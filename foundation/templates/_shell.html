@@ -1,0 +1,1171 @@
+{% comment %}
+Shared shell for every top-level page (the landing page, Chat, Ask,
+Search, Document library, Ask history, Images, Queue, and every page of
+the settings area).
+
+Lives at the project level (templates/, registered in TEMPLATES[0]["DIRS"] in
+config/settings.py) rather than inside tools/rag or models/registry,
+because both apps' page bases (tools/rag/templates/rag/base.html,
+models/registry/templates/inference/base.html) extend it -- the second
+by way of foundation/templates/_settings.html, which is itself a thin
+extension of this file. Template inheritance is a Django template-loader
+concept only -- it creates no Python import, so `models/contracts/`
+purity and column-privacy (`models/contracts/` never imports `tools/` or
+`models/registry/`) are unaffected by this file existing or being shared.
+
+Owns the design tokens, dark-mode overrides, and the shared body/nav/button
+rules so a palette change lives in ONE place instead of drifting between
+pages -- this replaces two near-duplicate copies that used to live in the
+per-app base.html files. Everything stays inline / offline (no external CSS
+or JS), per docs/ARCHITECTURE.md.
+
+Also owns the ONE global app bar (the nav block below) so every page
+agrees on every destination instead of drifting into per-app copies. A page
+marks itself current by overriding the matching `nav_current_*` block (see
+landing/index.html / chat/base.html / ask.html / search.html /
+documents.html / history.html / queue.html / vision/base.html) with
+`current`; this needs no JS, just plain block overrides. A settings-area
+page marks nothing here -- `_settings.html` sets `nav_current_settings`
+ONCE for all of them and the page marks its own SIDEBAR entry instead.
+
+ONE ROW, AND ONE DOOR TO THE OPERATOR SURFACES (UI-2, superseding UI-1
+decision 1). UI-1 split this bar in two: a top row of what you came to
+USE and a second Manage row of the operator surfaces. The split was
+right about the two kinds of thing and wrong about the shape -- Manage
+was a flat run of up to ten links with no grouping, which is a menu
+pretending to be a nav. So the row is gone and its contents moved into
+a SETTINGS AREA with a real sidebar (foundation/templates/_settings.html,
+foundation/settings_area.py); the bar is one row again: the brand (which
+is also the link home), the use-surfaces, Queue, Settings, and the
+account area on the right.
+
+QUEUE CAME UP, NOT INTO SETTINGS. It is activity -- what this box is
+doing right now -- which is a thing you WATCH, not a thing you
+configure; it is class R and shown to everybody, exactly as it was in
+the Manage row.
+
+SETTINGS RENDERS FOR EVERYONE, and it is honest for everyone: it points
+at `/settings/`, which forwards to the first section the viewer may open
+(foundation/settings_area.py). `Install guides` is ungated, so nobody is
+ever sent to a page that refuses them, and no per-standing gate belongs
+on this entry itself.
+
+AVAILABILITY = MODEL BOUND (UI-1 decision 2, unchanged). A use-surface
+entry renders only when the role behind it has a model bound --
+`surface_available`, from models.registry.context_processors.availability,
+which also carries the composite rules (Ask needs the answer role AND the
+embedding role; Images needs the vision FEATURE as well as the generate
+role, because with the feature off there is no /vision/ route for a url
+tag to resolve at all -- Django only evaluates one inside a taken branch,
+so the absent route raises nothing). Bound, not reachable: a nav bar that
+vanished whenever a workstation slept would be a worse lie than a page
+that says in its own words that the model is unreachable, and every one
+of these pages does say exactly that. The landing page gates its entry
+cards on the SAME keys, so the nav and the front door can never disagree.
+
+NEITHER QUEUE NOR SETTINGS IS AVAILABILITY-GATED, and Document library
+and Ask history are not either. The first two are STORAGE and a RECORD --
+both real with nothing bound at all -- and settings is where an operator
+fixes "nothing is available" FROM; gating it on availability would lock
+them out of the box at precisely the moment they need it.
+
+The account area is the far-right block, and it renders only when
+accounts are on (`identity_accounts_on`): a household box's bar ends at
+Settings. Signed in, it names the person (in the text colour -- a
+username nobody can read is not an account area) and carries "Your
+password" and the sign-out form; signed out, a Sign in link carrying
+`?next=` back to the current path, so signing in returns you where you
+were.
+
+Page-specific CSS goes in {% block extra_style %}; set --page-max-width
+there to size both the content column and the top nav.
+{% endcomment %}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}farabunker{% endblock %}</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f7f7f8;
+    --panel: #ffffff;
+    --text: #1a1a1a;
+    --muted: #666666;
+    --border: #dcdcdc;
+    --accent: #2b5fd9;
+    --accent-text: #ffffff;
+    {% comment %}
+    THE SETTINGS AREA'S DEEP-LINK HIGHLIGHT WASH, declared here with
+    every other token so the rule below never hard-codes a hex. A MIX,
+    not a fixed colour: `color-mix` is already in this tree for exactly
+    this reason (`agents/chat/templates/chat/base.html:715-720` mixes
+    over `--text` so a shadow "follows the theme instead"), and a
+    highlight that did not follow the theme would be right in one scheme
+    and wrong in the other.
+    {% endcomment %}
+    --target-wash: color-mix(in srgb, var(--accent) 12%, var(--panel));
+    {% comment %}
+    Status colours, owned here with every other token so a page never
+    ships a hex the dark scheme has no override for. `--danger` was five
+    copies of #b3261e across two vision templates and the setup page,
+    none of them dark-aware. A Django-level comment tag, not a CSS /* */
+    one: the latter is plain text inside this inline <style> block and
+    would render into the page, making the hex it's explaining appear a
+    second time. This form is stripped at template-render time, so the
+    note documents the source without leaking into rendered CSS.
+    {% endcomment %}
+    --danger: #b3261e;
+    {% comment %}
+    THE ERROR PAIR AND THE MONO STACK, owned here for the same reason
+    `--danger` above is (C-20). `--error-bg`/`--error-text` were declared
+    in FIVE leaf templates with byte-identical light and dark values;
+    `--mono` in three; `--danger-text` in two; and `inference/console.
+    html` never tokenised the error pair at all, so its error rows shipped
+    a light hex with no dark override -- the exact failure the `--danger`
+    note above describes, one token later.
+    {% endcomment %}
+    --error-bg: #fdeaea;
+    --error-text: #922020;
+    --danger-text: #ffffff;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --ok: #1b7f4f;
+    --chip-bg: #eef1f8;
+    --chip-text: #3a4a6b;
+    --page-max-width: 720px;
+    {% comment %}
+    THE APP BAR'S OWN FLOOR, and it is a separate token from
+    `--page-max-width` on purpose. The bar used to take the page's
+    content width outright, which is fine on a wide page and shatters on
+    a narrow one: at 420px (`/identity/password/`) an eleven-link bar
+    broke into four interleaved lines -- one use-surface orphaned beside
+    the account area, a link row split mid-list -- because a nav is not
+    prose and does not want a reading measure.
+
+    RAISED FROM 960 IN UI-2, and measured rather than guessed. Collapsing
+    to one row moved Queue and Settings up beside the six use-surfaces,
+    so the widest single line the bar can produce grew. Rendering every
+    label at this file's own sizes in the face the font stack resolves to
+    (-apple-system), plus the flex gaps declared below, the fully-loaded
+    signed-in admin bar measures ~897px with a three-letter username and
+    ~968px with a thirteen-letter one; 960 would therefore have shattered
+    on a long username on EVERY narrow page, permanently, since the bar
+    takes the floor outright whenever the page's own measure is smaller.
+    1000 is the nearest round number above the loaded case. It is not a
+    guarantee for every username Django's 150-character field allows --
+    no fixed floor can be -- which is what the wrap rules at the bottom
+    of this block are for.
+
+    The settings area's two-column layout takes the SAME max() as the
+    bar, so the sidebar's left edge and the brand's line up.
+    {% endcomment %}
+    --app-bar-min-width: 1000px;
+    {% comment %}
+    The settings sidebar's column. Wide enough for the longest entry
+    ("Identity & security", ~135px at 0.9rem) on one line, with room for
+    the `current` weight, so no entry wraps and the content column's
+    left edge never moves between one settings page and the next.
+    {% endcomment %}
+    --settings-nav-width: 190px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181c;
+      --panel: #212227;
+      --text: #eaeaea;
+      --muted: #9a9a9a;
+      --border: #3a3b40;
+      --accent: #5b8dfa;
+      --accent-text: #0b0d12;
+      --target-wash: color-mix(in srgb, var(--accent) 12%, var(--panel));
+      --danger: #e05c53;
+      --error-bg: #3a1f1f;
+      --error-text: #ffb4b4;
+      --danger-text: #1a0505;
+      --ok: #79d68f;
+      --chip-bg: #2a2e3a;
+      --chip-text: #b7c2e0;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 2rem 1rem 4rem;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+  }
+  h1 {
+    font-size: 1.5rem;
+    margin: 0 0 1.5rem;
+  }
+  {% comment %}
+  The one-line description under a page's H1. TWELVE pages carry one --
+  the landing page, Ask, Search, Ask history, Library, Document library,
+  the transcript page, Queue, Job execution, Models, Accounts and
+  Identity & security -- so the rule lives here beside the H1 it belongs
+  to, the same reason
+  the tokens and the chip do. It used to be six page-level copies at
+  three different margins, which meant one element had four vertical
+  rhythms across pages a person walks between. The negative top margin
+  pulls the line up under the heading it describes, out of the H1's own
+  1.5rem, leaving 0.5rem between them; the two pages that had tightened
+  their own H1 to 0.35rem for the same effect no longer need to.
+
+  A DJANGO COMMENT, and this note is WHY the last four in this block
+  became one too (UI-2 review, Minor 1). A `/* ... */` here is plain
+  text in the response body: this note names twelve pages, so as a CSS
+  comment it shipped "Identity & security" and "Models" into the
+  `<style>` of every page in the box -- page names, in the one comment
+  form that leaks them, on a file that warns about exactly this three
+  times over. Nothing was red; it was latent, which is worse.
+  {% endcomment %}
+  .tagline {
+    margin: -1rem 0 1.5rem;
+    color: var(--muted);
+    font-size: 0.92rem;
+  }
+  {% comment %}
+  The app bar: one row (UI-2). `max()` of the page's own content
+  width and the bar's own floor -- so a page whose column is WIDER than
+  the floor still shares an edge with it (the model console at 1500,
+  image generation at 1040 and the document library at 960 all render
+  exactly as they did), and a page whose column is NARROWER gets a bar
+  that still fits its own contents instead of being crushed into the
+  measure of a login form.
+
+  No viewport clamp is needed beside it: `width` is `auto`, so the block
+  already fills its containing block and `max-width` only ever caps it
+  -- which is why a 1500px console bar has always behaved on a phone.
+  The wrap rules for genuinely small screens are at the bottom of this
+  block.
+
+  The hairline under it is the only chrome -- it separates the bar from
+  the page without drawing a box around either.
+
+  A DJANGO COMMENT, like the token note above: a `/* ... */` inside this
+  inline <style> is plain text that RENDERS, so any word in it can turn
+  up in a page a test says must not contain it. That has now happened
+  twice in this batch; every note added here is a `{% templatetag
+  openblock %} comment {% templatetag closeblock %}` one.
+  {% endcomment %}
+  header.app-bar {
+    max-width: max(var(--page-max-width), var(--app-bar-min-width));
+    margin: 0 auto 1.5rem;
+    padding-bottom: 0.55rem;
+    border-bottom: 1px solid var(--border);
+  }
+  nav.top-nav {
+    margin: 0;
+    font-size: 0.9rem;
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+  nav.top-nav a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  nav.top-nav a:hover {
+    text-decoration: underline;
+  }
+  nav.top-nav a.current {
+    color: var(--text);
+    font-weight: 600;
+    text-decoration: none;
+  }
+  {% comment %}
+  ROUND-16 ADDENDUM (owner feedback, verbatim: "when I'm on chat I
+  should still be able to select chat to go back to the main chat
+  menue... it deactivates when I'm on chat"). `pointer-events: none`
+  USED TO sit on this rule -- the `<a href>` markup was always real
+  (`nav_current_chat`'s own block only ever swaps the CLASS, never the
+  `href`), but that CSS property made the current section's own link
+  functionally inert while you were already inside it: on a
+  conversation page specifically (`agents/chat`'s own `nav_current_
+  chat` override), the ONE way back to `/chat/`'s own index -- the
+  page this whole sidebar/rail is reached from -- was a bolded word
+  that could not be clicked. Removed here, APP-WIDE (every section
+  this bar names, not a chat-only patch): the current section stays
+  visually marked (this rule's own `color`/`font-weight`, unchanged)
+  and its `href` stays live, the same "marked, never disabled" rule
+  `nav.settings-nav a.current`'s OWN identical `pointer-events: none`
+  is deliberately NOT touched by this fix -- that is a different nav
+  (the settings sidebar), out of this fix's own named scope ("purely
+  the section links in the top bar; nothing else in the shell
+  changes").
+  {% endcomment %}
+  {% comment %}
+  The brand is a link, not a link-coloured word: it reads as the
+  wordmark first and a way home second, so it takes the text colour and
+  its own weight in BOTH states -- including `.current`, on the landing
+  page, where the shared rule above would otherwise drop it to 600 and
+  make the row look like it had lost its heading.
+  {% endcomment %}
+  nav.top-nav a.brand,
+  nav.top-nav a.brand.current {
+    color: var(--text);
+    font-weight: 700;
+    font-size: 1.05rem;
+    letter-spacing: -0.015em;
+    margin-right: 0.3rem;
+  }
+  {% comment %}
+  THE SETTINGS AREA'S TWO-COLUMN LAYOUT, and it lives HERE rather than
+  in `_settings.html` for the same reason the tokens and the chip do:
+  it is shared furniture, and a second copy is a second truth. The
+  markup that uses it is in `foundation/templates/_settings.html`; every
+  settings page extends that and writes only its own content.
+
+  The block takes the SAME `max()` the app bar takes, so the sidebar's
+  left edge sits under the brand and the content column's right edge
+  under the account area -- the two blocks read as one page rather than
+  as a bar with something bolted beneath it. The content column is
+  therefore the page's own `--page-max-width` MINUS the sidebar and the
+  gutter; a page that genuinely needs a wide measure (the models console
+  and its grid) raises its own token to say so.
+
+  `minmax(0, 1fr)` on the content track, not `1fr`: a grid item's
+  automatic minimum size is its content, so one wide table inside would
+  otherwise push the column past its track and take the page sideways.
+  {% endcomment %}
+  .settings-layout {
+    max-width: max(var(--page-max-width), var(--app-bar-min-width));
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: var(--settings-nav-width) minmax(0, 1fr);
+    gap: 2.5rem;
+    align-items: start;
+  }
+  {% comment %}
+  THE SETTINGS AREA'S DEEP-LINK HIGHLIGHT. `:target` only -- the browser
+  scrolls and this says which thing it scrolled to. No script, no class
+  toggling, no state, and no view change: a URL fragment is never sent to
+  the server.
+
+  IT LIVES HERE, NOT IN `_settings.html`'s OWN `extra_style` BLOCK, and
+  that is a decision rather than a habit: UNTIL COHERENCE WAVE A,
+  `foundation/setup/templates/setup/index.html` overrode `extra_style`
+  WITHOUT `{{ block.super }}`, so a rule added to `_settings.html` would
+  have silently not applied on Install guides -- the one settings page
+  whose sections are already painted `--panel` and therefore the one
+  where an invisible highlight would have been least noticed. That leaf
+  now writes `{{ block.super }}` first, but the rule stays here rather
+  than moving: this unconditional region is robust to any future leaf
+  page that forgets the same line, which `_settings.html`'s own
+  `extra_style` block cannot be. The settings layout's own CSS is
+  already here, so this needs no edit to any leaf page at all.
+
+  NOT `background: var(--panel)`: several settings sections are ALREADY
+  painted `--panel` (`setup/index.html`'s `.card`, `_settings.html`'s own
+  `.msg`), so a `--panel` highlight is invisible on exactly the pages a
+  person is most likely to be sent to. The ring plus its own tinted wash
+  is what makes "highlighted" true on every settings page rather than
+  most of them.
+
+  `scroll-margin-top` is part of the feature, not decoration: without it
+  the targeted section lands flush against the top of the viewport under
+  the app bar.
+  {% endcomment %}
+  .settings-main :target {
+    background: var(--target-wash);
+    box-shadow: 0 0 0 2px var(--accent);
+    border-radius: 6px;
+    scroll-margin-top: 1rem;
+  }
+  {% comment %}
+  THE SETTINGS ASSISTANT PANEL'S OWN FEW RULES (Task 10, spec §6.1;
+  moved here by the final review, finding I1). They used to live in
+  `_settings.html`'s own `extra_style` block, on the reasoning that
+  `_settings.html` is the panel fragment's deepest common ancestor --
+  true only if every leaf page that extends it writes `{{ block.super
+  }}` in its OWN `extra_style` override. UNTIL COHERENCE WAVE A, two did
+  not: `foundation/setup/templates/setup/index.html` and `models/
+  registry/templates/inference/console.html` (`inference/console.html`
+  extends `inference/base.html`, which extends `_settings.html` and
+  defines no `extra_style` of its own, so console's override dropped
+  `_settings.html`'s block directly). Both shipped the panel's markup
+  (`test_it_renders_on_every_settings_page_for_an_administrator` sweeps
+  every one) but neither inherited a single one of these rules, so the
+  panel rendered unstyled on Models and on Install guides. Both leaves
+  now write `{{ block.super }}` first, so `_settings.html`'s block does
+  reach them today -- these rules stay here rather than moving back,
+  for the same robustness reason `.settings-main :target` above does.
+
+  HERE INSTEAD, beside `.settings-main :target` for the identical
+  reason that rule lives here and not in `_settings.html`: this is the
+  unconditional `<style>` region every page that extends `_shell.html`
+  inherits, regardless of what any leaf page's own `extra_style`
+  override does or omits. The composer's OWN rules already live here
+  too (promoted when the panel started including `chat/_composer.html`
+  from outside `chat/`), so nothing below restates them.
+
+  PLACEMENT ROUND, RULING 1 (owner walk, 2026-09-11, verbatim: "I don't
+  see a chat window"). The panel used to render IN FLOW, at the bottom of
+  `.settings-main` -- a 24px collapsed bar below whatever the page's own
+  content ran to, which on the widest settings page (the models console)
+  sat roughly four screens below the fold. Fixed presence instead: a
+  bubble pinned to the viewport's bottom-right corner, opening an overlay
+  card anchored just above it.
+
+  PLACEMENT ROUND FOLLOW-UP (owner review, 2026-09-11): ruling 1's first
+  draft kept the `<details class="assistant-panel">` markup unchanged and
+  restyled both its states with CSS alone -- the reviewer's own finding
+  was that a floating bubble invites exactly the click a 24px in-flow bar
+  rarely got, and that click was the native `<summary>` toggle, which
+  opens the SAME element locally with no navigation at all and so reveals
+  whatever the server already rendered into the DOM -- an EMPTY
+  transcript for an administrator with real history, since the collapsed
+  render never reads a single `Conversation` or `Turn` row (`agents.chat.
+  context_processors.panel_context`'s own "COLLAPSED COSTS ONE QUERY"
+  comment). The fix, in `chat/_assistant_panel.html` (see its own
+  docstring): the CLOSED state is now a plain navigating `<a>`, not a
+  `<details>` at all, so there is no local toggle to open with -- the
+  bubble's `href` is a real link to `?assistant=1`, which re-renders
+  through the SAME context builder with the conversation actually read.
+  The OPEN state is still `<details open>`, because by the time a page
+  renders it the transcript has already been fetched for THIS request,
+  so a native LOCAL toggle back to closed (and open again) is genuinely
+  harmless. Selectors below are now tag-qualified (`a.assistant-panel`
+  for the bubble, `details.assistant-panel` for the card) rather than
+  keyed off a `[open]` attribute, because the `<details>` this file emits
+  is now unconditionally open -- there is no closed `<details>` left to
+  distinguish it from.
+
+  `position: fixed`, not `sticky` or in-flow: the box leaves
+  `.settings-main`'s own flow entirely, so it can never push a page's Save
+  button down and can never be pushed by one -- "must not shift page
+  layout in either state" is a property `position: fixed` gives for free
+  rather than something these rules have to defend by their own weight.
+
+  NO ANCESTOR OF THIS ELEMENT SETS `transform`, `filter`, `perspective`,
+  `will-change: transform` OR `contain`, audited across this file,
+  `_settings.html` and every settings leaf's own `extra_style`
+  blocks before this landed (each of those creates a new containing
+  block for a fixed descendant, which would anchor this box to that
+  ancestor's own box instead of the viewport). None of the leaves wraps
+  `{% templatetag openblock %} block settings_content {% templatetag
+  closeblock %} ` or the panel's own include in an `overflow: hidden`
+  container either, which would not clip a `position: fixed` descendant
+  regardless (a fixed box's containing block is the viewport unless some
+  ancestor creates a nearer one, so ordinary `overflow: hidden` on an
+  ancestor that is not that containing block never clips it) -- named
+  here so a future page that adds one of those properties finds this
+  comment before it silently breaks the corner placement.
+
+  Z-INDEX 30, AGAINST THE SHELL'S OWN STACKING CONTEXTS: neither this
+  file nor `_settings.html` sets a z-index anywhere else, so any
+  explicit value already paints above a settings page's ordinary
+  content; the only other z-indexed elements in this tree are
+  `chat/base.html`'s own in-column popovers (`z-index: 5`), which never
+  render on a settings page at all. 30 is headroom, not a value this box
+  needed to win a fight.
+
+  THE SHELL HAS NO FOOTER (grepped for one across every template this
+  panel can render beside before writing this rule): "the bubble never
+  covers the shell's footer links" is satisfied because there is nothing
+  at this corner for it to cover. Recorded here rather than left silent,
+  the same honesty this file already asks of the query-count pins.
+
+  NARROW VIEWPORTS TAKE THE VIEWPORT WIDTH MINUS MARGINS (the mobile
+  settings-layout stack's own precedent, `@media (max-width: 1000px)`
+  below) WITHOUT A SECOND BREAKPOINT: `min(22rem, calc(100vw - 2.5rem))`
+  on the open card's own width already narrows continuously below
+  22rem+2.5rem of viewport, using the identical 1.25rem side margin the
+  corner offset itself uses, rather than jumping at one fixed pixel
+  width the way the settings sidebar's own stack does. A fluid formula
+  was chosen over copying that breakpoint because THIS box has no second
+  column to stack -- the one thing a breakpoint would buy here it
+  already has for free.
+
+  THE TRANSCRIPT SCROLLS; THE COMPOSER STAYS VISIBLE, per the "must not
+  obscure a narrow page's own Save button" requirement:
+  `details.assistant-panel` bounds the WHOLE card to `max-height`,
+  `#assistant-body` becomes a column that can only grow up to that
+  ceiling, and `.assistant-transcript` alone takes the internal scrollbar
+  (`flex: 1 1 auto` -- the one child allowed to shrink -- `overflow-y:
+  auto`). The composer (`chat/_composer.html`'s own `.composer-card`,
+  whose rules already live in this same `<style>`) and the close link /
+  jump strip / reset form around the transcript are ordinary, non-growing
+  flex children, so they are never the part that gets pushed off-screen
+  no matter how long a turn's history runs -- only the panel's own height
+  is capped, never a page element outside it.
+  {% endcomment %}
+  {% comment %}
+  LAYOUT ECONOMY (owner feedback, live, 2026-09-13, on top of the
+  floating-panel round above): "the scroll is too tight to be readable,
+  the chat window needs to be expanded and the entire chat menu
+  optimized for space -- so much wasted space." The panel's own budget
+  grows (wider, and tall enough to use most of the viewport rather than
+  a fixed 32rem); the chrome around the transcript shrinks (the header
+  row carries Close instead of giving it a line of its own, the reset
+  control is demoted from a primary-scale button to a quiet link, the
+  composer is content-sized rather than reserving room it does not use)
+  so the TRANSCRIPT -- the panel's actual reason to exist -- gets the
+  space those savings free up, verified live against the real running
+  page exactly the way the scroll fix above was: a long, genuinely
+  overflowing transcript measured to confirm it takes the majority of
+  the panel's own height, not a fixed few lines.
+  {% endcomment %}
+  .assistant-panel {
+    position: fixed;
+    right: 1.25rem;
+    bottom: 1.25rem;
+    z-index: 30;
+    margin: 0;
+  }
+  {% comment %}
+  THE CLOSED STATE IS THE BUBBLE, AND IT IS A PLAIN LINK (placement round
+  follow-up -- see this block's own top comment): `chat/_assistant_panel.
+  html` renders `<a class="assistant-panel" id="assistant-panel"
+  href="{{ assistant.open_url }}">` when the panel is not open, no
+  `<details>` involved at all, so this is the entire closed-state box --
+  one element, styled as a pill, `href` doing all the work a script used
+  to be asked to.
+  {% endcomment %}
+  a.assistant-panel {
+    display: block;
+    cursor: pointer;
+    font-weight: 600;
+    text-decoration: none;
+    background: var(--accent);
+    color: var(--accent-text);
+    padding: .7rem 1.1rem;
+    border-radius: 999px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, .3);
+  }
+  {% comment %}
+  THE OPEN STATE IS THE OVERLAY CARD, anchored above the bubble's own
+  corner: `details.assistant-panel` is unconditionally `open` when
+  `chat/_assistant_panel.html` renders it at all (see this block's own
+  top comment), so this selector needs no `[open]` qualifier -- there is
+  no closed `<details>` with this class for it to also, wrongly, match.
+  The bubble and the card share the one `right`/`bottom` offset declared
+  above rather than each needing an independent position of their own.
+
+  WIDER, AND TALLER (layout economy, above): `26rem`, up from `22rem`,
+  so a paragraph-length answer wraps into fewer, more readable lines;
+  `min(80vh, calc(100vh - 2.5rem))`, up from a flat `32rem`/`6.5rem`
+  budget, so the panel uses MOST of the viewport rather than a fixed
+  fraction of it, still shrinking to fit shorter content and still never
+  touching either edge of the viewport (`2.5rem` total clearance, split
+  by the `1.25rem` corner offset already on both `right` and `bottom`).
+  {% endcomment %}
+  details.assistant-panel {
+    display: flex;
+    flex-direction: column;
+    width: min(26rem, calc(100vw - 2.5rem));
+    max-height: min(80vh, calc(100vh - 2.5rem));
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, .35);
+    overflow: hidden;
+  }
+  {% comment %}
+  THE HEADER ROW CARRIES CLOSE NOW (layout economy): `chat/_assistant_
+  panel.html`'s own `<summary><span>...</span><a ...>Close</a></summary>`
+  -- a `display: flex` row, title left, `Close` right, replacing the
+  full-width line `Close` used to get to itself below the header (one of
+  the "so much wasted space" pieces named live). `list-style: none` plus
+  the `::-webkit-details-marker` rule remove the browser's own disclosure
+  triangle in both the Firefox/modern-Chromium (`list-style`) and older
+  WebKit (`::-webkit-details-marker`) implementations of that marker --
+  this `<summary>` is still a real, native toggle (harmless when open,
+  per this block's own top comment), just not the ONLY way in any more.
+  {% endcomment %}
+  details.assistant-panel summary {
+    cursor: pointer;
+    font-weight: 600;
+    list-style: none;
+    background: var(--accent);
+    color: var(--accent-text);
+    padding: .55rem .8rem;
+    border-radius: 12px 12px 0 0;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: .75rem;
+  }
+  details.assistant-panel summary::-webkit-details-marker { display: none; }
+  .assistant-close {
+    font-size: .8rem;
+    font-weight: 400;
+    color: var(--accent-text);
+    opacity: .85;
+    text-decoration: underline;
+  }
+  {% comment %}
+  `29.1rem`/`9.4rem` BECOME `calc(80vh - 2.6rem)`/`calc(100vh - 5.1rem)`
+  (layout economy): the SAME budget-minus-summary-height arithmetic the
+  scroll fix above established (`details.assistant-panel`'s own budget,
+  two rules up, minus the header row's own fixed, deterministic height
+  -- `.55rem` padding top and bottom plus one line at this shell's own
+  `line-height: 1.5`, measured live at 41.59px = 2.6rem after the header
+  row's own padding shrank for this round), just tracking the panel's
+  now-viewport-relative budget instead of a flat number. `<details>` as a
+  flex CONTAINER still does not propagate its own resolved size into
+  its children's flex-shrink distribution -- the scroll fix's own
+  diagnosis, unchanged by this round -- which is why the bounding still
+  lives HERE, on `#assistant-body` itself, rather than one rule up.
+  {% endcomment %}
+  details.assistant-panel #assistant-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    max-height: min(calc(80vh - 2.6rem), calc(100vh - 5.1rem));
+    padding: 0 1rem 1rem;
+  }
+  .assistant-transcript {
+    margin: .75rem 0;
+    display: flex;
+    flex-direction: column-reverse;
+    gap: .5rem;
+    flex: 1 1 auto;
+    min-height: 3rem;
+    overflow-y: auto;
+  }
+  .assistant-turn { margin: 0; }
+  .assistant-pending { color: var(--muted); }
+  .assistant-failed { color: var(--danger); }
+  .assistant-jump { margin: .35rem 0; font-size: .9rem; flex: 0 0 auto; }
+  nav.settings-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    font-size: 0.9rem;
+  }
+  .settings-group {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.3rem;
+  }
+  nav.settings-nav a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  nav.settings-nav a:hover {
+    text-decoration: underline;
+  }
+  nav.settings-nav a.current {
+    color: var(--text);
+    font-weight: 600;
+    pointer-events: none;
+    text-decoration: none;
+  }
+  {% comment %}
+  ROUND 17 ADDENDUM (the round-16 nav-link reviewer's own follow-on
+  finding): the identical inert-current-link defect recurs on exactly
+  two settings pages -- `identity/entitlement.html` and `models/
+  registry/templates/inference/model_sets.html` -- each of which marks
+  its PARENT sidebar entry current FROM A CHILD URL (`_settings.html`'s
+  own docstring: "a SUB-PAGE marks its PARENT's entry -- model sets
+  marks Models, an entitlement's own page marks Entitlements"). On
+  those two pages `a.current`'s `href` points at the SECTION INDEX
+  (`identity-entitlements`, `inference-console`), a DIFFERENT url than
+  the child page actually showing, so `pointer-events: none` removes
+  the only link back exactly the way it did in the top bar before the
+  round-16 addendum.
+
+  `.current-parent` IS THAT FIX -- same visual marking, `pointer-
+  events` simply never set -- given its OWN class, deliberately NOT
+  applied to `.current` itself: every OTHER `side_current_*` override
+  (including `identity/entitlements.html`'s and `inference/console.
+  html`'s own INDEX pages, which mark themselves current from their
+  OWN exact url) keeps the plain inert `.current` unchanged. That half
+  really is different -- a "you are here" marker whose href names the
+  page already on screen has nothing useful to link to, and disabling
+  it is the ordinary, harmless convention this box already used
+  everywhere else in this nav. Only the two pages named above ever
+  render `.current-parent`.
+  {% endcomment %}
+  nav.settings-nav a.current-parent {
+    color: var(--text);
+    font-weight: 600;
+    text-decoration: none;
+  }
+  {% comment %}
+  The sidebar's group headings. One consumer now that the Manage row is
+  gone, but it stays the shell's own object: the sidebar that uses it is
+  the shell's too.
+
+  A DJANGO COMMENT, and the third time this file's own rule had to be
+  learned: a `/* ... */` here is plain text that RENDERS, so any phrase
+  inside one can turn up in a page a test says must not contain it. This
+  note began as a CSS comment containing the words a chat test asserts
+  are absent from an unshared conversation, and turned two unrelated
+  tests red. There is no fourth time to be had: EVERY comment in this
+  `<style>` is a Django one now (UI-2 review, Minor 1), so the rule is
+  enforced by there being no counter-example left rather than by each
+  new note remembering it.
+  {% endcomment %}
+  .nav-group-label {
+    color: var(--muted);
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+  }
+  {% comment %}
+  `margin-left: auto` is what pushes the account block to the far right
+  of the row; when the row wraps on a narrow screen it takes its own
+  line, which is the behaviour we want rather than a username squeezed
+  between two links.
+  {% endcomment %}
+  .nav-account {
+    margin-left: auto;
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+  }
+  {% comment %}
+  The person's own name, in the TEXT colour and bold: an account area
+  whose username is a muted whisper does not tell you who you are signed
+  in as, which is the only job it has.
+  {% endcomment %}
+  .nav-username {
+    color: var(--text);
+    font-weight: 600;
+  }
+  .nav-logout-form {
+    display: inline;
+    margin: 0;
+    padding: 0;
+  }
+  button.nav-link-button {
+    background: none;
+    border: none;
+    padding: 0;
+    margin: 0;
+    color: var(--accent);
+    font: inherit;
+    font-weight: 400;
+    cursor: pointer;
+  }
+  button.nav-link-button:hover {
+    text-decoration: underline;
+  }
+  button {
+    background: var(--accent);
+    color: var(--accent-text);
+    border: none;
+    border-radius: 6px;
+    padding: 0.55rem 1.25rem;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+  {% comment %}
+  The one status pill this project has. It began on the Queue page
+  (models/queue/templates/jobs/queue.html) and the /vision/ job cards
+  want the same object, so it lives HERE rather than being copied into a
+  second page's <style> -- the same reason the design tokens above do.
+  The modifiers colour by MEANING, using the tokens already declared: an
+  outlined pill so a row of chips never reads as a row of buttons.
+  {% endcomment %}
+  .chip {
+    display: inline-block;
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    background: var(--chip-bg);
+    color: var(--chip-text);
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+  }
+  .chip-done { background: transparent; color: var(--ok); border: 1px solid var(--ok); }
+  .chip-failed { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+  .chip-running { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  .chip-queued { border: 1px solid transparent; }
+  {% comment %}
+  A CHECKBOX THAT LOOKS LIKE THE CHIP IT TOGGLES -- the one control this
+  box offers for "pick any number of entitlements", and the reason no
+  page needs a raw `<select multiple>` any more. Three render one: the
+  document library (its upload card and its label-writing card), Tool
+  access and Agent access.
+
+  `<label>`-wrapped, so the whole pill is the hit target, and coloured
+  purely off `:checked` -- zero JS. The input is CLIPPED, never
+  `display: none`: it keeps its place in the tab order and in the
+  accessibility tree, and `:focus-visible` draws the ring on the pill
+  beside it, which is the thing the eye is actually looking at. Every
+  colour is a token already declared above, so both schemes are covered
+  with no second block.
+
+  A page wraps these in whatever row it needs; the picker itself has no
+  opinion about its container.
+  {% endcomment %}
+  .picker-label {
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  .chip-picker {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    min-width: 0;
+  }
+  .chip-check {
+    display: inline-flex;
+    position: relative;
+  }
+  .chip-check input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    margin: 0;
+  }
+  .chip-check .chip {
+    cursor: pointer;
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--border);
+  }
+  .chip-check input:checked + .chip {
+    background: var(--accent);
+    color: var(--accent-text);
+    border-color: var(--accent);
+  }
+  .chip-check input:focus-visible + .chip {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  {% comment %}
+  GENUINELY SMALL SCREENS -- narrower than the bar's own floor, so it
+  really does have to wrap. `margin-left: auto` puts the account block at
+  the right of whatever line it lands on, which is what produced the
+  interleaved "one link, then the username" line on a narrow page;
+  giving it the whole line instead makes the wrap read as two bands
+  rather than as a broken row. Everything else keeps wrapping exactly as
+  it did, a little tighter.
+
+  The breakpoint tracks `--app-bar-min-width` (raised to 1000 in UI-2):
+  below the floor the bar can no longer be as wide as it wants, which is
+  exactly when the wrap it describes begins.
+
+  The settings layout stacks here too, and its sidebar becomes a wrapped
+  ROW above the content rather than a 190px column squeezed beside it --
+  a two-column layout inside a phone-width page is two unreadable
+  columns. Still zero JS: it is the same markup, read differently.
+  {% endcomment %}
+  @media (max-width: 1000px) {
+    nav.top-nav { gap: 0.55rem 0.9rem; }
+    .nav-account {
+      margin-left: 0;
+      flex-basis: 100%;
+      justify-content: flex-end;
+    }
+    .settings-layout {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 1.5rem;
+    }
+    nav.settings-nav {
+      flex-direction: row;
+      flex-wrap: wrap;
+      gap: 0.5rem 1.5rem;
+    }
+    .settings-group {
+      flex-direction: row;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 0.35rem 0.9rem;
+    }
+  }
+  {% comment %}
+  THE FLASH RECIPE, owned at the deepest common ancestor (C-21/C-52).
+  `.messages`'s list-reset was written out at six sites and `.msg`'s
+  recipe at several more. `_settings.html` held the canonical copy from
+  an earlier pass, and that was right for the ten settings-area pages it
+  could see -- but `chat/base.html`, `jobs/base.html`, `rag/base.html`
+  and `vision/base.html` extend THIS file directly and cannot reach
+  `_settings.html` through inheritance, which is precisely why each of
+  them grew its own copy. The deepest ancestor of all fourteen consumers
+  is here.
+
+  THIS LIVES OUTSIDE `{% templatetag openblock %} block extra_style {%
+  templatetag closeblock %}`, not inside it, DELIBERATELY: a rule
+  written inside the block would only reach a descendant that opens its
+  own override with `{{ block.super }}`, and most of this shell's
+  fourteen-plus descendants have no reason to (`landing/index.html`,
+  `setup/index.html`, `identity/login.html`, `identity/password_change.
+  html`, `identity/password_change_done.html`, `rag/ask.html`,
+  `rag/transcript.html` and `rag/history.html` all override `extra_style`
+  without it today). Placed here, in the shell's own `<style>` tag
+  outside any block, these two rules render unconditionally for every
+  page that extends `_shell.html` -- directly or transitively -- with no
+  `block.super` dependency anywhere in the chain.
+
+  `.msg.error` DOES come with them now -- `_settings.html`'s own comment
+  documents the Coherence Wave D, C3 convergence onto `--danger` and
+  defines the rule itself; that is the file to read for the history,
+  this one just inherits it.
+  {% endcomment %}
+  .messages { list-style: none; margin: 0 0 1rem; padding: 0; }
+  .msg {
+    padding: 0.6rem 0.9rem;
+    border-radius: 6px;
+    margin-bottom: 0.4rem;
+    font-size: 0.9rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+  {% comment %}
+  SHARED PRIMITIVES (C-22/C-23/C-24). Each of these was written out below
+  the shell at two or more sites on structurally DISJOINT branches:
+  `chat/base.html`, `vision/base.html` and `rag/base.html` all extend this
+  file directly, and `vision/engine_files.html` extends `_settings.html`
+  rather than `vision/base.html` -- so no lower template is an ancestor of
+  every consumer and the duplication was forced rather than lazy.
+
+  WHAT DELIBERATELY DID NOT COME UP: `.banner.warn` (absent from
+  `rag/documents.html`, so it is genuinely two pages' rule and not
+  three's), `.delete-disclosure`'s own `margin-top` (0.5rem in one place,
+  0 in the other), `.empty`'s variant on the search page, and
+  `setup/index.html`'s `.muted` at 0.9rem -- that last one is a DRIFT
+  from the seven-site 0.85rem consensus, and resizing that page's muted
+  text to match would be a pixel change nobody asked for. Each stays
+  local.
+
+  THIS LIVES OUTSIDE `{% templatetag openblock %} block extra_style {%
+  templatetag closeblock %}`, not inside it, for the same reason the
+  flash recipe just above does: most of this shell's descendants override
+  that block without `{{ block.super }}`, so a rule placed inside it
+  would render unstyled on any page that does not call it.
+  {% endcomment %}
+  .banner {
+    border: 1px solid var(--border); border-radius: 8px; background: var(--panel);
+    padding: 0.75rem 1rem; margin-bottom: 1rem;
+  }
+  .banner a { color: var(--accent); }
+  .muted { color: var(--muted); font-size: 0.85rem; }
+  .empty { color: var(--muted); font-size: 0.9rem; padding: 1rem 0.25rem 1.25rem; }
+  .delete-disclosure > summary { cursor: pointer; color: var(--accent); font-weight: 500; list-style: none; }
+  .delete-disclosure > summary::-webkit-details-marker { display: none; }
+  {% comment %}
+  THE ONE COMPOSER'S OWN RECIPE, PROMOTED (settings assistant, spec §6.5,
+  decision 11). `chat/_composer.html` is included by
+  `agents/chat/templates/chat/base.html`'s three surfaces AND, since the
+  settings assistant, by `foundation/templates/_settings.html`'s panel.
+  The deepest template that is an ancestor of both is THIS one, so this
+  is where these rules live -- `foundation/ops/tests/test_css_ownership.
+  py`'s own placement rule, applied across a column boundary that gate
+  cannot itself see (its sweep is scoped to `agents/chat/templates/chat/`,
+  which that module states at `:310-313`), which is why that phase wrote
+  the check for this shape itself.
+
+  RULES MOVED BYTE-IDENTICAL. No pixel changes; only the declaration site
+  did. THREE THINGS DELIBERATELY DID NOT MOVE, all for the same reason --
+  the settings panel does not render any of them, so each still has
+  exactly one consumer: the MODEL picker (`.composer-toolbar .picker`,
+  `chat/_picker.html`; the panel passes
+  `composer_show_model_picker=False`); the AGENT picker (`.agent-picker`,
+  emitted only under `{% templatetag openblock %} if composer_mode ==
+  "start" {% templatetag closeblock %}`, and the panel passes `"turn"` --
+  orchestrator ruling, 2026-09-10, deviating from spec §6.5's letter);
+  and the drag-and-drop staging class (`.composer-card-drop-target`,
+  `chat/_attach_dragdrop.html`; `may_attach_files` is absent from the
+  panel's context). All three stay chat-only, and the four combined
+  picker rules that pair the two pickers stay whole.
+
+  `.composer-card > form { display: contents; }` is STRUCTURAL, not
+  decoration: `chat/_composer.html:68-74` depends on it by name -- it is
+  what makes the form element generate no box of its own so its children
+  become direct flex items of `.composer-card`.
+  {% endcomment %}
+  {% comment %}
+  THE COMPOSER CARD (owner feedback round 18, verbatim: "the ability to
+  add an attachment isn't on the intial new chat screen... I thought all
+  the chats used the same code base, why is there something using a
+  different sub-template?"). `chat/_composer.html` is the ONE fragment
+  every composer surface renders now -- `/chat/`'s own start box, `chat/
+  workstream.html`'s New-chat card, and `chat/conversation.html`'s
+  message form -- so this is where its CSS lives, from the fragment's
+  own birth (the placement rule `foundation/ops/tests/test_css_
+  ownership.py`'s own docstring states). Round 18 SUPERSEDES two earlier
+  promotions to this same file rather than adding beside them: the
+  former `.start-box`/`.start-controls` family (the workstream
+  composition pass) and `chat/conversation.html`'s own former page-
+  scoped `.composer-card`/`.composer-toolbar*`/`.composer-textarea`
+  family (round 9e) are now this ONE recipe, used everywhere a composer
+  renders.
+
+  `.composer-card > form { display: contents; }` (generalised from the
+  conversation page's own former `#turn-form` id selector) makes the
+  FORM ELEMENT ITSELF generate no box of its own, so its children (the
+  attach block, the textarea, the toolbar) become direct flex items of
+  `.composer-card` instead of being trapped inside the form's own block
+  box -- changes nothing about the DOM tree, only how it lays out.
+  `font: inherit` on the textarea: a `<textarea>` with no explicit font
+  falls back to the UA monospace default in every engine this box
+  targets, which is what produced the "tiny terminal-looking placeholder
+  box" an early round of this recipe was fixed for.
+  {% endcomment %}
+  .composer-card { border: 1px solid var(--border); border-radius: 8px;
+                   background: var(--panel); padding: 0.75rem;
+                   display: flex; flex-wrap: wrap; align-items: end; gap: 1rem;
+                   margin-bottom: 1.5rem; }
+  .composer-card:focus-within { border-color: var(--accent); }
+  .composer-card > form { display: contents; }
+  .composer-textarea {
+    width: 100%; min-height: 4.5rem; font: inherit;
+    border: none; background: transparent; color: var(--text);
+    resize: vertical; padding: 0;
+  }
+  .composer-textarea:focus { outline: none; }
+  .composer-toolbar { display: flex; gap: 1rem; align-items: end; flex-wrap: wrap;
+                      justify-content: space-between; flex: 1 1 auto; min-width: 0; }
+  {% comment %}
+  ROUND-18-CONFIRM R8b: `flex-wrap: wrap` here, ADDED -- the two START
+  surfaces put TWO controls (Agent + Model) in `.composer-toolbar-left`,
+  a shape `.composer-toolbar-left`'s own recipe was never given a chance
+  to wrap when only the conversation page's ONE-control left side (the
+  Model picker alone) ever exercised it. Without it every bit of a
+  narrow toolbar's own shrinkage lands on whichever child has the
+  smallest floor -- `.composer-toolbar .picker`'s own `min-width: 0`,
+  below -- clipping the model select's label instead of dropping Agent
+  to its own line.
+  {% endcomment %}
+  .composer-toolbar-left, .composer-toolbar-right {
+    display: flex; align-items: end; gap: 1rem; flex-wrap: wrap;
+  }
+  {% comment %}
+  THE COMPOSER, CONTENT-SIZED (layout economy): scoped to THIS panel
+  alone (`details.assistant-panel .composer-card`/`.composer-textarea`),
+  never the shared `.composer-card`/`.composer-textarea` rules directly
+  above, which `/chat/`'s own three composer surfaces still use
+  unchanged -- a second, narrower recipe layered on top of the shared
+  one for the one surface that needs a shorter box, not a fork of it.
+  `2.8rem`, roughly two rows at this shell's own `line-height: 1.5`, down
+  from the shared recipe's `4.5rem`: "2-3 rows... else fixed compact",
+  and a CSS-only auto-grow-on-input has no reliable cross-browser form
+  without a script this feature's own budget (spec §6.7) does not have
+  room for, so fixed compact is the honest answer here. `resize:
+  vertical` (the shared rule, untouched) still lets an operator drag it
+  taller by hand.
+
+  PLACED IMMEDIATELY AFTER THE SHARED RECIPE, DELIBERATELY, NOT BESIDE
+  THIS PANEL'S OTHER RULES ABOVE: `details.assistant-panel .composer-
+  card {` and `details.assistant-panel .composer-textarea {` each
+  CONTAIN the shared selector (`.composer-card {`/`.composer-textarea {`)
+  as a literal substring, so a plain-text-scanning test that searches
+  for the bare selector and takes the FIRST match -- the same technique
+  every rendered-CSS pin in this whole feature already uses -- would
+  silently find whichever of the two rules comes first in the file
+  instead of the one it means. Two PRE-EXISTING, unrelated `/chat/` page
+  tests already do exactly that naive search for the shared rule
+  (`agents/chat/tests/test_index.py::TestTheComposerCardFont::test_the_
+  shared_composer_textarea_inherits_the_page_font`, `test_workstream_
+  page.py::TestTheDesignPassReviewFixRound::test_the_new_chat_textarea_
+  inherits_the_page_font`) -- caught by running the full suite, not
+  assumed -- so the shared rule keeps the earlier position it already
+  had and this panel-scoped override sits after it, never before.
+  {% endcomment %}
+  details.assistant-panel .composer-card {
+    padding: .5rem .6rem;
+    gap: .5rem;
+    margin-bottom: 0;
+  }
+  details.assistant-panel .composer-textarea {
+    min-height: 2.8rem;
+  }
+  {% comment %}
+  START OVER AND ASK, ONE ROW (owner polish, live, 2026-09-13, on top of
+  the layout-economy commit above): the composer's own toolbar row
+  already right-aligns `Ask` via the shared `.composer-toolbar`'s
+  `justify-content: space-between` -- `composer-toolbar-left` carries an
+  agent picker on `/chat/`'s own start surfaces and is EMPTY here (turn
+  mode, no picker, spec §6.5), so that row's own left side rendered as
+  bare padding: the "dead white space" named live. `.assistant-reset`
+  cannot become a CHILD of the composer's own `<form>` -- nesting two
+  `<form>`s is invalid HTML, and this is a second, independent POST to a
+  second URL -- so it is pulled up, by a fixed, deterministic amount
+  (the toolbar row's own single-button height, `chat/_composer.html`
+  never varies it in this surface's `"turn"` mode with no picker), to sit
+  visually on that same now-empty row instead of claiming one of its
+  own. `margin-left` matches the composer card's own left padding, so
+  `Start over`'s text starts flush with where the picker would have sat.
+  RELATIVE/Z-INDEXED so it paints above the composer card's own bottom
+  edge rather than being clipped behind it.
+  {% endcomment %}
+  .assistant-reset {
+    position: relative;
+    z-index: 1;
+    margin-top: -2.75rem;
+    margin-left: .6rem;
+    flex: 0 0 auto;
+  }
+  {% block extra_style %}{% endblock %}
+</style>
+</head>
+<body>
+{% block nav %}
+<header class="app-bar">
+  <nav class="top-nav" aria-label="Main">
+    <a href="{% url 'landing' %}" class="brand {% block nav_current_home %}{% endblock %}">farabunker</a>
+    {% if surface_available.chat %}<a href="{% url 'chat-index' %}" class="{% block nav_current_chat %}{% endblock %}">Chat</a>{% endif %}
+    {% if surface_available.ask %}<a href="{% url 'rag-ask-page' %}" class="{% block nav_current_ask %}{% endblock %}">Ask</a>{% endif %}
+    {% if surface_available.search %}<a href="{% url 'rag-search' %}" class="{% block nav_current_search %}{% endblock %}">Search</a>{% endif %}
+    <a href="{% url 'rag-documents' %}" class="{% block nav_current_documents %}{% endblock %}">Document library</a>
+    <a href="{% url 'rag-history' %}" class="{% block nav_current_history %}{% endblock %}">Ask history</a>
+    {% if surface_available.images %}<a href="{% url 'vision-create' %}" class="{% block nav_current_vision %}{% endblock %}">Images</a>{% endif %}
+    {# Queue is ACTIVITY, not configuration -- what this box is doing right now, which is a thing you watch. Class R, shown to everybody, exactly as it was in the Manage row it came up from. #}
+    <a href="{% url 'jobs-queue' %}" class="{% block nav_current_queue %}{% endblock %}">Queue</a>
+    {# ONE DOOR to the operator surfaces, and no standing gate on it: `/settings/` forwards to the first section this viewer may open, and `Install guides` is ungated, so it is never a link to a refusal. The settings shell marks this entry current ONCE for every page in the area (foundation/templates/_settings.html) -- the page itself marks its SIDEBAR entry instead. #}
+    {# `{% templatetag openvariable %} assistant.open_query {% templatetag closevariable %}` (review round 1, I2): this bar renders ON every settings page, so THIS entry is a settings link too -- and it was the one left dropping the assistant panel's open flag, which made `settings_index`'s own passthrough unreachable, since nothing in the tree emitted `/settings/?assistant=1`. The same suffix every sidebar entry in `_settings.html` writes, empty everywhere else in the box: off the settings area the panel has no context at all, so this renders byte-identical to before on every non-settings page. #}
+    <a href="{% url 'settings-index' %}{{ assistant.open_query }}" class="{% block nav_current_settings %}{% endblock %}">Settings</a>
+    {% comment %}
+    THE ACCOUNT AREA. Behind `identity_accounts_on` (== `posture !=
+    "open"`, answered off the one row `identity.context_processors.
+    identity` already read) so a household box renders none of it at all
+    -- there is no account to show, and asking would be a query this box
+    has promised not to run.
+
+    RULING R-T8 still holds inside it: the sign-out control is the only
+    one on the box and it is a POST form, never a link, because a GET
+    logout is a URL anybody can put in an image tag (see
+    identity/views.py::LogoutView).
+
+    "Your password" moved here in UI-1, out of the main link row: it is
+    an account action, and it was the one link in that row that was
+    about the person rather than about the box.
+
+    Signed out, the Sign in link carries `?next=` back to the path being
+    viewed, so signing in returns you where you were -- the same
+    round-trip `identity.middleware.refuse_anonymous` builds when it
+    bounces you itself.
+    {% endcomment %}
+    {% if identity_accounts_on %}
+    {# A DIV, not a SPAN: the sign-out control is a `<form>`, which is flow content and may not sit inside a phrasing-content element. `.nav-account` is `display: flex` either way, so nothing about the layout depends on which it is. #}
+    <div class="nav-account">
+      {% if user.is_authenticated %}
+      <span class="nav-username">{{ user.username }}</span>
+      <a href="{% url 'identity-password-change' %}" class="{% block nav_current_password %}{% endblock %}">Your password</a>
+      <form method="post" action="{% url 'identity-logout' %}" class="nav-logout-form">
+        {% csrf_token %}
+        <button type="submit" class="nav-link-button">Sign out</button>
+      </form>
+      {% else %}
+      <a href="{% url 'identity-login' %}?next={{ request.get_full_path|urlencode }}">Sign in</a>
+      {% endif %}
+    </div>
+    {% endif %}
+  </nav>
+</header>
+{% endblock %}
+{% block content %}{% endblock %}
+{% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,114 @@
+{% extends "_settings.html" %}
+{% comment %}
+Tool labels. One form per tool, so an operator's single change can never
+read as a wipe of every other row -- and since phase 2 that form posts a
+DIFFERENCE (`op` plus `add`/`remove`) rather than a whole set, so two
+administrators editing different entitlements on one tool cannot clobber
+each other either. Each row is a collapsed `<details>` over the shared
+two-pane transfer panel; the chips it replaced put one checkbox per
+entitlement on every row, which is tools x entitlements checkboxes in
+one page.
+
+The shell-path consequence is stated ONCE, at the top: a service
+principal holds no entitlements, so a labelled tool is permanently
+unavailable to the watcher and the command line until service-account
+tokens land. It used to be repeated in red on every card that named a
+shipped agent, which turned a page of ordinary configuration into a page
+of alarm. The per-card sentence stays -- it names WHICH agents, which the
+page-level one cannot -- but in the quiet voice, since the warning above
+has already been given.
+{% endcomment %}
+{% block title %}Tool access — farabunker{% endblock %}
+{% block side_current_tool_access %}current{% endblock %}
+{% block extra_style %}
+  {{ block.super }}
+  {% comment %}
+  `block.super`, ABOVE, IS `_settings.html`'s OWN SHARED FOUR (`.warn`,
+  `.label-row`, `.label-row button`, `.no-labels`) -- consolidation
+  confirm residual 3: this page and `chat/agent_entitlements.html` used
+  to carry byte-identical copies of five, `.lede` included; see
+  `_settings.html`'s own `extra_style` block for why that template, not
+  `chat/base.html`, is their shared home. `.lede` itself is gone now
+  (Coherence Wave D, M1 review fix): C5 converged this page's own two
+  ledes onto `.tagline`/`.warn`, which left the shared `.lede` rule with
+  no consumer anywhere `_settings.html` reaches.
+  {% endcomment %}
+  :root { --page-max-width: 820px; }
+  {% comment %}
+  A CENTERED COLUMN, which this page did not have: it carried a
+  `main { max-width: … }` rule and no `<main>` element for it to match,
+  so the rule was inert and the page ran the full width of the window.
+
+  NOT A LIST TO TRUST AS COMPLETE: the same fault sat on several admin
+  pages, found by pairing every `main {` rule in the tree against a
+  `<main>` element. If you are reading this because you found a seventh,
+  that is the sweep to re-run, not a list to append to.
+  {% endcomment %}
+  main { max-width: var(--page-max-width); margin: 0 auto; }
+  {% comment %}
+  NO LOCAL `.msg.error`, `section.tool`, `section.tool h2` (Coherence
+  Wave D, C3/C4) -- the per-tool card used its own name for the same
+  row style `chat/agent_entitlements.html`'s `section.row` already
+  defined byte-for-byte; markup below renamed `tool` to `row` to match
+  (`row` reads correctly on both pages, `tool` did not on the other).
+  `_settings.html`'s own `extra_style` block now owns the rule for both
+  -- see `identity/templates/identity/groups.html` for the `.msg.error`
+  reasoning.
+  {% endcomment %}
+  .muted { color: var(--muted); font-size: .85rem; margin: 0 0 .3rem; }
+{% endblock %}
+{% block settings_content %}
+<main>
+  <h1>Tool access</h1>
+  <p class="tagline">A tool with no entitlement is callable by everyone signed in. Labelling one
+    narrows it to the people who hold any of its entitlements — an agent declares the tools it
+    wants, and this decides which of them a person actually gets.</p>
+  <p class="warn">A labelled tool is unavailable to the watcher and the command line. Automated
+    callers hold no entitlements on this box, so a labelled tool is simply never offered to them,
+    and the failure looks like an agent that cannot find anything rather than a refusal.</p>
+
+  {% include "_messages.html" %}
+
+  <span id="tool-labels"></span>
+  {% comment %}
+  ONE COLLAPSED ROW PER TOOL (phase 2). The row used to carry a checkbox
+  for EVERY entitlement on the box -- tools x entitlements checkboxes in
+  one render, which stops being readable long before fifty entitlements.
+  The summary states what the tool carries; the `<details>` opens onto
+  the shared transfer panel (`foundation/templates/_transfer_panel.html`)
+  -- the SAME component the entitlement page renders in the other
+  direction, with panes of entitlements instead of panes of resources.
+
+  `<details>` IS NATIVE, so the collapse needs no script and the page is
+  fully usable with JavaScript off, exactly as it was. `open` comes from
+  `?open=<anchor>` on the URL after a save (`agents/chat/service.py::
+  entitlement_row_url`) -- no cookie, no storage.
+
+  `save_action` AND `no_entitlements` COME FROM THE VIEW, not from this
+  template: the action has to carry the assistant panel's flag through
+  `preserve_assistant_flag`, which a template cannot call, and the
+  empty-catalogue sentence is user-facing copy, which the house declares
+  once in Python.
+  {% endcomment %}
+  {% for row in rows %}
+  <section class="row" id="{{ row.anchor }}">
+    <h2>{{ row.key }}</h2>
+    <p class="muted">{{ row.label }} — {{ row.description }}</p>
+    {% if row.shell_agents %}
+      <p class="muted">Declared by shipped agent{{ row.shell_agents|pluralize }}:
+        {{ row.shell_agents|join:", " }}. Labelling it removes it from those agents when they
+        are run from the command line.</p>
+    {% endif %}
+    {% if row.page_only %}
+      <p class="muted">No agent can be granted this tool — a label here restricts only the people
+        who reach its own page.</p>
+    {% endif %}
+    <details{% if row.open %} open{% endif %}>
+      <summary class="access-summary">{{ row.summary }}</summary>
+      {% include "_transfer_panel.html" with tp_key=row.anchor tp_anchor=row.panel_anchor tp_fields=row.fields tp_bare=1 tp_action=save_action tp_available=row.available tp_active=row.active tp_available_count=row.available_count tp_active_count=row.active_count tp_total=row.total tp_empty_catalogue=no_entitlements %}
+    </details>
+  </section>
+  {% endfor %}
+  {% if rows %}{% include "_filter_rows_script.html" %}{% endif %}
+</main>
+{% endblock %}

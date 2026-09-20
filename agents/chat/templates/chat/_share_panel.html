@@ -1,0 +1,53 @@
+{% comment %}
+Who else is reading this thread. Rendered to the OWNER and to a
+principal that `sees_all_content` -- a share list names who is reading
+somebody's thread, which is content about content.
+
+THE SENTENCE ABOUT WHAT IS EXPOSED IS NOT DECORATION. A thread's turns
+record citation text, so sharing the thread shares the quoted passages;
+it does not share the documents, and a citation link 404s for a
+recipient who may not read that document. This is the one place a person
+can leak library content without meaning to, so the form says so.
+
+The controls are styled by the `.share-panel` rules in `chat/base.html`
+-- not here: this fragment is rendered by the conversation page AND
+standalone, and a fragment cannot own rules a page has to load. Two
+browser-default dropdowns beside this box's own rounded, tokenised
+inputs were the one place the conversation page looked unfinished.
+{% endcomment %}
+<section class="share-panel">
+  <h2>Shared with</h2>
+  <ul>
+    {% for share in conversation_shares %}
+      <li>
+        {% if share.user_id %}{{ share.user.username }}{% else %}group: {{ share.group.name }}{% endif %}
+        — {{ share.get_level_display }}
+        <form method="post" action="{% url 'chat-conversation-share' conversation.id %}">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="revoke">
+          <input type="hidden" name="share" value="{{ share.pk }}">
+          <button type="submit">Remove</button>
+        </form>
+      </li>
+    {% empty %}
+      <li>Nobody yet.</li>
+    {% endfor %}
+  </ul>
+  <form class="share-form" method="post" action="{% url 'chat-conversation-share' conversation.id %}">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="share">
+    <label class="share-label" for="share-subject">Share with</label>
+    <select name="subject" id="share-subject">
+      {% for pk, name in share_subjects.users %}<option value="user:{{ pk }}">{{ name }}</option>{% endfor %}
+      {% for pk, name in share_subjects.groups %}<option value="group:{{ pk }}">group: {{ name }}</option>{% endfor %}
+    </select>
+    <select name="level" aria-label="Share level">
+      <option value="view">Can view</option>
+      <option value="use">Can view and post</option>
+    </select>
+    <button type="submit">Share</button>
+  </form>
+  <p class="muted">Sharing this thread shares what was said in it, including quoted passages
+    from documents. It does not share the documents themselves — a citation link opens only
+    for somebody who may already read that document.</p>
+</section>

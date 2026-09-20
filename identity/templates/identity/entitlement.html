@@ -1,0 +1,261 @@
+{% extends "_settings.html" %}
+{% comment %}
+One entitlement: who holds it, in what role, and the forms that change
+that. An OWNER of this entitlement reaches this page and sees the grant
+form; the rename and delete forms are rendered only for an
+administrator, because the POST behind them refuses anybody else --
+a page must not offer a control that answers "no".
+{% endcomment %}
+{% block title %}{{ entitlement.name }} — farabunker{% endblock %}
+{% comment %}
+ROUND 17 ADDENDUM: `current-parent`, not `current` -- this page marks
+its PARENT sidebar entry (Entitlements) current from a CHILD url (this
+entitlement's own detail page, not `identity-entitlements` itself), so
+the link must stay clickable (`foundation/templates/_shell.html`'s own
+`.current-parent` comment has the full reasoning). `identity/
+entitlements.html` -- the section's own index, marking itself current
+from its own exact url -- is unaffected and keeps plain `current`.
+{% endcomment %}
+{% block side_current_entitlements %}current-parent{% endblock %}
+{% block extra_style %}{{ block.super }}
+  :root { --page-max-width: 820px; }
+  {% comment %}
+  A CENTERED COLUMN, which this page did not have -- see
+  `identity/templates/identity/groups.html` for the fault (a
+  `main { max-width: … }` rule with no `<main>` to match).
+  {% endcomment %}
+  main { max-width: var(--page-max-width); margin: 0 auto; }
+  {% comment %}
+  NO LOCAL `.msg.error` (Coherence Wave D, C3) -- `_settings.html` now
+  owns it; see `identity/templates/identity/groups.html` for the
+  reasoning.
+  {% endcomment %}
+  section { background: var(--panel); border: 1px solid var(--border);
+            border-radius: 8px; padding: 1rem; margin-bottom: 1.25rem; }
+  section h2 { font-size: 1rem; margin: 0 0 .75rem; }
+  {% comment %}
+  A SCROLL BOX PER TABLE, like this page's two sibling pages. The
+  responsive rule this box keeps is that the BODY never scrolls
+  sideways; a wide table is allowed to, inside its own container. Both
+  tables here are narrow, but a long username beside two grant buttons
+  on a phone is exactly the case that would otherwise push the page
+  sideways -- and this page was just taken from full-window to 820px.
+  {% endcomment %}
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+  thead th {
+    text-align: left;
+    font-size: .72rem;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 0 .5rem .5rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+  td { padding: .5rem .5rem .5rem 0; border-top: 1px solid var(--border); vertical-align: middle; }
+  tbody tr:first-child td { border-top: none; }
+  {% comment %}
+  SIZED TO CONTENT. Both tables here are two or three short columns; left
+  to themselves they spread each one across a third of the page and put a
+  gulf between a holder's name and the buttons that act on it. The one
+  column that should absorb the surplus takes it, the rest stay at their
+  natural width -- the same idiom the document library uses.
+  {% endcomment %}
+  .col-grow { width: 100%; }
+  .col-tight { width: 1%; white-space: nowrap; }
+  .count { font-variant-numeric: tabular-nums; }
+  .grant-actions { display: flex; gap: .4rem; justify-content: flex-end; }
+  .grant-actions form { margin: 0; }
+  .grant-actions button, .grant-row button { padding: .3rem .7rem; font-size: .82rem; }
+  .field { display: flex; flex-direction: column; gap: .3rem; }
+  .field label { font-weight: 600; font-size: .85rem; }
+  .grant-row { display: flex; align-items: flex-end; gap: .6rem; flex-wrap: wrap; margin-top: .85rem; }
+  input[type="text"], select {
+    padding: .45rem .6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: .9rem;
+  }
+  .note { color: var(--muted); font-size: .85rem; margin: .75rem 0 0; }
+  .warn { color: var(--danger); font-size: .88rem; }
+  .danger-btn {
+    background: transparent;
+    color: var(--danger);
+    border: 1px solid var(--danger);
+    padding: .35rem .8rem;
+    font-size: .85rem;
+  }
+{% endblock %}
+{% block settings_content %}
+<main>
+  <h1>{{ entitlement.name }}</h1>
+  {% if entitlement.description %}<p class="tagline">{{ entitlement.description }}</p>{% endif %}
+  {% include "_messages.html" %}
+
+  <section>
+    <h2>Reach</h2>
+    {% comment %}
+    ONE PAGE, ONE ANSWER (spec section 22.34). `reach` IS
+    `identity.services.entitlement_delete_counts` -- the SAME cascade-
+    registry read the delete confirmation below counts with, aliased
+    rather than reimplemented, so the two can never disagree. Computed
+    for EVERY caller (not only an administrator): an entitlement owner
+    reaching this page is exactly somebody who should see what their
+    entitlement covers.
+    {% endcomment %}
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th class="col-grow">Kind</th><th class="col-tight">Count</th></tr></thead>
+      <tbody>
+      {% for label, count in reach.items %}
+        <tr><td class="col-grow">{{ label }}</td><td class="col-tight count">{{ count }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Grants</h2>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th class="col-grow">Holder</th><th class="col-tight">Role</th><th class="col-tight"></th></tr></thead>
+      <tbody>
+      {% for grant in grants %}
+        <tr>
+          <td class="col-grow">{% if grant.user_id %}{{ grant.user.username }}{% else %}group: {{ grant.group.name }}{% endif %}</td>
+          <td class="col-tight">{{ grant.get_role_display }}</td>
+          <td class="col-tight">
+            <div class="grant-actions">
+              <form method="post">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="set_role">
+                <input type="hidden" name="grant" value="{{ grant.pk }}">
+                <input type="hidden" name="role" value="{% if grant.role == 'owner' %}member{% else %}owner{% endif %}">
+                <button type="submit">{% if grant.role == 'owner' %}Make member{% else %}Make owner{% endif %}</button>
+              </form>
+              <form method="post">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="revoke">
+                <input type="hidden" name="grant" value="{{ grant.pk }}">
+                <button type="submit">Revoke</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+      {% empty %}<tr><td colspan="3">Nobody holds this yet.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+    </div>
+
+    <form method="post">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="grant">
+      <div class="grant-row">
+        <div class="field">
+          <label for="grant-subject">Grant to</label>
+          <select name="subject" id="grant-subject">
+            {% for pk, name in subjects.users %}<option value="user:{{ pk }}">{{ name }}</option>{% endfor %}
+            {% for pk, name in subjects.groups %}<option value="group:{{ pk }}">group: {{ name }}</option>{% endfor %}
+          </select>
+        </div>
+        {% comment %}
+        `grant_form`'s OWN FIELD, not a hand-written `<select>` -- the
+        same form-owned-field norm `groups.html`/`entitlements.html`
+        follow. The member/owner vocabulary then lives in
+        `GrantForm.role`'s `choices` alone, not duplicated here.
+        `subject`, above, stays hand-written: it is built from
+        `grant_subjects` data, which no `Form` field expresses.
+        {% endcomment %}
+        <div class="field">
+          <label for="{{ grant_form.role.id_for_label }}">As</label>
+          {{ grant_form.role }}
+        </div>
+        <button type="submit">Grant</button>
+      </div>
+    </form>
+    <p class="note">An owner of this entitlement may grant it, revoke it, and label documents
+      and tools with it. Nothing else.</p>
+  </section>
+
+  {% comment %}
+  ONE DOOR PER AXIS THAT REGISTERS ONE, from the registry rather than
+  hand-written (fix round 2, P2-I1). An axis counted here but edited on
+  its own column's page -- document labels today -- supplies the
+  heading, the sentence and the URL; this template knows none of them,
+  and a second such kind later is a REGISTRATION, which is what the
+  comment above the panels has always claimed.
+
+  A DOOR STATES NO COUNT. The reach panel above is the single home for
+  those, and a second number on one page is how a page comes to
+  disagree with itself.
+
+  RENDERED FOR EVERYBODY, not only an administrator, for the reason the
+  reach panel is: an entitlement owner is exactly somebody who should be
+  able to see what their entitlement covers, and labelling documents is
+  a capability they have.
+  {% endcomment %}
+  {% for door in axis_doors %}
+  <section id="door-{{ door.key }}">
+    <h2>{{ door.label }}</h2>
+    <p class="note">{{ door.hint }}
+      <a href="{{ door.url }}">Browse the {{ door.label|lower }} labelled {{ entitlement.name }}</a>.</p>
+  </section>
+  {% endfor %}
+
+  {% comment %}
+  ONE TRANSFER PANEL PER EDITABLE AXIS, rendered from the registry
+  (`identity/contracts/axes.py`) rather than one hand-written section
+  per kind: a sixth labelled kind later is a REGISTRATION in that
+  column's own `apps.py` and nothing here changes.
+
+  ADMINISTRATOR ONLY, and `identity/views.py` is where that is decided
+  -- `axis_panels` is EMPTY for an entitlement owner, so this loop
+  renders nothing for them rather than this template carrying a second
+  copy of the rule. An owner's page is exactly what it was: reach,
+  grants, and no rename or delete.
+
+  THE FILTER SCRIPT IS INCLUDED ONCE, after the loop, gated on there
+  being a panel for it to attach to -- the same "gated by the caller"
+  rule `_filter_rows_script.html`'s own comment states, and the reason
+  an owner's render ships no script at all.
+  {% endcomment %}
+  {% for panel in axis_panels %}
+    {% include "_transfer_panel.html" with tp_key=panel.anchor tp_anchor=panel.anchor tp_fields=panel.fields tp_label=panel.label tp_hint=panel.hint tp_available=panel.available tp_active=panel.active tp_available_count=panel.available_count tp_active_count=panel.active_count tp_total=panel.total %}
+  {% endfor %}
+  {% if axis_panels %}{% include "_filter_rows_script.html" %}{% endif %}
+
+  {% if is_admin %}
+  <section>
+    <h2>Rename</h2>
+    <form method="post">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="rename">
+      <div class="grant-row">
+        <div class="field">
+          <label for="rename-name">Name</label>
+          <input type="text" name="name" id="rename-name" value="{{ entitlement.name }}" required>
+        </div>
+        <button type="submit">Rename</button>
+      </div>
+    </form>
+  </section>
+
+  <section>
+    <h2>Delete</h2>
+    <p class="warn">Deleting this removes {% for label, count in delete_counts.items %}{{ label }}: {{ count }}{% if not forloop.last %}, {% endif %}{% endfor %}.
+      Every document this was the last label on becomes unlabelled and follows the library
+      posture — which widens who can read it.</p>
+    <form method="post">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="delete">
+      <button type="submit" class="danger-btn">Delete entitlement</button>
+    </form>
+  </section>
+  {% endif %}
+</main>
+{% endblock %}

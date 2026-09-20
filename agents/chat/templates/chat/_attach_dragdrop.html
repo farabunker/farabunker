@@ -1,0 +1,322 @@
+{% comment %}
+STAGING + DRAG-AND-DROP, the ONE shared script every composer surface
+that may attach files includes (`chat/_composer.html`, round 18 --
+originally conversation-page-only, round 10). Progressive enhancement
+ONLY: `chat/_attach_files.html`'s own `<label for>` and file input work
+identically, with this script absent, failed, or never loaded.
+
+FINDS ITS OWN COMPOSER by walking up from `[data-enter-submits]`
+(`chat/_enter_to_send.html`'s own generic hook, round 18) to the
+nearest `.composer-card` -- there is exactly one composer per page, so
+this needs no page-specific selector of its own, the same reason `chat/
+_enter_to_send.html` needs none.
+
+ROUND 18 ADDENDUM REWRITE (owner feedback: "there should be a button to
+add a document and then it should stack... with the ability to remove
+attachments"). TWO REAL CHANGES from round 10/13's own version:
+
+1. ACCUMULATE, NOT REPLACE. Through round 13, a second click-to-browse
+   pick (or a second drop) REPLACED the first selection outright -- the
+   browser's own native behaviour for `<input type="file">`, left
+   unmodified. The owner's own words ("add more documents") ask for the
+   opposite: `stagedFiles`, below, is this script's OWN accumulator,
+   never merely `fileInput.files` read back -- a browser's native
+   selection replaces `fileInput.files` on every pick, so BY THE TIME
+   `change` fires the browser has already discarded whatever was staged
+   before; this script has to remember it independently, merge the new
+   picks into it (deduped on name+size -- the same file re-picked twice
+   is one chip, not two), and write the UNION back into `fileInput.
+   files` via a fresh `DataTransfer` so the eventual submit carries
+   everything staged, not just the most recent pick.
+2. NO POPUP TO OPEN. `attachTrigger.open = true` (round 10's own drop
+   handler) is GONE -- there is no `<details>` left to open; a drop just
+   stages, exactly like a click-to-browse pick.
+
+CLEARING ON SUBMIT: `form._clearStagedAttachments`, a plain function
+reference hung off the form element itself, is this script's ONE
+integration point with a PAGE-SPECIFIC submit handler it does not
+control (`chat/conversation.html`'s own `fetch()`-based submit, which
+stays on the page after a send and so has staged state left to clear;
+the two start surfaces are plain-POST-and-redirect pages with no
+after-send DOM to clean up, so they never call this). A closure-private
+function, not a global or a custom event, for the same reason
+`agents.chat.pickers.chat_picker_options`'s own docstring gives a
+narrow, named contract rather than a generic one: exactly one caller,
+reached by exactly one property, easy to grep for either half.
+{% endcomment %}
+<script>
+(function () {
+  var form = document.querySelector("[data-enter-submits]");
+  var card = form ? form.closest(".composer-card") : null;
+  var chatWrap = card ? card.closest(".chat-wrap") : null;
+  var block = card ? card.querySelector(".attach-block") : null;
+  if (!form || !card || !block) { return; }
+  var fileInput = block.querySelector('input[type="file"]');
+  var stagedList = block.querySelector(".staged-files");
+  var scopeField = block.querySelector(".attach-scope");
+  if (!fileInput) { return; }
+
+  // ROUND-18-CONFIRM R8a: this script RUNNING AT ALL is the proof JS is
+  // on -- `.js-attach` (`chat/base.html`) is what lets `base.html` clip
+  // `.attach-input` down to a focusable, screen-reader-reachable 1px box
+  // ONLY once the chip stack below is the thing actually telling the
+  // operator what is staged. Added here, never authored in the
+  // template: a JS-off reader never gets this class, so `.attach-input`
+  // stays its normal, visible, "Choose Files — No file chosen" self --
+  // the one JS-off fallback this whole door leans on -- exactly as
+  // before this fix.
+  block.classList.add("js-attach");
+
+  // `stagedFiles`: THIS SCRIPT'S OWN MEMORY of what is staged --
+  // `fileInput.files` alone cannot answer that after a second native
+  // pick has already overwritten it (see this file's own module
+  // comment, point 1).
+  var stagedFiles = [];
+
+  function keyFor(file) { return file.name + "␟" + file.size; }
+
+  function syncInputFromStaged() {
+    try {
+      var dt = new DataTransfer();
+      stagedFiles.forEach(function (file) { dt.items.add(file); });
+      fileInput.files = dt.files;
+    } catch (err) {
+      // An engine that refuses a scripted `.files` assignment leaves
+      // the native selection as the browser last set it -- the same
+      // guarded degrade round 10's own drop handler always used.
+    }
+    renderStagedFiles();
+    updateScopeVisibility();
+  }
+
+  function mergeInFiles(newFiles) {
+    var seen = {};
+    stagedFiles.forEach(function (file) { seen[keyFor(file)] = true; });
+    Array.prototype.forEach.call(newFiles || [], function (file) {
+      var key = keyFor(file);
+      if (!seen[key]) {
+        stagedFiles.push(file);
+        seen[key] = true;
+      }
+    });
+    syncInputFromStaged();
+  }
+
+  function removeStagedFile(index) {
+    stagedFiles.splice(index, 1);
+    syncInputFromStaged();
+  }
+
+  // renderStagedFiles(): rebuilds `.staged-files` from `stagedFiles` --
+  // one `<li>` per staged file, the SAME `.turn-attachment-row`/
+  // `.turn-attachment-remove` chip `chat/base.html` already styles for
+  // a SENT message's own attachments (`chat/_attachment_chip.html`).
+  // Built as real child nodes, never `innerHTML`: a filename is
+  // operator-supplied text, and a `<li>` built from raw HTML would let
+  // one containing markup render as markup instead of the inert text a
+  // filename always is.
+  function renderStagedFiles() {
+    if (!stagedList) { return; }
+    while (stagedList.firstChild) { stagedList.removeChild(stagedList.firstChild); }
+    stagedFiles.forEach(function (file, index) {
+      var li = document.createElement("li");
+      li.className = "turn-attachment-row";
+      var name = document.createElement("span");
+      name.textContent = file.name;
+      li.appendChild(name);
+      var remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "turn-attachment-remove";
+      remove.setAttribute("aria-label", "Remove " + file.name);
+      remove.textContent = "✕";
+      remove.addEventListener("click", function () { removeStagedFile(index); });
+      li.appendChild(remove);
+      stagedList.appendChild(li);
+    });
+  }
+
+  // updateScopeVisibility(): round 18 addendum point 3 -- the scope
+  // row shows only once a file is staged. `.is-empty` (`chat/base.
+  // html`) is the ONE class this script ever toggles here; a JS-off
+  // reader never gets it added at all, so the fieldset stays visible
+  // from first paint on that path (`chat/_attach_files.html`'s own
+  // comment on the fieldset has the full "honest either way" reasoning).
+  function updateScopeVisibility() {
+    if (!scopeField) { return; }
+    scopeField.classList.toggle("is-empty", stagedFiles.length === 0);
+  }
+
+  // clearStagedAttachments(): round 18 addendum point 4 -- the ONE
+  // function a page-specific submit handler calls after a successful
+  // send, so the stack and the scope row never linger showing files
+  // that already went out with the message that was just sent.
+  function clearStagedAttachments() {
+    stagedFiles = [];
+    try {
+      fileInput.value = "";
+    } catch (err) {
+      // Some engines refuse to clear a file input's own `.value`
+      // outside a user gesture -- `syncInputFromStaged()`, below,
+      // still empties `fileInput.files` itself via a fresh, empty
+      // `DataTransfer`, so the SUBMITTED state is correct either way;
+      // only the browser's own native "N files" caption might lag by
+      // one render in that rare case.
+    }
+    syncInputFromStaged();
+  }
+  form._clearStagedAttachments = clearStagedAttachments;
+
+  fileInput.addEventListener("change", function () { mergeInFiles(fileInput.files); });
+  // A bfcache-restored page (the back button, most commonly) can hand
+  // this input back with a selection already on it and no `change`
+  // event ever fired for THIS load -- seed the accumulator from
+  // whatever is already there, unconditionally, so the list matches
+  // reality from the first paint.
+  mergeInFiles(fileInput.files);
+
+  // PASTE IS ATTACH (chat image artifacts, 2026-09-16; owner: "I should
+  // also be able to copy an image from clipboard into the chat ... as if
+  // I were to attach them to the message").
+  //
+  // THE SAME ACCUMULATOR, NOT A SECOND DOOR: a pasted image goes through
+  // `mergeInFiles` exactly as a drop and a click-to-browse pick do, so it
+  // gets the same dedup, the same chip, the same ✕, the same
+  // `DataTransfer` rebuild into `files`, and the same placement chooser.
+  // There is no server change anywhere for this: the size cap, the
+  // extension allow-list, the tool-access gate and the staging rollback
+  // all apply to it as they do to a chosen file, because by the time it
+  // is posted the server cannot tell which door it came through.
+  //
+  // ONLY WIRED WHEN THE ATTACH DOOR IS RENDERED. Two independent guards
+  // already stand above this line: `chat/_composer.html` includes this
+  // whole fragment behind `may_attach_files`, and this script returns
+  // early when `.attach-block` is absent. A principal without attach
+  // rights therefore gets the browser's own default paste, and the
+  // server's refusal path is unchanged for anyone who bypasses the UI.
+  //
+  // NEVER `preventDefault()`: text on the clipboard stays the browser's
+  // to handle, so a mixed paste keeps its text AND stages its image.
+
+  // FINAL FIX WAVE, FIX 2. The two extensions this platform actually
+  // ingests (`tools.rag.readers.IMAGE_EXTS`) get their own short forms --
+  // `image/png` -> "png", `image/jpeg` -> "jpg" -- and "png" is used
+  // ONLY when the clipboard item carries no type at all (`type` blank or
+  // absent), the one case with no better answer. ANY OTHER type keeps
+  // its OWN subtype as the extension (`type.split("/")[1]`, lower-cased
+  // -- "jpeg" stays "jpeg", which the server's own allow-list also
+  // accepts): a webp or tiff clipboard item is named `.webp`/`.tiff` and
+  // the SERVER refuses it by name, with its own message, exactly as it
+  // would a chosen file of that type. The previous version of this
+  // function named every unrecognised type "png" -- which passed the
+  // extension allow-list by name while the bytes underneath stayed
+  // whatever they actually were, and the server went on to record
+  // `media_type: image/png` over non-PNG bytes. Naming the real subtype
+  // is what lets the server's own refusal fire instead of silently
+  // mislabeling the file.
+  function extensionForImageType(type) {
+    if (type === "image/png") { return "png"; }
+    if (type === "image/jpeg") { return "jpg"; }
+    var subtype = String(type || "").split("/")[1];
+    return subtype ? subtype.toLowerCase() : "png";
+  }
+
+  function twoDigits(n) { return (n < 10 ? "0" : "") + n; }
+
+  // `pasted-image-<YYYYMMDD-HHMMSS>[-<n>].<ext>` -- a name a human can
+  // read back in the chip stack and in the document library, with the
+  // `-<n>` suffix only from the SECOND image of one paste onward, so two
+  // images pasted in the same second never collide on `keyFor`'s own
+  // name+size dedup.
+  function pastedImageName(index, type) {
+    var now = new Date();
+    var stamp = now.getFullYear()
+      + twoDigits(now.getMonth() + 1)
+      + twoDigits(now.getDate())
+      + "-" + twoDigits(now.getHours())
+      + twoDigits(now.getMinutes())
+      + twoDigits(now.getSeconds());
+    var ordinal = index === 0 ? "" : "-" + (index + 1);
+    return "pasted-image-" + stamp + ordinal + "." + extensionForImageType(type);
+  }
+
+  card.addEventListener("paste", function (event) {
+    var data = event.clipboardData;
+    if (!data || !data.items) { return; }
+    var images = [];
+    Array.prototype.forEach.call(data.items, function (item) {
+      if (item.kind !== "file") { return; }
+      if (String(item.type).indexOf("image/") !== 0) { return; }
+      var file = item.getAsFile();
+      if (file) { images.push(file); }
+    });
+    if (!images.length) { return; }
+    var named = images.map(function (file, index) {
+      var name = pastedImageName(index, file.type);
+      try {
+        return new File([file], name, { type: file.type });
+      } catch (err) {
+        // An engine with no `File` constructor keeps the clipboard's own
+        // name (usually "image.png") -- degraded, never broken, the same
+        // guarded-degrade posture the `DataTransfer` assignment above
+        // already takes.
+        return file;
+      }
+    });
+    mergeInFiles(named);
+  });
+
+  if (!chatWrap) { return; }
+
+  // THE DOCUMENT-LEVEL GUARD (`dragover`/`drop` on `document`, both
+  // unconditionally `preventDefault()`d the instant a drag carries
+  // files) stops the BROWSER'S OWN default drag-and-drop behaviour --
+  // navigating the whole tab away to the dropped file -- for a drop
+  // that lands anywhere on the page.
+  function carriesFiles(event) {
+    var types = event.dataTransfer && event.dataTransfer.types;
+    if (!types) { return false; }
+    return Array.prototype.indexOf.call(types, "Files") !== -1;
+  }
+
+  document.addEventListener("dragover", function (event) {
+    if (carriesFiles(event)) { event.preventDefault(); }
+  });
+  document.addEventListener("drop", function (event) {
+    if (carriesFiles(event)) { event.preventDefault(); }
+  });
+
+  // A depth counter, not `event.target === chatWrap`: `dragenter`/
+  // `dragleave` fire on every child boundary crossed too, and a bare
+  // identity check flickers the affordance off the instant the pointer
+  // passes over a turn card or another control underneath it.
+  var dragDepth = 0;
+  function showDropState() { card.classList.add("composer-card-drop-target"); }
+  function hideDropState() {
+    dragDepth = 0;
+    card.classList.remove("composer-card-drop-target");
+  }
+
+  chatWrap.addEventListener("dragenter", function (event) {
+    if (!carriesFiles(event)) { return; }
+    event.preventDefault();
+    dragDepth += 1;
+    showDropState();
+  });
+  chatWrap.addEventListener("dragover", function (event) {
+    if (carriesFiles(event)) { event.preventDefault(); }
+  });
+  chatWrap.addEventListener("dragleave", function (event) {
+    if (!carriesFiles(event)) { return; }
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) { hideDropState(); }
+  });
+  chatWrap.addEventListener("drop", function (event) {
+    if (!carriesFiles(event)) { return; }
+    event.preventDefault();
+    hideDropState();
+    var files = event.dataTransfer.files;
+    if (!files || !files.length) { return; }
+    mergeInFiles(files);
+  });
+})();
+</script>

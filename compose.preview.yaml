@@ -1,0 +1,264 @@
+# farabunker PREVIEW stack — runs a worktree branch side-by-side with the
+# normal dev stack (compose.yaml), on different ports and against an
+# isolated database, so a branch can be smoke-tested before merging without
+# ever touching the primary stack or its data.
+#
+# WHY THIS FILE EXISTS (see docs/adr/0006-containerization-and-isolation.md):
+# The normal stack (compose.yaml + compose.override.yaml) bind-mounts the
+# MAIN repo checkout — `.:/app` — so a `git worktree` branch can never be
+# built or run through it: the container would still see the main branch's
+# files. This file instead takes its source tree, data directory, and ports
+# from environment variables, so a launcher script can point it at ANY
+# worktree and spin up a disposable, fully isolated copy of the stack.
+#
+# STANDALONE, NEVER AUTO-MERGED: this file is only ever invoked explicitly
+# with `-f compose.preview.yaml`, so compose.override.yaml (the dev
+# auto-reload override) does NOT apply here. That's why the `web` command
+# below duplicates the override's `migrate && runserver` — there is no
+# second file to merge it in from.
+#
+# Contract with the launcher script (Task 2), which MUST set:
+#   FARABUNKER_SRC    — absolute path to the worktree checkout to build from
+#                        and bind-mount as the running code (used as the
+#                        build context AND the `:/app` volume, so
+#                        branch-added dependencies install and the
+#                        branch's code — not the main repo's — runs).
+#   PREVIEW_DATA_DIR  — absolute path to a host directory dedicated to this
+#                        preview's durable data (Postgres data dir, plus the
+#                        managed document store + inbox under
+#                        FARABUNKER_DATA_DIR — see config/settings.py).
+#                        Must NOT be the main stack's ./data; that is the
+#                        whole point of this file's isolation.
+#   PREVIEW_WEB_PORT  — host port for the web service (default 8001; the
+#                        main stack already owns 8000).
+#   PREVIEW_DB_PORT   — host port for Postgres (default 5433; the main
+#                        stack already owns 5432).
+#
+# Ollama is deliberately NOT isolated: it runs natively on the host (Docker
+# cannot reach the Metal GPU on macOS dev — see ADR 0006 §4) and this
+# preview stack reaches the SAME host Ollama instance as the main stack, via
+# http://host.docker.internal:11434. That is intentional: a preview should
+# reuse already-pulled models. The platform never downloads models itself.
+#
+# ComfyUI is not isolated either, for the same reason: it runs natively on the
+# host and every preview reaches the SAME instance at
+# http://host.docker.internal:8188. The platform never downloads checkpoints.
+#
+# This file is for local preview only — it is never used in production.
+
+# C-33: the four engine addresses every service needs, written once.
+# `app`, `watcher` and `worker` each carried this block verbatim. An
+# anchor, not a shared file: compose.yaml keeps its own copy with its
+# own values by design (ADR 0011), and an anchor cannot cross files.
+x-engine-env: &engine-env
+  # S4: composed from POSTGRES_PASSWORD rather than carrying the
+  # credential inline. This is not only a "don't commit a password"
+  # change -- compose's `environment:` BEATS `env_file:`, so the inline
+  # URL that used to sit here won over anything an operator wrote in
+  # .env, which made the password non-overridable by configuration.
+  # Interpolating `${POSTGRES_PASSWORD}` puts .env back in charge while
+  # keeping the anchor (C-33) that stops these four addresses drifting
+  # apart across the three services.
+  DATABASE_URL: postgres://farabunker:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/farabunker
+  OLLAMA_BASE_URL: http://host.docker.internal:11434
+  COMFYUI_BASE_URL: http://host.docker.internal:8188
+  WHISPER_BASE_URL: http://host.docker.internal:8080
+  # S1: the container's hostname is a random hex id, so the settings
+  # default (this machine's own name) is useless inside it. Name the
+  # service and the loopback addresses a browser actually uses to reach
+  # the published port.
+  #
+  # AN INTERPOLATED DEFAULT, NOT A LITERAL, and that is the whole point:
+  # compose's `environment:` beats `env_file:`, so a literal here would
+  # win over .env and silently make every instruction in .env.example,
+  # docs/DEV.md and docs/OPERATIONS.md ("add the name in .env") false.
+  # That is the exact defect Task H3 spends a whole task removing from
+  # DATABASE_URL; do not reintroduce it one task earlier.
+  ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1,[::1],web}
+
+services:
+  db:
+    # PINNED BY DIGEST (dependency audit IMAGE-8/9): `pgvector/pgvector:pg16`
+    # moves across Postgres point releases AND bundled extension versions,
+    # so two rebuilds of the same commit were not the same image. The tag is
+    # kept alongside the digest so a reader can still tell what it is.
+    # Resolved 2026-09-13 from a locally cached pull. Bump procedure: `docker
+    # pull pgvector/pgvector:pg16 && docker inspect --format='{{index
+    # .RepoDigests 0}}' pgvector/pgvector:pg16`, replace the digest below,
+    # rebuild, run the suite.
+    image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+    restart: unless-stopped
+    # S12: closes the other half of the non-root story below -- this
+    # service manages its own in-container user, but no service here
+    # needs the ability to raise privileges via a setuid binary either.
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      POSTGRES_DB: farabunker
+      POSTGRES_USER: farabunker
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    ports:
+      # S4: LOOPBACK ONLY -- see compose.yaml's matching comment. The
+      # preview stack is reached from the host by scripts/preview, which
+      # uses `localhost:<PREVIEW_DB_PORT>` (loopback), so this is safe.
+      - "127.0.0.1:${PREVIEW_DB_PORT:-5433}:5432"
+    volumes:
+      # Bind mount to a host directory dedicated to THIS preview (see the
+      # PREVIEW_DATA_DIR contract above) — never the main stack's ./data.
+      - ${PREVIEW_DATA_DIR}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U farabunker -d farabunker"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    build:
+      # Build from the WORKTREE, not this file's own location, so
+      # branch-added dependencies (requirements.txt changes, etc.) install
+      # into the preview image.
+      context: ${FARABUNKER_SRC}
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # S12: the Dockerfile's non-root USER already limits what a
+    # compromised process can do to the host; this stops it from using
+    # a setuid binary to climb back to root even if some other bug
+    # hands it a way to exec one.
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - .env
+    environment:
+      # Reach this preview's own db service by name on its own compose
+      # network, and the host's native Ollama (see header comment). Keys
+      # here override env_file, same as compose.yaml.
+      <<: *engine-env
+      # Isolate the managed document store, inbox, and generated-media
+      # store from the main stack's ./data (config/settings.py: DATA_DIR,
+      # DOCUMENTS_DIR, INGEST_INBOX_DIR, GENERATED_DIR all derive from
+      # FARABUNKER_DATA_DIR).
+      FARABUNKER_DATA_DIR: /preview-data
+      # ONE JAR PER STACK. Cookies are scoped by scheme + host + path and
+      # NOT by port (RFC 6265 section 8.5), so every stack on `localhost`
+      # shares one cookie jar: the live box on :8000 and up to three
+      # previews beside it all write `sessionid` and `csrftoken` to the
+      # same place, and whichever rolls its session last silently signs
+      # the others out mid-click. Naming them per stack is the fix
+      # (config/settings.py's own comment has the full reasoning).
+      #
+      # KEYED ON THE WEB PORT, because that is the thing that is already
+      # unique per stack -- two previews cannot publish the same host
+      # port, so two previews cannot collide here either. The default
+      # tracks `PREVIEW_WEB_PORT`'s own default just below, so the two
+      # never drift.
+      #
+      # INTERPOLATED, NOT LITERAL, for the reason this file's
+      # ALLOWED_HOSTS comment gives at length: `environment:` beats
+      # `env_file:`, so a literal here would win over .env and make the
+      # variable docs/DEV.md documents a lie. An operator who sets
+      # either name in .env still wins. Self-referential on purpose, the
+      # same shape ALLOWED_HOSTS uses above: compose interpolates from
+      # the host environment and .env, never from the block it is
+      # writing.
+      #
+      # THE KEY IS THE ONE `config/settings.py` READS, and it shipped
+      # wrong once. These were `SESSION_COOKIE_NAME` / `CSRF_COOKIE_NAME`
+      # -- the DJANGO SETTING names, which Django never reads from the
+      # environment -- so a preview carried the right value under a key
+      # nothing looked at and served the default cookie names anyway.
+      # `foundation/ops/tests/test_cookie_names.py` now parses this block
+      # into KEYS and compares each against the variable settings really
+      # asks for, because the assertion that let this through was a
+      # substring test and `SESSION_COOKIE_NAME` is a suffix of
+      # `FARABUNKER_SESSION_COOKIE_NAME`.
+      FARABUNKER_SESSION_COOKIE_NAME: ${FARABUNKER_SESSION_COOKIE_NAME:-sessionid_${PREVIEW_WEB_PORT:-8001}}
+      FARABUNKER_CSRF_COOKIE_NAME: ${FARABUNKER_CSRF_COOKIE_NAME:-csrftoken_${PREVIEW_WEB_PORT:-8001}}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${PREVIEW_WEB_PORT:-8001}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # Serve the WORKTREE branch's code, not the main repo checkout.
+      #
+      # Same dev-convenience trade-off as compose.yaml's own `.:/app`
+      # comment (S12): read-write from the container to this worktree's
+      # source. The non-root USER in the Dockerfile is what limits the
+      # damage; see that comment and `docs/OPERATIONS.md`.
+      - ${FARABUNKER_SRC}:/app
+      # This preview's isolated durable data (see PREVIEW_DATA_DIR above).
+      - ${PREVIEW_DATA_DIR}:/preview-data
+    # compose.override.yaml is NOT merged when this file is invoked with
+    # -f, so its migrate+runserver command is duplicated here verbatim.
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py runserver 0.0.0.0:8000"
+
+  watcher:
+    build:
+      context: ${FARABUNKER_SRC}
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - .env
+    environment:
+      <<: *engine-env
+      FARABUNKER_DATA_DIR: /preview-data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ${FARABUNKER_SRC}:/app
+      - ${PREVIEW_DATA_DIR}:/preview-data
+    # IMAGE-10: the image's HEALTHCHECK probes HTTP on :8000; the watcher
+    # serves no HTTP at all, so it would read as perpetually unhealthy
+    # rather than simply "no health information" -- switch the inherited
+    # probe off.
+    healthcheck:
+      disable: true
+    # Watch THIS preview's isolated inbox, not the main stack's.
+    command: python manage.py ingest_watch /preview-data/inbox
+
+  worker:
+    build:
+      context: ${FARABUNKER_SRC}
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - .env
+    environment:
+      # The worker needs the ComfyUI address too, so queued
+      # image-generation jobs reach the host engine instead of falling
+      # back to localhost inside the container. Same for the whisper
+      # address: queued transcription jobs (media-into-RAG plan T6)
+      # reach the host whisper-server instead of falling back to
+      # localhost inside the container.
+      <<: *engine-env
+      FARABUNKER_DATA_DIR: /preview-data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ${FARABUNKER_SRC}:/app
+      - ${PREVIEW_DATA_DIR}:/preview-data
+    # IMAGE-10: the image's HEALTHCHECK probes HTTP on :8000; the worker
+    # serves no HTTP at all, so it would read as perpetually unhealthy
+    # rather than simply "no health information" -- switch the inherited
+    # probe off.
+    healthcheck:
+      disable: true
+    command: python manage.py run_jobs
+    # See compose.yaml's `worker` service -- SHUTDOWN_GRACE_SECONDS
+    # (models/queue/worker.py) is 20s; docker's own 10s default would
+    # SIGKILL this preview's worker mid-drain otherwise.
+    stop_grace_period: 30s

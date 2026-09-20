@@ -1,0 +1,143 @@
+{% comment %}
+ONE attachment chip row — title link, status/scope chips, and (for the
+uploader) a detach form.
+
+SHARED, ROUND-13 REVIEW FIX MINOR 4: `_turn_card.html`'s own per-turn
+attachment block and `_legacy_attachments.html`'s legacy block USED TO
+hand-copy this exact five-chip run (Ready/Failed/Processing…/This chat
+only/Not retrievable here) — identical when the review diffed them, but
+a sixth state added to one would have silently missed the other, so
+both were made to `{% templatetag openblock %} include "chat/
+_attachment_chip.html" {% templatetag closeblock %}` this ONE fragment
+per document instead. `_legacy_attachments.html` ITSELF WAS REMOVED
+since (consolidation wave, S10 ruling: the whole renderer was
+production-unreachable) -- `_turn_card.html` is this fragment's one
+caller today, and the ONE-FRAGMENT discipline stays exactly as useful
+for whatever future second caller arrives as it was for the one that
+just left.
+
+TAKES three variables, deliberately not resolved here:
+- `doc` — the chip dict `tools.rag.access.attached_documents`'s own
+  shape (`id`, `title`, `status`, `status_detail`, `in_corpus`,
+  `chat_scoped`, `may_detach`, `not_in_corpus_reason`, `is_image`,
+  `readable` (preview UAT, 2026-09-17 -- gates the thumbnail below) --
+  ROUND 17, WHY `in_corpus` is False, `None` otherwise).
+- `conversation_id` — the detach form's own URL needs one; `_turn_
+  card.html` reads it off `card.turn.conversation_id` and hands it
+  through rather than this fragment resolving it itself.
+- `next_url`, OPTIONAL — ROUND-13 REVIEW FIX MINOR 2: threaded through
+  so a caller OUTSIDE the ordinary thread page (`/chat/all/`'s own
+  preview pane, which has search/filter/page/selected state worth
+  returning to) can bring the operator back to itself after a detach,
+  instead of `agents.chat.views.turns.attachment_detach`'s own default
+  fallback (`conversation_url(conversation)`, unchanged, still what a
+  blank/absent `next_url` produces — the ordinary thread page passes
+  none and keeps its existing "stay on the conversation" behaviour).
+{% endcomment %}
+<div class="turn-attachment-row">
+  {% comment %}
+  CHAT IMAGE ARTIFACTS (2026-09-16). An attached image shows itself,
+  served by `rag-document-file` -- the SAME route the title link beside
+  it already points at, and the same `readable_document` gate, so the
+  thumbnail can never show bytes the link could not. `doc.is_image`
+  comes off the provider row (`tools.rag.access.attached_documents`), so
+  no template ever guesses from a filename.
+
+  A `<span>` wrapper, not a second `<a>`: the title link one element to
+  the right already opens the file, and two adjacent links to the same
+  href is a duplicated tab stop for a screen-reader user with nothing
+  new behind it. `alt` is the title, which is the same text that link
+  carries -- the image is decorative FOR THAT LINK, but the title is the
+  honest description of what the picture is.
+
+  FINAL FIX WAVE, FIX 1: `loading="lazy" decoding="async"`. The document
+  file view marks its response `Cache-Control: private, no-store` (a
+  principal-gated route never lets a shared cache keep a copy), so the
+  browser cannot cache this `<img>` -- and the poller re-swaps this same
+  card, chip included, on every "queued"/"running" tick while ingest
+  runs. Without `loading="lazy"` an offscreen chip in a long thread would
+  be refetched, at full resolution, on every one of those swaps; with it,
+  an image the operator is not looking at is never fetched at all.
+
+  GATED ON `doc.readable` (packet finding A's chip half, 2026-09-17) --
+  the SAME key the caption is gated on, and the same predicate
+  `rag-document-file` itself enforces. A chat-scoped image somebody ELSE
+  attached is deliberately named on this chip (the round-12 ruling: its
+  title and status belong to anyone who can see the conversation) while
+  its BYTES stay with the uploader -- so an unconditional `<img>` would
+  hand that reader a broken-image glyph, here and on `/chat/all/`'s
+  preview pane. `is not False`, never a bare truthiness test: a Django
+  dotted lookup on a MISSING key resolves falsy, and a provider row
+  predating this key must keep the thumbnail it has today.
+  {% endcomment %}
+  {% if doc.is_image and doc.readable is not False %}
+  <span class="turn-attachment-thumb">
+    <img src="{% url 'rag-document-file' doc.id %}" alt="{{ doc.title }}"
+         loading="lazy" decoding="async">
+  </span>
+  {% endif %}
+  <a href="{% url 'rag-document-file' doc.id %}">{{ doc.title }}</a>
+  {% if doc.status == "ready" %}
+  <span class="chip chip-done">Ready</span>
+  {% elif doc.status == "failed" %}
+  <span class="chip chip-failed">Failed</span>
+  {% else %}
+  <span class="chip chip-running">Processing…</span>
+  {% endif %}
+  {% if doc.chat_scoped %}
+  <span class="chip chip-queued">This chat only</span>
+  {% endif %}
+  {% if not doc.in_corpus %}
+  <span class="chip chip-queued">Not retrievable here</span>
+  {% endif %}
+  {% if doc.may_detach %}
+  {% comment %}
+  ROUND 13, REQUIREMENT E'S POST-SEND REMOVE -- UPLOADER-ONLY
+  (`tools.rag.access.may_detach_attachment`, no admin override; see
+  that predicate's own docstring for why). A plain one-field `<form>`,
+  not a script-built confirm: removing an attachment is a single,
+  reversible-by-re-attaching action, the same "no confirm needed"
+  judgement this page's own in-flow Delete-conversation row already
+  makes for a costlier action, muted into a row rather than gated
+  behind a dialog.
+  {% endcomment %}
+  <form method="post"
+        action="{% url 'chat-attachment-detach' conversation_id doc.id %}">
+    {% csrf_token %}
+    {% if next_url %}<input type="hidden" name="next" value="{{ next_url }}">{% endif %}
+    <button type="submit" class="turn-attachment-remove"
+            aria-label="Remove {{ doc.title }}">✕</button>
+  </form>
+  {% endif %}
+</div>
+{% if doc.status == "failed" and doc.status_detail %}
+<p class="muted turn-attachment-detail">{{ doc.status_detail }}</p>
+{% endif %}
+{% comment %}
+ROUND 17 (owner: "a bool in settings to use all rag documents ...
+default it on"): TWO honest causes now, not one -- `doc.not_in_corpus_
+reason` (`tools.rag.access.attached_documents`'s own new key) names
+WHICH applies. `{% templatetag openblock %} elif not doc.in_corpus
+{% templatetag closeblock %}`, not a bare `{% templatetag openblock %}
+else {% templatetag closeblock %}`, is deliberate: a chat-scoped row
+can ALSO be `in_corpus=False` (a different, pre-existing mechanism --
+`sees_nothing`, a signed-in principal with ZERO entitlements on a
+locked library, unrelated to the wall/toggle the two named sentences
+above describe) and carries no `not_in_corpus_reason` for it -- `tools.
+rag.access.attached_documents`'s own docstring confirms this is the
+ONLY way `in_corpus` is False with no reason attached (a chat-scoped
+row is never universal, so it is never wall- or toggle-excluded).
+
+CONSOLIDATION WAVE (audit A, F5) FIXES THE ONE TRUTH DEFECT IN THIS
+DELTA: this fallback used to render the WALL sentence verbatim --
+"it lives in the universal library, outside this stream's scope" --
+about a document that is chat-scoped and lives in NEITHER. Its own
+cause gets its own honest sentence now.
+{% endcomment %}
+{% if doc.not_in_corpus_reason == "universal_off" %}
+<p class="muted turn-attachment-detail">Attached — not retrievable in this workstream (its "Use the full document library" setting is off, so this stream's corpus excludes the universal library entirely).</p>
+{% elif doc.not_in_corpus_reason == "wall" %}
+<p class="muted turn-attachment-detail">Attached — not retrievable in this workstream (it lives in the universal library, outside this stream's scope).</p>
+{% elif not doc.in_corpus %}
+<p class="muted turn-attachment-detail">Attached — not retrievable right now (this account holds no entitlements on this box's locked library, so no search or ask query returns anything for it at all).</p>
+{% endif %}

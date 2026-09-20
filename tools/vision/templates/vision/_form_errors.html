@@ -1,0 +1,18 @@
+{% comment %}
+The 400 body for an invalid generate submission made via XHR: just the
+errors, no page chrome. The submit handler in create.html renders this into
+the dedicated `#form-errors` slot above the form -- never into `#jobs`, so a
+rejected submission (no job was ever created) can never be mistaken for a
+finished one. The non-XHR path re-renders the whole create page instead,
+with the same messages shown next to each field.
+{% endcomment %}
+<div class="banner warn form-errors">
+  {% for error in form.non_field_errors %}
+  <p class="job-error">{{ error }}</p>
+  {% endfor %}
+  {% for field in form %}
+    {% for error in field.errors %}
+    <p class="job-error">{{ field.label }}: {{ error }}</p>
+    {% endfor %}
+  {% endfor %}
+</div>

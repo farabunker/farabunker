@@ -1,0 +1,9 @@
+{% extends "_shell.html" %}
+{% comment %}
+Thin per-app extension of the shared shell (foundation/templates/_shell.html). All
+design tokens, dark-mode overrides, and shared body/nav/button CSS -- plus
+the one global nav partial -- now live there so a palette or nav change
+lives in ONE place instead of drifting between the RAG module's pages and
+the inference console's. Extending a project-level template creates no
+Python import, so `models/contracts/` purity and column-privacy are unaffected.
+{% endcomment %}

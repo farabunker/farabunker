@@ -1,0 +1,154 @@
+{% comment %}
+THE ONE COMPOSER, owner feedback round 18 (verbatim: "the ability to
+add an attachment isn't on the intial new chat screen... I thought all
+the chats used the same code base, why is there something using a
+different sub-template?"). Every surface that starts or continues a
+conversation renders THIS fragment now -- `chat/index.html`'s own start
+box, `chat/workstream.html`'s New-chat card, and `chat/conversation.
+html`'s own message form -- never three near-identical copies. The
+owner's own standing ruling on the attach door alone (`chat/_attach_
+files.html`'s own module docstring: "There shouldn't be two different
+code bases. Both should serve both purposes") already covered the
+attach controls; round 18 extends it to the WHOLE composer, because a
+form around a shared door is still a second code base if the form
+itself is typed out three times.
+
+PARAMETERIZED ONLY WHERE THE SURFACES GENUINELY DIFFER (round 18's own
+words), all `with`-passed by the include site:
+
+  `composer_mode` -- `"start"` (index/workstream) or `"turn"`
+  (conversation). Switches the agent picker, the submit label, and
+  whether the textarea is `required` -- a blank message still starts an
+  empty thread (unchanged, existing behaviour), but never posts an
+  empty turn to a thread that already exists.
+  `composer_action` -- the form's own `action` URL (`chat-start` or
+  `chat-turn`).
+  `composer_form_id` -- `"turn-form"` on the conversation page only
+  (that page's own `{% templatetag openblock %} block scripts
+  {% templatetag closeblock %}` still finds it by that id); omitted
+  elsewhere, where nothing needs to.
+  `composer_agents` -- the agent queryset, start mode only.
+  `composer_placeholder` -- the textarea's own placeholder text.
+  `composer_button` -- the submit button's own label ("Start"/"Send").
+  `composer_show_model_picker` -- round 18's own explicit scope line:
+  "model picker where they do today" -- `chat/index.html` had one,
+  `chat/workstream.html`'s New-chat card never did, and this round adds
+  attachments, not a picker nobody asked for there. `True` on `/chat/`
+  and the conversation page, `False` on the workstream card.
+  `composer_workstream` -- the stream a new conversation is born into,
+  for the hidden ROUTING field `agents.chat.views.conversations.
+  conversation_start` reads (`request.POST["workstream"]`) -- `None`
+  everywhere else. NOT the same question as `attach_workstream`, below
+  (a principal can start a conversation in a stream they may not upload
+  to): `_attach_files.html` still reads `attach_workstream` to decide
+  whether ITS OWN "This workstream only" option renders at all, but the
+  hidden `name="workstream"` field is emitted ONCE, HERE, keyed on
+  `composer_workstream|default:attach_workstream` -- ROUND-18-CONFIRM R6
+  retires the second, `_attach_files.html`-owned copy of it (harmless
+  duplication, since both would always agree on a value, but still one
+  field two fragments each thought was theirs to write).
+  `composer_next` -- OPTIONAL. When passed, emits `<input type="hidden"
+  name="next">` so the posting view can return the operator to the page
+  they posted from, through `agents.chat.service.validated_next_url`.
+  Omitted by every `/chat/` surface, which posts to a view that already
+  knows where to go.
+
+READ DIRECTLY FROM CONTEXT, never `with`-passed, because every caller
+already builds these under this exact name (`agents.chat.service.
+composer_attach_context` for the two START builders, `agents.chat.
+views.thread.thread_context` for the conversation page -- ONE PREDICATE,
+independently computed per surface rather than threaded through a
+shared call, `agents.contracts.attachments.placement_is_valid`'s own
+"every layer keeps its own defensive call" reasoning applied here to a
+render-time predicate instead of a gate): `picker`, `selected_
+connection`, `may_attach_files`, `attach_workstream`.
+
+EVERY ATTACHMENT-RELATED PIECE IS IDENTICAL, because there is exactly
+ONE copy of each, included here once: `chat/_attach_files.html` (the
+door itself), `chat/_attach_dragdrop.html` (staging + drag-and-drop,
+round 18 addendum), `chat/_enter_to_send.html` (Enter-to-send, now
+shared with the conversation page's own former duplicate too).
+{% endcomment %}
+<div class="composer-card">
+  {% comment %}
+  NO `class=` ON THIS `<form>` (round-18-confirm R4): `chat/base.html`'s
+  own `.composer-card > form { display: contents; }` keys on the parent/
+  child STRUCTURE, not a class -- an earlier draft carried `class=
+  "composer-form"` here with no matching rule anywhere, exactly the dead
+  attribute the CSS gate exists to discourage.
+  {% endcomment %}
+  <form{% if composer_form_id %} id="{{ composer_form_id }}"{% endif %}
+        method="post" action="{{ composer_action }}"
+        enctype="multipart/form-data" data-enter-submits>
+    {% csrf_token %}
+    {% with routing_workstream=composer_workstream|default:attach_workstream %}
+    {% if routing_workstream %}
+    <input type="hidden" name="workstream" value="{{ routing_workstream.pk }}">
+    {% endif %}
+    {% endwith %}
+    {% comment %}
+    `composer_next` -- ONE MORE HIDDEN ROUTING FIELD, in the identical
+    shape `composer_workstream` just above already uses, and it is the
+    ONLY change the settings assistant phase makes to this fragment.
+
+    IT IS NEEDED because `agents/chat/service.py::validated_next_url`
+    reads `request.POST.get("next", "")` and this fragment emits no such
+    input -- and it is the right shape rather than a workaround: the
+    alternative (putting `next` in the action URL's query string and
+    teaching the view to read `request.GET`) would FORK the one `next`
+    reader this codebase has.
+
+    EVERY EXISTING INCLUDE SITE OMITS IT and is byte-identical to before.
+    The settings panel passes it because a settings page can carry a
+    half-filled form, and a plain POST that navigated to `/chat/` and
+    stayed there would be worse than one that comes back.
+    {% endcomment %}
+    {% if composer_next %}
+    <input type="hidden" name="next" value="{{ composer_next }}">
+    {% endif %}
+    {% if may_attach_files %}
+      {% include "chat/_attach_files.html" %}
+    {% endif %}
+    {% comment %}
+    ROUND-18-CONFIRM R5: `id="composer-text"` + `aria-label` restores an
+    accessible name on EVERY surface -- `/chat/` used to carry a real
+    visible `<label for="start-text">Message</label>` (`chat/index.
+    html`, pre-round-18) that the shared fragment dropped;
+    `chat/conversation.html`'s own textarea never had one either. One
+    accessible name per page is safe: exactly one composer renders per
+    page (the same invariant `#attach-files`/`#turn-form` already rely
+    on). `aria-label` mirrors `composer_placeholder` rather than a
+    second string to keep in sync -- the placeholder already names what
+    belongs in this box on every surface.
+    {% endcomment %}
+    <textarea name="text"{% if composer_mode == "turn" %} required{% endif %}
+              id="composer-text" aria-label="{{ composer_placeholder }}"
+              class="composer-textarea"
+              placeholder="{{ composer_placeholder }}"></textarea>
+    <div class="composer-toolbar">
+      <div class="composer-toolbar-left">
+        {% if composer_mode == "start" %}
+        <label class="agent-picker">
+          <span class="muted">Agent</span>
+          <select name="agent">
+            {% for a in composer_agents %}
+            <option value="{{ a.slug }}">{{ a.name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        {% endif %}
+        {% if composer_show_model_picker %}
+          {% include "chat/_picker.html" %}
+          {% if not picker %}
+          <input type="hidden" name="connection" value="{{ selected_connection }}">
+          {% endif %}
+        {% endif %}
+      </div>
+      <div class="composer-toolbar-right">
+        <button type="submit">{{ composer_button }}</button>
+      </div>
+    </div>
+  </form>
+</div>
+{% if may_attach_files %}{% include "chat/_attach_dragdrop.html" %}{% endif %}
+{% include "chat/_enter_to_send.html" %}

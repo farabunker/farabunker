@@ -1,0 +1,229 @@
+{% extends "_settings.html" %}
+{% comment %}
+The posture page (T9): posture, library posture, the session idle
+window, and the administrator-content toggle.
+
+The administrator-content toggle has NO posture branch (spec section
+4.2's read predicate, `identity.access.sees_all_content`, does not
+branch on posture either) -- it is rendered here whether the box is
+`personal` or `enterprise`, unlike the superuser control on the users
+page, which the `personal` posture removes outright.
+
+Every write on this page goes through `identity.services.set_posture`,
+which is where the three switch-away-from-open refusals and every
+posture-change audit row live.
+{% endcomment %}
+{% comment %}
+"Identity & security" since UI-2. It was called "Settings" while it sat
+in the Manage row, which was survivable there and is not now: the app
+bar's own entry into the settings area is called Settings, and a page
+inside that area cannot share the name of the area. The url name, the
+path (`/identity/settings/`) and the view are untouched -- display name
+only.
+{% endcomment %}
+{% block title %}Identity &amp; security — farabunker{% endblock %}
+{% block side_current_identity %}current{% endblock %}
+{% block extra_style %}{{ block.super }}
+  :root { --page-max-width: 640px; }
+  {% comment %}
+  LEFT-ALIGNED IN ITS COLUMN, not centred in it (UI-2 review, Minor 4).
+  640px is the only settings token narrower than the content column the
+  settings layout gives a page, so this is the only page whose `main`
+  has slack to be centred inside -- and centring it moved the form's
+  left edge ~65px right of every sibling page's, which is exactly what
+  `--settings-nav-width` exists to prevent ("the content column's left
+  edge never moves between one settings page and the next",
+  foundation/templates/_shell.html). The narrow measure stays: a column
+  of labelled fields does not want 770px. `0 auto 0 0` rather than
+  `0 0`, so the right margin still collapses the slack rather than
+  forcing it.
+  {% endcomment %}
+  main { max-width: var(--page-max-width); margin: 0 auto 0 0; }
+  {% comment %}
+  NO LOCAL `.msg.error` (Coherence Wave D, C3) -- `_settings.html` now
+  owns it; see `identity/templates/identity/groups.html` for the
+  reasoning.
+  {% endcomment %}
+  form.posture-form {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem;
+  }
+  .field { margin-top: 1rem; }
+  .field:first-child { margin-top: 0; }
+  .field label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 0.35rem;
+  }
+  select, input[type="number"] {
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+  }
+  .checkbox-field { display: flex; align-items: center; gap: 0.5rem; }
+  .checkbox-field label { margin-bottom: 0; }
+  .helptext { color: var(--muted); font-size: 0.82rem; margin-top: 0.35rem; }
+  .errorlist {
+    list-style: none;
+    margin: 0.35rem 0 0;
+    padding: 0;
+    color: var(--danger);
+    font-size: 0.85rem;
+  }
+  .form-row { display: flex; justify-content: flex-end; margin-top: 1.25rem; }
+{% endblock %}
+{% block settings_content %}
+<main>
+  <h1>Identity &amp; security</h1>
+  <p class="tagline">This box's posture, its library default, the idle-session window, and whether an administrator can read other people's conversations and files.</p>
+
+  {% if posture == "open" %}
+  {% comment %}
+  W-1 (IA-2 walkthrough): an open box renders NO sign-in chrome anywhere
+  else on purpose (Global Constraint 10 -- an open box runs no query
+  against `identity_user`), and the login page was reachable by nobody
+  who did not already know its URL. A STATIC sentence + link, on this
+  one page only: no query, exactly the same "no permission query on an
+  open box" promise `identity/tests/test_zero_queries.py` pins for this
+  very route.
+  {% endcomment %}
+  <p class="open-sign-in-note">This box has no sign-in chrome while it is open. If accounts exist, sign in at <a href="{% url 'identity-login' %}">Sign in</a> — switching away from open requires a signed-in administrator.</p>
+  {% endif %}
+
+  {% if posture == "open" and debug %}
+  {% comment %}
+  H22 review round 1 (F-1/D-1): `identity.W003`'s page-level echo. A
+  boot-time `manage.py check` warning is invisible to an operator who
+  never reads server logs, so this says the same thing on the one page
+  where they are about to decide what to do about it. OUTSIDE the
+  Posture field region on purpose (that block carries another branch's
+  anchor ids) -- a second static paragraph beside the sign-in note
+  above, no extra query, same "no permission query on an open box"
+  promise that note already keeps.
+  {% endcomment %}
+  <p class="open-debug-notice">This box is open with DEBUG on: every caller on this network is answered as an administrator, and any error renders its settings and environment to them. See docs/OPERATIONS.md under “Leaving the open posture” for the way out.</p>
+  {% endif %}
+
+  {% include "_messages.html" %}
+
+  <form class="posture-form" method="post" action="{% url 'identity-settings' %}{{ assistant.open_query }}">
+    {% csrf_token %}
+    <div class="field" id="posture">
+      <label for="{{ form.posture.id_for_label }}">Posture</label>
+      {{ form.posture }}
+      <p class="helptext">Reducing the posture towards "open" is always allowed. Switching away from "open" is refused if this box has no active administrator, if DEBUG is on, or if the signing key is still the shipped development key.</p>
+      {% if form.posture.errors %}<ul class="errorlist">{% for error in form.posture.errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
+    </div>
+    {% comment %}
+    THE ANCHOR IS ON THE WRAPPER, WHICH RENDERS IN ALL THREE POSTURES --
+    only its CONTENTS branch (`{% templatetag openblock %} if posture ==
+    "personal" {% templatetag closeblock %}` below). That is what makes
+    the settings assistant's deep link to this control land on a personal
+    box exactly as it lands on an enterprise one, and it is why
+    `foundation/settings_help.py`'s own second card rule is about what
+    the card SAYS rather than about whether the link works.
+    {% endcomment %}
+    <div class="field" id="library-posture">
+      {% comment %}
+      `identity.services.set_posture` resets
+      `library_posture` to "open" on its own whenever the box IS
+      personal, and ignores an explicit value passed alongside it --
+      there is no page to lift a lock nobody can see, so the select is
+      not offered at all in that posture. A hidden field, not an
+      omitted one: `PostureForm.library_posture` is a required
+      `ChoiceField`, and this same form's `posture`/`admin_sees_content`
+      fields still need to submit even though this one is never
+      honoured while personal.
+      {% endcomment %}
+      {% if posture == "personal" %}
+      <label>Library posture</label>
+      <p class="helptext">Always "open" in the personal posture: an unlabelled document is readable by everyone signed in, and there is no page to lock it, since every account here is an administrator already.</p>
+      <input type="hidden" name="{{ form.library_posture.html_name }}" value="open">
+      {% else %}
+      <label for="{{ form.library_posture.id_for_label }}">Library posture</label>
+      {{ form.library_posture }}
+      <p class="helptext">Decides who may read a document carrying no label: everyone signed in
+        while this is "open", and only an administrator with content access while it is
+        "locked". A labelled document is never affected — the people who hold its entitlements
+        read it either way.</p>
+      {% endif %}
+      {% if form.library_posture.errors %}<ul class="errorlist">{% for error in form.library_posture.errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
+    </div>
+    {% comment %}
+    THE ANCHOR WRAPS THE FIELD, THE HELPTEXT AND THE ERRORLIST TOGETHER
+    (final review, m4; nesting corrected by the re-check, R1) -- the
+    same shape `library-posture` above already uses. It used to close
+    right after the label, before the `<p>` that explains what the
+    checkbox does; `.settings-main :target`'s ring (`_shell.html`) then
+    highlighted the checkbox and its label while leaving the explanation
+    outside the highlight, on the one field whose meaning is least
+    obvious from its label alone.
+
+    THE ANCHOR LIVES ON A PLAIN `.field`, NOT ON `.checkbox-field`
+    ITSELF (R1): `.checkbox-field` is `display: flex; align-items:
+    center` with no wrap -- a one-row layout meant for exactly the
+    checkbox and its label, the same shape
+    `chat/settings.html`'s own `#time-aware` uses. Putting this id
+    (and so this div) directly on `.checkbox-field` made the helptext
+    paragraph and the errorlist flex ITEMS in that same row instead of
+    block content below it -- a squeezed third column beside the
+    checkbox rather than the five-line explanation underneath it. The
+    checkbox and its label keep their own nested `.checkbox-field` div
+    for that row's layout; the helptext and the errorlist are its
+    block-level SIBLINGS, both still inside the outer `.field` the
+    anchor and the highlight now both reach.
+    {% endcomment %}
+    <div class="field" id="admin-sees-content">
+      <div class="checkbox-field">
+        {{ form.admin_sees_content }}
+        {% comment %}
+        HUMAN WORDS, not the column name. This label read
+        "admin_sees_content -- an administrator may ..." -- a field
+        identifier shown to the person deciding the policy, on the one page
+        where the decision is made. The FIELD is untouched: same
+        `name="admin_sees_content"`, same form, same audit copy, and the
+        identifier is still in the rendered markup (which is what
+        `test_settings_page.py::TestTheContentToggle` asserts on) as the
+        input's own name and id.
+        {% endcomment %}
+        <label for="{{ form.admin_sees_content.id_for_label }}">Administrators may read other users' conversations and files</label>
+      </div>
+      <p class="helptext">
+        {% comment %}
+        THE IDENTIFIER, ONCE, HERE. Four notes on two other pages -- the
+        queue's three "Content hidden" lines and the vision queued card's
+        -- tell an operator to turn on "admin_sees_content" in Settings, by
+        name and in quotation marks. Once the label above became human
+        words, that name appeared on this page only as the input's own
+        `name`/`id` attribute, which is not what somebody finds when they
+        follow the instruction and scan the page for the string they were
+        just given. Naming it in the helptext costs one clause and makes
+        those four cross-page instructions resolve again; rewriting them
+        instead would touch two more columns and their test assertions.
+        {% endcomment %}
+        Off by default (the <code>admin_sees_content</code> setting). Administering this box
+        already shows every job's kind, owner,
+        state and progress, and every document's title, category and status, with
+        this OFF -- turning it on additionally lets an administrator open the
+        conversation text, Ask history, generated images, and document bytes that
+        belong to somebody else.
+      </p>
+      {% if form.admin_sees_content.errors %}<ul class="errorlist">{% for error in form.admin_sees_content.errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
+    </div>
+    <div class="field" id="session-idle">
+      <label for="{{ form.session_idle_minutes.id_for_label }}">Session idle window (minutes)</label>
+      {{ form.session_idle_minutes }}
+      <p class="helptext">A rolling idle timeout: every signed-in request pushes it out again. Zero means a session ends when the browser closes.</p>
+      {% if form.session_idle_minutes.errors %}<ul class="errorlist">{% for error in form.session_idle_minutes.errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
+    </div>
+    <div class="form-row">
+      <button type="submit">Save</button>
+    </div>
+  </form>
+</main>
+{% endblock %}

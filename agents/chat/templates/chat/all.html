@@ -1,0 +1,339 @@
+{% extends "chat/base.html" %}
+{% comment %}
+THE CONVERSATIONS BROWSER (round 14, Part 2; owner, verbatim: "when I
+cycle through the chats and i click on a project, it takes me to that
+workstreams chat... I believe we should remove the workstream chats
+from the side bar, but have a button and a new associated window that
+lets you see all chats where it shows all the chats in a list with
+searchable features that show workstream (if it's a part of one),
+entitlements tagged for that conversation, ect. ... Maybe on the new
+window we can preview the most recent language/chat of the
+conversation we click." Then, separately: "i also don't see a link to
+the table list of all the chats, i thought I requested that.").
+
+`agents.chat.views.all_conversations._all_context` builds EVERY URL
+this page links to (search, each filter, pagination, per-row select) --
+this template renders them, it does not build them: `q=`/`workstream=`/
+`tag=`/`archived=`/`page=` are read ONCE, in Python, and every control
+here either submits the search form (which carries the others as
+hidden fields) or follows a plain `<a href>` that already names the
+full, correct query string. NO JAVASCRIPT IS REQUIRED: every filter is
+a GET link or a GET form, so the whole page is one shareable URL per
+state, and the back button works, with or without a script running.
+
+ROUND 16 ADDS ONE SANCTIONED SCRIPT, gated on `tag_options` alongside
+the Tags dropdown it belongs to -- a client-side text filter over the
+already-rendered checkbox list, pure progressive enhancement (the
+dropdown's own search `<input>` comment has the full reasoning). ROUND
+17 MOVES IT INTO A SHARED INCLUDE, REUSED rather than copied by a
+second consumer (the workstream page's own "Pin a document" chooser) --
+this page's own contribution is now just the one `{% templatetag
+openblock %} include "_filter_rows_script.html" {% templatetag
+closeblock %}` line, beside the dropdown's own include. The include
+moved from `chat/` to `foundation/templates/` when a THIRD consumer
+outside this column (the entitlement page's transfer panels) needed the
+identical idiom; the script itself is unchanged in what it does here,
+and now reads the two selectors it filters by off the input's own
+`data-filter-scope`/`data-filter-rows` attributes rather than
+hardcoding this component's class names. It is still the only `<script>`
+this PAGE contributes; round 21 added a second one to the rendered
+output by putting `chat/_menu_exclusive.html` inside `chat/
+_sidebar.html`, which this page renders like every other rail page, so
+the literal `<script>` count here is TWO. "No javascript is REQUIRED"
+above still holds exactly as it always has -- both scripts are
+progressive enhancements -- but "zero javascript" as a literal count of
+`<script>` tags never described this page and does not now.
+
+CONTENT SEARCH INSIDE TURNS IS OUT OF SCOPE THIS ROUND (recorded
+follow-up, `all_conversations.py`'s own module docstring has the full
+reasoning) -- `q=` matches `Conversation.title` only.
+
+THE PREVIEW PANE REUSES `chat/_turn_block.html` VERBATIM (`{%
+templatetag openblock %} include "chat/_turn_block.html" with
+cards=preview_cards {% templatetag closeblock %}`) -- the SAME
+fragment `chat/conversation.html`'s own full thread and `turn_status`'s
+own poll body render through, so a card here (round 13's own
+attachment chips included, since `agents.chat.rendering.turn_card`'s
+`attachments=` keyword is threaded through unchanged) can never drift
+from what opening the thread in full would show for that same turn.
+{% endcomment %}
+{% comment %}
+ROUND-14 REVIEW FIX, MINOR 2: `<title>` now agrees with `<h1>` below
+in EVERY state -- `foundation/tests/test_page_names.py`'s own rule
+("`<title>` is 'X -- farabunker'... `<h1>` is exactly that same X"),
+which its own bare-route sweep could not catch here since `?archived=
+1` is a query-string state, not a second route. Two names for one page
+("Archived chats" under a tab that still said "All chats") is the
+identical defect that test file's own docstring already names for a
+different page; this template used to reproduce it for THIS one.
+{% endcomment %}
+{% block title %}{% if showing_archived %}Archived chats{% else %}All chats{% endif %} — farabunker{% endblock %}
+{% block chat_style %}
+  {% comment %}
+  THE SEARCH FORM. `.search`'s own recipe matches `tools/rag/templates/
+  rag/documents.html`'s identical form (house convention: a `<input
+  type="search">` plus a submit button plus an optional "Clear" link),
+  reused here rather than invented fresh.
+  {% endcomment %}
+  .search { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem; }
+  .search input[type="search"] { flex: 1 1 auto; min-width: 0; max-width: 24rem; }
+  .search .clear { color: var(--muted); }
+  {% comment %}
+  THE FILTER ROW. A plain flex-wrap run of small pill links -- `.chip`'s
+  own family (`foundation/templates/_shell.html`), given a `.active`
+  state (a filled `--accent` background) since these are TOGGLES a
+  reader picks one of, not status chips. `<a>`, not `<button>`: every
+  filter is a GET, so it is a real link with a real URL, shareable and
+  back-button-safe.
+  {% endcomment %}
+  .all-filters { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 1.25rem; }
+  {% comment %}
+  ROUND-14 REVIEW FIX, MINOR 4: the filtered-state cue, above the
+  master/detail row -- `font-size: 0.85rem` matches this page's own
+  `.search`/filter-chip scale rather than the ordinary body copy size,
+  since it is a small aside, not a heading.
+  {% endcomment %}
+  .all-filtered-note { font-size: 0.85rem; margin: 0 0 1rem; }
+  {% comment %}
+  `.filter-chip` MOVED to `chat/base.html` (CONSOLIDATION WAVE, audit A
+  F8), merged with `.search-checklist > summary` -- the two rules were
+  byte-identical on six properties, discovered because BOTH land on
+  this page's own Tags dropdown summary at once (`sc_summary_class=
+  "filter-chip"`, below). See that file's own comment for the full
+  reasoning. `class="filter-chip"` on the summary still gets it the
+  pill look for free; `.filter-chip.active`'s background is still the
+  one thing the shared rule has no opinion on, since only this page's
+  own dropdown has a "something is selected" state to show.
+
+  ROUND 17 CONSOLIDATION (unaffected by the above): the Tags dropdown's
+  own overlay/search/checkbox-list CSS moved to `chat/base.html`'s own
+  `.search-checklist` rule when the round-17 pin chooser became its
+  second consumer.
+  {% endcomment %}
+  {% comment %}
+  THE MASTER/DETAIL ROW. Side by side above 1000px (the SAME breakpoint
+  the rail itself stacks at, `chat/base.html`'s own `@media (max-width:
+  1000px)`) -- "Sub-1000px: pane stacks below the list" (Part 2's own
+  requirement) reuses that identical width rather than inventing a
+  second one.
+  {% endcomment %}
+  .all-conversations { display: flex; gap: 2rem; align-items: flex-start; }
+  .all-list { flex: 1 1 auto; min-width: 0; }
+  .all-preview {
+    flex: 0 0 26rem; min-width: 0; max-width: 26rem;
+    border: 1px solid var(--border); border-radius: 8px; background: var(--panel);
+    padding: 1rem 1.25rem;
+  }
+  @media (max-width: 1000px) {
+    .all-conversations { flex-direction: column; }
+    .all-preview { flex: 1 1 auto; max-width: none; width: 100%; }
+  }
+  {% comment %}
+  THE TABLE. Plain, bordered rows -- no new visual language, the same
+  `--border`/`--panel` tokens every card on this box already uses.
+  `.selected` marks the currently-previewed row the identical way
+  `.chat-nav-row.current` already marks the rail's own current
+  conversation.
+  {% endcomment %}
+  .all-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  .all-table th, .all-table td {
+    text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  .all-table th { color: var(--muted); font-weight: 600; font-size: 0.8rem;
+                  text-transform: uppercase; letter-spacing: 0.06em; }
+  .all-table tr.selected { background: var(--panel); }
+  .all-table .tag-chips { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+  .all-pagination { display: flex; gap: 1rem; align-items: center; margin-top: 1rem; }
+{% endblock %}
+{% block chat_sidebar %}{% include "chat/_sidebar.html" %}{% endblock %}
+{% block chat_content %}
+<h1>{% if showing_archived %}Archived chats{% else %}All chats{% endif %}</h1>
+
+{% include "chat/_messages.html" %}
+
+{% comment %}
+ROUND 16: THE TAGS CHECKBOXES/APPLY BUTTON LIVE INSIDE THIS SAME FORM
+(below, inside `.all-filters`) rather than a second `<form>` -- nested
+`<form>` elements are illegal HTML and this codebase has no precedent
+for the HTML5 `form="..."` attribute, so "one control outside a form
+needs to submit into it" means physically nesting it inside, the same
+way `.all-filters`'s own workstream/archived `<a href>` links have
+always lived here too (a plain anchor inside a `<form>` is legal and
+submits nothing on its own). `</form>` now closes AFTER `.all-filters`,
+not before it.
+
+PAGE RESETS TO 1 ON ANY FILTER CHANGE (documented, not new behaviour):
+neither this form nor any `.all-filters` link ever carries a `page=`
+value of its own, so submitting Apply or following a chip/toggle link
+lands on the bare (page-1) URL the same way the search box's own
+Search button already did before this round -- nothing added this
+round changes that.
+{% endcomment %}
+<form class="search" method="get" action="{% url 'chat-all' %}">
+  {% if selected_workstream_id %}<input type="hidden" name="workstream" value="{{ selected_workstream_id }}">{% endif %}
+  {% if showing_archived %}<input type="hidden" name="archived" value="1">{% endif %}
+  <input type="search" name="q" placeholder="Search titles…" value="{{ q }}"
+         aria-label="Search conversations by title">
+  <button type="submit">Search</button>
+  {% if q %}<a class="clear" href="{{ clear_search_url }}">Clear</a>{% endif %}
+
+  {% if workstream_options or tag_options %}
+  <div class="all-filters">
+    {% if workstream_options %}
+    <a class="filter-chip{% if not selected_workstream_id %} active{% endif %}"
+       href="{{ all_workstreams_url }}">All workstreams</a>
+    {% for entry in workstream_filter_urls %}
+    <a class="filter-chip{% if entry.active %} active{% endif %}" href="{{ entry.url }}">{{ entry.workstream.name }}</a>
+    {% endfor %}
+    {% endif %}
+    {% if tag_options %}
+    {% comment %}
+    ROUND 16 (owner feedback: "tags for this page should have a drop
+    down with checkboxes and search, not a shown list that is
+    selected") -- ONE control replacing the old row of per-tag toggle
+    links. ROUND 17 CONSOLIDATES the fragment itself into `chat/
+    _search_checklist.html` (a second consumer, the pin chooser, needed
+    the identical idiom) -- this include is now the whole of what this
+    page contributes: which rows, which are checked, and the filter-chip
+    look. "All tags" = nothing checked, so the closed summary reads
+    plain "Tags"; a count appears only once something is actually
+    selected (`tags_summary_text`, computed once in `_all_context`
+    rather than built here as an inline conditional, since `{%
+    templatetag openblock %} include %} with %}` takes plain values,
+    not expressions).
+    {% endcomment %}
+    {% include "chat/_search_checklist.html" with sc_summary_text=tags_summary_text sc_summary_class="filter-chip" sc_active=selected_tag_ids sc_input_type="checkbox" sc_input_name="tag" sc_rows=tag_checkboxes sc_search_placeholder="Filter tags…" sc_search_title="Type to filter the list below — requires JavaScript. The checkboxes and Apply button work with or without it." sc_clear_url=all_tags_url sc_submit_label="Apply" %}
+    {% include "_filter_rows_script.html" %}
+    {% endif %}
+    <a class="filter-chip{% if showing_archived %} active{% endif %}" href="{{ archived_toggle_url }}">
+      {% if showing_archived %}Archived{% else %}Show archived{% endif %}</a>
+  </div>
+  {% endif %}
+</form>
+
+{% comment %}
+ROUND-14 REVIEW FIX, MINOR 4: "The rail's CHATS list on /chat/all/ is
+unfiltered while the table beside it is filtered ... a reader who
+filters to one workstream sees a global list two inches to the left of
+a narrowed one, with no label distinguishing them." A PAGE-LEVEL cue,
+not a rail change (the rail's own "Chats" section renders identically
+on every chat page -- singling THIS page out to relabel it would be
+the inconsistency Part 1 of round 14 spent its own round removing):
+shown only while a filter/search/archived toggle is actually narrowing
+the table below, so an unfiltered visit (table and rail agreeing by
+construction) gets no extra text at all.
+{% endcomment %}
+{% if q or selected_workstream_id or selected_tag_ids or showing_archived %}
+<p class="muted all-filtered-note">
+  Showing filtered results below. The rail's own Chats list (left) always shows your most
+  recent conversations, unfiltered.
+</p>
+{% endif %}
+
+<div class="all-conversations">
+  <div class="all-list">
+    <table class="all-table">
+      <thead>
+        <tr>
+          <th>Title</th>
+          <th>Workstream</th>
+          <th>Tags</th>
+          {% comment %}
+          ROUND-14 REVIEW FIX, MINOR 3: the sort key is `-updated_at`
+          (`_all_context`'s own comment has the full "this column is
+          NOT re-written per turn" reasoning) -- kept AS the sort,
+          rather than switched to a field that means something else,
+          since building real per-turn activity tracking is its own
+          named follow-up, not a Minor fix. What changes here is
+          honesty ON THE PAGE, not only in a comment a reader of this
+          template will see and a viewer of the RENDERED page never
+          will: the `title=` tooltip says plainly what this column
+          actually tracks, so "a busy old conversation sorts below a
+          freshly-renamed dormant one" is a fact the page states, not
+          one it lets a reader assume is "last message" and be wrong.
+          {% endcomment %}
+          <th title="When this conversation's own row last changed — created, renamed, or archived. Not the time of its most recent message.">Updated</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr class="{% if row.selected %}selected{% endif %}">
+          <td>
+            <a href="{{ row.select_url }}"
+               title="{{ row.conversation.title|default:'Untitled conversation' }}">{{ row.conversation.title|default:"Untitled conversation" }}</a>
+          </td>
+          <td>
+            {% if row.conversation.workstream_id %}
+            <span class="chip chip-queued" title="{{ row.conversation.workstream.name }}">{{ row.conversation.workstream.name }}</span>
+            {% endif %}
+          </td>
+          <td>
+            {% comment %}
+            `row.tags` is `agents.workstreams.tags_for_conversations`'
+            own per-row shape -- named (viewer-held) tags rendered as
+            chips, everything else counted, NEVER named (`name_for_
+            viewer`'s own disclosure rule, applied identically here --
+            `all_conversations.py`'s own module docstring has the full
+            reasoning for why this is not a literal per-row call to
+            that function).
+            {% endcomment %}
+            <div class="tag-chips">
+              {% for tag_id, name in row.tags.named %}<span class="chip">{{ name }}</span>{% endfor %}
+              {% if row.tags.unnamed_count %}<span class="muted">+{{ row.tags.unnamed_count }} more</span>{% endif %}
+            </div>
+          </td>
+          <td>{{ row.conversation.updated_at|date:"Y-m-d H:i" }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="4" class="muted">
+          {% if q or selected_workstream_id or selected_tag_ids %}No conversations match.
+          {% elif showing_archived %}Nothing archived yet.
+          {% else %}No conversations yet.{% endif %}
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    {% comment %}
+    THE HONEST TOTAL (Part 2: "honest counts") -- ALWAYS shown, not
+    only once there is a second page to navigate to: a one-page result
+    still has a count worth stating out loud, the same "say it even
+    when it doesn't bite" rule `test_sidebar.py::TestTheCap` already
+    holds the rail's own cap message to. The prev/next links and the
+    "Page X of Y" wording are the only parts still gated on `page_obj.
+    has_other_pages` -- there is no "page 1 of 1" to navigate.
+    {% endcomment %}
+    <nav class="all-pagination" aria-label="Pages">
+      {% if page_obj.has_other_pages %}
+      {% if page_obj.prev_url %}<a href="{{ page_obj.prev_url }}">← Previous</a>{% endif %}
+      <span class="muted">Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}
+        ({{ total }} conversation{{ total|pluralize }})</span>
+      {% if page_obj.next_url %}<a href="{{ page_obj.next_url }}">Next →</a>{% endif %}
+      {% else %}
+      <span class="muted">{{ total }} conversation{{ total|pluralize }}</span>
+      {% endif %}
+    </nav>
+  </div>
+
+  {% if selected %}
+  {% comment %}
+  THE PREVIEW PANE (Part 2: "Maybe on the new window we can preview the
+  most recent language/chat of the conversation we click"). Server-
+  rendered master-detail -- `?selected=<uuid>` re-renders this WHOLE
+  page with the pane filled in, never a client-side fetch.
+  {% endcomment %}
+  <div class="all-preview">
+    <h2><a href="{% url 'chat-conversation' selected.id %}"
+           title="{{ selected.title|default:'Untitled conversation' }}">{{ selected.title|default:"Untitled conversation" }}</a></h2>
+    {% if selected.workstream_id %}
+    <p><span class="chip chip-queued">{{ selected.workstream.name }}</span></p>
+    {% endif %}
+    <div class="thread">
+      {% include "chat/_turn_block.html" with cards=preview_cards %}
+    </div>
+    <p><a href="{% url 'chat-conversation' selected.id %}">Open in full →</a></p>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

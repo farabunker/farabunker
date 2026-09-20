@@ -1,0 +1,116 @@
+{% comment %}
+One job card. Rendered inline on the create page and returned on its own by
+`job_status` -- the SAME fragment either way, so polling swaps like for like.
+
+`data-job-poll` is present only while the job can still change: the script in
+create.html keeps polling exactly as long as that attribute exists, so a
+finished or failed job costs no further requests, and a page with JS disabled
+simply shows the "refresh to update" note instead.
+
+FOUR BANDS (2026-08-25 redesign): head (prompt + status chip), body (media
+left, facts right), notes (everything the job wants to say about itself),
+foot (the delete control). The two-column body is the fix for the dead
+horizontal space a 512x512 output used to leave; `minmax(0, 1.7fr)` on the
+media column is load-bearing -- without the `0` minimum a wide image pushes
+past its share and squeezes the facts column to nothing.
+
+Every class here is styled in `vision/base.html`, not on a page: this
+fragment is rendered by the create page, by `queue_job_status`, and
+standalone by `job_status`.
+
+`data-job-poll` carries `selected_connection` (B2, final review) the same
+way `_output_actions.html`'s own links do -- `views._render_card` reads it
+straight back off `?connection=` (`picked_connection`), so a card that
+polls itself narrows to, and keeps carrying, the SAME model it was
+rendered under rather than reverting to the role binding on every refresh.
+{% endcomment %}
+<div class="card job-card" id="job-{{ job.id }}"
+     {% if not job.is_terminal %}data-job-poll="{% url 'vision-job-status' job.id %}{% if selected_connection %}?connection={{ selected_connection }}{% endif %}"{% endif %}>
+  <div class="job-head">
+    <h3 class="job-title">{{ job.headline|truncatechars:120 }}</h3>
+    {% comment %}
+    `job.status` is already a slug (`queued`/`running`/`done`/`failed` --
+    `GenerationJob.Status`), so the modifier class needs no Python mapping;
+    the human words stay `get_status_display`'s.
+    {% endcomment %}
+    <span class="chip chip-{{ job.status }}">{{ job.get_status_display }}</span>
+  </div>
+
+  <div class="job-body">
+    <div class="job-media">
+      {% if job.outputs.all %}
+      <div class="job-outputs">
+        {% for output in job.outputs.all %}
+        <figure class="output-tile">
+          <a href="{% url 'vision-output-file' output.id %}" target="_blank" rel="noopener">
+            <img src="{% url 'vision-output-file' output.id %}" alt="Generated image {{ forloop.counter }}">
+          </a>
+          {% include "vision/_output_actions.html" with output=output job=job %}
+        </figure>
+        {% endfor %}
+      </div>
+      {% elif not job.is_terminal %}
+      <div class="job-placeholder muted">No image yet.</div>
+      {% endif %}
+
+      {% comment %}
+      What the job was GIVEN, grouped UNDER what it produced and behind a
+      label -- it used to float above the output at output size, with
+      nothing saying what it was. Empty for a mode with no file params.
+      {% endcomment %}
+      {% if job.inputs.all %}
+      <div class="job-inputs">
+        <span class="strip-label">Inputs</span>
+        <div class="job-images">
+          {% for job_input in job.inputs.all %}
+          <a href="{% url 'vision-input-file' job_input.id %}" target="_blank" rel="noopener"
+             title="{{ job_input.param_key }}">
+            <img src="{% url 'vision-input-file' job_input.id %}" alt="Input {{ job_input.param_key }}">
+          </a>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+    </div>
+
+    <div class="job-details">
+      {% include "vision/_job_facts.html" with facts=job.facts layout="rows" %}
+      <p class="job-meta muted">{{ job.engine }} · {{ job.created_at|date:"j M Y, H:i" }}</p>
+      {% comment %}
+      Durations (owner requirement 2026-08-25; extended by the 2026-08-25
+      fix round to include the platform-side wait). Live for a job that
+      has not finished: this whole fragment is what `job_status`
+      re-renders on every poll tick, so the numbers move with no new
+      endpoint and no JS of their own. A blank value renders as nothing
+      (`format_timecode(None) == ""`).
+
+      `submitted` (the platform's own queue wait, enqueue -> claim) is a
+      FIXED, historical number the instant this row exists -- both ends
+      were already stamped before `submit_job` ever ran -- so it is shown
+      once, up front, in every state rather than only at the end; it is
+      blank (and the whole "In queue ..." clause disappears) when
+      `GenerationJob._submitted_at` cannot say (no queue job, an aged-out
+      queue row, or the queue unreachable this moment). `queued` stays the
+      ENGINE's own wait, labelled "for the engine" so the two queues on
+      this line are never mistaken for one.
+      {% endcomment %}
+      <p class="job-timing muted">
+        {% if job.durations_display.submitted %}In queue {{ job.durations_display.submitted }} · {% endif %}{% if job.status == "queued" %}Waiting {{ job.durations_display.queued }} for the engine
+        {% elif job.status == "running" %}Waited {{ job.durations_display.queued }} for the engine · running {{ job.durations_display.processing }}
+        {% else %}Waited {{ job.durations_display.queued }} for the engine{% if job.durations_display.processing %} · ran {{ job.durations_display.processing }}{% endif %} · total {{ job.durations_display.total }}{% endif %}
+      </p>
+    </div>
+  </div>
+
+  <div class="job-notes">
+    {% if job.error %}<p class="job-error">{{ job.error }}</p>{% endif %}
+    {% if job.unreachable %}<p class="muted">Engine unreachable, still checking.</p>{% endif %}
+    {% if job.engine_position %}<p class="muted">Waiting on the image engine — position {{ job.engine_position }}.</p>{% endif %}
+    {% if job.is_stale and not job.engine_position %}<p class="muted">Still queued — check that the image engine is running.</p>{% endif %}
+    {% if not job.is_terminal %}<p class="muted no-js-note">Refresh to update.</p>{% endif %}
+  </div>
+
+  <div class="job-foot">
+    {% include "vision/_delete_control.html" %}
+  </div>
+</div>

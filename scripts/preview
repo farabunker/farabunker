@@ -1,0 +1,582 @@
+#!/usr/bin/env bash
+# scripts/preview — one-command launcher for a branch preview stack
+# (compose.preview.yaml, see that file's header for the full contract).
+#
+# WHY THIS SCRIPT EXISTS: bringing up a preview by hand means resolving the
+# worktree path, seeding a .env the worktree may not have, creating a data
+# directory, picking a project name that can't collide with another preview
+# or the main stack, and exporting five environment variables before ever
+# running `docker compose up`. This script does all of that so bringing up
+# a preview is one command instead of six manual steps.
+#
+# SUBCOMMANDS (see compose.preview.yaml's contract for what each env var
+# does):
+#   up <branch|path> [--port PORT] [--db-port PORT]
+#   down <branch|path>
+#   reset <branch|path> --yes
+#
+# The first argument to every subcommand may be either a bare branch name
+# (looked up under .claude/worktrees/<branch>) or an explicit path to a
+# worktree checkout (relative or absolute, anywhere on disk) — see
+# resolve_branch_arg() below. Either way, the branch KEY used for the data
+# directory and the compose project name is always the worktree's own
+# directory basename, so `up ../other-checkout` and
+# `up <same-name-under-.claude/worktrees>` land on the same preview.
+#
+# Anything `docker compose` already does in one line (streaming logs,
+# listing containers) is deliberately NOT wrapped here — that would just be
+# extra code to maintain for no gain. Use `docker compose -p
+# farabunker-preview-<branch> logs -f` / `ps` directly.
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Repo-root resolution
+# ---------------------------------------------------------------------------
+# This script lives at scripts/preview in BOTH the main repo and every
+# worktree checkout (each worktree has its own copy of the file at the same
+# relative path). We always want the MAIN repo root — that's where
+# .claude/worktrees/ and data/preview/ live — regardless of which checkout
+# the script was invoked from. `git rev-parse --git-common-dir` always
+# resolves to the main repo's .git directory, even when run from inside a
+# worktree, so it's the robust way to find "the one true root" without
+# assuming anything about our own location relative to it.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if ! GIT_COMMON_DIR="$(git -C "$SCRIPT_DIR" rev-parse --git-common-dir 2>/dev/null)"; then
+  echo "error: scripts/preview must be run from inside a git checkout of farabunker" >&2
+  exit 1
+fi
+# git-common-dir is usually already absolute, but resolve defensively in
+# case an older git prints it relative to the cwd it was invoked from.
+GIT_COMMON_DIR="$(cd "$SCRIPT_DIR" && cd "$GIT_COMMON_DIR" && pwd)"
+MAIN_REPO_ROOT="$(dirname "$GIT_COMMON_DIR")"
+
+WORKTREES_DIR="$MAIN_REPO_ROOT/.claude/worktrees"
+PREVIEW_DATA_ROOT="$MAIN_REPO_ROOT/data/preview"
+
+DEFAULT_WEB_PORT=8001
+DEFAULT_DB_PORT=5433
+HEALTH_TIMEOUT_SECONDS=120
+
+# ---------------------------------------------------------------------------
+# Usage
+# ---------------------------------------------------------------------------
+usage() {
+  cat <<'EOF'
+Usage: scripts/preview <command> [options]
+
+Commands:
+  up <branch|path> [--port PORT] [--db-port PORT]
+      Bring up an isolated preview stack for a worktree branch. The
+      argument is either a bare branch name (resolved under
+      .claude/worktrees/<branch>) or an explicit path to a worktree
+      checkout. Resolves the worktree, seeds a .env for it if it doesn't
+      have one, creates data/preview/<branch>/, then runs
+      `docker compose -p farabunker-preview-<branch> up -d --build` and
+      waits for the web container to answer before printing the URL.
+
+  down <branch|path>
+      Stop and remove the preview containers for <branch>. Data under
+      data/preview/<branch>/ is left in place.
+
+  reset <branch|path> --yes
+      down, then permanently delete data/preview/<branch>/. Destructive —
+      refuses to run without --yes.
+
+Options (up only):
+  --port PORT       Host port for the web service (default: 8001)
+  --db-port PORT    Host port for Postgres (default: 5433)
+
+Environment:
+  PREVIEW_DRY_RUN=1  Print the docker compose command instead of running
+                     it (and skip the Docker-daemon check and the health
+                     wait). Useful for testing this script without Docker.
+
+Examples:
+  scripts/preview up model-management-framework
+  scripts/preview up ../other-checkout --port 8002 --db-port 5434
+  scripts/preview down model-management-framework
+  scripts/preview reset model-management-framework --yes
+EOF
+}
+
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+dry_run() {
+  [[ "${PREVIEW_DRY_RUN:-0}" == "1" ]]
+}
+
+# ---------------------------------------------------------------------------
+# Validation — always runs before any docker command, filesystem mutation,
+# or worktree/path resolution that depends on the branch name.
+# ---------------------------------------------------------------------------
+validate_branch_name() {
+  local branch="$1"
+  [[ -n "$branch" ]] || die "branch name is required"
+  # A branch name becomes a path component (data/preview/<branch>/) and a
+  # substring of the compose project name. Reject anything that could walk
+  # out of data/preview/ or .claude/worktrees/ (e.g. "..", "foo/../../etc"),
+  # anything that normalizes to the preview-data root itself (a bare "."
+  # would make data/preview/. == data/preview/, turning `reset` into
+  # "delete every branch's data" — see the reset delete-target guard below
+  # for the second layer of defense against this), or anything that looks
+  # like an option rather than a name.
+  case "$branch" in
+    */*|*..*)
+      die "invalid branch name '$branch': must not contain '/' or '..'"
+      ;;
+    .)
+      die "invalid branch name '.': would resolve to the preview data root itself"
+      ;;
+    -*)
+      die "invalid branch name '$branch': must not start with '-'"
+      ;;
+  esac
+}
+
+# Docker compose project names are restricted to [a-z0-9_-]; lowercase the
+# branch and collapse every other character to '-' so any valid git branch
+# name produces a usable, collision-free project name. Called immediately
+# after validate_branch_name(), before ANY filesystem/docker side effect
+# (create_data_dirs, port checks, docker checks, etc.) — a branch name made
+# entirely of characters that sanitize away (e.g. "___") must fail fast,
+# not after we've already created directories or probed ports for it.
+sanitize_project_name() {
+  local s="$1"
+  s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
+  s="$(printf '%s' "$s" | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
+  [[ -n "$s" ]] || die "branch name '$1' sanitizes to an empty project name"
+  printf '%s' "$s"
+}
+
+# ---------------------------------------------------------------------------
+# Argument resolution: bare branch name OR explicit worktree path
+# ---------------------------------------------------------------------------
+# Sets the caller-visible globals BRANCH_KEY and EXPLICIT_WORKTREE_PATH.
+# BRANCH_KEY is always a bare, validated name (no '/', no "..") suitable
+# for use as a data-dir/project-name component. EXPLICIT_WORKTREE_PATH is
+# the resolved absolute path when the argument was a path, or "" when it
+# was a bare branch name (in which case callers fall back to looking it up
+# under .claude/worktrees/<branch>).
+BRANCH_KEY=""
+EXPLICIT_WORKTREE_PATH=""
+resolve_branch_arg() {
+  local arg="$1"
+  [[ -n "$arg" ]] || die "a branch name or worktree path is required"
+  # ".." is never allowed, whether the argument is meant as a bare branch
+  # name or as a path — a legitimate sibling-worktree path can still be
+  # given absolutely (or as "./x/y"); we just don't walk up via "..".
+  case "$arg" in
+    *..*)
+      die "invalid argument '$arg': must not contain '..'"
+      ;;
+  esac
+  if [[ "$arg" == */* ]]; then
+    [[ -d "$arg" ]] || die "worktree path does not exist: $arg"
+    EXPLICIT_WORKTREE_PATH="$(cd "$arg" && pwd)"
+    BRANCH_KEY="$(basename "$EXPLICIT_WORKTREE_PATH")"
+  else
+    EXPLICIT_WORKTREE_PATH=""
+    BRANCH_KEY="$arg"
+  fi
+  validate_branch_name "$BRANCH_KEY"
+}
+
+# ---------------------------------------------------------------------------
+# Worktree + compose-file resolution
+# ---------------------------------------------------------------------------
+# `up` requires the worktree to actually exist — there is nothing to build
+# or bind-mount otherwise. If an explicit path was given (see
+# resolve_branch_arg), use it directly; its existence was already checked.
+resolve_worktree_path_strict() {
+  local branch="$1" explicit_path="${2:-}"
+  if [[ -n "$explicit_path" ]]; then
+    printf '%s' "$explicit_path"
+    return 0
+  fi
+  local path="$WORKTREES_DIR/$branch"
+  [[ -d "$path" ]] || die "no worktree found for branch '$branch' (looked for: $path)"
+  printf '%s' "$path"
+}
+
+# `down`/`reset` should still work after the worktree itself has been
+# removed (a very common order of operations: merge, remove the worktree,
+# THEN clean up its preview stack). Don't require the directory to exist —
+# just warn if it's gone; docker compose only needs FARABUNKER_SRC to
+# identify already-created containers, not to rebuild them. If an explicit
+# path was given, its existence was already checked in resolve_branch_arg.
+resolve_worktree_path_soft() {
+  local branch="$1" explicit_path="${2:-}"
+  if [[ -n "$explicit_path" ]]; then
+    printf '%s' "$explicit_path"
+    return 0
+  fi
+  local path="$WORKTREES_DIR/$branch"
+  if [[ ! -d "$path" ]]; then
+    echo "warning: worktree '$branch' no longer exists at $path (continuing to clean up its preview stack anyway)" >&2
+  fi
+  printf '%s' "$path"
+}
+
+# Prefer the worktree's own compose.preview.yaml (so a branch can evolve
+# its own preview config); fall back to the main repo's copy, with a
+# warning, if the worktree predates the file.
+resolve_compose_file() {
+  local worktree_path="$1"
+  local worktree_file="$worktree_path/compose.preview.yaml"
+  local main_file="$MAIN_REPO_ROOT/compose.preview.yaml"
+  if [[ -f "$worktree_file" ]]; then
+    printf '%s' "$worktree_file"
+    return 0
+  fi
+  if [[ -f "$main_file" ]]; then
+    echo "warning: $worktree_file not found; falling back to $main_file" >&2
+    printf '%s' "$main_file"
+    return 0
+  fi
+  die "compose.preview.yaml not found in the worktree or the main repo"
+}
+
+# ---------------------------------------------------------------------------
+# .env seeding — verified necessary: a fresh worktree has no .env and the
+# stack cannot start without one. Never overwrite an existing .env.
+# ---------------------------------------------------------------------------
+seed_env() {
+  local worktree_path="$1"
+  local target="$worktree_path/.env"
+  if [[ -f "$target" ]]; then
+    return 0
+  fi
+  local main_env="$MAIN_REPO_ROOT/.env"
+  local example_env="$worktree_path/.env.example"
+  if [[ -f "$main_env" ]]; then
+    cp "$main_env" "$target"
+    echo "seeded $target from the main repo's .env" >&2
+  elif [[ -f "$example_env" ]]; then
+    cp "$example_env" "$target"
+    echo "seeded $target from .env.example (no main repo .env found — set POSTGRES_PASSWORD in it before any compose command, since compose refuses to start with it unset; edit other values as needed)" >&2
+  else
+    die "no .env source found: neither $main_env nor $example_env exists"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Data directory
+# ---------------------------------------------------------------------------
+data_dir_for() {
+  local branch="$1"
+  printf '%s' "$PREVIEW_DATA_ROOT/$branch"
+}
+
+create_data_dirs() {
+  local data_dir="$1"
+  # Belt-and-suspenders: this must always land under data/preview/, never
+  # anywhere near data/postgres, data/documents, data/inbox, or
+  # data/generated (the real stack's data). validate_branch_name() already
+  # rules out '/', '..', and a bare '.' in the branch, but assert the prefix
+  # too before creating anything.
+  case "$data_dir" in
+    "$PREVIEW_DATA_ROOT"/*) ;;
+    *) die "refusing to create data dir outside data/preview/: $data_dir" ;;
+  esac
+  mkdir -p "$data_dir/postgres" "$data_dir/documents" "$data_dir/inbox" "$data_dir/generated"
+}
+
+# Second layer of defense for the one truly destructive operation
+# (`reset`'s rm -rf): even though validate_branch_name() already rejects a
+# bare "." (which would make data/preview/. resolve to data/preview/
+# itself), assert here too that the delete target's *resolved* basename is
+# exactly the branch name we validated, so any future change to branch-name
+# validation, or an unexpected filesystem quirk (e.g. a symlink), can never
+# turn a single-branch reset into "delete every branch's preview data".
+assert_delete_target_is_single_branch() {
+  local branch="$1" data_dir="$2"
+  case "$data_dir" in
+    "$PREVIEW_DATA_ROOT"/*) ;;
+    *) die "refusing to delete data dir outside data/preview/: $data_dir" ;;
+  esac
+  [[ -d "$data_dir" ]] || return 0
+  local resolved
+  resolved="$(cd "$data_dir" && pwd -P)"
+  local resolved_root
+  resolved_root="$(cd "$PREVIEW_DATA_ROOT" && pwd -P)"
+  if [[ "$resolved" == "$resolved_root" ]] || [[ "$(basename "$resolved")" != "$branch" ]]; then
+    die "refusing to delete '$data_dir': it resolves to '$resolved', which is not a single branch under data/preview/"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Port checks
+# ---------------------------------------------------------------------------
+port_in_use() {
+  local port="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -i ":${port}" -sTCP:LISTEN >/dev/null 2>&1
+    return $?
+  fi
+  # No lsof available (unlikely on macOS/Linux dev boxes) — fall back to a
+  # bare TCP connect probe via bash's /dev/tcp.
+  if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
+    exec 3<&- 3>&-
+    return 0
+  fi
+  return 1
+}
+
+next_free_port() {
+  local port="$1"
+  while port_in_use "$port"; do
+    port=$((port + 1))
+  done
+  printf '%s' "$port"
+}
+
+check_port_free() {
+  local port="$1"
+  local flag="$2"
+  if port_in_use "$port"; then
+    local suggestion
+    suggestion="$(next_free_port "$((port + 1))")"
+    die "port $port is already in use — try ${flag} ${suggestion}"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Docker checks
+# ---------------------------------------------------------------------------
+require_docker_running() {
+  if dry_run; then
+    return 0
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    die "Docker does not appear to be running (docker info failed) — start Docker Desktop and try again"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Health wait
+# ---------------------------------------------------------------------------
+wait_for_web() {
+  local port="$1"
+  local project="$2"
+  local compose_file="$3"
+  if dry_run; then
+    echo "[dry-run] would wait for http://localhost:${port}/ to respond (timeout ${HEALTH_TIMEOUT_SECONDS}s)"
+    return 0
+  fi
+  echo "Waiting for the web container to answer on http://localhost:${port}/ ..." >&2
+  local deadline=$((SECONDS + HEALTH_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if curl -s -o /dev/null "http://localhost:${port}/"; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "error: timed out after ${HEALTH_TIMEOUT_SECONDS}s waiting for http://localhost:${port}/ to respond" >&2
+  echo "Check what's happening with: docker compose -p ${project} -f ${compose_file} logs -f" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Compose invocation
+# ---------------------------------------------------------------------------
+run_compose_up() {
+  local project="$1" compose_file="$2"
+  if dry_run; then
+    echo "[dry-run] would run: FARABUNKER_SRC=$FARABUNKER_SRC PREVIEW_DATA_DIR=$PREVIEW_DATA_DIR PREVIEW_WEB_PORT=$PREVIEW_WEB_PORT PREVIEW_DB_PORT=$PREVIEW_DB_PORT docker compose -p $project -f $compose_file up -d --build"
+    return 0
+  fi
+  docker compose -p "$project" -f "$compose_file" up -d --build
+}
+
+run_compose_down() {
+  local project="$1" compose_file="$2"
+  if dry_run; then
+    echo "[dry-run] would run: FARABUNKER_SRC=$FARABUNKER_SRC PREVIEW_DATA_DIR=$PREVIEW_DATA_DIR docker compose -p $project -f $compose_file down"
+    return 0
+  fi
+  docker compose -p "$project" -f "$compose_file" down
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+cmd_up() {
+  local branch_arg="" web_port="$DEFAULT_WEB_PORT" db_port="$DEFAULT_DB_PORT"
+  local positional_set=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --port)
+        [[ $# -ge 2 ]] || die "--port requires a value"
+        web_port="$2"
+        shift 2
+        ;;
+      --db-port)
+        [[ $# -ge 2 ]] || die "--db-port requires a value"
+        db_port="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      -*)
+        die "unknown option for 'up': $1"
+        ;;
+      *)
+        if [[ $positional_set -eq 1 ]]; then
+          die "unexpected extra argument: $1"
+        fi
+        branch_arg="$1"
+        positional_set=1
+        shift
+        ;;
+    esac
+  done
+
+  resolve_branch_arg "$branch_arg"
+  local branch="$BRANCH_KEY"
+  local explicit_path="$EXPLICIT_WORKTREE_PATH"
+
+  # Fail fast on a branch name that sanitizes away to nothing (e.g. "___")
+  # BEFORE any filesystem or docker side effect — see sanitize_project_name.
+  local project
+  project="farabunker-preview-$(sanitize_project_name "$branch")"
+
+  local worktree_path
+  worktree_path="$(resolve_worktree_path_strict "$branch" "$explicit_path")"
+  local compose_file
+  compose_file="$(resolve_compose_file "$worktree_path")"
+
+  seed_env "$worktree_path"
+
+  local data_dir
+  data_dir="$(data_dir_for "$branch")"
+  create_data_dirs "$data_dir"
+
+  require_docker_running
+  check_port_free "$web_port" "--port"
+  check_port_free "$db_port" "--db-port"
+
+  export FARABUNKER_SRC="$worktree_path"
+  export PREVIEW_DATA_DIR="$data_dir"
+  export PREVIEW_WEB_PORT="$web_port"
+  export PREVIEW_DB_PORT="$db_port"
+
+  run_compose_up "$project" "$compose_file"
+  wait_for_web "$web_port" "$project" "$compose_file"
+
+  if dry_run; then
+    echo "[dry-run] preview would be available at http://localhost:${web_port}/ (db: localhost:${db_port}, project: ${project})"
+  else
+    echo "Preview is up: http://localhost:${web_port}/"
+    echo "Postgres: localhost:${db_port} (db=farabunker user=farabunker, password: POSTGRES_PASSWORD in ${worktree_path}/.env)"
+    echo "Project: ${project}"
+  fi
+}
+
+cmd_down() {
+  [[ $# -ge 1 ]] || die "usage: scripts/preview down <branch|path>"
+  resolve_branch_arg "$1"
+  local branch="$BRANCH_KEY"
+  local explicit_path="$EXPLICIT_WORKTREE_PATH"
+
+  # See cmd_up: fail fast on the project name before any side effect.
+  local project
+  project="farabunker-preview-$(sanitize_project_name "$branch")"
+
+  local worktree_path
+  worktree_path="$(resolve_worktree_path_soft "$branch" "$explicit_path")"
+  local compose_file
+  compose_file="$(resolve_compose_file "$worktree_path")"
+
+  require_docker_running
+
+  export FARABUNKER_SRC="$worktree_path"
+  export PREVIEW_DATA_DIR="$(data_dir_for "$branch")"
+
+  run_compose_down "$project" "$compose_file"
+  echo "Stopped ${project}. Data left in place at ${PREVIEW_DATA_DIR}."
+}
+
+cmd_reset() {
+  local branch_arg="" confirmed=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --yes)
+        confirmed=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      -*)
+        die "unknown option for 'reset': $1"
+        ;;
+      *)
+        if [[ -n "$branch_arg" ]]; then
+          die "unexpected extra argument: $1"
+        fi
+        branch_arg="$1"
+        shift
+        ;;
+    esac
+  done
+
+  resolve_branch_arg "$branch_arg"
+  local branch="$BRANCH_KEY"
+
+  # Destructive — refuse before touching the filesystem or Docker at all.
+  if [[ $confirmed -ne 1 ]]; then
+    die "'reset' deletes data/preview/${branch}/ permanently — re-run with --yes to confirm"
+  fi
+
+  cmd_down "$branch_arg"
+
+  local data_dir
+  data_dir="$(data_dir_for "$branch")"
+  assert_delete_target_is_single_branch "$branch" "$data_dir"
+  if [[ -d "$data_dir" ]]; then
+    rm -rf "$data_dir"
+    echo "Deleted ${data_dir}"
+  else
+    echo "Nothing to delete at ${data_dir}"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+main() {
+  local command="${1:-}"
+  case "$command" in
+    -h|--help|help|"")
+      usage
+      exit 0
+      ;;
+    up)
+      shift
+      cmd_up "$@"
+      ;;
+    down)
+      shift
+      cmd_down "$@"
+      ;;
+    reset)
+      shift
+      cmd_reset "$@"
+      ;;
+    *)
+      echo "error: unknown command '$command'" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

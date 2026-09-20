@@ -1,0 +1,62 @@
+# What may NOT enter a `docker build .` context.
+#
+# Docker's build context is the FILESYSTEM, not `git ls-files` --
+# `.gitignore` has no effect here at all. Without this file, `Dockerfile`'s
+# `COPY . .` copies whatever is on disk on the box doing the build: `.env`
+# (mandatory for `web` to start, so it exists on every working install,
+# and it carries SECRET_KEY and DATABASE_URL), the whole managed document
+# store and backups under `data/`, and the entire `.git` history. An image
+# layer is immutable -- deleting a file afterwards does not unbake it, and
+# `docker history` reads a layer back with no running container and no
+# credentials (security audit S3, dependency audit IMAGE-6).
+#
+# NOT a copy of `.gitignore`, deliberately. The two answer different
+# questions -- "may this be committed" vs. "may this enter an image layer"
+# -- and only their intersection looks the same; `.env` is the clearest
+# divergence. `foundation/ops/tests/test_repo_hygiene.py` pins the
+# patterns below that a future edit may not silently drop.
+
+# --- Secrets & local config ---
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+*.pem
+
+# --- Operator data (the managed document store, backups, the DB dir) ---
+data/
+
+# --- Local build/venv artefacts (a host .venv is also the wrong
+#     architecture inside the image, so copying it is worse than useless) ---
+.venv/
+venv/
+env/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- Version control and agent/session working directories ---
+.git/
+.github/
+.claude/
+.superpowers/
+
+# --- Documentation the running image never reads ---
+# `**/*.md`, not `*.md`: a .dockerignore pattern is matched against the
+# whole relative path with Go `filepath.Match` semantics, where `*` does
+# not cross a path separator, so `*.md` alone would exclude root-level
+# markdown only and leave every docs/*.md and app README.md in the image.
+# `Dockerfile` never COPYs a `.md` file explicitly, so none is kept back
+# in with a negation -- a container shell has no front page, and that is
+# fine, because nothing at runtime reads one (foundation/ops/backup.py's
+# references are in docstrings and tests, not code paths).
+docs/superpowers/
+**/*.md
+
+# --- OS noise ---
+.DS_Store
+Thumbs.db

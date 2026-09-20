@@ -1,0 +1,345 @@
+{% extends "jobs/base.html" %}
+{% comment %}
+The Queue page (T7): the operator's window into the execution queue
+(ADR 0013) -- server-rendered, ZERO JavaScript, offline-first.
+Shared shell (tokens, body, nav, button base) lives in jobs/base.html ->
+_shell.html; only queue-specific styles/markup are here.
+
+Zero JS, deliberately, matching rag/history.html's own comment: there is
+no polling, no meta-refresh, and no client-side anything. The ONLY way
+this page updates is the explicit "Refresh" link below, which is a plain
+GET to this same URL -- an operator decides when to look again, the page
+never surprises them by rerendering underneath their cursor. Settings
+writes and job cancellation are plain POST-redirect-GET forms.
+
+Section-presence rule, throughout: a section (Running / Waiting /
+Finished) renders ONLY when it has rows -- no empty "Running (0)" table
+skeletons anywhere. When there are NO jobs at all (none running, waiting,
+or finished), the three sections collapse to one line, the whole-page
+empty state, below -- the settings sections (budget/concurrency,
+retention/priority) still render regardless, since those are facts about
+configuration, not about today's jobs.
+
+`runs_alone` (a row flag computed server-side in `models.queue.views.
+_present_row`) is deliberately narrower than `models.queue.scheduler.
+effectively_exclusive()` -- see that function's own docstring in
+views.py for why the "oversize relative to budget" reason is not shown
+here.
+
+Successful finished jobs show no extra detail in v1 -- a kind-owned
+result renderer (e.g. rag.ask's answer) is future work; a failure's
+stored `error` shows inline ONLY when this row's content is visible to
+the viewer (`row.content_hidden` is false) -- `models.queue.views.
+_present_row` withholds it the same way it withholds `summary`, since an
+error message is content too (it can quote payload back).
+{% endcomment %}
+{% block title %}Queue — farabunker{% endblock %}
+
+{% block extra_style %}
+  :root {
+    --page-max-width: 860px;
+  }
+  main {
+    max-width: var(--page-max-width);
+    margin: 0 auto;
+  }
+  .refresh-line {
+    margin: 0 0 1.5rem;
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  .refresh-line a {
+    color: var(--accent);
+  }
+  {% comment %}
+  `.messages`/`.msg` moved to `_shell.html` (C-21/C-52), which renders
+  them unconditionally from its own `<style>` tag -- no `{{ block.super
+  }}` needed here. `.msg.error` below is this page's own genuine
+  variant and stayed put -- see `_shell.html`'s own comment for why
+  `.msg.error` never moved.
+  {% endcomment %}
+  .msg.error {
+    background: var(--error-bg);
+    color: var(--error-text);
+    border-color: transparent;
+  }
+  section.settings {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1.5rem;
+  }
+  section.settings h2 {
+    font-size: 1rem;
+    margin: 0 0 0.5rem;
+  }
+  .settings-current {
+    margin: 0 0 0.75rem;
+    font-size: 0.9rem;
+  }
+  {% comment %}
+  F1 (Coherence Wave C): `.settings-row`/`.caveat` left with the two
+  forms they styled -- both now live on `jobs/settings.html`, which
+  carries its own copy of those rules beside the markup that uses them.
+  {% endcomment %}
+  .settings-link {
+    margin: 0.9rem 0 0;
+    font-size: 0.85rem;
+  }
+  .count-line {
+    margin: 0.9rem 0 0;
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  section.queue-section {
+    margin-bottom: 1.5rem;
+  }
+  section.queue-section h2 {
+    font-size: 1.05rem;
+    margin: 0 0 0.5rem;
+  }
+  .section-note {
+    margin: 0 0 0.75rem;
+    font-size: 0.82rem;
+    color: var(--muted);
+  }
+  .content-hidden-note {
+    margin: 0.15rem 0 0;
+    font-size: 0.82rem;
+    font-style: italic;
+    color: var(--muted);
+  }
+  .worker-down {
+    margin: 0 0 1rem;
+    padding: 0.7rem 0.9rem;
+    border-radius: 6px;
+    background: var(--error-bg);
+    color: var(--error-text);
+    font-size: 0.88rem;
+  }
+  ul.job-rows {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .job-row {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.85rem 1rem;
+    margin-bottom: 0.6rem;
+  }
+  .job-summary {
+    font-size: 0.95rem;
+  }
+  .job-meta {
+    color: var(--muted);
+    font-size: 0.82rem;
+    margin-top: 0.3rem;
+  }
+  .job-error {
+    margin: 0.5rem 0 0;
+    font-size: 0.85rem;
+    color: var(--error-text);
+  }
+  .progress-line {
+    margin-top: 0.35rem;
+    font-size: 0.82rem;
+    color: var(--muted);
+  }
+  .progress-track {
+    margin-top: 0.3rem;
+    height: 6px;
+    border-radius: 999px;
+    background: var(--border);
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    background: var(--accent);
+  }
+  .job-actions {
+    margin-top: 0.6rem;
+  }
+  .job-actions button {
+    padding: 0.35rem 0.9rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  .position {
+    font-weight: 600;
+    margin-right: 0.4rem;
+  }
+  .empty-state {
+    color: var(--muted);
+    padding: 1rem 0;
+  }
+{% endblock %}
+
+{% block nav_current_queue %}current{% endblock %}
+
+{% block content %}
+<main>
+  <h1>Queue</h1>
+  <p class="tagline">Every job the execution queue currently knows about — running, waiting, and recently finished.</p>
+  <p class="refresh-line"><a href=".">Refresh</a> — as of {{ now|date:"H:i:s" }}</p>
+
+  {% include "_messages.html" %}
+
+  <section class="settings">
+    <h2>Memory budget</h2>
+    {% if memory_budget_bytes %}
+      <p class="settings-current">
+        <strong>Memory budget</strong> — {{ memory_budget_human }}. Jobs run together while their footprints fit; anything larger waits its turn.
+      </p>
+      <p class="settings-current">
+        {% if running_has_unknown %}
+          Running now: at least {{ running_known_human|default:"0 B" }} of {{ memory_budget_human }} (one model's size not yet measured)
+        {% else %}
+          Running now: {{ running_known_human|default:"0 B" }} of {{ memory_budget_human }}.
+        {% endif %}
+      </p>
+    {% else %}
+      <p class="settings-current">
+        <strong>Memory budget</strong> — not set. Jobs run one at a time.
+      </p>
+      <p class="settings-current">With a budget set, jobs whose footprints fit within it run together.</p>
+    {% endif %}
+    {% comment %}
+    F1 (Coherence Wave C): READ-ONLY here. The forms that edit these
+    values live on the registered "Job execution" settings page; this is
+    an activity surface, and the budget's only reason to appear on it is
+    the "running now" reading just above, which is about today's jobs
+    rather than about configuration.
+
+    THE LINK IS ADMIN-ONLY (I4, Wave C review). `jobs-settings` is class
+    S, so a member who clicked it would get a 403 -- and "the entry never
+    leads anywhere that would refuse them" is the rule the whole settings
+    area is built on (`foundation/settings_area.py`'s own docstring,
+    restated in `docs/DEV.md`). The READING above stays for everybody:
+    what the budget is, and how much of it is in use, is a fact about
+    today's queue, not a control. `identity_is_admin` is True for every
+    viewer on an open box, so a household box is unchanged.
+    {% endcomment %}
+    {% if identity_is_admin %}
+    <p class="settings-link">Change the budget and the concurrency cap on <a href="{% url 'jobs-settings' %}">Job execution</a>.</p>
+    {% endif %}
+  </section>
+
+  {% if queue_unavailable %}
+  <p class="empty-state">The queue isn't ready yet — run database migrations.</p>
+  {% else %}
+
+    {% if show_worker_down_hint %}
+    <p class="worker-down">Nothing has started in the last 10 minutes. If this doesn't move, check that the worker container is running.</p>
+    {% endif %}
+
+    {% if not has_any_jobs %}
+    <p class="empty-state">Nothing has been queued yet.</p>
+    {% else %}
+
+      {% if running_rows %}
+      <section class="queue-section">
+        <h2>Running</h2>
+        <p class="section-note">Runs to completion — a started job can't be stopped.</p>
+        <ul class="job-rows">
+          {% for row in running_rows %}
+          <li class="job-row">
+            <div class="job-summary">{{ row.summary }} <span class="chip">{{ row.kind_label }}</span>{% if row.runs_alone %} <span class="chip">runs alone</span>{% endif %}</div>
+            {% if row.content_hidden %}
+            <p class="content-hidden-note">Content hidden — turn on “admin_sees_content” in <a href="{% url 'identity-settings' %}">Identity &amp; security</a> to read other users' conversations and files.</p>
+            {% endif %}
+            <div class="job-meta">
+              {% for name in row.model_names %}{{ name }}{% if not forloop.last %}, {% endif %}{% endfor %}
+              · {{ row.footprint_human|default:"size not measured" }}
+              · started {{ row.started_at }}
+            </div>
+            {% if row.progress_text %}
+            <div class="progress-line">{{ row.progress_text }}</div>
+            {% if row.progress_percent != None %}
+            <div class="progress-track"><div class="progress-fill" style="width: {{ row.progress_percent }}%;"></div></div>
+            {% endif %}
+            {% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      </section>
+      {% endif %}
+
+      {% if waiting_rows %}
+      <section class="queue-section">
+        <h2>Waiting</h2>
+        <p class="section-note">lower priority number runs first</p>
+        <ul class="job-rows">
+          {% for row in waiting_rows %}
+          <li class="job-row">
+            <div class="job-summary"><span class="position">#{{ row.position }}</span>{{ row.summary }} <span class="chip">{{ row.kind_label }}</span></div>
+            {% if row.content_hidden %}
+            <p class="content-hidden-note">Content hidden — turn on “admin_sees_content” in <a href="{% url 'identity-settings' %}">Identity &amp; security</a> to read other users' conversations and files.</p>
+            {% endif %}
+            <div class="job-meta">
+              priority {{ row.priority }}
+              · {% for name in row.model_names %}{{ name }}{% if not forloop.last %}, {% endif %}{% endfor %}
+              · {{ row.footprint_human|default:"size not measured" }}
+              · submitted {{ row.created_at }}
+            </div>
+            <div class="job-actions">
+              <form method="post" action="{% url 'jobs-queue-cancel' row.id %}">
+                {% csrf_token %}
+                <button type="submit">Cancel</button>
+              </form>
+            </div>
+          </li>
+          {% endfor %}
+        </ul>
+      </section>
+      {% endif %}
+
+      {% if finished_rows %}
+      <section class="queue-section">
+        <h2>Finished</h2>
+        <ul class="job-rows">
+          {% for row in finished_rows %}
+          <li class="job-row">
+            <div class="job-summary"><span class="chip">{{ row.state }}</span> {{ row.summary }} <span class="chip">{{ row.kind_label }}</span></div>
+            {% if row.content_hidden %}
+            <p class="content-hidden-note">Content hidden — turn on “admin_sees_content” in <a href="{% url 'identity-settings' %}">Identity &amp; security</a> to read other users' conversations and files.</p>
+            {% endif %}
+            <div class="job-meta">
+              {% for name in row.model_names %}{{ name }}{% if not forloop.last %}, {% endif %}{% endfor %}
+              · finished {{ row.finished_at }}
+            </div>
+            {% if row.error %}
+            <p class="job-error">{{ row.error }}</p>
+            {% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      </section>
+      {% endif %}
+
+    {% endif %}
+  {% endif %}
+
+  <section class="settings">
+    <h2>Retention &amp; default priority</h2>
+    {% comment %}
+    `default_priority` IS NEWLY VISIBLE TO A MEMBER HERE (M1, Wave C
+    review), and that is a deliberate, recorded disclosure rather than an
+    oversight: before F1 it appeared only inside the admin-gated form's
+    own `value=`, and it now reads in this ungated line. It is box-wide
+    queue policy, not anybody's content, and the waiting list beside it
+    already shows each row's own priority number -- so a member could
+    already see priorities, and this tells them which one their next
+    submission will get. `max_concurrent_jobs` went the other way and is
+    now shown to nobody on this page; it is on Job execution.
+    {% endcomment %}
+    <p class="count-line">{{ finished_count }} of {{ retention_limit }} kept; new submissions default to priority {{ default_priority }}.</p>
+    {% comment %}F1 (Coherence Wave C): read-only here, edited on Job execution. Admin-only for the same reason as the budget link above (I4).{% endcomment %}
+    {% if identity_is_admin %}
+    <p class="settings-link">Change the retention limit and the default priority on <a href="{% url 'jobs-settings' %}">Job execution</a>.</p>
+    {% endif %}
+  </section>
+</main>
+{% endblock %}

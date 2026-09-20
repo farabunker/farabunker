@@ -1,0 +1,122 @@
+{% extends "_shell.html" %}
+{% comment %}
+Module-local base for the /vision/ pages. Extends the shared project shell
+(foundation/templates/_shell.html) so the design tokens, dark-mode overrides, and the
+global nav live in ONE place -- exactly as tools/rag/templates/rag/base.html
+does. (The three module base templates are a known consolidation candidate;
+out of scope here.)
+
+Template inheritance creates no Python import, so `models/contracts/`
+purity and column-privacy are unaffected.
+
+Marking the shared nav's "Images" entry current is done exactly the way
+ask.html / documents.html / console.html do it -- by overriding the matching
+`nav_current_*` block with `current`. It sits on this BASE (not on each leaf
+page) because every page under /vision/ belongs to that one nav destination;
+the page-level distinction is the sub-nav below. ("Images" names the whole
+surface -- Generate and Gallery both live under it; "Image generation" is
+what the create page inside it does.)
+{% endcomment %}
+{% block nav_current_vision %}current{% endblock %}
+{% block extra_style %}
+  :root { --page-max-width: 1040px; }
+  .vision-wrap { max-width: var(--page-max-width); margin: 0 auto; }
+  .vision-subnav { display: flex; gap: 1rem; font-size: 0.9rem; margin-bottom: 1rem; }
+  .vision-subnav a { color: var(--accent); text-decoration: none; }
+  .vision-subnav a.current { color: var(--text); font-weight: 600; pointer-events: none; }
+  .banner.warn { border-color: var(--accent); }
+  .card {
+    border: 1px solid var(--border); border-radius: 8px; background: var(--panel);
+    padding: 1rem; margin-bottom: 1rem;
+  }
+  /* Everything the SHARED job-card fragment and the SHARED delete control
+     need. They live here, not on a page: `_job_card.html` is rendered by
+     the create page, by `generate`, and standalone by `job_status`, and
+     `_delete_control.html` by the card and the gallery -- a page cannot own
+     rules a fragment three views render. */
+  /* --- the shared job card (2026-08-25 redesign) -------------------
+     Four bands inside a `.card`, so the card's own 1rem padding is
+     dropped and each band pads itself; that is what lets the head and
+     foot carry full-width hairlines. */
+  .job-card { padding: 0; }
+  .job-card img { max-width: 100%; border-radius: 6px; display: block; }
+
+  .job-head {
+    display: flex; justify-content: space-between; gap: 1rem; align-items: center;
+    padding: 0.75rem 1rem; border-bottom: 1px solid var(--border);
+  }
+  .job-title { margin: 0; font-size: 0.98rem; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+
+  .job-body {
+    display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(200px, 1fr);
+    gap: 1rem; padding: 1rem; align-items: start;
+  }
+  /* One breakpoint. Below it the facts read better under the image than
+     beside it, and 200px of facts column would squeeze the media. */
+  @media (max-width: 720px) { .job-body { grid-template-columns: minmax(0, 1fr); } }
+
+  .job-outputs { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.75rem; }
+  .output-tile { margin: 0; display: flex; flex-direction: column; }
+  .output-tile img { width: 100%; height: auto; max-height: 360px; object-fit: contain; }
+  .job-placeholder {
+    border: 1px dashed var(--border); border-radius: 6px;
+    padding: 2rem 1rem; text-align: center;
+  }
+
+  .job-inputs { margin-top: 0.75rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+  .strip-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+  .job-images { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0; }
+  .job-inputs img { opacity: 0.85; max-height: 72px; width: auto; }
+
+  .job-details { display: grid; gap: 0.6rem; }
+  .job-meta { margin: 0; }
+  .job-timing { margin: 0; }
+
+  .job-notes { padding: 0 1rem; }
+  .job-notes p { margin: 0 0 0.5rem; }
+  /* The queued placeholder has no body and no foot band, so its notes
+     must pad themselves top AND bottom; on a full card the head's border
+     and the foot band supply both. */
+  .job-notes:last-child { padding-top: 0.5rem; padding-bottom: 0.5rem; }
+  .job-error { color: var(--danger); }
+
+  .job-foot {
+    display: flex; justify-content: flex-end;
+    padding: 0.6rem 1rem; border-top: 1px solid var(--border);
+  }
+  /* The shared delete control keeps its 0.5rem top margin inside a gallery
+     figure; inside the card's own footer band the band supplies the space. */
+  .job-foot .delete-disclosure { margin-top: 0; }
+  /* The shared actions partial's row -- rendered by the card AND by the
+     gallery figure, so its rules live here beside the other fragment
+     rules, never on a page. Gap-separated rather than the typed "·"
+     the gallery used to carry: a separator that wraps with the links. */
+  .output-actions { display: flex; flex-wrap: wrap; gap: 0.15rem 0.6rem; font-size: 0.85rem; margin-top: 0.35rem; }
+  .output-actions a { color: var(--accent); text-decoration: none; }
+  .output-actions a:hover { text-decoration: underline; }
+  /* Labelled rows, not a prose line. A two-column grid rather than a
+     floated <dt> so a long value wraps under itself instead of under the
+     label. */
+  .job-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.15rem 0.75rem; margin: 0; font-size: 0.85rem; }
+  .job-facts dt { color: var(--muted); }
+  .job-facts dd { margin: 0; overflow-wrap: anywhere; }
+  button.secondary { background: transparent; color: var(--accent); padding: 0.3rem 0; font-weight: 500; }
+  /* 0.5rem, create.html's value -- NOT the gallery's 0.35rem. A6 calls the
+     two copies verbatim; they differ here alone. The card's value wins
+     because the card is the fragment three views render, and a figure's
+     control tightening by 1.5px is the smaller surprise. */
+  .delete-disclosure { margin-top: 0.5rem; }
+  .delete-confirm { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.4rem; }
+  .delete-confirm form { display: flex; align-items: center; gap: 0.5rem; margin: 0; }
+  button.danger { background: transparent; color: var(--danger); padding: 0.3rem 0.6rem; font-weight: 600; border-color: var(--danger); }
+  {% block vision_style %}{% endblock %}
+{% endblock %}
+{% block content %}
+<div class="vision-wrap">
+  <div class="vision-subnav">
+    <a href="{% url 'vision-create' %}" class="{% block subnav_current_create %}{% endblock %}">Generate</a>
+    <a href="{% url 'vision-gallery' %}" class="{% block subnav_current_gallery %}{% endblock %}">Gallery</a>
+  </div>
+  {% block vision_content %}{% endblock %}
+</div>
+{% endblock %}

@@ -1,0 +1,188 @@
+{% comment %}
+ONE turn. Rendered inline by conversation.html AND standalone by
+`turn_status`'s `{"state": "done", "html": ...}` body -- which is the
+whole reason it takes a card dict and carries no page chrome.
+
+A `depth > 0` turn never renders itself at top level: the grouper in
+`agents/chat/rendering.py::thread_cards` hands it to its parent, which
+renders it inside the collapsed disclosure below (spec section 8.4).
+
+`data-poll-block` (from `card.poll_block`, normally the row's own
+`queue_job_id`) is what makes the poller's swap idempotent (extended by
+D1/chat-polish P3.1 to the queued/running bodies too): a card that is
+already on the page from an earlier render
+(a tool call that finished while the assistant turn it belongs to is
+still queued/running, OR the user's own message that
+`rendering.turn_group_cards` groups in under this SAME marker) carries
+the SAME value as the eventual block's own cards. The script groups by
+this attribute to remove every stale card for the exchange -- not just
+the one placeholder it was polling -- before inserting the fresh block,
+so a polled thread and a reloaded one never disagree by a duplicate.
+{% endcomment %}
+<article class="turn turn-{{ card.role }}{% if card.pending %} turn-pending{% endif %}"
+         data-turn-id="{{ card.turn.pk }}"
+         {% if card.poll_block %}data-poll-block="{{ card.poll_block }}"{% endif %}
+         {% if card.pending %}data-status-url="{% url 'chat-turn-status' card.turn.pk %}"{% endif %}>
+  {% if card.role == "tool" %}
+    {% include "chat/_tool_card.html" with tool=card.tool %}
+    {% if card.nested %}
+    <details class="turn-nested">
+      <summary>{{ card.nested|length }} step(s) run by the delegated agent</summary>
+      {% for nested in card.nested %}{% include "chat/_turn_card.html" with card=nested %}{% endfor %}
+    </details>
+    {% endif %}
+  {% else %}
+    {% if card.pending %}
+    {% comment %}
+    R4 (fix round 1): ONE line here, not two. The seed `.no-js-note`
+    paragraph used to render "Queued. Refresh to see the answer."
+    unconditionally, which a JS-enabled reader saw for an instant
+    alongside (and a JS-OFF reader saw permanently alongside) the
+    `<noscript>` line below -- the same information, twice. The script's
+    own `updateNote()` (`conversation.html`) already creates the
+    `.no-js-note` paragraph on demand the first time it has something
+    to say (`card.querySelector(".no-js-note")` falls back to building
+    one), so the server no longer needs to seed it: with scripts on, the
+    first poll tick creates it; with scripts off, the `<noscript>` line
+    is the only thing a reader ever sees on a card nothing will ever
+    swap out (D3) -- a finished/failed/cancelled card never reaches this
+    branch at all (`card.pending` is only true for `Turn.State.QUEUED`/
+    `RUNNING` -- `rendering.turn_card`'s own key).
+
+    R4 amendment (chat-resume-poll): the seed line is back, but this
+    time it shares the exact `.no-js-note` markup `updateNote()` looks
+    for, so it gets REWRITTEN in place on the first tick rather than
+    duplicated. R4 above was right about the WORDING, not the markup:
+    the pre-R4 seed (`git show d033a8c:agents/chat/templates/chat/
+    _turn_card.html`) already used this exact `<p class="muted no-js-
+    note">` element -- R4's real complaint was that its TEXT, "Queued.
+    Refresh to see the answer.", repeated the `<noscript>` line's own
+    "reload to see the answer" below it word for word. This seed's
+    text does not: "Working…"/"Queued…" states progress the
+    `<noscript>` line never mentions, so a JS-off reader sees two lines
+    saying two different things, not one thing twice. It comes back
+    because a plain page refresh mid-turn carries no `?pending=` at
+    all: `conversation.html`'s bootstrap scans every `.turn-pending
+    [data-status-url]` card and starts a poll loop per card, but that
+    loop's first progress text only lands once its first tick
+    resolves. Seeding it server-side means a JS-enabled reader sees it
+    from the very first paint instead of a blank pending `<article>`
+    for one round trip, and with scripts off it is now the ONLY thing
+    a reader sees alongside `<noscript>`'s reload hint below -- still
+    complementary, never duplicated, and still gated on `card.pending`
+    so a finished/failed/cancelled card never reaches this branch at
+    all.
+    {% endcomment %}
+    <p class="muted no-js-note">{% if card.state == "running" %}Working…{% else %}Queued…{% endif %}</p>
+    <noscript><p class="muted">This page does not update on its own —
+      reload to see the answer.</p></noscript>
+    {% elif card.state == "failed" %}
+    {% comment %}
+    `Turn.error` is `str(exc)`, never a traceback -- `run_turn`
+    writes it that way and `models/queue/worker.py` already sets
+    that rule for job failures. The setup link belongs HERE, not on
+    a cancellation below (U6): a failure can be model-shaped (an
+    unbound role, an unreachable engine); an operator-initiated
+    cancel from `/queue/` never is.
+    {% endcomment %}
+    {% if card.text %}
+    {% comment %}
+    I1 (fix round 1, one-timeout task): PRESERVE, don't discard.
+    `_finish` still writes `turn.text` for a timed-out ending (the
+    honest sentence plus, when a tool actually ran, its raw result) --
+    a timed-out turn is the ONE FAILED path that ever populates it;
+    every OTHER FAILED path (a crash, a stalled-worker writeback) never
+    writes `turn.text` at all, so this block is silently a no-op for
+    those and only ever fires for a timeout. A generated image at
+    minute 25 that timed out at minute 30 still shows what it got,
+    right above the honest failure sentence below -- never hidden by
+    the FAILED state alone.
+    {% endcomment %}
+    {% if card.text_html %}
+    <div class="turn-text">{{ card.text_html }}</div>
+    {% else %}
+    <div class="turn-text">{{ card.text|linebreaks }}</div>
+    {% endif %}
+    {% endif %}
+    <p class="turn-error">{{ card.error|default:"This turn did not finish." }}</p>
+    <p class="muted"><a href="{% url 'inference-console' %}">Models</a></p>
+    {% comment %}
+    ON-TIMEOUT ADMIN HINT (one-timeout task, 2026-09-17), the
+    content-withheld pattern: `card.error_is_timeout` is computed ONCE,
+    server-side, in `agents.chat.rendering.turn_card` -- a fixed-key
+    boolean matched against the ONE shared Python constant
+    (`agents.limits.TURN_TIMEOUT_ERROR`, re-exported by `agents.runtime.
+    loop` -- MINOR 6, fix round 1), never a duplicated template string
+    literal. `identity_is_admin` reaches this template
+    the same way it already does for the banner above and for
+    `_unavailable.html`'s own admin-gated links (a global context
+    processor). A non-admin sees only the generic sentence `card.error`
+    already shows above; a FAILED turn with any OTHER error shows no
+    hint at all.
+
+    B3 (fix round 1) -- HONEST LIMITATION, RECORDED RATHER THAN
+    IMPLIED: this HTML block renders on a full page load/reload only.
+    The live poll path (`turn_status`'s JSON body, consumed by
+    `conversation.html`'s poller -- HELD by PR #84) never swaps this
+    card's HTML in for a FAILED turn at all (`showCardError` rebuilds
+    the card from `data.error`/`data.setup_url` alone, ignoring any
+    `html` key the way the "done"/"queued"/"running" branches do not) --
+    fixing that fully would mean editing the held file, which this task
+    does not do. `agents.chat.views.turns._failed_body` independently
+    appends the SAME admin hint, as plain text, onto `data.error` for an
+    admin viewer polling a timed-out turn -- not this markup, and no
+    link, but the substance of the hint still reaches a watching admin
+    without a reload.
+    {% endcomment %}
+    {% if identity_is_admin and card.error_is_timeout %}
+    <p class="muted">An administrator can raise this time limit on the
+      <a href="{% url 'jobs-settings' %}#response-timeout-seconds">Job execution</a> settings page.</p>
+    {% endif %}
+    {% elif card.state == "cancelled" %}
+    {% comment %}
+    U6: no "Models" link -- `on_turn_terminal` writes "Cancelled
+    from the queue before it ran." (or its twice-orphaned twin), and
+    neither sentence is a reason to bind a model.
+    {% endcomment %}
+    <p class="turn-error">{{ card.error|default:"This turn did not finish." }}</p>
+    {% else %}
+    {% if card.text_html %}
+    {% comment %}
+    U2: `render_answer` (`rendering.py`) already escaped and formatted
+    this -- a SAFE, pre-built string -- so it renders as-is rather than
+    through `linebreaks`, which would re-escape the `<strong>`/`<code>`/
+    `<ul>` tags it just built into visible text.
+    {% endcomment %}
+    <div class="turn-text">{{ card.text_html }}</div>
+    {% else %}
+    <div class="turn-text">{{ card.text|linebreaks }}</div>
+    {% endif %}
+    {% endif %}
+    {% include "chat/_artifact_images.html" with images=card.images %}
+    {% include "chat/_artifact_files.html" with files=card.files %}
+    {% if card.attachments %}
+    {% comment %}
+    ROUND 13 (message-bound attachments; owner feedback: "After
+    submitting the document wasn't attached to that message (at least
+    not visually)"). REPLACES round 11's own conversation-level strip
+    (`chat/conversation.html`'s own retirement comment has the full
+    reasoning) -- `card.attachments` is `[]` for every card but a USER
+    one that actually carried files (`agents.chat.rendering.turn_card`'s
+    own new keyword), so this block only ever renders here, never on a
+    TOOL/ASSISTANT card, with no role check needed to say so.
+
+    LIVE BY CONSTRUCTION: this SAME card is what the poller re-renders
+    on every "queued"/"running" tick and once more on "done" (D1's own
+    idempotent swap, `conversation.html`'s own poller script) -- a chip
+    here reads whatever status the SERVER had for it at the moment of
+    the last swap, never a value cached at page load the way the
+    retired strip's was.
+    {% endcomment %}
+    <div class="turn-attachments">
+      {% for doc in card.attachments %}
+      {% include "chat/_attachment_chip.html" with doc=doc conversation_id=card.turn.conversation_id next_url=card.attachment_detach_next %}
+      {% endfor %}
+    </div>
+    {% endif %}
+  {% endif %}
+</article>

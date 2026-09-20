@@ -1,0 +1,651 @@
+{% extends "vision/base.html" %}
+{% block title %}Image generation — farabunker{% endblock %}
+{% block subnav_current_create %}current{% endblock %}
+{% block vision_style %}
+  .errorlist { color: var(--danger); font-size: 0.85rem; margin: 0.2rem 0 0; padding-left: 1rem; }
+  .gen-form { display: grid; gap: 0.75rem; }
+  .gen-form .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.75rem; }
+  /* A file input and a chip group (`_field.html`'s `field--kind-file` /
+     `field--multi`, off `f.field.kind`/`f.field.multiple`) truncate
+     illegibly at one auto-fit column: a file input shows "Choose File
+     I…3" and the raw multi-select widget T2 replaced clipped every
+     filename past the column width (the owner's screenshot that opened
+     this task). Full row costs little: unused fields render `hidden`
+     since the 2026-08-29 amendment, so most rows a mode does not use are
+     not even painted.
+
+     Scoped to `field--kind-file` and `field--multi` rather than every
+     `field--kind-asset` -- a SINGLE-choice asset select
+     (`upscale_model`) is one short line and stretching it the full row
+     looked absurd in a browser check; only a field whose CONTENT
+     actually needs the width (a file + its preview image, or a group of
+     wrapping chips) gets one. */
+  .gen-form .field--kind-file, .gen-form .field--multi { grid-column: 1 / -1; }
+  .gen-form label { display: block; font-size: 0.85rem; color: var(--muted); }
+  .gen-form input, .gen-form select, .gen-form textarea {
+    width: 100%; padding: 0.45rem 0.55rem; border: 1px solid var(--border);
+    border-radius: 6px; background: var(--bg); color: var(--text); font: inherit;
+  }
+  .model-picker { display: flex; align-items: end; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+  .model-picker label { display: flex; flex-direction: column; gap: 0.2rem; flex: 1 1 16rem; font-size: 0.85rem; color: var(--muted); }
+  .model-picker select { width: 100%; }
+  /* A disabled fieldset must not disturb `.gen-form`'s own CSS grid --
+     `display: contents` takes the fieldset itself out of layout so its
+     children participate in the grid directly, and `all: unset` strips
+     the browser's default fieldset border/padding/margin. */
+  .gen-form fieldset { all: unset; display: contents; }
+  /* Now rendered per-field (`_field.html`), immediately under the file
+     widget it belongs to -- `margin-top` mirrors `.file-preview`'s below
+     so a stored hand-off and a freshly attached file's own JS preview
+     sit the same distance under the widget either way. */
+  .stored-input { display: flex; align-items: center; gap: 0.75rem; margin-top: 0.4rem; }
+  .stored-input img { max-height: 96px; width: auto; border-radius: 6px; display: block; }
+  /* Owner feedback: Remove used to sit at the far right, after the
+     caption, and was hard to find. This column keeps the thumbnail and
+     its Remove control together and left-aligned -- thumbnail on top,
+     Remove directly beneath it -- with the caption text still beside the
+     column, same as before. */
+  .stored-thumb { display: flex; flex-direction: column; align-items: flex-start; gap: 0.3rem; }
+  /* The chosen-file preview the form's own script (below) inserts after
+     a `type="file"` input on `change` -- mirrors `.stored-input img`'s
+     sizing so a freshly attached file and a gallery hand-off read as the
+     same kind of thing. Nothing renders this element without JS; there
+     is no `display: none` default to undo. */
+  .gen-form .file-preview { max-height: 96px; border-radius: 6px; display: block; margin-top: 0.4rem; }
+  /* Sits beside `.file-preview` in the wrapper the script (below) builds
+     once a file is chosen. `secondary` (vision/base.html) already gives
+     it this page's transparent/no-border button chrome; this only trims
+     it down further -- small and muted -- so "Remove" reads as a
+     utility next to the thumbnail, not a page action competing with
+     Generate. */
+  .gen-form .file-clear { display: block; margin-top: 0.3rem; font-size: 0.8rem; color: var(--muted); font-weight: normal; }
+  /* `.stored-remove` (the "Remove" link under a stored gallery hand-off's
+     thumbnail, `_field.html`, inside `.stored-thumb` above) used to share
+     `.file-clear`'s muted rule and read as easy-to-miss fine print (owner
+     feedback). Split out so it can carry the page's accent color and keep
+     its underline -- still a plain small link, not a button, just more
+     visible than the muted caption beside it. No `margin-top`: it sits in
+     `.stored-thumb`'s flex column now, spaced by that column's own `gap`. */
+  .gen-form .stored-remove { display: block; font-size: 0.8rem; color: var(--accent); font-weight: normal; }
+  /* One field's chrome (`vision/_field.html`). `.tip` is a sibling of
+     `<label>`, not a descendant of it (a11y fix: a label's accessible
+     name is its text content, so tooltip prose living inside `<label>`
+     would be read as part of the field's name) -- `.field` is the
+     positioning context instead, relative with the tip absolute inside
+     it, so nothing shifts the grid when one opens. */
+  .field { position: relative; }
+  /* `.field` sets no `display` of its own, so the `hidden` attribute's
+     UA default (`display: none`) already wins for an unused field --
+     this rule is not load-bearing today. It is here anyway because
+     `.field` is a direct child of `.gen-form`'s grid, and a later grid
+     rule that gave `.field` an explicit `display` would silently
+     re-show a "hidden" field; this keeps that impossible. */
+  .gen-form .field[hidden] { display: none; }
+  .gen-form .field label { display: flex; align-items: baseline; gap: 0.3rem; }
+  .info { cursor: help; color: var(--accent); font-size: 0.95em; line-height: 1; }
+  .info:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 50%; }
+  /* Shown on hover AND on keyboard focus. Kept in the DOM either way and
+     wired with `aria-describedby`, so a screen reader never depends on
+     this. `.tip` is no longer a sibling of `.info` (it sits outside
+     `<label>` entirely), so a plain `~` selector can't reach it; `:has()`
+     lets `.field` react to its hovered/focused descendants instead --
+     supported by every evergreen engine (Chrome, Safari, Firefox).
+     `:has(.tip:hover)` keeps the tip itself in the "show" condition too
+     (WCAG 1.4.13, hoverable content): without it, moving the pointer off
+     the ⓘ and onto the tip to read a long sentence or select its text
+     would cross a gap with nothing hovered and dismiss it before the
+     pointer arrives. */
+  .tip {
+    position: absolute; left: 0; top: 100%; z-index: 5; width: min(26rem, 90vw);
+    margin-top: 0.15rem; padding: 0.5rem 0.6rem; font-size: 0.8rem; line-height: 1.4;
+    font-weight: normal; color: var(--text); background: var(--panel);
+    border: 1px solid var(--border); border-radius: 6px;
+    visibility: hidden; opacity: 0;
+  }
+  .gen-form .field:has(label:hover) .tip,
+  .gen-form .field:has(.info:focus) .tip,
+  .gen-form .field:has(.tip:hover) .tip { visibility: visible; opacity: 1; }
+  /* A field this model or this mode cannot answer. The widget already
+     carries HTML `disabled`; this is what makes that legible. */
+  .field--unused > label, .field--ignored > label { color: var(--muted); }
+  .field--unused input, .field--unused select, .field--unused textarea,
+  .field--ignored input, .field--ignored select, .field--ignored textarea {
+    opacity: 0.55; cursor: not-allowed;
+  }
+  /* The reason, inline under its own field -- a block so a sentence sits
+     under the control instead of colliding with the next label. */
+  .field-reason { display: block; margin-top: 0.25rem; line-height: 1.35; }
+{% endblock %}
+{% block vision_content %}
+<h1>Image generation</h1>
+
+{% if preflight.state != "ready" %}
+<div class="banner warn">
+  {{ preflight.message }}
+  {% if preflight.state == "unbound" %}
+  <a href="{% url 'inference-console' %}">Assign a model</a>
+  {% else %}
+  <a href="{% url 'inference-console' %}">Check the model bindings</a>
+  {% endif %}
+  {% comment %}
+  Deep-link to the bound engine's own section of /setup/. With nothing bound
+  there is no engine to name, so this falls back to the image engine this cut
+  ships an adapter for -- a documentation anchor only, never a behavioural
+  default: no model, endpoint, or binding is presumed anywhere by it.
+  {% endcomment %}
+  <a href="{% url 'setup-index' %}#engine-{% if preflight.resolved %}{{ preflight.resolved.engine }}{% else %}comfyui{% endif %}">How to set this up</a>
+</div>
+{% elif not operations_supported %}
+{% comment %}
+Owner ruling 2026-08-24(c) -- the honesty banner handed off
+(`views.resolve_page_operation`'s own comment): the engine answered, it
+just has no graph for ANYTHING in the family this model declares. The form
+below is disabled rather than hidden, so the operator still sees what a
+generation here would ask for.
+{% endcomment %}
+<div class="banner warn">
+  <code>{{ preflight.resolved.model_id }}</code>'s engine ({{ preflight.resolved.engine }}) reports no operations for the family it declares — pick a different model, or register a family this engine has a graph for.
+</div>
+{% else %}
+<div class="banner">
+  Image generation is bound to <code>{{ preflight.resolved.model_id }}</code> on {{ preflight.resolved.engine }} at {{ preflight.resolved.endpoint }} — reachable.
+</div>
+{% endif %}
+
+{% comment %}
+ONE little GET form for both choices the header offers: which model runs
+this generation, and which mode it runs. A SEPARATE form from the generate
+form on purpose -- that one is `enctype="multipart/form-data"` and carries
+the operator's attached image and typed instruction, and submitting THAT
+as a GET would drop the file outright. Switching must not cost the
+operator their work, so switching is its own GET and the generate form
+learns both choices from hidden inputs below.
+
+A GET form can only ever produce a QUERY parameter, never a path segment,
+which is why `?operation=` is the canonical URL and `op/<key>/` is kept
+only as a rendering alias (ADR 0012 D-EDIT-13).
+
+Every registered operation is an option, always. One this model has no
+graph for is `disabled` and carries its reason, so a mode never simply
+vanishes and says nothing (ADR 0012 D-EDIT-13).
+
+The hidden `input_*` fields just below mirror `stored_inputs`
+(`views._stored_input_context`) -- a gallery hand-off ("Use in ...")
+lands here as a query param this form never had a control for, so
+without them switching Model/Mode used to drop it silently on the very
+next GET (a live bug this closes): they are server-rendered, so a stored
+image survives a switch with NO JS required. The form's own inline
+script (bottom of page) mirrors the operator's TYPED values the same
+way, right before this form submits -- that half needs JS, since a
+query string does not exist until this form actually navigates.
+{% endcomment %}
+<form class="model-picker" method="get" action="{% url 'vision-create' %}">
+  {% for stored in stored_inputs %}
+  <input type="hidden" name="input_{{ stored.param_key }}" value="{{ stored.reference }}">
+  {% endfor %}
+  {% if connection_options %}
+  <label for="connection">Model
+    <select id="connection" name="connection" data-reload-on-change>
+      {% for opt in connection_options %}
+      <option value="{{ opt.value }}"{% if opt.selected %} selected{% endif %}>{{ opt.label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  {% endif %}
+  <label for="operation">Mode
+    <select id="operation" name="operation" data-reload-on-change>
+      {% for state in operation_states %}
+      {% comment %}
+      `disabled` BEFORE `selected`, deliberately: the supports-nothing case
+      renders the fallback operation as both, and a test (or a reader)
+      looking for `value="txt2img" disabled` must find the two adjacent.
+      {% endcomment %}
+      <option value="{{ state.operation.key }}"{% if not state.supported %} disabled title="{{ state.reason }}"{% endif %}{% if state.operation.key == operation.key %} selected{% endif %}>{{ state.operation.label }}{% if not state.supported %} — {{ state.reason }}{% endif %}</option>
+      {% endfor %}
+    </select>
+  </label>
+  {% if connection_options %}
+  <button type="submit" id="use-model">Use these</button>
+  <span class="muted">The model this generation runs on, and the mode it runs. The form below follows both.</span>
+  {% else %}
+  <button type="submit" id="use-model">Use this mode</button>
+  <span class="muted">The mode this generation runs. The form below follows it.</span>
+  {% endif %}
+</form>
+
+{% comment %}
+The XHR submit handler's own script fills this in with `_form_errors.html`'s
+fragment (below). A non-XHR re-render around a NON-field error (the queue
+unreachable, the picked model gone) had no way to say so until now --
+`_form_errors.html`'s own comment already promised "the same messages shown
+... for the non-XHR path", so this closes that gap rather than opening a new
+one. Per-field errors still render next to their own field, below; this is
+non-field errors ONLY, so the two never say the same thing twice.
+{% endcomment %}
+<div id="form-errors">
+  {% if form.non_field_errors %}
+  <div class="banner warn form-errors">
+    {% for error in form.non_field_errors %}<p class="job-error">{{ error }}</p>{% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+{% if may_generate %}
+<form class="card gen-form" method="post" enctype="multipart/form-data" action="{% url 'vision-generate' %}" id="generate-form">
+  {% csrf_token %}
+  {% comment %}
+  Which model this submission runs on, carried as a hidden field so the POST
+  says it explicitly rather than the view re-deriving it from a referer or a
+  session. Blank means "the role binding", which is what every existing link,
+  bookmark, and caller sends. `views.picked_connection` reads this name off
+  the POST and the query string alike, which is what makes the picker's GET
+  and this POST agree.
+  {% endcomment %}
+  <input type="hidden" name="connection" value="{{ selected_connection }}">
+  {% comment %}
+  Which schema this submission is validated against. `generate` reads it and
+  404s on a key that is not registered -- the URL and the POST identify an
+  operation the same way.
+  {% endcomment %}
+  <input type="hidden" name="operation" value="{{ operation.key }}">
+  {% comment %}
+  An image the operator picked from the gallery, carried as a reference
+  (`views.stored_input_refs` / `views._stored_input_context`, the
+  `stored_inputs` context list). This used to render here, once per file
+  param, as a block at the TOP of the form -- which said "Using this
+  image as Image" above the fold while the Image file input, further
+  down, still read "No file chosen" (owner screenshot: the operator
+  could not tell that input already had a value). It now renders inline
+  in `_field.html`, immediately under the specific file widget it
+  belongs to (matched there by `stored.param_key == f.name`), so the
+  occupied slot is visually obvious. The hidden `input_<key>` field is
+  still posted from inside THIS form either way.
+  {% endcomment %}
+  <fieldset{% if not operations_supported %} disabled{% endif %}>
+  {% for f in form %}{% if f.field.wide %}{% include "vision/_field.html" %}{% endif %}{% endfor %}
+  <div class="row">
+    {% for f in form %}{% if not f.field.wide %}{% include "vision/_field.html" %}{% endif %}{% endfor %}
+  </div>
+  <div><button type="submit">Generate</button></div>
+  </fieldset>
+  {% comment %}
+  This form's first inline script -- distinct from the polling/XHR-submit
+  script in `{% block scripts %}` below, which handles the job cards and
+  never touches a file input. Pure progressive enhancement: nothing about
+  submitting the form depends on this running. Without it (JS disabled,
+  or an error before it attaches) the operator attaches a file and
+  submits exactly as before, with no preview and no loss of function.
+  With it, choosing a file shows what was chosen immediately, so the
+  operator can catch the wrong file before generating rather than after.
+  Same story for the Remove control it also builds: the native input can
+  only replace a chosen file, never clear it, so without this script
+  that replace-only behaviour is simply what stands -- Remove never
+  exists to be missed.
+
+  It also wires up `.stored-remove` (`_field.html`, a gallery hand-off's
+  own "Remove" link): without JS its `href` is the fallback -- a reload
+  minus that one `input_<key>` (`views._remove_stored_input_url`); with
+  it, the click is intercepted and the whole `.stored-input` block --
+  hidden field included -- is removed from the DOM in place, no reload.
+  Same file, same "progressive enhancement only" rule as the preview
+  above, so it lives in the same `<script>` rather than a second one.
+
+  The picker form (above) server-renders its OWN mirror of every stored
+  `input_<key>` (the comment above that form), so a Model/Mode switch
+  does not silently bring a removed hand-off back. A click here has to
+  drop that mirror too, or the picker's next GET would resubmit it --
+  found live (:8002): Remove appeared to work, but the very next Model/
+  Mode switch un-did it.
+
+  `NAME` is read off `link.dataset.inputName` -- a value `_field.html`
+  stamps directly on the `.stored-remove` link itself (`data-input-name`)
+  -- BEFORE anything is removed from the DOM, rather than reached for on
+  a sibling of the block this handler is about to delete: reading first,
+  removing second, is the one order that cannot silently no-op if a
+  later edit ever changes what is inside `.stored-input`.
+  `querySelectorAll` (not `querySelector`) removes EVERY hidden input by
+  that name inside `.model-picker`, not only the first match, on the
+  chance more than one is ever present at once.
+  {% endcomment %}
+  <script>
+  (function () {
+    document.querySelectorAll('.gen-form .stored-remove').forEach(function (link) {
+      link.addEventListener('click', function (event) {
+        event.preventDefault();
+        var name = link.dataset.inputName;
+        if (name) {
+          document.querySelectorAll(
+            '.model-picker input[type=hidden][name="' + name + '"]'
+          ).forEach(function (mirror) { mirror.remove(); });
+        }
+        link.closest('.stored-input').remove();
+      });
+    });
+    document.querySelectorAll('.gen-form input[type=file]').forEach(function (input) {
+      var url = null;
+      function clearPreview() {
+        if (url) { URL.revokeObjectURL(url); url = null; }
+        var old = input.nextElementSibling;
+        if (old && old.classList.contains('file-preview-wrap')) { old.remove(); }
+      }
+      input.addEventListener('change', function () {
+        clearPreview();
+        var file = input.files[0];
+        if (!file || file.type.indexOf('image/') !== 0) { return; }
+        url = URL.createObjectURL(file);
+        var wrap = document.createElement('div');
+        wrap.className = 'file-preview-wrap';
+        var img = document.createElement('img');
+        img.className = 'file-preview';
+        img.alt = 'Preview of the selected image.';
+        img.src = url;
+        wrap.appendChild(img);
+        wrap.insertAdjacentHTML('beforeend', '<button type="button" class="file-clear secondary">Remove</button>');
+        wrap.querySelector('.file-clear').addEventListener('click', function () {
+          input.value = '';
+          clearPreview();
+        });
+        input.insertAdjacentElement('afterend', wrap);
+      });
+    });
+  })();
+  </script>
+</form>
+{% else %}
+  <p class="card muted">{{ generate_forbidden_message }} Everything you have already
+    generated is still below.</p>
+{% endif %}
+
+<h2>Recent</h2>
+<div id="jobs">
+  {% if queued_card %}{% include "vision/_queued_card.html" with card=queued_card %}{% endif %}
+  {% comment %}
+  A child wrapper, not `#jobs` itself (T1, 2026-09-16): the discovery
+  poll below replaces THIS element's contents wholesale on every change,
+  and the `?queued=` placeholder above must never be inside that
+  boundary -- it names a job that has no `GenerationJob` row yet, so it
+  cannot be one of the cards `vision-jobs-strip` (`_recent_jobs`) knows
+  how to render, and a swap that ate it would blank the one card an
+  operator on the no-JS redirect path is looking at.
+  {% endcomment %}
+  {% comment %}
+  `data-strip-fp` (fix round 2026-09-16, review finding 1): the
+  discovery poll's starting fingerprint, from the SAME `views._strip_
+  fingerprint(jobs)` call `vision-jobs-strip` answers with as its own
+  `X-Strip-Fingerprint` header -- comparing THIS to that header is what
+  replaces a body-text compare (rendered-DOM vs. fetched-fragment text
+  can never honestly agree, since this include renders with different
+  incidental whitespace inline here than it does standalone).
+  {% endcomment %}
+  <div id="jobs-strip" data-strip-fp="{{ jobs_strip_fp }}">{% include "vision/_jobs_strip.html" %}</div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{% include "_poller.html" %}
+<script>
+// Poll every non-terminal card and swap in the fresh fragment; a card
+// without data-job-poll is finished, so polling stops by itself. The
+// loop itself is `_poller.html`'s `pollUntilTerminal` (C-16) -- this
+// page owns only what a response MEANS. No external assets, and the
+// page works fully without this script.
+(function () {
+  // Images queues run far longer than Ask's turnaround, and a
+  // web-container restart mid-queue must read as "still checking", not
+  // as sudden failure -- so this page's ceilings differ from
+  // `_poller.html`'s defaults (10 minutes / 3 transport retries, tuned
+  // for Ask). 60 minutes gives a long image queue room to actually
+  // finish before the give-up note below fires; 12 retries is roughly a
+  // minute of this page's own 5-second backoff (`retryDelayMs` below),
+  // long enough that a container restart does not freeze the card.
+  window.POLL_DEFAULTS.maxDurationMs = 60 * 60 * 1000;
+  window.POLL_DEFAULTS.maxTransportRetries = 12;
+
+  // The Recent strip's own discovery cadence (T1, 2026-09-16) -- a fixed
+  // per-tick delay, not `POLL_DEFAULTS.intervalMs` (unused below; this
+  // call always supplies its own `delayMs`). Fast enough that a
+  // generation queued by a chat turn or another tab shows up within a
+  // few seconds; slow enough that an idle create page costs nowhere near
+  // what watching every open non-terminal card already does.
+  var STRIP_POLL_DELAY_MS = 4000;
+
+  // Server-rendered, exactly like every card's own `data-job-poll`
+  // (`_job_card.html`) -- the same `?connection=` query key every other
+  // link and poll on this page carries, never assembled from anything
+  // JS reads out of the page itself.
+  var STRIP_URL = "{% url 'vision-jobs-strip' %}{% if selected_connection %}?connection={{ selected_connection }}{% endif %}";
+
+  // The "Refresh to update." note is the no-JS fallback (_job_card.html);
+  // with JS running it should read as the live-polling hint it actually
+  // is. Applied at load, to the card the submit handler inserts, and to
+  // each `fresh` card a poll swap brings in -- every place a card enters
+  // the DOM while this script is alive.
+  function markLive(card) {
+    var note = card.querySelector('.no-js-note');
+    if (note) { note.textContent = 'Waiting for the engine…'; }
+  }
+
+  function watch(card) {
+    pollUntilTerminal(card.getAttribute('data-job-poll'), {
+      // The first poll waits, exactly as before: a card inserted a
+      // moment ago has not reached the engine yet.
+      startDelayMs: 2000,
+      // A transport failure backs off further than an ordinary tick
+      // does -- this page's own long-standing choice, preserved.
+      retryDelayMs: 5000,
+      onResponse: function (response) {
+        // ORPHAN GUARD (fix round 2026-09-16, review finding 1): a card
+        // the discovery poll below already swapped away is no longer
+        // `isConnected` -- `card.replaceWith(fresh)` further down is a
+        // silent no-op on a node with no parent, so without this a loop
+        // whose card left the DOM would keep polling `vision-job-status`
+        // against a dead node all the way to its own ceiling instead of
+        // stopping the moment it next ticks.
+        if (!card.isConnected) { return { retry: false }; }
+        if (response.status === 404) {
+          card.removeAttribute('data-job-poll');
+          card.innerHTML = '<p class="muted">This generation was removed.</p>';
+          return null;
+        }
+        if (!response.ok) { return { retry: true }; }
+        return response.text().then(function (html) {
+          var holder = document.createElement('div');
+          holder.innerHTML = html.trim();
+          var fresh = holder.firstElementChild;
+          card.replaceWith(fresh);
+          markLive(fresh);
+          card = fresh;
+          var next = fresh.getAttribute('data-job-poll');
+          return next ? { retry: true, url: next } : null;
+        });
+      },
+      onGiveUp: function () {
+        // markLive() already overwrote this card's note to "Waiting for
+        // the engine…" -- left alone, a tripped ceiling (10 minutes, or
+        // 3 consecutive transport failures) would freeze the card on
+        // that claim forever, which is now false: nothing is watching
+        // it any more. Say so honestly, distinct from markLive's own
+        // sentence, rather than falling back on the fragment's static
+        // "Refresh to update." (which a fresh swap already overwrote).
+        card.removeAttribute('data-job-poll');
+        var note = card.querySelector('.no-js-note');
+        if (note) { note.textContent = 'Stopped checking after a while — refresh to update.'; }
+      }
+    });
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('[data-job-poll]'), watch);
+  Array.prototype.forEach.call(document.querySelectorAll('.job-card'), markLive);
+
+  // DISCOVER new jobs (T1, 2026-09-16). Every poll above only refreshes
+  // a card already sitting in the DOM; nothing before this noticed a
+  // generation that showed up from somewhere else -- a chat turn, or
+  // another tab -- while this page sat open. This polls the exact same
+  // Recent list the page itself rendered (`vision-jobs-strip`, the
+  // `_jobs_strip.html` include this page's own markup uses too, so the
+  // two can never disagree on who counts as recent) and swaps the
+  // fragment's contents in only when its FINGERPRINT actually differs
+  // from the last answer.
+  var strip = document.getElementById('jobs-strip');
+  if (strip) {
+    // FINGERPRINT compare, not a body-text compare (fix round
+    // 2026-09-16, review finding 1): this wrapper's own `data-strip-fp`
+    // came from the SAME `views._strip_fingerprint(jobs)` call
+    // `vision-jobs-strip` answers with as `X-Strip-Fingerprint` on every
+    // poll -- comparing those two numbers is exact. A body-text compare
+    // was tried first and was wrong: this include renders with
+    // different incidental whitespace depending on whether it is
+    // INCLUDED inline (this page) or rendered STANDALONE (the fragment
+    // endpoint), so it "changed" on literally the first tick regardless
+    // of whether any job actually had -- detaching the cards `watch()`
+    // had just attached at load and leaving their poll loops orphaned.
+    var lastFp = strip.getAttribute('data-strip-fp') || '';
+    pollUntilTerminal(STRIP_URL, {
+      onResponse: function (response) {
+        var fp = response.headers.get('X-Strip-Fingerprint') || '';
+        if (!response.ok || fp === lastFp) {
+          return { retry: true, delayMs: STRIP_POLL_DELAY_MS };
+        }
+        return response.text().then(function (html) {
+          lastFp = fp;
+          strip.setAttribute('data-strip-fp', fp);
+          strip.innerHTML = html;
+          // The `?queued=` placeholder lives OUTSIDE this wrapper
+          // (create.html's own markup), so it is never touched by this
+          // swap. Every fresh non-terminal card gets the same live note
+          // and the same watcher every other card on this page gets --
+          // `watch` is the one function that owns that poll loop; this
+          // never grows a second copy of it. Any watcher still running
+          // against a card THIS swap just detached self-terminates on
+          // its own next tick (`watch`'s own `isConnected` guard, above)
+          // rather than polling a dead node to its ceiling.
+          Array.prototype.forEach.call(strip.querySelectorAll('[data-job-poll]'), function (card) {
+            markLive(card);
+            watch(card);
+          });
+          return { retry: true, delayMs: STRIP_POLL_DELAY_MS };
+        });
+      },
+      onGiveUp: function () {
+        // Matches the house honest-give-up pattern (`watch`'s own
+        // `onGiveUp`, above): nothing is discovering new generations any
+        // more, and a silent poller that quietly stopped would be a lie
+        // by omission the moment the next externally-started job never
+        // shows up.
+        var note = document.getElementById('jobs-strip-note');
+        if (!note) {
+          note = document.createElement('p');
+          note.id = 'jobs-strip-note';
+          note.className = 'muted';
+          strip.insertAdjacentElement('afterend', note);
+        }
+        note.textContent = 'Stopped watching for new generations — reload to catch up.';
+      }
+    });
+  }
+
+  // Progressive enhancement ONLY. Without JS the operator changes a
+  // select and presses the button; the same GET happens either way. Both
+  // selects (model and mode) live in the one picker form, so both submit
+  // it -- the button is hidden only once we know we can do it for them.
+  var pickers = document.querySelectorAll('[data-reload-on-change]');
+  var useModel = document.getElementById('use-model');
+  var pickerForm = pickers.length ? pickers[0].form : null;
+  if (pickers.length && useModel && pickerForm) {
+    useModel.hidden = true;
+    Array.prototype.forEach.call(pickers, function (picker) {
+      // `requestSubmit()`, not `submit()`: only the FORMER dispatches the
+      // form's own `submit` event -- the carry-forward listener just
+      // below needs that event to fire on THIS auto-submit-on-change path
+      // too, not only on a real click of the (now hidden) button.
+      picker.addEventListener('change', function () { pickerForm.requestSubmit(); });
+    });
+  }
+
+  var form = document.getElementById('generate-form');
+  var formErrors = document.getElementById('form-errors');
+
+  // Owner: "when i click on buttons it refreshes the page and clears
+  // current inputs." The Model/Mode picker is its OWN GET form on
+  // purpose (the comment above the picker form, create.html) -- that is
+  // what keeps a switch from dropping an attached file. The cost was
+  // everything TYPED going with it. This carries it back: right before
+  // the picker form actually submits, mirror every enabled, non-file
+  // field of the generate form into a hidden field of the SAME name on
+  // the picker form, so the reload's query string carries those values
+  // and `views._carried_get_initial` (lowest precedence -- a live
+  // default or a reused job's own value still wins) prefills the form
+  // with them again. One listener on `submit` covers both ways the
+  // picker form can go: the auto-submit-on-change path above (via
+  // `requestSubmit()`) and a plain click of "Use these"/"Use this mode"
+  // when JS never got as far as hiding it.
+  //
+  // Files cannot be carried this way -- a query string cannot hold a
+  // file's bytes -- so an attached file is still lost on a switch; the
+  // operator re-attaches after.
+  //
+  // `connection`/`operation`/`csrfmiddlewaretoken` are skipped: the first
+  // two are what the picker's OWN selects are about to set, and mirroring
+  // the generate form's stale hidden copies of them here would overwrite
+  // the operator's actual choice. A stored `input_*` reference is skipped
+  // too -- that is preserved server-side, rendered directly into the
+  // picker form as its own hidden field (the comment above the picker
+  // form), so it survives with no JS at all; carrying it again here would
+  // only be redundant. A field with MORE THAN ONE current value (the
+  // LoRAs chip group -- several checked boxes share one `name`) is
+  // skipped too rather than carried as just its last value: `FormData`
+  // yields one entry per checked box under that shared name, and blindly
+  // "refreshing" one hidden input per name would silently drop every
+  // value but the last.
+  if (pickerForm && form) {
+    var CARRY_SKIP = { connection: true, operation: true, csrfmiddlewaretoken: true };
+    pickerForm.addEventListener('submit', function () {
+      var values = {};
+      var multiValued = {};
+      new FormData(form).forEach(function (value, name) {
+        if (CARRY_SKIP[name] || name.indexOf('input_') === 0) { return; }
+        if (typeof value !== 'string' || !value) { return; }
+        if (name in values) { multiValued[name] = true; return; }
+        values[name] = value;
+      });
+      Object.keys(values).forEach(function (name) {
+        if (multiValued[name]) { return; }
+        var hidden = pickerForm.querySelector('input[type=hidden][name="' + name + '"]');
+        if (!hidden) {
+          hidden = document.createElement('input');
+          hidden.type = 'hidden';
+          hidden.name = name;
+          pickerForm.appendChild(hidden);
+        }
+        hidden.value = values[name];
+      });
+    });
+  }
+
+  if (form) {
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      fetch(form.action, {
+        method: 'POST',
+        body: new FormData(form),
+        headers: { 'X-Requested-With': 'XMLHttpRequest' }
+      }).then(function (response) {
+        return response.text().then(function (html) {
+          if (!response.ok) { formErrors.innerHTML = html; return; }
+          formErrors.innerHTML = '';
+          var holder = document.createElement('div');
+          holder.innerHTML = html.trim();
+          var card = holder.firstElementChild;
+          var empty = document.getElementById('jobs-empty');
+          if (empty) { empty.remove(); }
+          document.getElementById('jobs').insertAdjacentElement('afterbegin', card);
+          markLive(card);
+          watch(card);
+        });
+      }).catch(function () {
+        formErrors.innerHTML = '<div class="banner warn form-errors"><p class="job-error">Could not reach farabunker — check the connection and try again.</p></div>';
+      });
+    });
+  }
+})();
+</script>
+{% endblock %}

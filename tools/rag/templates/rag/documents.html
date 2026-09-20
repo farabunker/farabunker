@@ -1,0 +1,1013 @@
+{% extends "rag/base.html" %}
+{% comment %}
+Document library. Shared shell (tokens, body, nav, button base) lives in
+rag/base.html; only library-specific tokens/styles/markup are here.
+{% endcomment %}
+{% block title %}Document library — farabunker{% endblock %}
+
+{% block extra_style %}
+  :root {
+    {% comment %}
+    WIDER THAN A READING COLUMN, because this page is a table, not prose.
+    At 960 the two-column layout left the table ~700px: the shelf takes
+    220 plus a 1.5rem gutter, and the card takes another 2rem of padding.
+    Six columns whose minimum widths add up to more than that leave the
+    title cell nothing to absorb -- which is exactly what the pixel pass
+    measured (title 239px, the meta line still fragmenting). The surplus
+    a table distributes cannot be negative, so the fix is to have some.
+    {% endcomment %}
+    --page-max-width: 1200px;
+    {% comment %}
+    `--danger` is NOT redeclared here any more: the shell already owns it,
+    at these exact values, and a second copy is a second thing to drift
+    (fix round 2). `--danger-text`/`--error-bg`/`--error-text`/`--mono`
+    are gone from here for the same reason, as of C-20: the shell owns
+    all four now too, in both colour schemes, so this page's filled
+    Delete-button hover state and its error rows read from the shared
+    tokens.
+
+    `--shelf-count-bg` was `--chip-bg` until fix round 2, which is a name
+    this page had quietly taken from the shell. Harmless while nothing
+    here rendered a `.chip`; the labels column now renders one per label,
+    so the local value would have restyled every chip on the page. Renamed
+    to what it actually is -- the pill behind a shelf's document count.
+    {% endcomment %}
+    --shelf-hover: #eef1f9;
+    --shelf-active-bg: #e6ecfb;
+    --shelf-count-bg: #eceef2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --shelf-hover: #262a35;
+      --shelf-active-bg: #202944;
+      --shelf-count-bg: #2c2e35;
+    }
+  }
+  .page {
+    max-width: var(--page-max-width);
+    margin: 0 auto;
+  }
+  .page-head {
+    margin-bottom: 1.5rem;
+  }
+
+  /* -- Two-column library: shelf sidebar (browse) + stacks (search/list). */
+  .library {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 1.5rem;
+    align-items: start;
+  }
+
+  .shelf {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.85rem 0.5rem;
+    position: sticky;
+    top: 1.5rem;
+  }
+  .shelf-label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 0 0.75rem 0.6rem;
+  }
+  .shelf-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+  }
+  .shelf-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.45rem 0.75rem;
+    border-left: 3px solid transparent;
+    border-radius: 0 6px 6px 0;
+    color: var(--text);
+    text-decoration: none;
+    font-size: 0.92rem;
+  }
+  .shelf-item:hover {
+    background: var(--shelf-hover);
+  }
+  .shelf-item.active {
+    border-left-color: var(--accent);
+    background: var(--shelf-active-bg);
+    font-weight: 600;
+  }
+  .shelf-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .shelf-count {
+    flex: none;
+    font-family: var(--mono);
+    font-size: 0.74rem;
+    color: var(--muted);
+    background: var(--shelf-count-bg);
+    border-radius: 999px;
+    padding: 0.08rem 0.45rem;
+    min-width: 1.5rem;
+    text-align: center;
+  }
+  .shelf-item.active .shelf-count {
+    color: var(--accent-text);
+    background: var(--accent);
+  }
+  .shelf-row {
+    display: flex;
+    align-items: center;
+    gap: 0.15rem;
+  }
+  .shelf-row .shelf-item {
+    flex: 1;
+  }
+  .shelf-manage summary {
+    list-style: none;
+    cursor: pointer;
+    color: var(--muted);
+    padding: 0 0.35rem;
+    border-radius: 6px;
+  }
+  .shelf-manage summary:hover {
+    background: var(--shelf-hover);
+  }
+  .shelf-manage[open] {
+    padding: 0.4rem 0.5rem;
+  }
+  .shelf-manage form {
+    display: flex;
+    gap: 0.3rem;
+    margin-top: 0.3rem;
+  }
+  .shelf-manage input[type="text"] {
+    width: 100%;
+    padding: 0.3rem 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: 0.85rem;
+  }
+  .shelf-manage button {
+    padding: 0.3rem 0.55rem;
+    font-size: 0.8rem;
+  }
+
+  .stacks {
+    min-width: 0;
+  }
+
+  form.search {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    margin-bottom: 1.25rem;
+  }
+  form.search input[type="search"] {
+    flex: 1;
+    padding: 0.55rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--text);
+    font: inherit;
+  }
+  form.search button {
+    padding: 0.55rem 1.1rem;
+  }
+  form.search .clear {
+    color: var(--muted);
+    font-size: 0.85rem;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  form.search .clear:hover {
+    text-decoration: underline;
+  }
+
+  {% comment %}
+  `.messages`/`.msg` moved to `_shell.html` (C-21/C-52), which renders
+  them unconditionally from its own `<style>` tag -- no `{{ block.super
+  }}` needed here. This page now inherits the shared recipe's list-reset
+  and padding/border/font-size wholesale; `background` is the one
+  property this page's `.msg` ever spelled differently
+  (`--shelf-active-bg`, not the shell's `--panel`), so that is all that
+  is left here -- a local override, not a restatement. One visible
+  consequence: this page's flash now also picks up the shell's
+  `border`, which it never had before (this page never extended
+  `_settings.html`, so it never inherited a bordered `.msg` from
+  anywhere) -- accepted, matches `console.html`'s own long-standing
+  `.msg`. `.msg.error` below is this page's own genuine variant and
+  stayed put too.
+  {% endcomment %}
+  .msg { background: var(--shelf-active-bg); }
+  .msg.error {
+    background: var(--error-bg);
+    color: var(--error-text);
+  }
+  {% comment %}
+  `.banner` moved to `_shell.html` (C-22): it was byte-identical to
+  `agents/chat/templates/chat/base.html`'s own rule of the same name
+  (`chat-workstream`'s page carries the other half of this `?pin_into=`
+  round trip) and to `vision/base.html`'s. This page has no `.banner.warn`
+  -- that half stays local to the two templates that do.
+  {% endcomment %}
+  form.upload {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+    padding: 0.85rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  form.upload select,
+  form.upload input[type="text"] {
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+  }
+  {% comment %}
+  THE ONE LABEL-WRITING SURFACE (fix round 2). The table's Labels column
+  is read-only chips; every write to a label happens in this one card,
+  and the card sits directly ABOVE the table because that is where
+  somebody who has just ticked a row looks for what to do next. One
+  card, one set of chips, one scope control, two verbs -- it replaces a
+  per-row multi-select plus a per-row save button on every row, plus two
+  more forms below the table.
+
+  A DJANGO COMMENT, not a CSS one, and so is every other note in this
+  <style> block: a `/* ... */` is plain text inside <style> and renders
+  into the page, so a comment naming a control would put that control's
+  own words on a page that must not offer it.
+  {% endcomment %}
+  .with-selected {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.85rem 1rem;
+    margin-bottom: 1rem;
+  }
+  .with-selected h2 {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 0.2rem;
+  }
+  .with-selected .note {
+    margin: 0 0 0.8rem;
+    font-size: 0.82rem;
+    color: var(--muted);
+  }
+  .with-selected .scope {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: 0.8rem;
+    padding-top: 0.8rem;
+    border-top: 1px solid var(--border);
+  }
+  .with-selected select {
+    padding: 0.4rem 0.55rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: 0.88rem;
+  }
+  {% comment %}
+  SCOPED TO THE CARD, and it has to be: a bare `.scope-note` (0,1,0)
+  loses to `.with-selected .note` (0,2,0) above, on an element carrying
+  BOTH classes -- so the top margin never applied at all. The sibling
+  rule is scoped with it and stays last, or it would in turn lose to the
+  rule right above it.
+  {% endcomment %}
+  .with-selected .scope-note {
+    margin: 0.6rem 0 0;
+  }
+  .with-selected .scope-note + .scope-note {
+    margin-top: 0.25rem;
+  }
+  .with-selected .verbs {
+    display: flex;
+    gap: 0.5rem;
+    margin-left: auto;
+  }
+  .with-selected button {
+    padding: 0.4rem 0.85rem;
+    font-size: 0.85rem;
+  }
+  .with-selected button.ghost {
+    background: transparent;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+  }
+  .with-selected button.ghost:hover {
+    background: var(--accent);
+    color: var(--accent-text);
+  }
+
+  {% comment %}
+  `.chip-picker` / `.chip-check` / `.picker-label` moved to the shared
+  shell in round 3: three pages render one now (this one twice, plus
+  Tool access and Agent access), which is the threshold at which a rule
+  belongs beside the tokens rather than in one page's `extra_style`.
+  `.labels-field` stays here -- it is this page's own flex row, not part
+  of the picker.
+  {% endcomment %}
+  .labels-field {
+    flex-basis: 100%;
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .table-wrap {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.25rem 1rem;
+    overflow-x: auto;
+  }
+  {% comment %}
+  `width: 100%` on the TABLE, not just on its cells: without it a
+  `table-layout: auto` table is shrink-to-fit and never has a surplus to
+  distribute in the first place, so every column rule below it is inert.
+  {% endcomment %}
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  {% comment %}
+  WHERE THE WIDTH GOES. Every column used to negotiate for itself, so
+  the title -- the only cell with a sentence in it -- came last and was
+  starved: the meta line broke into fragments two or three words wide
+  while Labels, Category and Source each held a column they did not
+  fill, and the actions column left a gulf of dead space at the right.
+
+  `width: 100%` on the title cell and `width: 1%` on the rest is the
+  table idiom for "size these to their content and give the remainder to
+  that one". It is not a real 100%/1% split -- a table distributes the
+  surplus after every column has its minimum, and asking for 100% is how
+  one column claims all of that surplus.
+
+  Category, Source and the actions already refuse to wrap in their own
+  rules further down, which is what keeps them at their natural width
+  rather than letting the browser buy the title's space back by wrapping
+  "Uncategorized". The Labels cell is deliberately NOT nowrap -- a
+  document with four chips should wrap them, not push the title out --
+  so the nowrap sits on the individual chips instead.
+  {% endcomment %}
+  {% comment %}
+  `width: 100%` claims the surplus; `min-width` guarantees there is a
+  floor even when there is none to claim. In the auto table algorithm a
+  cell's MINIMUM CONTENT WIDTH always beats a specified width, so five
+  short columns that each refuse to wrap can starve a sixth no matter
+  what percentage it asks for -- a percentage is a claim on what is
+  left over, not a reservation. This is the reservation. Below it the
+  table overflows into `.table-wrap`'s own `overflow-x: auto`, which is
+  the honest outcome on a genuinely narrow screen and was always the
+  escape valve here.
+  {% endcomment %}
+  {% comment %}
+  EVERY COLUMN EXCEPT THE TITLE claims `width: 1%`, which in a table
+  layout means "as narrow as your content allows" -- that is what lets
+  `td.doc-title`'s `width: 100%` actually take the slack instead of
+  negotiating with five other claimants. The Workstream column (C-51) was
+  added after this rule was written and was the one left out, so it was
+  the only column still competing for the title's space.
+  {% endcomment %}
+  td.doc-title { width: 100%; min-width: 22rem; }
+  .doc-labels,
+  .doc-category,
+  .doc-type,
+  .workstream,
+  .doc-actions { width: 1%; }
+  {% comment %}
+  The tabular note rides beside the row's other metadata and had no rule
+  at all, so it rendered at body size next to muted text (C-51).
+  {% endcomment %}
+  .doc-tabular-note { color: var(--muted); font-size: 0.85rem; }
+  {% comment %}
+  Header and body share one horizontal padding, which is the whole of
+  "columns aligned to the header" -- they used to differ, so every column
+  sat a quarter-rem off its own heading. `vertical-align: top` because
+  the title cell is now two lines and the others are one: a
+  middle-aligned cell floated against nothing.
+  {% endcomment %}
+  thead th {
+    text-align: left;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 0.75rem 0.5rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+  table td {
+    padding: 0.7rem 0.5rem;
+    border-top: 1px solid var(--border);
+    vertical-align: top;
+  }
+  {% comment %}
+  The checkbox column's heading: a name for a screen reader, nothing
+  drawn. An empty `<th>` leaves the column unnamed in the table's own
+  header row, which is the one place a non-visual reader looks to find
+  out what a column is for.
+  {% endcomment %}
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  th.col-select,
+  td.col-select {
+    width: 1.5rem;
+    padding-right: 0;
+  }
+  td.col-select input {
+    margin: 0.15rem 0 0;
+  }
+  tbody tr:first-child td {
+    border-top: none;
+  }
+  .doc-title a {
+    color: var(--accent);
+    text-decoration: none;
+    font-weight: 600;
+  }
+  .doc-title a:hover {
+    text-decoration: underline;
+  }
+  .doc-title-plain {
+    font-weight: 600;
+  }
+  {% comment %}
+  ONE quiet meta line under the title: links, status, and whatever this
+  document has to say about itself. The separators come from the items
+  rather than from typed characters, so they wrap with what they
+  separate -- the same rule `_output_actions.html` follows in the vision
+  gallery.
+  {% endcomment %}
+  .doc-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.1rem 0.5rem;
+    margin-top: 0.2rem;
+    font-size: 0.8rem;
+    color: var(--muted);
+  }
+  .doc-meta > * + *::before {
+    content: "·";
+    color: var(--border);
+    margin-right: 0.5rem;
+  }
+  {% comment %}
+  Short items never break mid-phrase -- a duration or a status left
+  hanging on a line of its own was the most visible symptom of the
+  starved column. The extraction note is the one item long enough to
+  deserve wrapping inside itself, so it keeps the default.
+  {% endcomment %}
+  .doc-meta > * { white-space: nowrap; }
+  .doc-meta > .doc-extraction-summary { white-space: normal; }
+  .doc-meta a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .doc-meta a:hover {
+    text-decoration: underline;
+  }
+  .doc-labels .chip {
+    margin: 0 0.25rem 0.2rem 0;
+    white-space: nowrap;
+  }
+  .doc-unlabelled {
+    color: var(--muted);
+  }
+  .doc-category {
+    color: var(--muted);
+    font-size: 0.88rem;
+    white-space: nowrap;
+  }
+  .doc-type {
+    color: var(--muted);
+    font-size: 0.85rem;
+    white-space: nowrap;
+  }
+  .doc-actions {
+    text-align: right;
+    white-space: nowrap;
+  }
+  form.delete-form,
+  form.retry-form {
+    display: inline;
+  }
+  {% comment %}
+  The destructive action is OUTLINED, not a solid red block (fix round
+  2). A table where every row carried a filled danger button read as a
+  wall of alarm over what is, on this page, an ordinary maintenance
+  action; the colour is still `--danger` and the button still fills on
+  hover, so nothing about the warning is lost -- only the shouting. The
+  re-run button keeps the outline treatment it already had, and the two
+  now match.
+  {% endcomment %}
+  button.delete-btn {
+    background: transparent;
+    color: var(--danger);
+    border: 1px solid var(--danger);
+    padding: 0.3rem 0.65rem;
+    font-size: 0.82rem;
+  }
+  button.delete-btn:hover {
+    background: var(--danger);
+    color: var(--danger-text);
+  }
+  button.retry-btn {
+    background: transparent;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    padding: 0.3rem 0.65rem;
+    font-size: 0.82rem;
+    margin-right: 0.3rem;
+  }
+  button.retry-btn:hover {
+    background: var(--accent);
+    color: var(--accent-text);
+  }
+  .doc-status-chip {
+    color: var(--muted);
+  }
+  .doc-status-chip.doc-status-failed {
+    color: var(--danger);
+  }
+  .doc-status-chip.doc-status-ready {
+    color: var(--ok);
+  }
+  .doc-badge {
+    display: inline-block;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .doc-duration {
+    font-family: var(--mono);
+  }
+  .pager {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    margin-top: 1.25rem;
+    font-size: 0.88rem;
+  }
+  .pager-link {
+    color: var(--accent);
+    text-decoration: none;
+    font-weight: 600;
+  }
+  .pager-link:hover {
+    text-decoration: underline;
+  }
+  .pager-link.disabled {
+    color: var(--muted);
+    font-weight: 400;
+    pointer-events: none;
+  }
+  .pager-status {
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 0.8rem;
+  }
+
+  @media (max-width: 720px) {
+    .library {
+      grid-template-columns: 1fr;
+    }
+    .shelf {
+      position: static;
+      padding: 0.6rem;
+    }
+    .shelf-list {
+      flex-direction: row;
+      flex-wrap: wrap;
+    }
+    .shelf-item {
+      border-left: none;
+      border-bottom: 3px solid transparent;
+      border-radius: 6px;
+    }
+    .shelf-item.active {
+      border-bottom-color: var(--accent);
+    }
+    form.search {
+      flex-wrap: wrap;
+    }
+    .doc-category {
+      display: none;
+    }
+  }
+{% endblock %}
+
+{% block nav_current_documents %}current{% endblock %}
+
+{% block content %}
+<div class="page">
+  {% include "_messages.html" %}
+  {% if pin_into %}
+  <p class="banner">Pinning into
+    <a href="{% url 'chat-workstream' pin_into.workstream_id %}">{{ pin_into_name }}</a>.
+    Pick a universal document below.</p>
+  {% endif %}
+  {% comment %}
+  THE ENTITLEMENT FILTER (phase 2), reached from an entitlement's own
+  page. It NARROWS what this viewer could already list and never widens
+  it, so the honest empty state is the whole of what a filter naming
+  something they cannot see produces. The banner names the entitlement
+  only when this page would already have named it -- see
+  `tools/rag/views.py::_entitlement_filter` -- and otherwise says what is
+  true without saying which.
+  {% endcomment %}
+  {% if entitlement_filter.active %}
+  <p class="banner">{% if entitlement_filter.name %}Showing documents labelled
+    <strong>{{ entitlement_filter.name }}</strong>.{% else %}Showing documents labelled with
+    one entitlement.{% endif %}
+    <a href="{% url 'rag-documents' %}">Clear</a></p>
+  {% endif %}
+  <header class="page-head">
+    <h1>Document library</h1>
+    <p class="tagline">Browse by shelf on the left, or search every title at once.</p>
+  </header>
+
+  <div class="library">
+    <aside class="shelf" aria-label="Categories">
+      <div class="shelf-label">Shelves</div>
+      <nav class="shelf-list">
+        {% for entry in sidebar %}
+        <div class="shelf-row{% if entry.active %} active{% endif %}">
+          <a class="shelf-item{% if entry.active %} active{% endif %}" href="{{ entry.url }}">
+            <span class="shelf-name">{{ entry.name }}</span>
+            <span class="shelf-count">{{ entry.count }}</span>
+          </a>
+          {% if entry.manageable %}
+          <details class="shelf-manage">
+            <summary aria-label="Manage {{ entry.name }}">&ctdot;</summary>
+            {% comment %}mirrors the admin-only POST gate on rag-category-rename / rag-category-delete{% endcomment %}
+            {% if identity_is_admin %}
+            <form method="post" action="{% url 'rag-category-rename' entry.id %}">
+              {% csrf_token %}
+              <input type="text" name="name" value="{{ entry.name }}" aria-label="Rename category">
+              <button type="submit">Rename</button>
+            </form>
+            <form method="post" action="{% url 'rag-category-delete' entry.id %}" onsubmit="return confirm('Delete category {{ entry.name|escapejs }}? Its documents become Uncategorized.');">
+              {% csrf_token %}
+              <button type="submit" class="delete-btn">Delete</button>
+            </form>
+            {% endif %}
+          </details>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </nav>
+    </aside>
+
+    <section class="stacks">
+      {% if may_upload %}
+      <form class="upload" method="post" action="{% url 'rag-document-upload' %}" enctype="multipart/form-data">
+        {% csrf_token %}
+        <input type="file" name="files" multiple required aria-label="Files to upload">
+        <select name="category" aria-label="Category for uploaded files">
+          <option value="">Uncategorized</option>
+          {% for category in categories %}
+          <option value="{{ category.name }}">{{ category.name }}</option>
+          {% endfor %}
+        </select>
+        <input type="text" name="new_category" placeholder="or new category…" aria-label="New category name">
+        {% if label_choices %}
+        {% comment %}
+        A CHIP PICKER, not a `<select multiple>` (fix round 2). The raw
+        multi-select was a scrolling three-row box that hid every option
+        past the third and gave no indication that more than one could be
+        chosen. These are the same `<input type="checkbox" name=
+        "entitlements">` values the view already reads -- `request.POST.
+        getlist("entitlements")` cannot tell the two widgets apart -- so
+        this is a presentation change with no view change behind it.
+
+        A `role="group"` div rather than a `<fieldset>`/`<legend>`: a
+        legend inside a flex container is laid out outside the flex flow
+        and would not sit on the row with its chips. The label is a plain
+        span, wired with `aria-labelledby`, which reads identically.
+        {% endcomment %}
+        <div class="labels-field">
+          <span class="picker-label" id="id_upload_entitlements_label">Labels</span>
+          <div class="chip-picker" role="group" id="id_upload_entitlements"
+               aria-labelledby="id_upload_entitlements_label">
+            {% for pk, name in label_choices %}
+            <label class="chip-check"><input type="checkbox" name="entitlements" value="{{ pk }}"><span class="chip">{{ name }}</span></label>
+            {% endfor %}
+          </div>
+        </div>
+        <p class="muted">A document with no label follows the library posture — everyone signed
+          in can read it while the library is open.</p>
+        {% endif %}
+        <button type="submit">Upload</button>
+      </form>
+      {% else %}
+      <p class="muted">{{ upload_forbidden_message }} Everything you may read is still
+        listed below.</p>
+      {% endif %}
+
+      <form class="search" method="get" action="{% url 'rag-documents' %}">
+        {% if category_param %}<input type="hidden" name="category" value="{{ category_param }}">{% endif %}
+        <input type="search" name="q" placeholder="Search titles…" value="{{ query }}" aria-label="Search documents by title">
+        <button type="submit">Search</button>
+        {% if query %}
+        <a class="clear" href="{{ clear_search_url }}">Clear</a>
+        {% endif %}
+      </form>
+
+      {% if may_label_any %}
+      {% comment %}
+      THE ONE LABEL-WRITING SURFACE (fix round 2). It used to be three:
+      a `<select multiple>` plus a "Save labels" button on EVERY row, a
+      bulk form below the table, and a second bulk form for a whole
+      category. The owner rejected that on sight -- a row is a thing you
+      read, and three ways to write one label is three ways to be
+      inconsistent. The table's Labels column is read-only chips now, and
+      this card is the only writer.
+
+      ABOVE the table, deliberately: the checkboxes it acts on are in the
+      rows below it, and a control you cannot see while you tick things
+      is a control you scroll past. The checkboxes reach this form
+      through `form="bulk-label-form"` -- HTML5's own way of associating
+      an input with a form it is not nested inside -- which is what lets
+      the form render once, here, instead of once per row.
+
+      ADD OR REMOVE, NEVER "SET TO EXACTLY THIS", and the note says so in
+      the page's own words. That is the shipped semantics of
+      `rag-document-labels-bulk` (`tools/rag/views.py::document_labels_
+      bulk`: `current | wanted` or `current - wanted`), unchanged here --
+      somebody selecting forty documents to add one label must not
+      silently strip the labels those documents already carry.
+
+      ONE SCOPE CONTROL, not a second form. `documents_targeted_for_
+      labelling` already documents its precedence -- "`category`, when
+      given, wins over `ids`" -- so a blank `category` means "the checked
+      rows" to the endpoint exactly as it now does to the reader. That
+      collapses the old category-only form into this one without
+      touching the endpoint, and without a `<button>` ever doubling as
+      two verbs: the two buttons still differ only in `action`.
+
+      EXPLICITLY NOT a stored category-to-entitlement rule (spec section
+      22.34, the owner's own ruling): choosing a shelf labels the
+      documents in it now; a document added to that shelf afterwards is
+      unlabelled.
+      {% endcomment %}
+      <form id="bulk-label-form" class="with-selected" method="post"
+            action="{% url 'rag-document-labels-bulk' %}">
+        {% csrf_token %}
+        <h2>With selected…</h2>
+        <p class="note">Adds or removes the labels you pick here — it never replaces the other
+          labels a document already carries.</p>
+        <div class="labels-field">
+          <span class="picker-label" id="id_bulk_entitlements_label">Labels</span>
+          <div class="chip-picker" role="group" id="id_bulk_entitlements"
+               aria-labelledby="id_bulk_entitlements_label">
+            {% for pk, name in label_choices %}
+            <label class="chip-check"><input type="checkbox" name="entitlements" value="{{ pk }}"><span class="chip">{{ name }}</span></label>
+            {% endfor %}
+          </div>
+        </div>
+        <div class="scope">
+          <label class="picker-label" for="id_bulk_category_select">Apply to</label>
+          <select name="category" id="id_bulk_category_select">
+            <option value="">the rows I check below</option>
+            {% for category in categories %}<option value="{{ category.name }}">everything in {{ category.name }}</option>{% endfor %}
+          </select>
+          <span class="verbs">
+            <button type="submit" name="action" value="apply">Add labels</button>
+            <button type="submit" name="action" value="remove" class="ghost">Remove labels</button>
+          </span>
+        </div>
+        <p class="note scope-note">Choosing a shelf acts on every document in it and ignores the rows you have ticked.</p>
+        <p class="note scope-note">Removing a document's last label makes it follow the library posture — on an open library, everyone signed in can then read it.</p>
+      </form>
+      {% endif %}
+
+      <div class="table-wrap">
+        {% if page_obj.object_list %}
+        <table>
+          <thead>
+            <tr>
+              {% if may_label_any %}<th class="col-select"><span class="sr-only">Select</span></th>{% endif %}
+              <th>Title</th>
+              <th>Labels</th>
+              {% if show_category_column %}<th>Category</th>{% endif %}
+              <th>Source</th>
+              {% comment %}
+              THE WORKSTREAM COLUMN (spec §15.4): blank for a universal
+              document, naming the stream for a contained one -- an
+              administrator lists contained documents too (§8.1), and a
+              row that does not say where it lives is a row that
+              invites the wrong delete.
+              {% endcomment %}
+              <th>Workstream</th>
+              {% if pin_into %}<th></th>{% endif %}
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for row in rows %}{% with document=row.document %}
+          <tr>
+            {% if may_label_any %}
+            <td class="col-select">
+              {% if document.scope != "conversation" %}
+              <input type="checkbox" name="documents" value="{{ document.id }}"
+                     form="bulk-label-form" aria-label="Select {{ document.title }} for labelling">
+              {% comment %}
+              ROUND 12 (owner ruling): a chat-scoped document is never
+              labellable at all -- labels are corpus machinery, and this
+              document has no corpus -- so bulk labelling does not even
+              OFFER the checkbox for one, not merely refuse it server-side
+              (`services.documents_targeted_for_labelling`'s own
+              `.exclude(scope="conversation")` is the second, independent
+              guard on the write path).
+              {% endcomment %}
+              {% endif %}
+            </td>
+            {% endif %}
+            <td class="doc-title">
+              {% if row.readable %}
+              <a href="{% url 'rag-document-file' document.id %}" target="_blank" rel="noopener">{{ document.title }}</a>
+              {% else %}
+              {% comment %}
+              W-2 (IA-2 walkthrough finding): the fix wave gated the
+              Download/Transcript links on `row.readable` but left the
+              TITLE itself linking at the same file route -- a principal
+              this row is merely LISTED for (an administrator with
+              `admin_sees_content` off, the same "administer without
+              reading" split the labels column already threads) could
+              still open the file by clicking its name. Plain text here,
+              same as the status beside it. Unchanged by fix round 2:
+              this gate is policy, and that round was presentation.
+              {% endcomment %}
+              <span class="doc-title-plain">{{ document.title }}</span>
+              {% endif %}
+              {% comment %}
+              ONE quiet meta line (fix round 2), where the links, the
+              status, the extraction note and the duration used to be
+              four separate blocks scattered across two columns at three
+              font sizes. Every item is a direct child span, because the
+              separators are drawn by the `* + *::before` rule rather
+              than typed -- so they wrap with what they separate and a
+              missing item never leaves a stray dot behind.
+              {% endcomment %}
+              <div class="doc-meta">
+                {% if row.readable %}<span><a href="{% url 'rag-document-file' document.id %}?download=1">Download</a></span>{% endif %}
+                {% if document.has_transcript and row.readable %}<span><a href="{% url 'rag-document-transcript' document.id %}">{{ document.transcript_label }}</a></span>{% endif %}
+                {% if document.status == "pending" %}<span class="doc-status-chip">Pending…</span>
+                {% elif document.status == "processing" %}<span class="doc-status-chip">Processing…</span>
+                {% elif document.status == "failed" %}<span class="doc-status-chip doc-status-failed">Failed — {{ document.status_detail }}</span>
+                {% elif document.status == "ready" %}<span class="doc-status-chip doc-status-ready">Ready</span>
+                {% if document.status_detail %}<span class="doc-extraction-summary">{{ document.status_detail }}</span>{% endif %}
+                {% endif %}
+                {% if document.extraction_summary %}<span class="doc-extraction-summary">{{ document.extraction_summary }}</span>{% endif %}
+                {% if document.duration_display %}<span class="doc-duration">{{ document.duration_display }}</span>{% endif %}
+                {% if document.doc_type == "tabular" and document.status == "ready" %}<span class="doc-tabular-note">Stored — rows are not searchable yet.</span>{% endif %}
+              </div>
+            </td>
+            {% comment %}
+            READ-ONLY CHIPS (fix round 2). This cell used to carry a
+            three-row `<select multiple>` and a "Save labels" button
+            taller than the row it sat in, on every row the viewer could
+            label. Writing happens in the one card above the table now;
+            this column reports, and a document with no label reads as a
+            quiet em-dash rather than as an empty cell somebody has to
+            interpret.
+            {% endcomment %}
+            <td class="doc-labels">{% if row.labels %}{% for name in row.labels %}<span class="chip">{{ name }}</span>{% endfor %}{% else %}<span class="doc-unlabelled" title="No labels — follows the library posture">—</span>{% endif %}</td>
+            {% if show_category_column %}
+            <td class="doc-category">{{ document.category.name|default:"Uncategorized" }}</td>
+            {% endif %}
+            <td class="doc-type"><span class="doc-badge">{{ document.source_kind }}</span></td>
+            <td class="workstream">
+              {% if document.workstream_id %}
+              <a href="{% url 'chat-workstream' document.workstream_id %}">{{ document.workstream.name }}</a>
+              {% elif document.scope == "conversation" %}
+              {% comment %}
+              ROUND 12 (owner ruling: chat scope is "referenced as
+              such"). A chat-scoped document is never contained, so this
+              cell would otherwise render empty for it -- the SAME
+              global `.doc-badge` chip the source-kind column already
+              uses, in the column that otherwise names "where this
+              document lives", which chat scope answers too. This row
+              renders at all only for its own uploader or an admin with
+              `sees_all_content` (`tools.rag.access.listable_documents`'
+              own exclusion) -- the badge is never shown to anyone this
+              document is invisible to in the first place.
+              {% endcomment %}
+              <span class="doc-badge" title="Attached to one chat only — not part of the RAG framework">chat</span>
+              {% endif %}
+            </td>
+            {% if pin_into and not document.workstream_id and document.scope != "conversation" %}
+            {% comment %}
+            ROUND 12 WHOLE-BRANCH REVIEW B-1: a chat-scoped document
+            always has `workstream_id` unset (never contained), so the
+            OLD condition offered "Pin" on it too -- the POST would
+            SUCCEED (`readable_documents(principal)`, no `workstream_id`,
+            re-admits the uploader's own chat-scoped rows) into a
+            SILENTLY INERT pin: invisible in the stream panel's own
+            pinned list (that surface reads through `readable_documents
+            (…, workstream_id=W)`, which correctly excludes it) and
+            inert at retrieval, while still consuming one slot of
+            `MAX_PINS_PER_STREAM`. `tools.rag.workstreams.pin_document`
+            now refuses this by name too (belt and braces, render AND
+            gate) -- this condition is the RENDER half.
+            {% endcomment %}
+            <td><form method="post" action="{% url 'rag-workstream-pin' pin_into.workstream_id %}">
+              {% csrf_token %}<input type="hidden" name="action" value="pin">
+              <input type="hidden" name="document" value="{{ document.pk }}">
+              <input type="hidden" name="next" value="{{ request.get_full_path }}">
+              <button type="submit">Pin</button></form></td>
+            {% elif pin_into %}
+            <td></td>
+            {% endif %}
+            <td class="doc-actions">
+              {% comment %}
+              ROUND 12 WHOLE-BRANCH REVIEW A-2/B-2: mirrors the POST gate
+              on `rag-document-reingest`/`rag-document-delete` --
+              `tools.rag.access.may_administer_document`, WIDER than
+              `may_label` above (that key still governs ONLY the bulk-
+              labelling checkbox): a chat-scoped document's own uploader
+              gets Delete/Re-ingest here even though they may never
+              label it.
+              {% endcomment %}
+              {% if row.may_administer %}
+              {% if document.status != "pending" and document.status != "processing" %}
+              <form class="retry-form" method="post" action="{% url 'rag-document-reingest' document.id %}">
+                {% csrf_token %}
+                {% if document.status == "ready" %}
+                <button type="submit" class="retry-btn">Re-ingest</button>
+                {% else %}
+                <button type="submit" class="retry-btn">Retry</button>
+                {% endif %}
+              </form>
+              {% endif %}
+              <form class="delete-form" method="post" action="{% url 'rag-document-delete' document.id %}" onsubmit="return confirm('Delete {{ document.title|escapejs }}?');">
+                {% csrf_token %}
+                <button type="submit" class="delete-btn">Delete</button>
+              </form>
+              {% endif %}
+            </td>
+          </tr>
+          {% endwith %}{% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <div class="empty">
+          {% if query %}No documents match &ldquo;{{ query }}&rdquo;.{% else %}No documents here yet.{% endif %}
+        </div>
+        {% endif %}
+      </div>
+
+      {% if page_obj.paginator.num_pages > 1 %}
+      <nav class="pager" aria-label="Pagination">
+        {% if page_obj.prev_url %}
+        <a class="pager-link" href="{{ page_obj.prev_url }}">&lsaquo; Prev</a>
+        {% else %}
+        <span class="pager-link disabled">&lsaquo; Prev</span>
+        {% endif %}
+        <span class="pager-status">Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
+        {% if page_obj.next_url %}
+        <a class="pager-link" href="{{ page_obj.next_url }}">Next &rsaquo;</a>
+        {% else %}
+        <span class="pager-link disabled">Next &rsaquo;</span>
+        {% endif %}
+      </nav>
+      {% endif %}
+    </section>
+  </div>
+</div>
+{% endblock %}

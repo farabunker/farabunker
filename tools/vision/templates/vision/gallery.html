@@ -1,0 +1,107 @@
+{% extends "vision/base.html" %}
+{% block title %}Gallery — farabunker{% endblock %}
+{% block subnav_current_gallery %}current{% endblock %}
+{% block vision_style %}
+  .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 1rem; }
+  .gallery figure { margin: 0; }
+  .gallery img { width: 100%; height: auto; border-radius: 6px; display: block; }
+  .gallery figcaption { font-size: 0.85rem; color: var(--muted); margin-top: 0.35rem; }
+  .pager { display: flex; gap: 1rem; margin-top: 1.5rem; }
+  .gallery-header { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
+  /* `.messages`/`.msg` moved to `_shell.html` (C-21/C-52), which
+     renders them unconditionally from its own `<style>` tag, outside
+     any block -- reachable here with no `{{ block.super }}` chain
+     needed through `vision/base.html`'s own `extra_style` override or
+     this nested `vision_style` block. */
+  /* Select mode (owner ask, 2026-09-02): the checkbox sits INSIDE the
+     label wrapping the thumbnail, top-right, large enough to tap on a
+     phone -- `.thumb-select` replaces the normal `<a>` entirely, so
+     clicking the image toggles the box instead of opening the file.
+     `:has(:checked)` outlines the whole figure so a selected tile reads
+     at a glance in both schemes. */
+  .thumb-select { position: relative; display: block; cursor: pointer; }
+  .thumb-select input[type="checkbox"] {
+    position: absolute; top: 0.5rem; right: 0.5rem; width: 1.4rem; height: 1.4rem;
+    accent-color: var(--accent); margin: 0;
+  }
+  .gallery figure:has(:checked) { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
+  .bulk-bar {
+    display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+    margin: 1rem 0 1.5rem; padding: 0.75rem 1rem; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+{% endblock %}
+{% block vision_content %}
+{% url 'vision-gallery' as gallery_url %}
+<div class="gallery-header">
+  <h1>Gallery</h1>
+  {% if select_mode %}
+  <a href="{{ gallery_url }}?page={{ page_obj.number }}{% if job_filter %}&job={{ job_filter|urlencode }}{% endif %}">Done</a>
+  {% else %}
+  <a href="{{ gallery_url }}?page={{ page_obj.number }}&select=1{% if job_filter %}&job={{ job_filter|urlencode }}{% endif %}">Select</a>
+  {% endif %}
+</div>
+
+{% include "_messages.html" %}
+
+{% if page_obj.object_list %}
+{% if select_mode %}
+<form method="post" action="{% url 'vision-jobs-delete-selected' %}">
+  {% csrf_token %}
+  <input type="hidden" name="next" value="{{ gallery_url }}?page={{ page_obj.number }}{% if job_filter %}&job={{ job_filter|urlencode }}{% endif %}">
+  <div class="bulk-bar">
+    <span class="muted">Selected items will be deleted</span>
+    <a href="{{ gallery_url }}?select=all&page={{ page_obj.number }}{% if job_filter %}&job={{ job_filter|urlencode }}{% endif %}">Select all</a>
+    <details class="delete-disclosure">
+      <summary>Delete selected</summary>
+      <div class="delete-confirm">
+        <span class="muted">Delete the selected generations and their files? A batch generation's sibling images are deleted with it.</span>
+        <button type="submit" class="danger">Yes, delete</button>
+        <button type="button" class="secondary" onclick="this.closest('details').removeAttribute('open')">Cancel</button>
+      </div>
+    </details>
+  </div>
+{% endif %}
+<div class="gallery">
+  {% for output in page_obj.object_list %}
+  {% comment %} `id="job-<uuid>"` is the anchor half of the chat card's href contract
+     (`?job=<uuid>#job-<uuid>`, item B). A batch job's outputs repeat this
+     id across their figures -- acceptable, since only the FIRST one is
+     ever the anchor target a browser scrolls to. {% endcomment %}
+  <figure class="card" id="job-{{ output.job.id }}">
+    {% if select_mode %}
+    <label class="thumb-select">
+      <img src="{% url 'vision-output-file' output.id %}" alt="{{ output.job.headline }}">
+      <input type="checkbox" name="jobs" value="{{ output.job.id }}"{% if select_all %} checked{% endif %}>
+    </label>
+    {% else %}
+    <a href="{% url 'vision-output-file' output.id %}" target="_blank" rel="noopener">
+      <img src="{% url 'vision-output-file' output.id %}" alt="{{ output.job.headline }}">
+    </a>
+    {% endif %}
+    <figcaption>
+      {{ output.job.headline|truncatechars:100 }}<br>
+      Size {{ output.width|default:"?" }}×{{ output.height|default:"?" }} ·
+      {% include "vision/_job_facts.html" with facts=output.job.facts %}<br>
+      {{ output.job.engine }}{% if output.job.durations_display.processing %} · ran {{ output.job.durations_display.processing }}{% endif %}
+    </figcaption>
+    {% if not select_mode %}
+    {% include "vision/_output_actions.html" with output=output job=output.job %}
+    {% include "vision/_delete_control.html" with job=output.job next_url=gallery_url %}
+    {% endif %}
+  </figure>
+  {% endfor %}
+</div>
+{% if select_mode %}
+</form>
+{% endif %}
+
+<div class="pager">
+  {% if page_obj.has_previous %}<a href="?page={{ page_obj.previous_page_number }}{% if select_mode %}&select=1{% endif %}{% if job_filter %}&job={{ job_filter|urlencode }}{% endif %}">← Newer</a>{% endif %}
+  <span class="muted">Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
+  {% if page_obj.has_next %}<a href="?page={{ page_obj.next_page_number }}{% if select_mode %}&select=1{% endif %}{% if job_filter %}&job={{ job_filter|urlencode }}{% endif %}">Older →</a>{% endif %}
+</div>
+{% else %}
+<p class="muted">Nothing generated yet.</p>
+{% endif %}
+{% endblock %}

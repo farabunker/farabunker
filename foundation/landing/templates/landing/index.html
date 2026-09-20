@@ -1,0 +1,127 @@
+{% extends "_shell.html" %}
+{% comment %}
+The landing page (/) -- the front door (UI-1 decision 3).
+
+Extends the shared shell like every other page, so the design tokens,
+the nav and the account area live in ONE place. Template inheritance
+creates no Python import, so `models/contracts/` purity and
+column-privacy are unaffected.
+
+THE CARDS AND THE NAV READ THE SAME SIGNAL. Every model-bound card below
+is gated on `surface_available.*` -- the identical key the shell gates
+its own entry on (`models.registry.context_processors.availability`). A
+card is therefore never offered for a surface the nav has hidden, and
+the composite rules (Ask needs two roles; Images needs the feature flag
+too) are stated once, in that context processor, rather than twice here.
+
+The Document library card is UNGATED, exactly as its nav entry is: it is
+storage. Uploading, browsing and labelling documents needs no model
+bound at all, and telling somebody with a fresh box that they cannot even
+put a file in it would be false.
+
+Zero JS, no external assets -- house rule; this page is nothing but
+links.
+
+Marks the shell's BRAND as current (`nav_current_home`) rather than a
+nav link of its own: the brand IS this page's entry in the nav.
+{% endcomment %}
+{% block nav_current_home %}current{% endblock %}
+
+{% block extra_style %}
+  :root { --page-max-width: 820px; }
+  main { max-width: var(--page-max-width); margin: 0 auto; }
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 0.85rem;
+  }
+  a.card {
+    display: block;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    padding: 0.9rem 1rem;
+    text-decoration: none;
+    color: var(--text);
+  }
+  a.card:hover {
+    border-color: var(--accent);
+  }
+  .card-name {
+    font-weight: 600;
+    margin: 0 0 0.25rem;
+  }
+  a.card:hover .card-name { color: var(--accent); }
+  .card-note {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+  .nothing-bound {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    padding: 1rem;
+    margin-bottom: 1.5rem;
+  }
+  .nothing-bound p { margin: 0 0 0.5rem; }
+  .nothing-bound p:last-child { margin-bottom: 0; }
+  .nothing-bound a { color: var(--accent); }
+  .section-label {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    font-weight: 600;
+    margin: 0 0 0.6rem;
+  }
+{% endblock %}
+
+{% block content %}
+<main>
+  <h1>farabunker</h1>
+  <p class="tagline">Everything on this box, and nothing off it.</p>
+
+  {% if not surface_available.any_model_surface %}
+  <section class="nothing-bound">
+    <p>No models are set up yet. Start at <a href="{% url 'setup-index' %}">Install guides</a>.</p>
+    <p class="card-note">Install guides explains how to install and reach an engine; once one is
+      answering, bind a model to each role in
+      <a href="{% url 'inference-console' %}">Models</a> and the surfaces that need it
+      will appear here.</p>
+  </section>
+  {% endif %}
+
+  <p class="section-label">Go to</p>
+  <div class="cards">
+    {% if surface_available.chat %}
+    <a class="card" href="{% url 'chat-index' %}">
+      <p class="card-name">Chat</p>
+      <p class="card-note">Talk to an agent, with tools and your own library behind it.</p>
+    </a>
+    {% endif %}
+    {% if surface_available.ask %}
+    <a class="card" href="{% url 'rag-ask-page' %}">
+      <p class="card-name">Ask</p>
+      <p class="card-note">One question, answered from your documents, with citations.</p>
+    </a>
+    {% endif %}
+    {% if surface_available.search %}
+    <a class="card" href="{% url 'rag-search' %}">
+      <p class="card-name">Search</p>
+      <p class="card-note">Find the passage itself — retrieval with no answer written over it.</p>
+    </a>
+    {% endif %}
+    <a class="card" href="{% url 'rag-documents' %}">
+      <p class="card-name">Document library</p>
+      <p class="card-note">Add, browse and label everything this box knows about.</p>
+    </a>
+    {% if surface_available.images %}
+    <a class="card" href="{% url 'vision-create' %}">
+      <p class="card-name">Images</p>
+      <p class="card-note">Generate and edit images, and keep the results in a gallery.</p>
+    </a>
+    {% endif %}
+  </div>
+</main>
+{% endblock %}

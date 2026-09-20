@@ -1,0 +1,1260 @@
+{% extends "inference/base.html" %}
+{% comment %}
+Model management console. Shared shell (tokens, body, nav, button
+base) lives in inference/base.html; only console-specific tokens/styles/
+markup are here.
+
+One pipeline: found → registered → in use. The machine rows
+(inference/_installed_row.html) carry the "Add to registered" button (or,
+capability unknown, a prefilled-manual-form link); the role rows'
+dropdowns (inference/_role_row.html) list REGISTERED connections only.
+Two states, one template: `cold_start` (no connection registered yet, or
+the model server is unreachable) renders onboarding copy and — when the
+reachable server already has models installed — the SAME machine rows and
+role rows the warm page uses, so first run teaches the permanent
+pipeline. The warm state renders In use (role rows) / On this machine
+(the machine rows, with their Add buttons and the loaded-now chips) /
+Getting models / Registered connections. Both states share the "Getting
+models" block (inference/_getting_models.html — a needs checklist with
+live status plus adapter-derived server facts; no model names anywhere).
+See views.py::_build_context for how the state and its context are
+assembled.
+
+Terminology: "model server" is the ONE human-facing term for the thing
+this console connects to; "engine" stays the internal/code term (field
+names, option values, adapter registry) and the technical label inside
+the Supported APIs disclosure.
+
+The one inline script (block scripts, bottom) is progressive enhancement
+only — every form here is fully usable with JS disabled.
+{% endcomment %}
+{% comment %}
+"Models" since UI-2: the settings sidebar already says SETUP above it,
+so "Model setup" said setup twice. One name per page -- link text == H1
+== <title>. No url name, path or Python identifier moved.
+{% endcomment %}
+{% block title %}Models — farabunker{% endblock %}
+{% block side_current_models %}current{% endblock %}
+
+{% block extra_style %}{{ block.super }}
+  :root {
+    /* 960px is too narrow to hold the "Registered connections" grid's
+       realistic values on one line each -- Name ("env: EMBED_MODEL"),
+       Endpoint ("http://host.docker.internal:11434", monospace), and
+       Created ("Aug. 22, 2026") wrap even after the grid's own tracks are
+       sized to fit them, because THIS PAGE'S max-width caps their shared
+       row well under what nine content-sized columns need. `--page-
+       max-width` is set independently per page (`_shell.html`'s own
+       default is 720px; `rag/documents.html` overrides it to 960px on its
+       own) -- this override is scoped to this console template only, not
+       a page-global bump; Ask/Documents keep their own caps untouched.
+       1500px gives room for the realistic values above; this page's other
+       panels (In use / On this machine / Getting models) are short
+       card-like sections that read fine wider, not prose that needs a
+       narrow measure.
+
+       1730, NOT 1500, SINCE UI-2: this token now sizes the whole
+       settings block -- sidebar, gutter and content column together --
+       and the grid above lives in the content column alone. 190px of
+       sidebar plus a 2.5rem (40px) gutter is exactly the 230px added
+       here, so the app bar keeps sharing an edge with the block and the
+       grid gets its 1500px back WHEN THERE IS ROOM FOR 1730: the body
+       carries 1rem of side padding, so that means a viewport of about
+       1762px or wider. Narrower than that, this cap is not the binding
+       constraint at all -- the window is -- and the grid gets
+       `viewport - 32 - 230`, which is the sidebar's cost paid out of
+       the widest panel on the page. That is inherent to putting a
+       sidebar beside a 1500px grid, not something this number can
+       undo; what the number does is stop the console being narrowed on
+       a display that was already wide enough. */
+    --page-max-width: 1730px;
+    {% comment %}
+    NO LOCAL `--danger` (round 2 review, Nit 4): the shell already
+    declares it, at the exact values this page used to repeat, so the
+    copy was a pure drift source. `--danger-text`/`--mono` are gone from
+    here for the same reason, as of C-20: the shell owns both now too,
+    and the error pair (`--error-bg`/`--error-text`) this page's `.msg.
+    error`/`.badge.unhealthy` used to hardcode as raw hex is now read
+    from the shell's tokens as well, gaining the dark override those two
+    rules never had.
+
+    `--badge-chip-bg` was `--chip-bg`, which is the SHELL's name: this
+    page redefined the background without also redefining `--chip-text`,
+    so any bare `.chip` rendered here would have drawn the shell's
+    blue-grey text on this page's grey. Inert today (the one consumer,
+    `.badge.chip`, sets its own colour) -- and inert is exactly what
+    `documents.html` was until its Labels column started rendering
+    chips. Renamed for what it is before that happens here too.
+    {% endcomment %}
+    --warn-bg: #fdf3da;
+    --warn-text: #6b4c02;
+    --ok-bg: #e3f3e6;
+    --ok-text: #1e6b2e;
+    --badge-chip-bg: #eceef2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --warn-bg: #3a3210;
+      --warn-text: #f0d783;
+      --ok-bg: #163a20;
+      --ok-text: #8fe0a2;
+      --badge-chip-bg: #2c2e35;
+    }
+  }
+  .page {
+    max-width: var(--page-max-width);
+    margin: 0 auto;
+  }
+  .page-head {
+    margin-bottom: 1.25rem;
+  }
+  .status-line {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-size: 0.9rem;
+    color: var(--muted);
+    margin-bottom: 1.5rem;
+  }
+  .status-line code {
+    font-family: var(--mono);
+    font-size: 0.85rem;
+  }
+
+  {% comment %}
+  F5 (review I3 correction): NO LOCAL `.messages`/`.msg`/`.msg.warning`
+  HERE ANY MORE -- this page's own copy diverged from every other
+  settings page's (a green success tint on plain `.msg`, and no token
+  behind any of it), and it existed only because this block used to
+  open without `{{ block.super }}` above, silently dropping
+  `_settings.html`'s shared rules rather than adding to them.
+  `{{ block.super }}` now inherits those rules the same way every other
+  settings-area leaf page does, so a SUCCESS message here renders with
+  the neutral shared `.msg` exactly like Library's, Chat's and the rest.
+
+  `.msg.error` IS GONE TOO NOW (Coherence Wave D, C3) -- it used to stay,
+  deliberately, in the token-based majority spelling (identical to what
+  it inherits today), because `_settings.html` declined to hoist it at
+  the time (the pages that carried one did not all agree). C3 converged
+  every settings leaf onto that one spelling and moved it into
+  `_settings.html` itself, so this page's own copy became a re-typed
+  duplicate of a rule its ancestor now owns -- exactly what `foundation/
+  ops/tests/test_css_ownership.py::
+  test_no_settings_page_retypes_a_rule_settings_html_already_owns`
+  exists to catch. This page renders roughly two dozen
+  `messages.error(...)` calls (`models/registry/views.py`), more than
+  any other settings page, and every one of them still paints with
+  `--danger` -- inherited now, not re-typed.
+  {% endcomment %}
+
+  .badge {
+    display: inline-block;
+    padding: 0.12rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    /* A pill chip never wraps mid-phrase -- shared by the machine table's
+       Status chips (registered / in-use) and the Registered connections
+       grid's "used by" role chips, which would otherwise render as plain
+       multi-word text that could break across lines. Wrapping BETWEEN two
+       adjacent chips is still fine (they're separate inline-block boxes);
+       only within one is disallowed. */
+    white-space: nowrap;
+  }
+  .badge.healthy { background: var(--ok-bg); color: var(--ok-text); }
+  .badge.unhealthy { background: var(--error-bg); color: var(--error-text); }
+  .badge.chip { background: var(--badge-chip-bg); color: var(--muted); font-weight: 600; }
+
+  section.panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1.5rem;
+  }
+  section.panel > h2 {
+    margin: 0 0 0.75rem;
+    font-size: 1.05rem;
+  }
+  .panel-note {
+    font-size: 0.88rem;
+    color: var(--muted);
+    margin: 0.5rem 0;
+  }
+  .panel-note.posture {
+    border-left: 3px solid var(--accent);
+    padding-left: 0.75rem;
+  }
+
+  /* The "Getting models" block (_getting_models.html) -- the needs
+     checklist with live status, and the per-model-server facts lines.
+     Shared by the cold-start and warm renderings. */
+  .getting-models .needs-lead {
+    margin-bottom: 0.25rem;
+    font-weight: 600;
+  }
+  /* The needs checklist is a table, not a prose list: a plain prose list
+     puts its ✓ at a different horizontal spot per row, so satisfied vs
+     missing isn't scannable at a glance. A grid of rows (each row
+     `display: contents` so its cells join the SAME grid as every other
+     row) gets a real aligned column without a `<table>` element -- this
+     page has no other table CSS to reuse. `.registered-table` and
+     `.machine-table` below reuse this exact grid-row idiom. `role="table"`
+     etc. keep it announced correctly to assistive tech despite being
+     `<div>`s. */
+  .needs-table {
+    display: grid;
+    grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1.6fr);
+    gap: 0.15rem 1rem;
+    margin: 0 0 0.75rem;
+    font-size: 0.88rem;
+  }
+  .needs-row {
+    display: contents;
+  }
+  .needs-cell {
+    padding: 0.3rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .needs-row-head .needs-cell {
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .needs-cell.need-status.ok {
+    color: var(--ok-text);
+    font-weight: 600;
+  }
+  .needs-cell.need-status.missing {
+    color: var(--warn-text);
+    font-weight: 600;
+  }
+  ul.server-facts {
+    list-style: none;
+    margin: 0 0 0.6rem;
+    padding: 0;
+  }
+  ul.server-facts li {
+    padding: 0.15rem 0;
+    font-size: 0.88rem;
+  }
+  ul.server-facts code {
+    font-family: var(--mono);
+    font-size: 0.82rem;
+  }
+  ul.server-facts a {
+    color: var(--accent);
+  }
+  .getting-models-section {
+    margin: 1rem 0 0;
+    padding-top: 0.25rem;
+    border-top: 1px solid var(--border);
+  }
+  .getting-models-section h3 {
+    margin: 0.5rem 0 0.25rem;
+    font-size: 0.95rem;
+  }
+
+  /* Cold-start's ready-to-use models section -- reuses .installed-row
+     (below) for each model, just with its own heading/spacing since it
+     lives inside the cold-start panel rather than a dedicated section
+     like the warm page's "On this machine". */
+  .ready-section {
+    margin: 1rem 0;
+    padding-top: 0.25rem;
+    border-top: 1px solid var(--border);
+  }
+  .ready-section h3 {
+    margin: 0.5rem 0 0.25rem;
+    font-size: 0.95rem;
+  }
+  form.inline-form {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  form.inline-form input[type="text"],
+  form.inline-form input[type="number"],
+  form.inline-form select {
+    padding: 0.45rem 0.55rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: 0.88rem;
+  }
+  form.inline-form button {
+    padding: 0.45rem 0.9rem;
+    font-size: 0.88rem;
+  }
+  form.add-connection {
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border);
+  }
+  form.add-connection label {
+    font-size: 0.8rem;
+    color: var(--muted);
+    display: block;
+    margin-bottom: 1rem;
+  }
+  /* Live finding 4: the endpoint field was truncating values like
+     "http://host.docker.internal:11434" at the browser's default input
+     width. Every endpoint-carrying text input gets enough room to show a
+     full endpoint, not just the add-connection form's. */
+  form.inline-form input[name="endpoint"] {
+    min-width: 21rem;
+  }
+  /* The two role rows' "change" dropdowns would otherwise auto-size to
+     their own longest option label and end up different widths -- give
+     both a shared min/max so the row of controls reads as one consistent
+     control, not two differently-sized ones. */
+  form.inline-form select.role-choice {
+    min-width: 14rem;
+    max-width: 22rem;
+  }
+  form.add-connection input[name="name"],
+  form.add-connection input[name="model_id"] {
+    min-width: 12rem;
+  }
+  /* T9: the Capability field is a checkbox group (a model can honestly
+     hold more than one platform capability) rather than a single-select --
+     shared by both `console.html` manual-form copies and
+     `_connection_edit.html`'s edit form. A plain `<fieldset>`/`<legend>`
+     laid out as a row of checkboxes, not the block-per-`<label>` stack the
+     surrounding `label { display: block }` rule would otherwise give it. */
+  .capability-group {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem 0.6rem;
+    margin-bottom: 1rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1rem;
+  }
+  .capability-group legend {
+    font-size: 0.8rem;
+    color: var(--muted);
+    padding: 0 0.3rem;
+  }
+  .capability-group .capability-option {
+    display: inline-flex !important;
+    align-items: center;
+    gap: 0.3rem;
+    margin-bottom: 0 !important;
+    font-size: 0.85rem;
+    color: var(--text);
+  }
+
+  /* "Registered connections" -- the one editing home for every
+     ModelConnection; the role-row and installed-row disclosures are
+     read-only reflections rather than each carrying their own live edit
+     form.
+
+     The fact block is a real aligned-column grid (Name / Model server /
+     Model ID / Endpoint / Capability / Dim / Created / Used by) -- the
+     SAME `display: contents` row idiom the needs-table (below) and the
+     machine table (.machine-table) use: `.registered-table` is the ONE
+     shared grid (defined once in console.html, wrapping every
+     connection), and each connection's own wrapper (`.registered-connection`,
+     still the `#conn-<pk>` anchor target) and the header row
+     (`.registered-row-head`) both flatten with `display: contents` so
+     their children become the grid's own items in document order.
+
+     Track widths are `ch`-based, sized to what "env: EMBED_MODEL" (~16ch),
+     "http://host.docker.internal:11434" (~34ch monospace) and
+     "Aug. 22, 2026" (~13ch) actually need, rather than guessed fractions
+     of the row -- so wrapping is the exception (an operator-supplied
+     outlier), not the norm. The `.registered-actions` cluster (Edit
+     disclosure + Remove) is the grid's 9th (last) CELL, right alongside
+     Name..Used by, rather than its own full-width row below the facts --
+     see `.registered-actions` below for how it still grows to full width
+     once the Edit disclosure is opened. */
+  .registered-table {
+    display: grid;
+    /* Name: "env: EMBED_MODEL"-shaped values run ~16-18ch; a floor lets
+       it sit on one line and still flex for a longer name. Model server /
+       Capability / Dim / Created carry short, closed-vocabulary values
+       ("ollama", "embeddings", "768", "Aug. 22, 2026") -- `max-content`
+       shrinks each to exactly what its own longest value needs instead of
+       claiming a guessed fraction of the row. Model ID gets a ~20ch floor,
+       Endpoint a ~34ch floor (monospace, "http://host.docker.internal:
+       11434" is 34 chars) so an unwrapped URL is the normal case, not the
+       exception -- the `overflow-wrap`/`min-width: 0` guards below are
+       what hold at extreme values, not the track width. Used by keeps a
+       flexible share for its chips; Actions is `max-content` too (a
+       one-line "Edit" disclosure + Remove button, same idiom as the
+       short fact columns). */
+    grid-template-columns:
+      minmax(16ch, 1.3fr) max-content minmax(18ch, 1fr) minmax(30ch, 2fr)
+      max-content max-content max-content minmax(10ch, 0.9fr) max-content;
+    gap: 0.15rem 1rem;
+    margin: 0 0 0.5rem;
+    font-size: 0.85rem;
+  }
+  .registered-table .registered-connection,
+  .registered-table .registered-row,
+  .registered-table .registered-row-head {
+    display: contents;
+  }
+  .registered-cell {
+    padding: 0.3rem 0;
+    /* A per-cell `border-bottom` fragments into a broken rule across the
+       grid's column gaps -- a `.row-rule` sliver after the facts row
+       (`_registered_connection.html`) draws one continuous line instead;
+       this cell carries no border of its own. */
+    /* Grid-blowout guard: a grid item's default `min-width` is `auto`,
+       which lets its CONTENT'S min-content size (an unbreakable string's
+       full width) win over the track's own sizing and paint outside it --
+       exactly the overlap the live screenshot caught. `min-width: 0`
+       lets the track actually constrain the cell; `overflow-wrap` is the
+       second half (below) that lets long unbreakable text still shrink to
+       fit instead of merely being clipped. Kept as a SAFETY NET now that
+       the tracks above are sized to content -- wrapping should no longer
+       happen at realistic widths, but an operator can still paste in an
+       extreme value. */
+    min-width: 0;
+    overflow-wrap: break-word;
+  }
+  .registered-row-head .registered-cell {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .registered-cell code {
+    font-family: var(--mono);
+    font-size: 0.82rem;
+  }
+  /* The operator's own descriptor, inline after the name -- muted so it
+     reads as a secondary annotation, not part of the name itself. */
+  .registered-cell .descriptor-note {
+    color: var(--muted);
+    font-size: 0.82rem;
+  }
+  /* The specific defect: an endpoint URL is one long unbreakable token
+     with no spaces for the browser's default line-breaking to use --
+     `break-word` alone leaves it untouched. `overflow-wrap: anywhere` (plus
+     `word-break: break-all` for engines that weigh it more) forces a break
+     mid-token so the value wraps onto a second line inside its own cell
+     instead of overflowing into Capability/Dim to its right. Safety net
+     only now that the Endpoint track (above) is sized to hold a realistic
+     URL on one line. */
+  .registered-cell.cell-endpoint {
+    overflow-wrap: anywhere;
+    word-break: break-all;
+  }
+  /* The Edit disclosure + Remove cluster are the grid's 9th (last) cell
+     -- part of the SAME fact row as Name..Used by, not a second
+     full-width row below it. Collapsed (the common case, no JS required
+     to get here): `grid-column` pins it to the last column alongside the
+     other 8 cells, and it's a narrow flex column holding just the "Edit"
+     summary and the Remove cluster, right-aligned within that one cell.
+     Opened: `:has(.conn-edit-details[open])` -- pure CSS reacting to the
+     attribute the browser already toggles on `<summary>` click, no
+     author JS -- widens this SAME element to `grid-column: 1 / -1`.
+     Auto-placement can no longer fit that span into the fact row
+     (columns 1-8 are already taken by Name..Used by), so it flows onto
+     its own full-width row directly below, exactly where the edit form
+     and the folded-in Capability/Dim source note need the room;
+     `.row-rule` (next in document order) then lands below THAT, still
+     the one continuous divider per connection. */
+  .registered-cell.registered-actions {
+    grid-column: 9;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.35rem;
+  }
+  .registered-cell.registered-actions:has(.conn-edit-details[open]) {
+    grid-column: 1 / -1;
+  }
+  /* A browser with no `:has()` support silently drops the rule above --
+     not "never collapses", but "never EXPANDS either", so opening Edit
+     crams the whole disclosure + form into the narrow last-column track:
+     empirically measured, the actions cell ballooned to 1826px inside
+     that track, document scrollWidth hit 3174px against a 2056px
+     viewport, "Save changes" rendered entirely off-screen, and the
+     squeezed grid re-wrapped every endpoint -- controls-unusable,
+     unacceptable for an offline appliance that can't assume an evergreen
+     browser. `@supports not selector(:has(a))` -- itself universally
+     supported wherever `@supports selector()` is understood, including
+     everywhere `:has()` is NOT -- gives non-supporting browsers an
+     always-full-width band instead: the collapsed happy path is lost for
+     them, but the row never breaks. Modern browsers (the `:has()` rule
+     above still applies there) keep the inline-collapse. */
+  @supports not selector(:has(a)) {
+    .registered-cell.registered-actions {
+      grid-column: 1 / -1;
+    }
+  }
+  /* The Edit disclosure: closed by default (no JS), its `<summary>` is
+     the ONLY "Edit" control on the row. The Capability/Dim source note is
+     the first thing inside this one disclosure -- "one disclosure per
+     connection", not two. `min-width: 0` lets it shrink instead of
+     forcing `.registered-actions` wider than its column while collapsed
+     (the edit form's own `form.inline-form` already wraps its fields at
+     narrow widths once the cell grows to full width open). */
+  .conn-edit-details {
+    min-width: 0;
+    max-width: 100%;
+  }
+  .conn-edit-details > summary {
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.88rem;
+    color: var(--accent);
+    padding: 0.2rem 0;
+  }
+  .conn-edit-details[open] > summary {
+    margin-bottom: 0.5rem;
+  }
+  .conn-edit-details .conn-source {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.2rem 0.9rem;
+    margin: 0 0 0.6rem;
+    font-size: 0.82rem;
+    color: var(--muted);
+  }
+  .conn-edit-details .conn-source dt {
+    color: var(--muted);
+  }
+  .conn-edit-details .conn-source dd {
+    margin: 0;
+  }
+  /* The Remove cluster: button always present, the "in use by…" warning
+     (bound only) compressed to a short muted note directly above it
+     rather than a loose full-width sentence, and the Confirm-removal
+     checkbox (embeddings-bound only) inline with the button -- all
+     right-aligned, all sized to the cluster rather than the row. The
+     note's full sentence lives in its own `title` attribute
+     (`_registered_connection.html`) for anyone who hovers/inspects it. */
+  .conn-remove-cluster {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.3rem;
+    flex: 0 0 auto;
+  }
+  .conn-remove-cluster .remove-note {
+    font-size: 0.78rem;
+    color: var(--warn-text);
+    text-align: right;
+    max-width: 12rem;
+    margin: 0;
+  }
+  form.conn-remove {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  form.conn-remove button.remove-btn {
+    background: var(--danger);
+    color: var(--danger-text);
+    border: none;
+    border-radius: 6px;
+    padding: 0.4rem 0.85rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  /* The collapsed manual-create form: an always-open form visually
+     instructs operators to fill it in even when every model they have is
+     already assignable from "In use" -- collapsing it (plus the
+     disclaimer sentence inside) kills that false "available models ->
+     transcribe here" inference. */
+  details.add-connection-details {
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border);
+  }
+  details.add-connection-details > summary {
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.92rem;
+    padding: 0.2rem 0;
+  }
+  details.add-connection-details[open] > summary {
+    margin-bottom: 0.5rem;
+  }
+  /* The engine-adapter registry disclosure: one line per registered
+     engine, entirely derived, none of it hardcoded here. */
+  details.supported-apis-details {
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border);
+  }
+  details.supported-apis-details > summary {
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.92rem;
+    padding: 0.2rem 0;
+  }
+  details.supported-apis-details[open] > summary {
+    margin-bottom: 0.5rem;
+  }
+  ul.supported-apis-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  ul.supported-apis-list li {
+    padding: 0.3rem 0;
+    font-size: 0.88rem;
+  }
+  ul.supported-apis-list li + li {
+    border-top: 1px solid var(--border);
+  }
+  ul.supported-apis-list code {
+    font-family: var(--mono);
+    font-size: 0.82rem;
+  }
+  /* The read-only reflections' anchor link back to the one edit form. */
+  .conn-details .edit-link {
+    margin: 0.4rem 0 0;
+    font-size: 0.85rem;
+  }
+  .conn-details .edit-link a {
+    color: var(--accent);
+  }
+
+  .section-note {
+    font-size: 0.82rem;
+    color: var(--muted);
+    margin: 0 0 0.75rem;
+  }
+
+  /* "On this machine" is a real aligned-column grid (Model / Capability /
+     On disk / Runtime / Status / Action) -- the same `display: contents`
+     row idiom the needs-table below uses. `.machine-table` is the ONE
+     shared grid (see _installed_rows_table.html, wrapping every row);
+     `.inventory-item` and `.installed-row` both flatten with `display:
+     contents` so their descendants -- the 6 `.machine-cell` spans --
+     become the grid's own items in document order, landing directly
+     under that row and above the next row's cells.
+
+     The `.conn-details` disclosure nests inside the Model cell itself
+     (`_installed_row.html`) rather than spanning `grid-column: 1 / -1` as
+     a 7th item below the six cells, so it is not a grid item at all;
+     collapsed, it costs nothing beyond its own `<summary>` line inside
+     that cell's box. `.machine-cell` carries no border of its own; a
+     single `.row-rule` sliver (`grid-column: 1 / -1`, below) draws one
+     continuous line per row instead of a per-cell `border-bottom` that
+     would fragment across the grid's column gaps. */
+  .machine-table {
+    display: grid;
+    grid-template-columns:
+      minmax(0, 1.3fr) minmax(0, 0.9fr) minmax(0, 0.85fr) minmax(0, 1.15fr)
+      minmax(0, 1fr) minmax(0, 1.15fr);
+    gap: 0.15rem 1rem;
+    margin: 0 0 0.75rem;
+    font-size: 0.88rem;
+  }
+  .machine-table .machine-row-head,
+  .machine-table .inventory-item,
+  .machine-table .installed-row {
+    display: contents;
+  }
+  .machine-cell {
+    padding: 0.5rem 0;
+    /* Same grid-blowout guard as .registered-cell: no column here holds an
+       unbreakable URL today, but a long/unbroken model name or id
+       shouldn't be able to paint past its track either. */
+    min-width: 0;
+    overflow-wrap: break-word;
+  }
+  .machine-row-head .machine-cell {
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  /* One continuous rule per row, shared by `.machine-table` and
+     `.registered-table` -- a full-width sliver instead of per-cell
+     `border-bottom`s that broke across the grid's column gaps. */
+  .row-rule {
+    grid-column: 1 / -1;
+    height: 1px;
+    background: var(--border);
+  }
+  /* The Model cell's nested disclosure picks up the shared
+     `details.conn-details` rules below unchanged; it just needs a little
+     breathing room under the model name it sits beneath. */
+  .installed-row .machine-cell details.conn-details {
+    margin-top: 0.2rem;
+  }
+  .installed-row .name {
+    font-weight: 600;
+  }
+  .installed-row .meta {
+    font-size: 0.82rem;
+    color: var(--muted);
+  }
+  /* The loaded-now chip (from the already-fetched /api/ps report) and the
+     registered/in-use pipeline state share the `.badge` pill chips
+     (below) -- reusing the same nowrap styling the "explicit environment
+     override" chip elsewhere on the page uses, rather than bespoke tag
+     classes. */
+  .installed-row .loaded-tag {
+    font-size: 0.82rem;
+    color: var(--ok-text);
+  }
+  .installed-row form.add-to-registered button {
+    padding: 0.3rem 0.7rem;
+    font-size: 0.8rem;
+  }
+  .installed-row .manual-add-link {
+    font-size: 0.82rem;
+    color: var(--accent);
+  }
+  /* Status/Used-by chips sit side by side, wrapping BETWEEN chips (never
+     within one) when the cell runs out of room. */
+  .machine-cell .badge + .badge,
+  .registered-cell .badge + .badge {
+    margin-left: 0.35rem;
+  }
+
+  /* Per-row "Connection details" disclosure (native <details>, no JS) —
+     every value used to connect, with the source of each, plus the
+     inline edit form for registered connections. */
+  details.conn-details {
+    margin: 0.1rem 0 0.4rem;
+  }
+  details.conn-details > summary {
+    cursor: pointer;
+    font-size: 0.82rem;
+    color: var(--muted);
+    padding: 0.15rem 0;
+  }
+  .conn-details dl {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.2rem 0.9rem;
+    margin: 0.5rem 0;
+    font-size: 0.85rem;
+  }
+  .conn-details dt {
+    color: var(--muted);
+  }
+  .conn-details dd {
+    margin: 0;
+  }
+  .conn-details code {
+    font-family: var(--mono);
+    font-size: 0.82rem;
+  }
+  .conn-details .source-note,
+  .conn-details .env-note {
+    color: var(--muted);
+    font-size: 0.82rem;
+  }
+  .conn-details .env-note {
+    margin: 0.5rem 0 0.25rem;
+  }
+  form.conn-edit {
+    margin: 0.5rem 0 0.25rem;
+    padding-top: 0.5rem;
+    border-top: 1px dashed var(--border);
+  }
+  form.conn-edit label {
+    font-size: 0.8rem;
+    color: var(--muted);
+  }
+  .empty-choices {
+    font-size: 0.88rem;
+    color: var(--muted);
+    margin: 0 0 0.6rem;
+  }
+  .empty-choices a {
+    color: var(--accent);
+  }
+
+  .role-card + .role-card {
+    border-top: 1px solid var(--border);
+    margin-top: 0.85rem;
+    padding-top: 0.85rem;
+  }
+  .role-card .role-head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.35rem;
+  }
+  .role-card .role-label {
+    font-weight: 600;
+  }
+  .role-card .role-key {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: var(--muted);
+  }
+  .role-card .current-binding {
+    font-size: 0.88rem;
+    color: var(--muted);
+    margin: 0 0 0.6rem;
+  }
+  .drift-banner {
+    background: var(--warn-bg);
+    color: var(--warn-text);
+    border-radius: 6px;
+    padding: 0.6rem 0.85rem;
+    font-size: 0.88rem;
+    margin-bottom: 0.6rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .drift-banner button {
+    padding: 0.35rem 0.7rem;
+    font-size: 0.82rem;
+    flex: none;
+  }
+  /* Neutral counterpart to .drift-banner for the non-drift re-encode
+     control (W5 review MAJOR 2's hoisted-out form): same layout rules
+     (flex, gap, padding, radius) but no warning color, since there is
+     nothing wrong to flag when the role isn't actually drifted. */
+  .role-action {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.6rem 0.85rem;
+    font-size: 0.88rem;
+    margin-bottom: 0.6rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .role-action button {
+    padding: 0.35rem 0.7rem;
+    font-size: 0.82rem;
+    flex: none;
+  }
+  .reencode-caption {
+    color: var(--muted);
+    margin: 0;
+    font-size: 0.82rem;
+  }
+  .confirm-row {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.82rem;
+    color: var(--muted);
+  }
+  .not-found-tag {
+    font-size: 0.82rem;
+    color: var(--warn-text);
+  }
+  /* A role with no connection and no explicit environment override is
+     UNASSIGNED -- there is no default to fall into, so it gets an honest
+     warning state rather than a quiet "unbound". Reuses the existing
+     --warn-bg/--warn-text tokens the drift banner and the needs-table's
+     unmet rows already use; no new colors. */
+  .unassigned-tag {
+    color: var(--warn-text);
+    font-weight: 600;
+  }
+  .unassigned-banner {
+    background: var(--warn-bg);
+    color: var(--warn-text);
+    border-radius: 6px;
+    padding: 0.6rem 0.85rem;
+    font-size: 0.88rem;
+    margin: 0 0 0.6rem;
+  }
+  .unassigned-banner a {
+    color: inherit;
+  }
+  .materialized-note {
+    font-size: 0.8rem;
+    color: var(--muted);
+    margin: 0 0 0.6rem;
+  }
+
+  .scan-form {
+    margin: 0.75rem 0;
+  }
+  .scan-form.small {
+    margin: 0;
+  }
+  .scan-form .section-note {
+    margin: 0;
+  }
+  .section-head-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .section-head-row h2 {
+    margin: 0;
+  }
+  button.scan-btn-small {
+    padding: 0.3rem 0.7rem;
+    font-size: 0.8rem;
+  }
+  .scan-results ul.scan-hits {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .scan-results ul.scan-hits li {
+    padding: 0.4rem 0;
+    font-size: 0.9rem;
+  }
+  .scan-results ul.scan-hits li + li {
+    border-top: 1px solid var(--border);
+  }
+{% endblock %}
+
+{% block settings_content %}
+{% comment %}
+`<main class="page">`, NOT A BARE `<div>` (Coherence Wave D, C1): this
+page had no `<main>` landmark at all -- one of three settings pages the
+audit found missing it. The class stays `page`, and so does the CSS
+selector and this page's own 1730px width; C1 converges the WRAPPER
+ELEMENT only, never the width token (the owner-accepted per-page
+values are out of scope for this item). The flash block moves below
+the header too, matching the majority "lede, then flash" ordering (C5)
+-- a pure reorder, no markup inside either block changed.
+{% endcomment %}
+<main class="page">
+  <header class="page-head">
+    <h1>Models</h1>
+    <p class="tagline">Which model server and model back each role, right now, and whether that data is still up to date.</p>
+    <div class="status-line">
+      {% if healthy %}
+      <span class="badge healthy">Reachable</span>
+      {% else %}
+      <span class="badge unhealthy">Unreachable</span>
+      {% endif %}
+      <span>Default endpoint: <code>{{ endpoint }}</code></span>
+    </div>
+  </header>
+
+  {% include "_messages.html" %}
+
+  {% if scan_results %}
+  <section class="panel scan-results">
+    <h2>Scan results</h2>
+    {% if scan_results.hits %}
+    <ul class="scan-hits">
+      {% for hit in scan_results.hits %}
+      <li>
+        Found <strong>{{ hit.engine }}</strong> server at <code>{{ hit.endpoint }}</code>
+        ({{ hit.model_count }} model{{ hit.model_count|pluralize }}) —
+        <a href="{% url 'inference-console' %}?endpoint={{ hit.endpoint|urlencode }}">Use this endpoint</a>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="panel-note">No additional model servers found.</p>
+    <p class="section-note">Checked: {{ scan_results.checked|join:", " }}.</p>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  {% if cold_start %}
+  <section class="panel">
+    <h2>No model connected yet</h2>
+    {% if healthy and installed_rows %}
+    <p class="panel-note">
+      Your model server at <code>{{ endpoint }}</code> is reachable and already has models installed — add
+      one to your registered models below, then assign it to a role. No pull needed; one click keeps every
+      detected setting.
+    </p>
+    {% elif healthy %}
+    <p class="panel-note">
+      Your model server at <code>{{ endpoint }}</code> is reachable — but no models are installed yet.
+      Install one from its library (Getting models, below), then reload this page — it's detected
+      automatically.
+    </p>
+    {% else %}
+    <p class="panel-note">
+      No model server could be reached at <code>{{ endpoint }}</code>. Start one, or install a model on a
+      machine running a supported model server (Getting models, below), then register it as a connection to
+      start binding roles.
+    </p>
+    {% endif %}
+    <p class="panel-note">
+      Installing a model needs internet access once, to pull it — the platform itself never downloads models
+      for you.
+    </p>
+    <p class="panel-note posture">
+      On an air-gapped or isolated-LAN box: pull the model on a separate machine that has internet access and
+      transfer it over, or use a scheduled gated-sync window. This console never assumes WAN access.
+    </p>
+
+    {# NO OPEN-FLAG SUFFIX ON THE TWO SCAN FORMS, and it is deliberate (review round 1, M2; ADR 0018's gap G15): `server_scan` does not redirect -- it RE-RENDERS this page from its own POST url, which is not a settings card route, so the assistant panel has no context there and cannot render whatever the query string says. Writing the flag here would leave a parameter in the address bar of a panel-less page and imply a coverage this round does not have. #}
+    <form method="post" action="{% url 'inference-server-scan' %}" class="inline-form scan-form">
+      {% csrf_token %}
+      {% if endpoint_override %}<input type="hidden" name="endpoint_override" value="{{ endpoint_override }}">{% endif %}
+      <button type="submit">Scan for model servers</button>
+      <span class="section-note">Checks a short list of common addresses (localhost, host.docker.internal…) for each supported model server — only when you click this.</span>
+    </form>
+
+    {% comment %}
+    THE ROLE-ASSIGNMENT ANCHOR, in the COLD branch, as an empty span --
+    the same shape `#add-connection` below already uses, and for the same
+    reason: the section that renders the role rows here
+    (`.ready-section`, just below) is itself inside `{% templatetag
+    openblock %} if installed_rows {% templatetag closeblock %}`, so an
+    id on it would vanish on a box with nothing installed. The warm
+    branch puts the identical id on its own `In use` section, which
+    always renders. `foundation/settings_help.py`'s card for this page
+    cites it, and `foundation/tests/test_settings_help.py::TestTheAnchors`
+    renders THIS branch, so both halves are asserted.
+    {% endcomment %}
+    <span id="in-use"></span>
+
+    {% comment %}
+    THE "ON THIS MACHINE" ANCHOR, in the COLD branch, as an empty span
+    (final whole-delta review I1). It used to be carried by the
+    `.ready-section` below, which is itself inside `{% templatetag
+    openblock %} if installed_rows {% templatetag closeblock %}` -- so on
+    a GENUINELY fresh box (no connections registered AND no model server
+    answering at the resolved endpoint, which is the literal first-run
+    state this whole branch exists for) the id vanished, and
+    `foundation/settings_help.py`'s `inference-console` card cited an
+    anchor the rendered page did not contain. The warm branch carries the
+    same id unconditionally, so the gap was invisible from that side.
+
+    Placed HERE, immediately above the section it names, rather than
+    beside the three warm-only siblings further down: unlike
+    `registered-connections`/`model-sets`/`footprint-override`, this
+    section DOES render on a cold box that has installed models but no
+    registered connection, and an anchor for it must land above it rather
+    than past "Getting models". Same empty-span shape as `#in-use` above,
+    same reason.
+    {% endcomment %}
+    <span id="on-this-machine"></span>
+
+    {% if installed_rows %}
+    <div class="ready-section">
+      <h3>Found on your machine — ready to use</h3>
+      <p class="section-note">Add a model to your registered models first (one click — every detected setting is kept), then assign it to a role below. These are the same controls the console always uses. Models load into memory on first use and unload after sitting idle — “loaded” means in memory right now; “in use” means assigned to a role.</p>
+      {% include "inference/_installed_rows_table.html" %}
+      {% for view in role_views %}
+      {% include "inference/_role_row.html" %}
+      {% endfor %}
+    </div>
+    {% endif %}
+    <div class="getting-models-section" id="getting-models">
+      <h3>Getting models</h3>
+      {% include "inference/_getting_models.html" %}
+    </div>
+
+    {% comment %}
+    THREE MORE ANCHORS, IN THE COLD BRANCH (review I1): `registered-
+    connections`, `model-sets` and `footprint-override` describe controls
+    that live inside "Registered connections" below, a section this cold
+    branch never renders (a box with no connections has nothing there to
+    show). The J4 pattern -- the SAME shape `#in-use`/`#add-connection`
+    already use just above -- is to carry the id here anyway, as an empty
+    span, so the anchor exists on EVERY rendered branch even though the
+    section it names is warm-only; a fresh box's rendered `<div id=
+    "settings-main">` therefore always contains every id its own help
+    card cites, and a deep link into an empty state degrades to "top of
+    the section" rather than a broken jump.
+    {% endcomment %}
+    <span id="add-connection"></span>
+    <span id="registered-connections"></span>
+    <span id="model-sets"></span>
+    <span id="footprint-override"></span>
+    <details class="add-connection-details"{% if prefill_model_id %} open{% endif %}>
+      <summary>Add a connection manually (for a model on another machine)</summary>
+      <p class="panel-note">Models found on this machine with a detected capability never need this form — add them with their “Add to registered” button above. Use this for a model on another machine, or for one whose capability or embedding dimension the model server doesn't report.</p>
+      <form class="inline-form add-connection" method="post" action="{% url 'inference-connection-add' %}{{ assistant.open_query }}">
+        {% csrf_token %}
+        <label>Name<input type="text" name="name" placeholder="your label, e.g. workstation chat model" required></label>
+        <label>Model server
+          <select name="engine">
+            {% for eng in supported_engines %}
+            <option value="{{ eng.name }}" title="{{ eng.source_path }}" data-endpoint="{{ eng.default_endpoint }}"{% if forloop.first %} selected{% endif %}>{{ eng.name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Endpoint<input type="text" name="endpoint" value="{{ prefill_endpoint|default:endpoint|default:supported_engines.0.default_endpoint }}" required></label>
+        <label>Model ID<input type="text" name="model_id" value="{{ prefill_model_id|default:'' }}" placeholder="exact id from your model server's library" required></label>
+        <fieldset class="capability-group">
+          <legend>Capability</legend>
+          {% for cap in capabilities %}
+          <label class="capability-option">
+            <input type="checkbox" name="capability" value="{{ cap }}">
+            {{ cap }}
+          </label>
+          {% endfor %}
+        </fieldset>
+        {% include "inference/_family_fields.html" with id_prefix="add-" selected_family=form_values.family selected_variant=form_values.variant selected_text_encoder=form_values.text_encoder selected_vae=form_values.vae %}
+        <label>Embed dim (embeddings only)<input type="number" name="embed_dim" min="1"></label>
+        <label>Context window (tokens, optional — chat models only)<input type="number" name="context_window" min="1"></label>
+        <label>Descriptor (optional)<input type="text" name="descriptor" maxlength="80"></label>
+        <label>Rank (optional)<input type="number" name="rank" min="1"></label>
+        <button type="submit">Register connection</button>
+      </form>
+    </details>
+  </section>
+
+  {% else %}
+
+  <section class="panel" id="in-use">
+    <h2>In use</h2>
+    {% for view in role_views %}
+    {% include "inference/_role_row.html" %}
+    {% empty %}
+    <p class="empty">No roles registered.</p>
+    {% endfor %}
+  </section>
+
+  <section class="panel" id="on-this-machine">
+    <div class="section-head-row">
+      <h2>On this machine</h2>
+      {# No open-flag suffix, for the reason given at the first scan form above (M2 / gap G15). #}
+      <form method="post" action="{% url 'inference-server-scan' %}" class="inline-form scan-form small">
+        {% csrf_token %}
+        {% if endpoint_override %}<input type="hidden" name="endpoint_override" value="{{ endpoint_override }}">{% endif %}
+        <button type="submit" class="scan-btn-small">Scan for another server</button>
+      </form>
+    </div>
+    <p class="section-note">Scanned live from <code>{{ endpoint }}</code> just now — reload to rescan. Models load on first use and unload when idle.</p>
+    {% if installed_rows %}
+    {% include "inference/_installed_rows_table.html" %}
+    {% else %}
+    <p class="empty">Nothing installed at this endpoint.</p>
+    {% endif %}
+  </section>
+
+  <section class="panel" id="getting-models">
+    <h2>Getting models</h2>
+    {% include "inference/_getting_models.html" %}
+  </section>
+
+  <section class="panel" id="registered-connections">
+    <h2>Registered connections</h2>
+    <p class="panel-note">Every registered connection lives here, once, with its own edit form — the “In use” and “On this machine” sections above only reflect what's bound or installed now; this is where you change it.
+      <span id="model-sets"></span><a href="{% url 'inference-model-sets' %}">Manage model sets →</a></p>
+    <p class="panel-note" id="footprint-override">Each connection's own Edit disclosure below has an optional memory footprint override the execution queue uses when planning what can run at once — see that disclosure's own field for what it does when left blank.</p>
+    {% if connection_views %}
+    <div class="registered-table" role="table" aria-label="Registered connections">
+      <div class="registered-row-head" role="row">
+        <span class="registered-cell" role="columnheader">Name</span>
+        <span class="registered-cell" role="columnheader">Model server</span>
+        <span class="registered-cell" role="columnheader">Model ID</span>
+        <span class="registered-cell" role="columnheader">Endpoint</span>
+        <span class="registered-cell" role="columnheader">Capability</span>
+        <span class="registered-cell" role="columnheader">Dim</span>
+        <span class="registered-cell" role="columnheader">Created</span>
+        <span class="registered-cell" role="columnheader">Used by</span>
+        <span class="registered-cell" role="columnheader">Actions</span>
+      </div>
+      <span class="row-rule" aria-hidden="true"></span>
+      {% for item in connection_views %}
+      {% include "inference/_registered_connection.html" %}
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="empty">No connections registered yet.</p>
+    {% endif %}
+    <details class="supported-apis-details">
+      <summary>Supported APIs ({{ supported_engines|length }})</summary>
+      <p class="panel-note">The model-server APIs this platform can speak — this list is derived from the registered adapters and is exactly what's supported today. Any model a server speaking one of these APIs can run is usable.</p>
+      <ul class="supported-apis-list">
+        {% for eng in supported_engines %}
+        <li><code>{{ eng.name }}</code> — speaks {{ eng.description }} — <code>{{ eng.source_path }}</code> — {{ eng.ports }}</li>
+        {% endfor %}
+      </ul>
+    </details>
+    <span id="add-connection"></span>
+    <details class="add-connection-details"{% if prefill_model_id %} open{% endif %}>
+      <summary>Add a connection manually (for a model on another machine)</summary>
+      <p class="panel-note">Models found on this machine with a detected capability never need this form — add them with their “Add to registered” button above. Use this for a model on another machine, or for one whose capability or embedding dimension the model server doesn't report. For a well-known model, Capability and Embed dim can be left blank — they're filled in automatically.</p>
+      <form class="inline-form add-connection" method="post" action="{% url 'inference-connection-add' %}{{ assistant.open_query }}">
+        {% csrf_token %}
+        <label>Name<input type="text" name="name" placeholder="your label, e.g. workstation chat model" required></label>
+        <label>Model server
+          <select name="engine">
+            {% for eng in supported_engines %}
+            <option value="{{ eng.name }}" title="{{ eng.source_path }}" data-endpoint="{{ eng.default_endpoint }}"{% if forloop.first %} selected{% endif %}>{{ eng.name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Endpoint<input type="text" name="endpoint" value="{{ prefill_endpoint|default:endpoint|default:supported_engines.0.default_endpoint }}" required></label>
+        <label>Model ID<input type="text" name="model_id" value="{{ prefill_model_id|default:'' }}" placeholder="exact id from your model server's library" required></label>
+        <fieldset class="capability-group">
+          <legend>Capability (leave every box unchecked if well-known)</legend>
+          {% for cap in capabilities %}
+          <label class="capability-option">
+            <input type="checkbox" name="capability" value="{{ cap }}">
+            {{ cap }}
+          </label>
+          {% endfor %}
+        </fieldset>
+        {% include "inference/_family_fields.html" with id_prefix="add-" selected_family=form_values.family selected_variant=form_values.variant selected_text_encoder=form_values.text_encoder selected_vae=form_values.vae %}
+        <label>Embed dim (embeddings only)<input type="number" name="embed_dim" min="1"></label>
+        <label>Context window (tokens, optional — chat models only)<input type="number" name="context_window" min="1"></label>
+        <label>Descriptor (optional)<input type="text" name="descriptor" maxlength="80"></label>
+        <label>Rank (optional)<input type="number" name="rank" min="1"></label>
+        <button type="submit">Register connection</button>
+      </form>
+    </details>
+  </section>
+  {% endif %}
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  "use strict";
+
+  // Engine-profile endpoint autofill -- PROGRESSIVE ENHANCEMENT
+  // only: the endpoint field is already server-rendered with the best
+  // available fact (the page's live endpoint on the create form, a stored
+  // connection's endpoint on an edit form), so every form works
+  // identically with JS disabled. When the model-server selection
+  // changes, swap the endpoint to the newly selected server's own default
+  // (its option's data-endpoint) -- but never clobber a value the
+  // operator has TYPED: the server-rendered value (and any value this
+  // script itself set) is the clean baseline, and the first keystroke in
+  // the field marks it dirty, permanently opting it out of the swap (only
+  // the placeholder keeps updating).
+  var selects = document.querySelectorAll('select[name="engine"]');
+  Array.prototype.forEach.call(selects, function (select) {
+    var form = select.form;
+    var endpointInput = form ? form.querySelector('input[name="endpoint"]') : null;
+    if (!endpointInput) {
+      return;
+    }
+    var pristine = endpointInput.value;
+    endpointInput.addEventListener("input", function () {
+      pristine = null;
+    });
+    select.addEventListener("change", function () {
+      var current = select.options[select.selectedIndex];
+      var nextDefault = current ? current.getAttribute("data-endpoint") : "";
+      if (!nextDefault) {
+        return;
+      }
+      endpointInput.placeholder = nextDefault;
+      if (endpointInput.value === "" || endpointInput.value === pristine) {
+        endpointInput.value = nextDefault;
+        pristine = nextDefault;
+      }
+    });
+  });
+})();
+</script>
+{% endblock %}

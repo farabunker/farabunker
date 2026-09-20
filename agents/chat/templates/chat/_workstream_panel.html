@@ -1,0 +1,23 @@
+{% comment %}
+THE WRAPPER ONLY (author decision 11 / M12). A heading, the degrade
+branch every registered panel must survive, and one include -- so a
+second panel later is a REGISTRATION (`agents.contracts.workstreams.
+register_workstream_panel`), never an edit to this fragment or to the
+view that renders it. `panel.ok` is False only when the provider itself
+raised (`agents.workstreams.panels_for` never lets that reach here as an
+exception); a broken provider still gets its own heading and one honest
+sentence, exactly as `agents.chat.pickers.chat_picker_options` degrades
+the model picker.
+
+`class="ws-card"`/`class="ws-card-head"` (workstream composition pass):
+this wrapper is the ONE place every current AND future registered panel
+gets the stream page's own bounded-card treatment -- a panel registered
+later needs no template of its own to remember it, the same reason this
+file exists as a wrapper at all rather than each panel re-rendering its
+own heading.
+{% endcomment %}
+<section class="panel ws-card" id="panel-{{ panel.key }}">
+  <h2 class="ws-card-head">{{ panel.label }}</h2>
+  {% if panel.ok %}{% include panel.template %}
+  {% else %}<p class="muted">This section could not be loaded.</p>{% endif %}
+</section>

@@ -1,0 +1,14 @@
+{% extends "_settings.html" %}
+{% comment %}
+Thin per-app base for the registry's two pages (the models console and
+Model sets). It extends the SETTINGS shell (foundation/templates/
+_settings.html), not `_shell.html` directly, because both pages are
+settings-area pages -- every route this app mounts is class S box
+configuration -- so the sidebar and the two-column layout belong to the
+base rather than being repeated on each page. `_settings.html` is itself
+a thin extension of the one project-level shell, so the design tokens,
+dark-mode overrides, shared body/nav/button CSS and the global app bar
+still live in ONE place. `models/` still never imports `tools/` (see
+models/registry/README.md) -- extending a project-level template creates
+no Python import, so that boundary and `models/contracts/` purity are unaffected.
+{% endcomment %}

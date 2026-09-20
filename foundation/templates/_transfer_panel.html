@@ -1,0 +1,209 @@
+{% comment %}
+THE TWO-PANE TRANSFER PANEL (owner-specified component). Left pane:
+everything that does NOT carry this entitlement, with a checkbox each
+and an "Add" button. Right pane: everything that does, with a checkbox
+each and a "Remove" button. Both panes are fixed-height scroll boxes
+with a type-to-filter box on top, so an axis with fifty rows is as
+workable as one with three.
+
+FULLY SERVER-RENDERED, and the reason is the house rule rather than
+taste: with JavaScript off the panes still render every row, the
+checkboxes still check, and both buttons still submit -- all the script
+adds is hiding non-matching rows as you type (`_filter_rows_script.html`,
+included by the CALLER beside this one, gated on the same condition).
+Nothing here touches `localStorage`, `sessionStorage` or a cookie, and
+nothing listens on `document`.
+
+TWO DIRECTIONS, ONE COMPONENT (phase 2). Phase 1 renders it
+ENTITLEMENT-major: one entitlement, panes of resources, on
+`identity/templates/identity/entitlement.html`. Phase 2 renders the same
+fragment RESOURCE-major: one tool/agent/flow, panes of entitlements,
+inside a collapsed `<details>` on `/chat/tools/` and `/chat/access/`.
+Nothing about the mechanism differs between the two -- the same
+`add`/`remove` checkbox names, the same `op` button, the same inert
+filter form -- so the flip is entirely in the PARAMETERS below
+(`tp_fields`, `tp_label`, `tp_bare`, `tp_empty_catalogue`), never a
+second copy of this file. What the caller's own view supplies is which
+hidden fields identify the target and which rows go in which pane.
+
+ADD/REMOVE, NOT A WHOLE SUBMITTED SET. One form spans both panes, and
+the button pressed says which side to honour (`name="op"`, value
+`add`/`remove`): a browser submits every checked box in the form, and
+honouring only the pressed side is what stops a stray tick in the other
+pane from acting. The server then applies exactly those ids as a
+DIFFERENCE -- so two administrators editing different rows of the same
+axis do not clobber each other, which a whole-set write does by
+construction. `identity/contracts/axes.py::EntitlementAxis.set_for` has
+the full reasoning, including the batch's N-transaction semantics.
+
+THE FILTER BOXES ARE NOT PART OF THE WRITING FORM, and that is a fix
+rather than a detail (fix round 1, I2). HTML's implicit-submission rule
+says Enter in a text-like field activates the form's FIRST submit
+button -- which here is the left pane's `Add`. An operator ticking three
+rows in the Active pane, typing in that pane's filter and pressing Enter
+would have posted `op=add` with an empty left pane, lost all three
+ticks, and been told "0 added, 0 removed": a keystroke that discards
+work and reports success, on a page whose whole promise is that it works
+without JavaScript. Both filter inputs are therefore associated by
+`form=` with an INERT sibling form -- declared before the writing form,
+never nested inside it (nested `<form>` elements are illegal HTML), with
+no `method="post"`, no action of its own, no fields of its own and no
+submit button at all. Enter in a filter box now reaches a form that
+cannot write, and whose own implicit submission is blocked twice over:
+by having no submit button, and by owning two text-like fields rather
+than one. `identity/tests/test_entitlement_pages.py::
+test_enter_in_a_filter_box_can_never_mutate` pins the association, the
+absence of a submit button, and that the inert form is not a POST.
+
+ONE FORM, NO NESTING. This fragment renders its own `<form>`, so it must
+NOT be included inside another one.
+
+WHERE ITS CSS LIVES. Every `.transfer-*` rule -- the panel's own CARD
+CHROME included -- is in `foundation/templates/_settings.html`, because
+EVERY CONSUMER TODAY EXTENDS `_settings.html`: `identity/templates/
+identity/entitlement.html`, `chat/tool_entitlements.html` and
+`chat/agent_entitlements.html`. That template is therefore the deepest
+common ancestor of all three, which is the placement rule
+`foundation/ops/tests/test_css_ownership.py` states. A consumer outside
+the settings area later promotes those rules one tier to `_shell.html`,
+exactly as `.messages`/`.msg` were promoted when four non-settings bases
+needed them; it does not copy them.
+
+THE CHROME IS THE PANEL'S OWN, not the consumer page's (fix round 1,
+M1). This fragment used to take its background, border and padding from
+whatever bare `section { ... }` rule the including page happened to
+define in its own style block -- which is the exact shape the CSS gate
+forbids for classes, and escaped it only because the gate matched class
+names and not element selectors. It rendered chromed on the one page
+that had such a rule and would have rendered bare on the two chat pages
+phase 2 then added. `.transfer-panel` carries its own card now, and the
+gate grew the element-selector check that catches the old shape.
+
+A `<div>`, NOT A `<section>`, and the gate is what settled it (phase 2).
+The moment a second and third page included this fragment, the
+element-selector check went red on exactly this: the fragment opened a
+`<section>`, and `identity/entitlement.html` styles bare `section` in
+its own style block, so the panel would have rendered with a card on
+that page and a different one on the access pages. A `<div>` depends on
+no page's element rules at all. It also reads more honestly now that
+`tp_label` is optional: a `<section>` whose heading the caller may omit
+is not a section.
+
+PARAMETERS, every one required unless marked optional:
+
+  tp_key             -- a token unique to this panel WITHIN ITS PAGE. It
+                        stems the inert filter form's own id and the two
+                        pane headings' ids, so two panels on one page
+                        never share one. BY CONVENTION EVERY CONSUMER
+                        PASSES THE ANCHOR OF THE THING THE PANEL IS
+                        ABOUT (fix round 2, P2-N1; corrected here, since
+                        the first version of this sentence said
+                        `tp_anchor` and that is true of only one of the
+                        three call sites). On the entitlement page that
+                        is the panel's own section, so `tp_key` and
+                        `tp_anchor` are the same string; on the two
+                        access pages it is the RESOURCE ROW's anchor,
+                        while `tp_anchor` is the panel's own id nested
+                        inside it -- one element, one id
+  tp_anchor          -- the section's own element `id`, and the fragment
+                        a save redirects back to. Separate from `tp_key`
+                        because the two vocabularies differ per
+                        consumer: phase 1 anchors `axis-<key>`, phase 2
+                        anchors the resource row (`tool-<key>`,
+                        `agent-<pk>`)
+  tp_fields          -- dict of hidden field name -> value identifying
+                        the POST's target, rendered in order. The one
+                        parameter that carries the direction flip: phase
+                        1 passes `{"action": "axis", "axis": <key>}`,
+                        phase 2 `{"tool_key": <key>}` or
+                        `{"kind": ..., "pk": ...}`. Built by the VIEW,
+                        never assembled in a template
+  tp_label           -- OPTIONAL, "": an `<h2>` above the panes. Phase 1
+                        names the axis here; phase 2 omits it, because
+                        the `<details>` summary it sits under already
+                        names the row
+  tp_bare            -- OPTIONAL, falsy: drop the panel's own card
+                        chrome, for a consumer that supplies its own
+                        (phase 2's `<details>` sits inside a
+                        `section.row` card already)
+  tp_empty_catalogue -- OPTIONAL, "": the left pane's copy when there is
+                        nothing to offer AT ALL, as opposed to
+                        everything already being active. Defaults to
+                        "No resources of this kind yet."
+  tp_hint            -- OPTIONAL, "": one sentence under the heading
+  tp_available       -- rows NOT carrying it; each `{id, name, note}`
+  tp_active          -- rows carrying it, same shape
+  tp_available_count / tp_active_count -- the pane headings' own counts,
+                        computed by the caller's own view where the
+                        split is (`identity/axes.py::axis_panels`, or
+                        the two chat views' row builders), so a heading
+                        cannot disagree with the list under it
+  tp_total           -- rows in the whole catalogue, which is what makes
+                        the left pane's empty state HONEST: an empty
+                        left pane means something different on an axis
+                        with no rows at all than on one where every row
+                        is already active
+  tp_action          -- OPTIONAL, "": the writing form's `action`.
+                        Omitted here, which posts to the current URL and
+                        so carries whatever query string it already had;
+                        a consumer on a settings CARD route needs one
+                        ending `?assistant=1` instead (`identity/tests/
+                        test_route_matrix.py`'s own sweep)
+{% endcomment %}
+<div class="transfer-panel{% if tp_bare %} transfer-panel-bare{% endif %}" id="{{ tp_anchor }}">
+  {% if tp_label %}<h2>{{ tp_label }}</h2>{% endif %}
+  {% if tp_hint %}<p class="transfer-hint">{{ tp_hint }}</p>{% endif %}
+  {% comment %}
+  THE INERT FORM the two filter boxes belong to -- see the header
+  comment. Empty and sibling, never nested; it exists only so that Enter
+  in a filter box reaches something that cannot write.
+  {% endcomment %}
+  <form id="transfer-filter-{{ tp_key }}" class="transfer-inert"></form>
+  <form method="post"{% if tp_action %} action="{{ tp_action }}"{% endif %}>
+    {% csrf_token %}
+    {% for name, value in tp_fields.items %}<input type="hidden" name="{{ name }}" value="{{ value }}">
+    {% endfor %}
+    <div class="transfer-panes">
+      <div class="transfer-pane">
+        <h3 id="{{ tp_key }}-available">Available — {{ tp_available_count }}</h3>
+        <input type="search" class="filter-input" form="transfer-filter-{{ tp_key }}"
+               data-filter-scope=".transfer-pane" data-filter-rows=".transfer-row"
+               placeholder="Filter"
+               title="Type to filter the list below — requires JavaScript. The checkboxes and the buttons work with or without it."
+               aria-label="Filter the available list — requires JavaScript. The checkboxes and the buttons work with or without it.">
+        <div class="transfer-list" role="group" aria-labelledby="{{ tp_key }}-available">
+          {% for row in tp_available %}
+          <label class="transfer-row">
+            <input type="checkbox" name="add" value="{{ row.id }}">
+            <span class="transfer-name">{{ row.name }}</span>
+            {% if row.note %}<span class="transfer-note">{{ row.note }}</span>{% endif %}
+          </label>
+          {% empty %}
+          <p class="transfer-empty">{% if tp_total %}Everything is already active.{% else %}{% if tp_empty_catalogue %}{{ tp_empty_catalogue }}{% else %}No resources of this kind yet.{% endif %}{% endif %}</p>
+          {% endfor %}
+        </div>
+        <button type="submit" name="op" value="add">Add →</button>
+      </div>
+      <div class="transfer-pane">
+        <h3 id="{{ tp_key }}-active">Active — {{ tp_active_count }}</h3>
+        <input type="search" class="filter-input" form="transfer-filter-{{ tp_key }}"
+               data-filter-scope=".transfer-pane" data-filter-rows=".transfer-row"
+               placeholder="Filter"
+               title="Type to filter the list below — requires JavaScript. The checkboxes and the buttons work with or without it."
+               aria-label="Filter the active list — requires JavaScript. The checkboxes and the buttons work with or without it.">
+        <div class="transfer-list" role="group" aria-labelledby="{{ tp_key }}-active">
+          {% for row in tp_active %}
+          <label class="transfer-row">
+            <input type="checkbox" name="remove" value="{{ row.id }}">
+            <span class="transfer-name">{{ row.name }}</span>
+            {% if row.note %}<span class="transfer-note">{{ row.note }}</span>{% endif %}
+          </label>
+          {% empty %}
+          <p class="transfer-empty">None active.</p>
+          {% endfor %}
+        </div>
+        <button type="submit" name="op" value="remove">← Remove</button>
+      </div>
+    </div>
+  </form>
+</div>

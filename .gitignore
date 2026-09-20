@@ -1,0 +1,74 @@
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+*.code-workspace
+
+# --- Secrets & local config (never commit) ---
+.env
+.env.*
+!.env.example
+*.local
+secrets/
+*.key
+*.pem
+
+# --- Python (likely for inference/RAG modules) ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# --- Node (likely for the access-layer UI) ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+.next/
+out/
+coverage/
+
+# --- AI / data artifacts (large; do not commit) ---
+# Model weights, quantized files, and downloaded checkpoints
+*.gguf
+*.safetensors
+*.bin
+*.pt
+*.onnx
+# Vector store & database data
+*.db
+*.sqlite
+*.sqlite3
+# data/ is the FARABUNKER_DATA_DIR default (see config/settings.py); its
+# data/documents/ subtree is the managed document store (ADR 0009) — never
+# commit operator-ingested files.
+data/
+vectorstore/
+# Ingested documents / knowledge packs (may be private)
+corpus/
+knowledge/
+
+# --- Logs / runtime ---
+*.log
+logs/
+tmp/
+.cache/
+
+# --- Agent working directories ---
+# `.claude/*` and NOT `.claude/`: git will not re-include a file whose PARENT
+# DIRECTORY is excluded, so the bare-directory form would leave the committed
+# settings.json below permanently invisible, and the negation must follow the
+# pattern it negates.
+.claude/*
+!.claude/settings.json
+.superpowers/

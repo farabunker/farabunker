@@ -1,0 +1,663 @@
+{% extends "_shell.html" %}
+{% comment %}
+THE SETTINGS AREA'S SHELL (UI-2). Every settings page extends this
+instead of `_shell.html` and writes its body into `settings_content`;
+the sidebar, the two-column layout and the app bar's `Settings`
+highlight are written once, here.
+
+WHY A SIDEBAR AT ALL. UI-1's Manage row was a flat run of up to ten
+links across the top of every page in the box -- Queue beside Groups
+beside Model setup -- with no grouping and no room for one. Nine of the
+ten were the same KIND of thing (configuration), and a flat list of nine
+is a menu pretending to be a nav. Here they are three named groups in a
+column that has room for them, and the row they came from is gone.
+
+THE GATES ARE THE MANAGE ROW'S GATES, MOVED AND NOT CHANGED. Nothing is
+newly exposed and nothing newly hidden:
+
+  * Install guides is class P and renders for everybody -- it is the
+    page a person needs BEFORE they can sign in to a box whose engines
+    are not up.
+  * Models and Library are class S: a member who clicked either would
+    get a 403, and a nav entry that can only ever refuse is not
+    navigation (ORCHESTRATOR RULING R1). `identity_is_admin` is True in
+    the open posture -- everybody operates a household box -- so a
+    household box gets all three SETUP entries.
+  * ACCESS and BOX need accounts to exist as well as an administrator
+    looking, so an open box is offered neither: there are no accounts to
+    administer. Both groups sit behind ONE `{% templatetag openblock %}
+    if {% templatetag closeblock %}`, which is also what keeps a group
+    whose every entry is hidden from rendering an orphan label. SETUP
+    cannot empty out, because Install guides has no gate.
+
+`foundation/settings_area.py` holds the SAME order, grouping and gates
+as Python, for `/settings/` to redirect by. Two readers, one truth: a
+context processor would have to run on every page in the box and cost a
+query the console's own query-count pin forbids, so the sidebar reads
+the two context keys the shell already has (`identity_is_admin`,
+`identity_posture`) and a drift test walks a really-rendered sidebar and
+asserts its first link is exactly where `/settings/` sends the same
+viewer.
+
+A PAGE MARKS ITS SIDEBAR ENTRY, NOT ITS BAR ENTRY. `nav_current_settings`
+is set once below, so every page in the area lights the bar's `Settings`
+without each one remembering to; the page overrides its own
+`side_current_*` block instead. A SUB-PAGE marks its PARENT's entry --
+model sets marks Models, an entitlement's own page marks Entitlements --
+because the sidebar names sections, not URLs.
+
+The layout's CSS lives in `_shell.html` beside the app bar's, so the two
+blocks take the same width and their edges line up; see the
+`.settings-layout` note there.
+{% endcomment %}
+{% block nav_current_settings %}current{% endblock %}
+
+{% block extra_style %}
+  {% comment %}
+  CONSOLIDATION CONFIRM RESIDUAL 3: `chat/tool_entitlements.html` and
+  `chat/agent_entitlements.html` carried byte-identical copies of these
+  five selectors. Neither is a `chat/` fragment or a `chat/` leaf page,
+  so `foundation/ops/tests/test_css_ownership.py`'s own gate -- which
+  only scans `agents/chat/templates/chat/` -- cannot see this shape at
+  all; the placement rule its docstring states ("a selector's home is
+  the deepest template that is an ancestor of every template that uses
+  it") still applies, and for these two SIBLING pages that ancestor is
+  THIS template, not `chat/base.html`, which neither of them extends.
+  Both leaf pages now write `{{ block.super }}` first in their own
+  `extra_style` override to inherit this block, since a leaf page that
+  overrode it outright would silently drop these rules rather than add
+  to them.
+
+  AUDIT-2 B10, NARROWED, THEN C-21/C-52 MOVED IT AGAIN: `.messages` and
+  `.msg` were the SAME two rules in TEN of this shell's leaf pages --
+  every settings-area page that renders `{% templatetag openblock %}
+  for message in messages {% templatetag closeblock %}` -- so a prior
+  pass put them here, the deepest ancestor of those ten. But
+  `chat/base.html`, `jobs/base.html`, `rag/base.html` and
+  `vision/base.html` extend BARE `_shell.html` and cannot reach this
+  template at all, which is why each of THEM had grown its own copy
+  too. `_shell.html` is the deepest ancestor of all fourteen consumers,
+  so both rules now live there instead, in the shell's own `<style>` tag
+  OUTSIDE `{% templatetag openblock %} block extra_style {% templatetag
+  closeblock %}` -- this template's own override of that block (like
+  every other descendant's) still renders unconditionally underneath it,
+  `{{ block.super }}` or not.
+
+  `.msg.error` NOW COMES WITH THEM (Coherence Wave D, C3). It used to
+  stay out deliberately -- eight of the ten leaves carried their own
+  copy and did not agree: `rag/settings.html` tinted the whole row
+  (`--error-bg`/`--error-text`), the majority recoloured the border and
+  text (`--danger`), and two pages defined no error rule at all. That
+  was a real disagreement worth leaving alone at the time; by Wave D it
+  had become the LAST divergent spelling the settings-surface audit's
+  C3 finding named, and the audit's own recommendation (ranked fix
+  order, item 8) was to converge it. `--danger` is the spelling ten of
+  the twelve leaves already agreed on (console's own hard-coded error
+  hex pair was replaced with it by F5/Coherence Wave A, before this file
+  ever saw it -- see `foundation/ops/tests/test_css_ownership.py::
+  test_the_error_hexes_appear_only_where_the_token_is_declared`, which is
+  why this comment does not spell either literal out), so this is the
+  one spelling every page
+  now inherits via `{{ block.super }}` rather than re-typing --
+  `foundation/ops/tests/test_css_ownership.py::
+  test_no_settings_page_retypes_a_rule_settings_html_already_owns`
+  pins that no leaf re-types it. `rag/settings.html`'s own
+  `--error-bg`/`--error-text` tint is gone with its local rule -- the
+  one real visual change this convergence makes, and the one the item
+  exists to make.
+
+  `color: var(--text)` on `.msg` is what `_shell.html`'s own `body`
+  already sets, so the five pages whose copy omitted it are unmoved by
+  inheriting it explicitly.
+  {% endcomment %}
+  .msg.error { border-color: var(--danger); color: var(--danger); }
+  .warn { color: var(--danger); font-size: .85rem; }
+  .label-row {
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+    flex-wrap: wrap;
+    margin-top: .6rem;
+    padding-top: .6rem;
+    border-top: 1px solid var(--border);
+  }
+  .label-row button { margin-left: auto; padding: .35rem .8rem; font-size: .85rem; }
+  .no-labels { color: var(--muted); font-size: .85rem; }
+
+  {% comment %}
+  `section.settings` (Coherence Wave D, C4): the audit's C4 finding
+  counted nine section-wrapper vocabularies across twelve pages (eleven
+  when the audit counted them — F1/Coherence Wave C added Job execution
+  as the twelfth leaf afterwards, which is why it appears among the three
+  converged below), and not
+  all of them were genuinely different -- Library's `section.settings`,
+  Job execution's own copy of the SAME rule (S2/Coherence Wave C simply
+  copied it) and Accounts' `section.create` were three names for one
+  byte-identical card (background/border/radius/padding/margin, and the
+  same `h2` sizing). That is the mechanical case C4 asks for: no markup
+  content changed, no visual value changed, just one shared name instead
+  of three. Accounts' markup renamed `create` to `settings` to match;
+  the other, genuinely different section vocabularies (Models' grid,
+  Engine files' file grid, Install guides' cards, Tool/Agent access's
+  own `.tool`/`.row` card -- see just below -- Groups/Entitlements' bare
+  `<section>`, Identity & security's `<h2>`-less `.field`) are left
+  alone, per C4's own "where mechanical" limit: their content densities
+  genuinely differ, so forcing one shape onto them would be a visual
+  redesign, not a rename.
+  {% endcomment %}
+  section.settings {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1.5rem;
+  }
+  section.settings h2 {
+    font-size: 1rem;
+    margin: 0 0 0.75rem;
+  }
+
+  {% comment %}
+  `section.row` (Coherence Wave D, C4): the SAME shape one level down --
+  `chat/tool_entitlements.html`'s `section.tool` and `chat/
+  agent_entitlements.html`'s own `section.row` were already
+  byte-identical (tighter padding/margin and a monospace `h2` than
+  `section.settings` above, because each row is one short line of work,
+  not a settings card). `row` is the name kept: `tool` reads oddly on
+  the agent/flow rows Agent access renders, `row` reads correctly on
+  both pages' per-item cards.
+  {% endcomment %}
+  section.row {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: .9rem 1rem;
+    margin-bottom: .85rem;
+  }
+  section.row h2 {
+    font-size: .95rem;
+    margin: 0 0 .3rem;
+    font-family: monospace;
+  }
+
+  {% comment %}
+  THE SETTINGS ASSISTANT PANEL'S OWN FEW RULES MOVED TO `_shell.html`
+  (final review, I1). They used to live here, in `extra_style`, on the
+  reasoning that this template is the panel fragment's deepest common
+  ancestor -- true for all but TWO of the settings pages, and those TWO
+  (`foundation/setup/templates/setup/index.html`, `models/registry/
+  templates/inference/console.html`) overrode `extra_style` WITHOUT
+  `{{ block.super }}` UNTIL COHERENCE WAVE A, which dropped this entire
+  block and shipped the panel unstyled on Models and Install guides.
+  Both leaves now write `{{ block.super }}` first, so this block does
+  reach them today -- the panel's rules STAY in `_shell.html`'s
+  unconditional `<style>` region rather than moving back, because that
+  region is robust to any future leaf page that forgets the same line
+  again, exactly as `_shell.html`'s `.settings-main :target` rule does
+  for the identical reason (see its own comment there).
+  {% endcomment %}
+
+  {% comment %}
+  THE TWO-PANE TRANSFER PANEL (`foundation/templates/_transfer_panel.
+  html`). EVERY CONSUMER TODAY EXTENDS THIS TEMPLATE -- `identity/
+  templates/identity/entitlement.html` in the entitlement-major
+  direction, `chat/tool_entitlements.html` and
+  `chat/agent_entitlements.html` in the resource-major one -- so this is
+  the deepest ancestor of every template that renders the fragment,
+  which is where `foundation/ops/tests/test_css_ownership.py` says a
+  shared fragment's rules go. Not in the consumer's own style block: a fragment can be
+  included by a page nobody has read yet, and a leaf page's `{%
+  templatetag openblock %} block extra_style {% templatetag closeblock
+  %}` does not cascade sideways to another leaf.
+
+  A CONSUMER OUTSIDE THE SETTINGS AREA LATER PROMOTES THESE ONE TIER, to
+  `_shell.html`, exactly as `.messages`/`.msg` were promoted when four
+  non-settings bases turned out to need them. It does not copy them.
+
+  NO NEW PRIMITIVE. The scroll box, the search input and the row are the
+  idioms this area already uses (`overflow-y: auto` on a fixed
+  max-height, the bordered input, the flex row); what earns its own
+  names here is the two-pane LAYOUT, which nothing else on the box has.
+  {% endcomment %}
+  {% comment %}
+  THE PANEL'S OWN CARD (fix round 1, M1). It used to inherit background,
+  border and padding from whatever bare `section { ... }` rule the
+  including page happened to define in its own style block -- chromed on
+  the one page that had such a rule and bare anywhere else, and the
+  exact shape the CSS gate forbids for classes, escaping it only because
+  that check matched class names and not element selectors. Phase 2 then
+  added the two chat consumers, the element check stopped exempting this
+  fragment, and it went red on precisely that dependence: the fragment
+  opens a `<div>` now, and this rule is what chromes it.
+  {% endcomment %}
+  .transfer-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1.25rem;
+    scroll-margin-top: 1rem;
+  }
+  {% comment %}
+  THE INERT FORM the panel's two filter boxes are associated with by
+  `form=`, so Enter in one reaches a form that cannot write. It has no
+  content and must occupy no space -- a `<form>` carries a UA margin in
+  some browsers, which would otherwise open a gap under the heading.
+  Hiding the OWNER form does not disable the controls associated with
+  it: they live elsewhere in the markup and stay visible and submittable.
+  {% endcomment %}
+  {% comment %}
+  THE PANEL'S OWN HEADING (re-review nit NR2), for the reason its card
+  is its own: this was still sized by whichever consumer page happened
+  to write `section h2`, which is the M1 borrowing one selector deeper
+  -- and invisible to the element-selector check, which reads BARE
+  element selectors and says nothing about descendant ones.
+  {% endcomment %}
+  .transfer-panel h2 { font-size: 1rem; margin: 0 0 .75rem; }
+  {% comment %}
+  THE CHROME-LESS VARIANT (phase 2). On the two access pages the panel
+  sits inside a `<details>` inside a `section.row` card, so a second
+  card around it would be a border inside a border. The rule lives here,
+  beside the card it cancels, rather than in either consumer page --
+  same home, same reason.
+  {% endcomment %}
+  .transfer-panel-bare {
+    background: none;
+    border: 0;
+    border-radius: 0;
+    padding: .6rem 0 0;
+    margin-bottom: 0;
+  }
+  {% comment %}
+  THE COLLAPSED ROW (phase 2). A `<details>` per resource, closed by
+  default: `/chat/access/` used to render every entitlement as a
+  checkbox on every row, which is resources x entitlements checkboxes in
+  one page. The summary carries the truthful count and the leading
+  names, so an operator reads the page without opening anything.
+  {% endcomment %}
+  .access-summary { cursor: pointer; font-size: .88rem; color: var(--muted); }
+  .access-summary:hover { color: var(--text); }
+  .transfer-inert { display: none; }
+  .transfer-hint { color: var(--muted); font-size: .85rem; margin: -.25rem 0 .75rem; }
+  .transfer-panes { display: flex; gap: 1rem; flex-wrap: wrap; }
+  {% comment %}
+  `flex: 1 1 15rem` with `min-width: 0` -- the two panes share the width
+  evenly on a desktop and STACK, rather than overflow, once neither can
+  hold 15rem. `min-width: 0` is what lets a long row name be clipped by
+  the pane instead of widening it: a flex item's default `min-width:
+  auto` is its content, which is exactly how a wide list pushes a page
+  sideways, and the body never scrolls sideways on this box.
+  {% endcomment %}
+  .transfer-pane { flex: 1 1 15rem; min-width: 0;
+                   display: flex; flex-direction: column; gap: .5rem; }
+  .transfer-pane h3 {
+    margin: 0;
+    font-size: .72rem;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  {% comment %}
+  ONE TYPE-TO-FILTER INPUT RULE for the whole settings area (fix round
+  1, N1), not one per consumer. The transfer panel's two pane filters
+  and the entitlements list's own search box were the same idiom written
+  twice, in two homes, with three values differing -- the CSS gate
+  passed only because one was a class and the other a bare
+  `input[type="search"]`. A page that needs a different WIDTH still says
+  so itself; what is shared is the control's look.
+  {% endcomment %}
+  .filter-input {
+    padding: .45rem .6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: .9rem;
+  }
+  {% comment %}
+  THE FIXED-HEIGHT SCROLL BOX, which is the whole point of the
+  component: fifty rows must not push the buttons below the fold, and
+  the pane must not resize as a filter hides rows.
+
+  `height`, NOT `max-height` (owner feedback, 2026-09-16, pre-merge on
+  PR #97). A max-height grows to fit and stops there, so a pane holding
+  one row rendered as a short box beside a full one -- "Available -- 10"
+  tall next to "Available -- 1" tiny, with the two Add/Remove buttons at
+  different heights. The owner's words: the boxes should be the same
+  size regardless, rather than truncating if there is not enough to fill
+  it. A fixed height gives both panes the same box whatever they hold; a
+  short list simply shows empty space below its rows, and a long one
+  scrolls exactly as it did.
+
+  THE BUTTON ALIGNMENT FALLS OUT OF IT rather than being arranged
+  separately: the two panes are structurally identical (heading, filter,
+  list, button), so once the only variable-height element is fixed, what
+  follows it lines up.
+
+  ONE RULE FOR EVERY CONSUMER AND EVERY AXIS -- the entitlement page's
+  panels and both access pages' expanded rows are the same fragment, so
+  this is the only place the size is stated. `box-sizing: border-box`
+  (`_shell.html`) makes 16rem the OUTER box, padding and border
+  included, so the two panes match to the pixel.
+  {% endcomment %}
+  .transfer-list {
+    height: 16rem;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: .3rem;
+  }
+  .transfer-row {
+    display: flex;
+    align-items: baseline;
+    gap: .45rem;
+    padding: .25rem .3rem;
+    border-radius: 4px;
+    font-size: .88rem;
+    cursor: pointer;
+  }
+  .transfer-row:hover { background: var(--bg); }
+  .transfer-name { overflow-wrap: anywhere; }
+  .transfer-note { color: var(--muted); font-size: .78rem; white-space: nowrap; }
+  .transfer-empty { color: var(--muted); font-size: .85rem; margin: .4rem .3rem; }
+  .transfer-pane button { align-self: flex-start; padding: .35rem .8rem; font-size: .85rem; }
+{% endblock %}
+
+{% block content %}
+<div class="settings-layout">
+  {% comment %}
+  `{% templatetag openvariable %} assistant.open_query {% templatetag
+  closevariable %}` ON EVERY ENTRY (persistence round, owner report: "if
+  I have the chat up and then I click on a new settings link, the menu
+  goes back into hiding"). The assistant panel's entire open/closed state
+  is one query parameter -- no script, no client storage -- so a sidebar
+  of bare hrefs SHUTS THE PANEL on every click through the settings area.
+  This is `"?assistant=1"` while the panel is open and the empty string
+  otherwise, declared once in Python (`agents/chat/context_processors.py
+  ::panel_context`) and never typed as a literal here: the collapsed
+  render is then byte-identical to the one that predates the panel, and
+  a viewer the panel does not render for has no `assistant` key at all,
+  which Django resolves to the same empty string.
+
+  THE SAME SUFFIX GOES ON EVERY SETTINGS FORM'S `action` in every leaf
+  page (the other half of the same rule -- `docs/EXTENDING.md` states it
+  for new pages), so that a SAVE lands back on a page with the panel
+  still open too. The redirect half of that is `foundation/settings_area
+  .py::preserve_assistant_flag`.
+  {% endcomment %}
+  <nav class="settings-nav" aria-label="Settings">
+    <div class="settings-group">
+      <span class="nav-group-label">Setup</span>
+      {% if identity_is_admin %}
+      <a href="{% url 'inference-console' %}{{ assistant.open_query }}" class="{% block side_current_models %}{% endblock %}">Models</a>
+      <a href="{% url 'rag-settings' %}{{ assistant.open_query }}" class="{% block side_current_library %}{% endblock %}">Library</a>
+      <a href="{% url 'chat-settings' %}{{ assistant.open_query }}" class="{% block side_current_chat %}{% endblock %}">Chat</a>
+      <a href="{% url 'jobs-settings' %}{{ assistant.open_query }}" class="{% block side_current_jobs %}{% endblock %}">Job execution</a>
+      {% if "vision" in farabunker_features %}
+      <a href="{% url 'vision-engine-files' %}{{ assistant.open_query }}" class="{% block side_current_engine_files %}{% endblock %}">Engine files</a>
+      {% endif %}
+      {% endif %}
+      <a href="{% url 'setup-index' %}{{ assistant.open_query }}" class="{% block side_current_guides %}{% endblock %}">Install guides</a>
+    </div>
+    {% if identity_posture != "open" and identity_is_admin %}
+    <div class="settings-group">
+      <span class="nav-group-label">Access</span>
+      <a href="{% url 'identity-users' %}{{ assistant.open_query }}" class="{% block side_current_accounts %}{% endblock %}">Accounts</a>
+      <a href="{% url 'identity-groups' %}{{ assistant.open_query }}" class="{% block side_current_groups %}{% endblock %}">Groups</a>
+      <a href="{% url 'identity-entitlements' %}{{ assistant.open_query }}" class="{% block side_current_entitlements %}{% endblock %}">Entitlements</a>
+      <a href="{% url 'chat-tool-entitlements' %}{{ assistant.open_query }}" class="{% block side_current_tool_access %}{% endblock %}">Tool access</a>
+      <a href="{% url 'chat-agent-entitlements' %}{{ assistant.open_query }}" class="{% block side_current_agent_access %}{% endblock %}">Agent access</a>
+    </div>
+    <div class="settings-group">
+      <span class="nav-group-label">Box</span>
+      <a href="{% url 'identity-settings' %}{{ assistant.open_query }}" class="{% block side_current_identity %}{% endblock %}">Identity &amp; security</a>
+    </div>
+    {% endif %}
+  </nav>
+  <div class="settings-main">
+    {% block settings_content %}{% endblock %}
+    {% comment %}
+    THE SETTINGS ASSISTANT PANEL (spec §6.1, §8.2). Below the content
+    column, on every settings page, inside `.settings-main` so the
+    `:target` highlight's own scope is unchanged.
+
+    `{% templatetag openblock %} if identity_is_admin {% templatetag
+    closeblock %}` mirrors `chat/settings.html`'s own gate and the
+    sidebar's just above. IT IS THE SECOND OF TWO GATES, NOT THE ONLY
+    ONE: `agents.chat.context_processors.settings_assistant` refuses the
+    same principal at the DATA seam, before a single row is read, because
+    a gate that lives one layer above the work it guards decides what
+    RENDERS and not what was BUILT. `assistant` is absent from the
+    context entirely for anybody this `{% templatetag openblock %} if
+    {% templatetag closeblock %}` would have hidden it from.
+
+    ON AN OPEN BOX EVERY VIEWER IS AN ADMINISTRATOR, so a household box
+    shows this to whoever is at the keyboard -- consistent with the whole
+    settings area, where the same viewer already gets Models, Library and
+    Chat.
+    {% endcomment %}
+    {% if identity_is_admin and assistant %}
+    {% include "chat/_assistant_panel.html" %}
+    {% endif %}
+  </div>
+</div>
+{% comment %}
+THE UNSAVED-INPUT NAVIGATION GUARD (owner report, live, 2026-09-16:
+typing into a settings field and then clicking the assistant bubble, a
+sidebar link, a panel jump-link or `Close` is a full page load, and the
+input goes with it -- silently). ONE script, here in the chrome, which is
+also the whole of its scoping: every settings page extends this template
+and no page outside the settings area does, so it ships exactly where the
+settings chrome renders and nowhere else. `foundation/tests/test_shell.py
+::TestTheUnsavedInputGuard` sweeps both halves of that claim.
+
+IN `{% templatetag openblock %} block content {% templatetag closeblock
+%}`, NOT IN A `scripts` BLOCK, for the same reason the panel's rules do
+not live in `extra_style`: two settings leaves override their own blocks
+without `{{ block.super }}` (`models/registry/templates/inference/
+console.html` owns a `scripts` block of its own), and a guard that a leaf
+page can drop by forgetting one line is not a guard. No settings leaf
+overrides `content` -- they write `settings_content` -- so this region
+reaches all of them unconditionally.
+
+PROGRESSIVE ENHANCEMENT, AND IT STORES NOTHING. With JavaScript off every
+settings page behaves exactly as it did before this existed: the browser
+navigates and the edit is lost, which is today's behaviour, not a new
+one. Nothing is held on the client between loads -- no `localStorage`, no
+`sessionStorage`, no cookie -- because nothing needs to be: the dirty
+check runs at unload time against the DOM's own record of what the SERVER
+rendered.
+
+STATELESS DIRTY DETECTION, and that is the design, not an economy. There
+are no `input` listeners and no dirty flag to go stale. At unload, each
+control is compared to its server-rendered default (`defaultValue`,
+`defaultChecked`, and for a select the option carrying `defaultSelected`),
+so an operator who types into a field and then reverts it BY HAND gets no
+prompt, and markup the assistant panel's own XHR swapped into
+`#assistant-body` after page load is covered with no re-binding at all --
+the scan sees whatever is in the DOM at the moment it runs. A select with
+no `selected` option at all is not dirty either: the browser's own
+default selection is the first non-disabled option, which is what
+`defaultIndex` falls back to rather than reading "nothing carries
+`defaultSelected`, therefore everything differs" -- bounded by the two
+preconditions that fallback actually has, since the browser applies it
+only to a select whose DISPLAY SIZE is 1 and treats an option inside a
+disabled `<optgroup>` as unselectable. Neither shape is in the tree
+today; both are handled, because a wrong answer here is not a missed
+prompt but a false one on EVERY navigation off that page, for ever.
+
+ONLY CONTROLS INSIDE A FORM ARE SCANNED. The walk is over
+`document.forms`, so a bare control with no ancestor form and no `form=`
+attribute is invisible to it. There are none on any settings page today,
+and every settings control is in the form that saves it -- a standalone
+filter box added later would need this sentence revisited, not the
+design.
+
+A SAVE DOES NOT PROMPT ABOUT ITSELF. A document-delegated `submit`
+listener records the form being submitted and the scan skips that one
+form -- its values are being saved, not lost. A DIFFERENT dirty form
+still prompts, correctly: that edit really would be discarded by the
+save's own redirect.
+
+`defaultPrevented` IS WHAT SEPARATES A SAVE FROM THE PANEL'S ASK. The
+assistant's composer fires a real `submit` event and then cancels it, in
+its own handler on the form, to ask over XHR instead
+(`chat/_assistant_panel.html`); that event bubbles to this listener
+AFTER that handler has run, so by then the cancellation is visible and
+the ask records no exemption it will never spend. The unload scan also
+CONSUMES the record it reads, so a navigation the operator cancels at the
+prompt leaves no standing exemption behind either. Neither shape needed a
+deferred clear, which matters: `foundation/ops/tests/test_shared_poller
+.py::test_no_template_outside_the_helper_rolls_its_own_poll_loop` bans
+`setTimeout` and `setInterval` in every template but the shared poller,
+and this guard has no case to argue there -- it schedules nothing.
+
+THE INVARIANT THAT READ RESTS ON, AND THE ONE RULE IT PUTS ON EVERY
+FUTURE SETTINGS SCRIPT (fix round 1, review Important 1): EVERY RECORDED
+SUBMIT IS FOLLOWED BY AN UNLOAD OF THIS DOCUMENT, because an unload is
+the only thing that spends the record. Two shapes would break it, and
+both are closed:
+
+  * A SETTINGS-PAGE SCRIPT THAT CANCELS A SUBMIT MUST CANCEL IT ON THE
+    FORM ITSELF, never in a listener delegated to `document`. This guard
+    reads `defaultPrevented` at the document bubble -- after every
+    handler bound to the form (target phase precedes the bubble whatever
+    order anybody registered in, which is why the panel's own cancelling
+    handler is always visible as one), but BEFORE any document listener
+    registered later. This script renders in `{% templatetag openblock %}
+    block content {% templatetag closeblock %}` and `_shell.html` renders
+    `content` before `scripts`, so a leaf's own `{% templatetag
+    openblock %} block scripts {% templatetag closeblock %}` is always
+    later. A cancelled submit this guard does not see leaves a standing
+    exemption for the rest of the page's life -- the exact edit-loss this
+    round exists to close, restored, silently. Document delegation being
+    the repository's sanctioned script pattern is what makes this worth
+    stating rather than assuming; `foundation/tests/test_shell.py::
+    TestTheGuardsOrderingInvariant` fails the build on it.
+  * A FORM WITH `target` fires `submit` and navigates elsewhere, never
+    unloading this document. The recorder refuses those outright, and
+    the same gate keeps the shape out of the settings area's markup.
+
+THE ASSISTANT'S OWN COMPOSER IS IN SCOPE, deliberately: a typed-but-
+unasked question is real loss too, and it is loss of exactly the shape
+this round exists to close -- the jump strip and `Close` sit beside the
+box you typed it into. The one place that shows is the panel's own XHR
+fallback: when the ask's `fetch` fails the panel calls `form.submit()`,
+which fires no `submit` event at all, so that navigation is not exempt
+and a typed question prompts. That is the safe direction (the browser is
+about to leave a page holding text nobody saved) and it is a failure path
+already, not the ordinary one.
+
+WHAT THE PROMPT SAYS IS THE BROWSER'S, not ours. `preventDefault()` plus
+`returnValue` is the whole contract; every current engine shows its own
+generic wording and ignores any string a page supplies, so this does not
+try to write one.
+
+THE MODELS CONSOLE'S ENDPOINT AUTOFILL IS NOT A FALSE POSITIVE
+(`models/registry/templates/inference/console.html`): it rewrites the
+endpoint field only when the operator CHANGES the engine select, and that
+select is itself then dirty against its own `defaultSelected`, so the
+page was already an unsaved edit before the autofill touched anything.
+{% endcomment %}
+<script>
+(function () {
+  // Unsaved settings input -- navigation guard. See this template's own
+  // comment above for the whole account; the short version is that the
+  // dirty check is a scan of the live DOM against the server-rendered
+  // defaults, made at unload time, holding nothing on the client.
+  var submittingForm = null;
+
+  document.addEventListener("submit", function (event) {
+    // `event.target.target` -- a form that opens its submit somewhere
+    // else (`target="_blank"`, a named frame) fires this event and then
+    // never unloads THIS document, so the exemption it would record is
+    // one nothing ever spends. Recording nothing is the safe side: that
+    // form stays scanned.
+    if (event.defaultPrevented || event.target.target) { return; }
+    submittingForm = event.target;
+  });
+
+  function defaultIndex(select) {
+    var options = select.options;
+    var group;
+    var index;
+    for (index = 0; index < options.length; index += 1) {
+      if (options[index].defaultSelected) { return index; }
+    }
+    // NOTHING CARRIES `selected`, so the browser picked the default
+    // itself -- but only for a select whose DISPLAY SIZE is 1. A sized
+    // listbox auto-selects nothing and sits at -1, which is what this
+    // must answer for it rather than 0.
+    if (select.size > 1) { return -1; }
+    for (index = 0; index < options.length; index += 1) {
+      group = options[index].parentNode;
+      if (options[index].disabled) { continue; }
+      // An option inside a disabled `<optgroup>` is unselectable too,
+      // which the option's own `disabled` does not report.
+      if (group && group.tagName === "OPTGROUP" && group.disabled) { continue; }
+      return index;
+    }
+    return -1;
+  }
+
+  function selectIsDirty(select) {
+    var options = select.options;
+    var index;
+    if (select.multiple) {
+      for (index = 0; index < options.length; index += 1) {
+        if (options[index].selected !== options[index].defaultSelected) { return true; }
+      }
+      return false;
+    }
+    return select.selectedIndex !== defaultIndex(select);
+  }
+
+  function controlIsDirty(control) {
+    if (control.disabled) { return false; }
+    if (control.tagName === "SELECT") { return selectIsDirty(control); }
+    if (control.tagName === "BUTTON") { return false; }
+    var type = control.type;
+    if (type === "hidden" || type === "submit" || type === "button"
+        || type === "reset" || type === "image") { return false; }
+    if (type === "checkbox" || type === "radio") {
+      return control.checked !== control.defaultChecked;
+    }
+    if (control.defaultValue === undefined) { return false; }
+    return control.value !== control.defaultValue;
+  }
+
+  function anythingUnsaved(exempt) {
+    var forms = document.forms;
+    var controls;
+    var form;
+    var index;
+    var position;
+    for (position = 0; position < forms.length; position += 1) {
+      form = forms[position];
+      if (form === exempt) { continue; }
+      controls = form.elements;
+      for (index = 0; index < controls.length; index += 1) {
+        if (controlIsDirty(controls[index])) { return true; }
+      }
+    }
+    return false;
+  }
+
+  window.addEventListener("beforeunload", function (event) {
+    var exempt = submittingForm;
+    submittingForm = null;
+    if (!anythingUnsaved(exempt)) { return; }
+    event.preventDefault();
+    // The legacy half of the same contract, for engines that still read
+    // it: a non-empty `returnValue` is what asks them for the dialog.
+    // NOT a sentence, deliberately -- every engine in service shows its
+    // own generic wording and ignores this value, and a user-facing
+    // sentence is declared in Python in this repository, never typed
+    // into a template (AGENTS.md, house style).
+    event.returnValue = true;
+  });
+})();
+</script>
+{% endblock %}

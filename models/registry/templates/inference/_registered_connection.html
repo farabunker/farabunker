@@ -1,0 +1,161 @@
+{% comment %}
+One row in "Registered connections" -- the ONE editing home for every
+`ModelConnection`; the role-row and installed-row disclosures are
+read-only reflections rather than each carrying their own copy of this
+form. Bound to a `_connection_views` item via `item` (`item.connection`,
+`item.source_label`, `item.bound_role_labels`, `item.bound_has_embeddings`),
+with `capabilities` / `endpoint_override` already in the surrounding
+context (plain include, no `with ... only`).
+
+Anchored `id="conn-<pk>"` -- every read-only reflection elsewhere on the
+page that mentions this connection (the role-row and installed-row
+disclosures) links here with "Edit in Registered connections ↓"
+(`#conn-<pk>`) instead of carrying its own copy of the form.
+
+The fact block is a grid row, sharing the ONE `.registered-table` grid
+console.html wraps around every connection (`display: contents` on this
+div, same idiom as the needs-table and the machine table) so every
+connection's facts line up in real columns. The edit form, the
+"Where Capability/Dim come from" disclosure, and the Remove control are
+collapsed into ONE `.registered-actions` cluster per connection (Edit
+disclosure + Remove cluster) rather than three separate surfaces.
+
+That cluster is the 9th (last) CELL of the fact row itself --
+`.registered-cell.registered-actions` sits in the grid's final column,
+right alongside Name..Used by, not below them, so a connection with
+nothing open costs only its one fact-row stripe. Closed (the common case,
+no JS): it holds just the "Edit" `<summary>` and the Remove cluster,
+compact and right-aligned, sized to the one column. Opened: the same
+element's `grid-column` widens to `1 / -1` (console.html,
+`.registered-cell.registered-actions:has(.conn-edit-details[open])`) so
+the edit form and the folded-in Capability/Dim source note get the full
+row width they need, flowing onto their own grid row below the facts --
+pure CSS reacting to the native `<details>` `[open]` attribute the browser
+already toggles, no JS authored here. The Remove cluster moves down with
+it while editing (one cluster, one position), and reverts to the compact
+last-column cell the instant the disclosure closes.
+
+The bound-removal warning (`.conn-remove-cluster .remove-note`) is a
+short, compact note ("removing → unassigns those roles") rather than a
+loose full-width sentence -- the complete consequence ("in use by X --
+removing leaves it with no model assigned") is still there, in the
+element's `title` attribute, for anyone who hovers/inspects it. There are
+no "environment defaults" to fall back to any more, so the note never
+promises one.
+
+Both strings are built in the view (`_removal_note_short` /
+`_removal_note_title`) rather than assembled from `bound_role_labels`
+here: what removal does depends on whether EACH bound role has an
+explicit environment override -- one falls back onto it and keeps
+working, one without is left with no model at all -- and a single
+connection can be bound to roles with different outcomes. Template-side
+string building could only state one of them; the view states every one.
+
+`RoleBinding.connection` is `on_delete=SET_NULL` (models.py) -- removing a
+connection roles use clears those bindings, and an
+embeddings-bound removal additionally gates behind the same `confirm`
+checkbox `role_assign`'s unbind path uses (an embeddings-model change is
+drift-relevant) -- see `views.py::connection_remove`.
+
+Descriptor and rank: the operator's own one-line descriptor renders
+inline after the name, muted (`.descriptor-note`) -- it is how the
+operator recognizes a model without opening Edit, so it stays outside the
+disclosure, unlike `rank`, which is a plain fact and joins the other
+`<dt>`/`<dd>` pairs in the Edit disclosure's fact list. Both render only
+when set; no filler when they're blank.
+
+Memory footprint (T2b): up to two rows, in the same fact list, built from
+`ModelConnection`'s own footprint fields plus the human-size strings
+`_connection_views` precomputes (`item.footprint_override_display` /
+`item.measured_footprint_display` -- the template itself cannot format
+bytes). An override set with no measurement yet: one "Memory footprint"
+row, labeled "manual". An override set AND a measurement on record: that
+same row, PLUS a second "Last measured" row naming the measured size and
+date -- the override is what's actually in effect, but the last real
+measurement stays visible rather than disappearing the moment an operator
+overrides it. Only a measurement, no override: a single "Memory footprint"
+row with the "detected from the model server" label and date. Neither
+fact set: no rows at all -- provenance strings come from
+`footprint_source_labels` (== `_SOURCE_LABELS`, views.py) verbatim, same as
+`item.source_label` above, so there is no second copy of "manual"/
+"detected from the model server" to drift out of sync.
+{% endcomment %}
+<div class="registered-connection" id="conn-{{ item.connection.pk }}">
+  <div class="registered-row" role="row">
+    <span class="registered-cell" role="cell">“{{ item.connection.name }}”{% if item.connection.descriptor %} <span class="descriptor-note">— {{ item.connection.descriptor }}</span>{% endif %}</span>
+    <span class="registered-cell" role="cell">{{ item.connection.engine }}</span>
+    <span class="registered-cell" role="cell"><code>{{ item.connection.model_id }}</code></span>
+    <span class="registered-cell cell-endpoint" role="cell"><code>{{ item.connection.endpoint }}</code></span>
+    <span class="registered-cell" role="cell">{{ item.connection.capabilities|join:", " }}</span>
+    <span class="registered-cell" role="cell">{% if item.connection.embed_dim %}{{ item.connection.embed_dim }}{% endif %}</span>
+    <span class="registered-cell" role="cell">{{ item.connection.created_at|date:"N j, Y" }}</span>
+    <span class="registered-cell" role="cell">
+      {% if item.bound_role_labels %}used by: {% for label in item.bound_role_labels %}<span class="badge chip">{{ label }}</span>{% endfor %}{% else %}not used by any role{% endif %}
+    </span>
+    <div class="registered-cell registered-actions" role="cell">
+      <details class="conn-edit-details">
+        <summary>Edit</summary>
+        <dl class="conn-source">
+          <dt>Capability</dt><dd>{{ item.source_label }}</dd>
+          {% if item.connection.embed_dim %}
+          <dt>Embedding dimension</dt><dd>{{ item.source_label }}</dd>
+          {% endif %}
+          {% if item.connection.context_window %}
+          <dt>Context window</dt><dd>{{ item.connection.context_window }} tokens</dd>
+          {% endif %}
+          {% if item.connection.rank %}
+          <dt>Rank</dt><dd>{{ item.connection.rank }}</dd>
+          {% endif %}
+          {% if item.connection.footprint_override_bytes %}
+          <dt>Memory footprint</dt><dd>{{ item.footprint_override_display }} — {{ footprint_source_labels.connection }}</dd>
+          {% if item.connection.measured_footprint_bytes %}
+          <dt>Last measured</dt><dd>{{ item.measured_footprint_display }} — {{ footprint_source_labels.engine }} on {{ item.connection.measured_footprint_at|date:"N j, Y" }}</dd>
+          {% endif %}
+          {% elif item.connection.measured_footprint_bytes %}
+          <dt>Memory footprint</dt><dd>{{ item.measured_footprint_display }} — {{ footprint_source_labels.engine }} on {{ item.connection.measured_footprint_at|date:"N j, Y" }}</dd>
+          {% endif %}
+        </dl>
+        {% include "inference/_connection_edit.html" with connection=item.connection form_scope="reg" %}
+        <div class="conn-sets">
+          <h4>Model sets</h4>
+          <p class="muted">A model in no set is usable by everyone who may use its capability. Putting
+            it in a set narrows it to the people who hold an entitlement attached to that set — a set with
+            no entitlement attached narrows nothing — and makes it unreachable from the watcher and the
+            command line, which hold none. Models bound to a
+            <em>role</em> — embeddings, transcription, extraction, and the default answering model — are
+            never narrowed: that is how ingestion keeps working for the whole box.</p>
+          <form method="post" action="{% url 'inference-connection-sets' item.connection.pk %}{{ assistant.open_query }}">
+            {% csrf_token %}
+            {% if endpoint_override %}<input type="hidden" name="endpoint_override" value="{{ endpoint_override }}">{% endif %}
+            <select name="sets" multiple size="{{ all_model_sets|length|default:1 }}">
+              {% for model_set in all_model_sets %}
+              <option value="{{ model_set.pk }}"{% if model_set.pk in item.member_set_ids %} selected{% endif %}>{{ model_set.name }}</option>
+              {% empty %}
+              <option value="" disabled>No model sets exist yet — create one on the Model sets page.</option>
+              {% endfor %}
+            </select>
+            <button type="submit">Save sets</button>
+          </form>
+        </div>
+      </details>
+      <div class="conn-remove-cluster">
+        {% if item.bound_role_labels %}
+        <p class="remove-note" title="{{ item.removal_note_title }}">{{ item.removal_note }}</p>
+        {% endif %}
+        <form class="inline-form conn-remove" method="post" action="{% url 'inference-connection-remove' %}{{ assistant.open_query }}">
+          {% csrf_token %}
+          {% if endpoint_override %}<input type="hidden" name="endpoint_override" value="{{ endpoint_override }}">{% endif %}
+          <input type="hidden" name="connection_id" value="{{ item.connection.id }}">
+          {% if item.bound_has_embeddings %}
+          <span class="confirm-row">
+            <input type="checkbox" name="confirm" value="yes" id="confirm-remove-{{ item.connection.id }}">
+            <label for="confirm-remove-{{ item.connection.id }}">Confirm removal</label>
+          </span>
+          {% endif %}
+          <button type="submit" class="remove-btn">Remove</button>
+        </form>
+      </div>
+    </div>
+  </div>
+  <span class="row-rule" aria-hidden="true"></span>
+</div>

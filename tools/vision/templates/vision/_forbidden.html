@@ -1,0 +1,12 @@
+{% comment %}
+The 403 body for a generate attempt made without the `vision.generate`
+entitlement -- a REFUSAL, not an unavailable service, so this carries no
+"Models" link: that link points at `inference-console` (class S,
+administrators only), and handing it to the very non-admin this refusal
+names would reframe a permission decision as a config problem for
+somebody who cannot act on it either way. `_unavailable.html` is the
+503 sibling and stays console-linked; this is deliberately message-only.
+{% endcomment %}
+<div class="banner warn">
+  {{ message }}
+</div>

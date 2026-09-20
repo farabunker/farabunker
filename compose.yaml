@@ -1,0 +1,226 @@
+# farabunker dev/appliance compose stack (ADR 0006).
+#
+# Ollama is intentionally NOT a service: on macOS dev, Docker cannot reach the
+# Metal GPU, so Ollama runs natively on the host and the `web` container reaches
+# it via host.docker.internal. On the Linux appliance it would be its own
+# container with GPU passthrough — same OLLAMA_BASE_URL contract, different value.
+# See docs/adr/0006-containerization-and-isolation.md §4.
+#
+# DURABLE DATA lives on the host under ./data (FARABUNKER_DATA_DIR, gitignored),
+# NOT inside any container (ADR 0006 rule: data outlives the process):
+#   ./data/postgres   — the Postgres data directory (bind mount below)
+#   ./data/documents  — the managed document store (ADR 0009), reached inside the
+#                       web container at /app/data/documents via the ./:/app mount
+#   ./data/inbox      — the watch-inbox for browser uploads; the `watcher`
+#                       service ingests it out-of-band (ADR 0006 §6)
+#   ./data/generated  — the managed generated-media store (one dir per job),
+#                       reached inside the web container at /app/data/generated
+# `docker compose down` and image rebuilds therefore never wipe operator data.
+#
+# ENGINE FILES (2026-09-02): the image engine keeps its OWN copies of every
+# rendered output and uploaded input, in folders farabunker's own managed
+# store above never manages and never deletes. The two bind mounts on `web`
+# below expose those folders (read/write) at /engine/output and /engine/input
+# so an administrator can see and delete them at /vision/engine-files/
+# (`tools/vision/store.py::ENGINE_OUTPUT_DIR`/`ENGINE_INPUT_DIR`, fixed to
+# those same two in-container paths).
+#
+# COMFYUI_OUTPUT_DIR/COMFYUI_INPUT_DIR (below) are a DIFFERENT pair of names
+# on purpose, not a typo for the two above: `env_file: .env` on `web` also
+# hands every `.env` variable to the CONTAINER's own process, so naming the
+# HOST-side source path the same as the IN-CONTAINER setting would leak the
+# host path over top of `/engine/output` inside the app and break it. These
+# two are OPERATOR-SET in .env, pointed at wherever the engine really keeps
+# its folders (e.g. ComfyUI's own `output`/`input` directories) — this repo
+# ships no assumption about that path (it is public, and every operator's
+# engine install lives somewhere different), so the default below is a
+# harmless empty local folder rather than any one person's home directory.
+
+# C-33: the four engine addresses every service needs, written once.
+# `app`, `watcher` and `worker` each carried this block verbatim. An
+# anchor, not a shared file: `compose.preview.yaml` keeps its own copy
+# with its own values by design (ADR 0011), and an anchor cannot cross
+# files.
+x-engine-env: &engine-env
+  # S4: composed from POSTGRES_PASSWORD rather than carrying the
+  # credential inline. This is not only a "don't commit a password"
+  # change -- compose's `environment:` BEATS `env_file:`, so the inline
+  # URL that used to sit here won over anything an operator wrote in
+  # .env, which made the password non-overridable by configuration.
+  # Interpolating `${POSTGRES_PASSWORD}` puts .env back in charge while
+  # keeping the anchor (C-33) that stops these four addresses drifting
+  # apart across the three services.
+  DATABASE_URL: postgres://farabunker:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/farabunker
+  OLLAMA_BASE_URL: http://host.docker.internal:11434
+  COMFYUI_BASE_URL: http://host.docker.internal:8188
+  WHISPER_BASE_URL: http://host.docker.internal:8080
+  # S1: the container's hostname is a random hex id, so the settings
+  # default (this machine's own name) is useless inside it. Name the
+  # service and the loopback addresses a browser actually uses to reach
+  # the published port.
+  #
+  # AN INTERPOLATED DEFAULT, NOT A LITERAL, and that is the whole point:
+  # compose's `environment:` beats `env_file:`, so a literal here would
+  # win over .env and silently make every instruction in .env.example,
+  # docs/DEV.md and docs/OPERATIONS.md ("add the name in .env") false.
+  # That is the exact defect Task H3 spends a whole task removing from
+  # DATABASE_URL; do not reintroduce it one task earlier.
+  ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1,[::1],web}
+
+services:
+  db:
+    # PINNED BY DIGEST (dependency audit IMAGE-8/9): `pgvector/pgvector:pg16`
+    # moves across Postgres point releases AND bundled extension versions,
+    # so two rebuilds of the same commit were not the same image. The tag is
+    # kept alongside the digest so a reader can still tell what it is.
+    # Resolved 2026-09-13 from a locally cached pull. Bump procedure: `docker
+    # pull pgvector/pgvector:pg16 && docker inspect --format='{{index
+    # .RepoDigests 0}}' pgvector/pgvector:pg16`, replace the digest below,
+    # rebuild, run the suite.
+    image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+    restart: unless-stopped
+    # S12: closes the other half of the non-root story below -- this
+    # service manages its own in-container user, but no service here
+    # needs the ability to raise privileges via a setuid binary either.
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      POSTGRES_DB: farabunker
+      POSTGRES_USER: farabunker
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    ports:
+      # S4: LOOPBACK ONLY. `"5432:5432"` has no host-IP prefix and
+      # therefore binds 0.0.0.0 -- every interface on the box. Nothing in
+      # this compose topology needs the port published at all (the three
+      # app services reach `db` by service name on the compose network);
+      # it is published for the operator's own `psql`, and an operator
+      # sits at the box. `docs/ARCHITECTURE.md` calls the LAN trusted,
+      # but SECURITY.md's threat model is "assume the network is
+      # compromised" and the whole point of the enterprise posture is
+      # that different people on that same LAN hold different
+      # entitlements.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      # Bind mount to a visible, backup-able host directory (not a Docker-managed
+      # named volume), so the database is stored plainly OUTSIDE the container.
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U farabunker -d farabunker"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # S12: the Dockerfile's non-root USER already limits what a
+    # compromised process can do to the host; this stops it from using
+    # a setuid binary to climb back to root even if some other bug
+    # hands it a way to exec one.
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - .env
+    environment:
+      # Reach the db service by name on the compose network, and Ollama on the
+      # host (host.docker.internal; resolved on Linux via extra_hosts below).
+      <<: *engine-env
+      # Pinned to the volumes' own IN-CONTAINER targets below, regardless of
+      # what (if anything) .env sets for these two names -- the app must
+      # always agree with where the bind mounts actually land.
+      ENGINE_OUTPUT_DIR: /engine/output
+      ENGINE_INPUT_DIR: /engine/input
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # Bind the repo for live code during dev; ./data under it carries the
+      # managed document store durably. For a production appliance you would
+      # instead bake code into the image and mount only ./data (durable).
+      #
+      # DEV CONVENIENCE, NOT THE PRODUCTION SHAPE (S12). Live code with
+      # no rebuild is why this is here; it is also read-write access from
+      # the container to the host's application source. For an appliance,
+      # bake the code into the image and mount only ./data. The non-root
+      # USER in the Dockerfile is what limits the damage until then.
+      # `deploy/README.md` carries the rest of the hardening list
+      # (read-only rootfs, dropped capabilities, seccomp) as Phase 4.
+      - .:/app
+      # Engine files (see the header comment above): rw, so the admin page's
+      # delete action can actually remove a phantom file. Defaults to a
+      # harmless empty local folder — an operator points these at the
+      # engine's real output/input directories via COMFYUI_OUTPUT_DIR/
+      # COMFYUI_INPUT_DIR in .env. (Named differently from the in-container
+      # ENGINE_OUTPUT_DIR/ENGINE_INPUT_DIR setting on purpose -- see the
+      # header comment.)
+      - ${COMFYUI_OUTPUT_DIR:-./data/engine/output}:/engine/output
+      - ${COMFYUI_INPUT_DIR:-./data/engine/input}:/engine/input
+
+  watcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - .env
+    environment:
+      <<: *engine-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    # IMAGE-10: the image's HEALTHCHECK probes HTTP on :8000; the watcher
+    # serves no HTTP at all, so it would read as perpetually unhealthy
+    # rather than simply "no health information" -- switch the inherited
+    # probe off.
+    healthcheck:
+      disable: true
+    command: python manage.py ingest_watch /app/data/inbox
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - .env
+    environment:
+      # The worker needs the ComfyUI address too, so queued
+      # image-generation jobs reach the host engine instead of falling
+      # back to localhost inside the container. Same for the whisper
+      # address: queued transcription jobs (media-into-RAG plan T6)
+      # reach the host whisper-server instead of falling back to
+      # localhost inside the container.
+      <<: *engine-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    # IMAGE-10: the image's HEALTHCHECK probes HTTP on :8000; the worker
+    # serves no HTTP at all, so it would read as perpetually unhealthy
+    # rather than simply "no health information" -- switch the inherited
+    # probe off.
+    healthcheck:
+      disable: true
+    command: python manage.py run_jobs
+    # SHUTDOWN_GRACE_SECONDS (models/queue/worker.py) is 20s; this must be
+    # comfortably longer than that or docker's own default (10s) would
+    # SIGKILL the worker mid-drain, before it ever gets to hand its
+    # in-flight job(s) back to the queue.
+    stop_grace_period: 30s

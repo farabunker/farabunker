@@ -1,0 +1,27 @@
+{% comment %}
+The ONE facts line, rendered from an Operation's `Param` schema
+(`tools/vision/models.py::GenerationJob.facts`) instead of from txt2img-shaped
+literals. Included by the job card and by the gallery caption, so a second
+operation's parameters appear in both with no template edit -- which is the
+promise ADR 0012's Consequences make.
+
+Facts only. A caller with something the schema cannot know -- the gallery's
+OUTPUT pixel size, which measures the produced file rather than the request
+-- renders it inline next to the include, which is one line and needs no
+slot here.
+{% endcomment %}
+{% comment %}
+TWO presentations, ONE source. `layout="rows"` is the job card's labelled
+definition list -- the owner's "facts as labeled rows instead of a
+dot-separated prose line". Anything else (including no `layout` at all) is
+the compact inline line, which is still the right shape inside a 240px
+gallery figcaption where a two-column list wraps into nonsense. A second
+partial would have been a second place to keep the same iteration.
+{% endcomment %}
+{% if layout == "rows" %}
+<dl class="job-facts">
+  {% for label, value in facts %}
+  <dt>{{ label }}</dt><dd>{{ value }}</dd>
+  {% endfor %}
+</dl>
+{% else %}{% for label, value in facts %}{{ label }} {{ value }}{% if not forloop.last %} · {% endif %}{% endfor %}{% endif %}

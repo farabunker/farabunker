@@ -1,0 +1,113 @@
+{% comment %}
+THE ONE SHARED ATTACH FRAGMENT (owner feedback round 9, verbatim: "I
+also don't have the ability in the chat to add any additional objects
+like photos/documents/pdfs/ect... There shouldn't be two different
+code bases. Both should serve both purposes."). Rendered by ALL THREE
+composer surfaces now (`chat/_composer.html`, round 18) -- the plain
+`/chat/` start box, the workstream page's own New-chat card, and the
+conversation page's message form -- never per-surface copies.
+
+ROUND 18 ADDENDUM REWRITE (owner feedback, verbatim: "the box that
+allows me to add it just stays hovered, there is no way to add it to
+the chat or add more documents"; "when I submit... the add attachment
+box remains"; "there should be a button to add a document and then it
+should stack as part of the chat with the ability to remove
+attachments"). RETIRES THE `<details>` POPUP entirely -- everything
+below is now plain, always-in-flow form controls, not an overlay that
+could "stay hovered" or fail to close on submit. `+ Add files` is now
+a plain `<label for="attach-files">`, which opens the OS file picker
+natively with ZERO script -- the input itself stays visibly rendered
+(compact, `.attach-input`), never `display: none`, so its own native
+"N file(s)" text is an always-present JS-off fallback rather than
+something a hide/restore trick could get wrong.
+
+STAGED FILES render as a chip stack (`.staged-files`, the SAME
+`.turn-attachment-row`/`.turn-attachment-remove` recipe `chat/
+base.html` already gives a SENT message's own attachment chips --
+"staged" and "sent" are the same visual language, one earlier in its
+life) -- built and kept current by `chat/_attach_dragdrop.html`'s own
+script, included once by `chat/_composer.html` beside this fragment.
+Picking files now ACCUMULATES rather than replaces (that script's own
+docstring has the full reasoning); the ✕ on each chip removes just
+that one file, the same `DataTransfer` rebuild as before.
+
+THE SCOPE FIELDSET renders UNCONDITIONALLY in the markup (never a
+JS-off `hidden` attribute authored here, which would hide it from a
+JS-off reader PERMANENTLY) -- `chat/_attach_dragdrop.html`'s own script
+adds `.is-empty` to it once it finds zero staged files at load, and
+again on every render after that, removing it the moment a file is
+staged. A JS-off reader never gets that class added at all, so the
+fieldset stays visible from the first paint -- the "honest either way"
+call round 18's own addendum left to this implementation: always-
+visible-but-compact, rather than a `<noscript>` block duplicating the
+markup a second time.
+
+THE SCOPE SECTION IS CONTEXT-DRIVEN, not page-driven: `attach_
+workstream` (set by `agents.chat.service.composer_attach_context` for
+the two START surfaces, and by `agents.chat.views.thread.thread_
+context` for the conversation page -- see that function's own
+docstring for why a `may_upload_tool` holder who may not manage THIS
+stream gets no "This workstream only" option at all, rather than a
+universal-only fallback) is what decides which chooser renders --
+three options in a stream, two outside one. `agents.chat.service.
+start_turn` re-derives the identical `workstream_scope(...).may_upload`
+check server-side before trusting a `"contained"` placement, exactly
+the render-vs-gate pairing every other predicate this door touches
+already keeps.
+
+ROUND 12 (owner ruling, verbatim: "if I submit a document but have
+scope for chat, then it should only be used in that chat... if I
+change the scope to workstream, it should be made available via the
+rag framework"): THIS FRAGMENT DOES NOT INCLUDE `rag/_placement_
+choice.html` -- that fragment stays the WORKSTREAM DOCUMENTS PANEL'S
+OWN chooser (two values, auto-applies a remembered default). This
+door's own chooser is INLINE, below, because it genuinely diverges:
+THREE values here, not two ("This chat only" -- THE DEFAULT,
+pre-checked -- alongside "This workstream only"/"The universal
+library" in a stream, or just "This chat only"/"The universal library"
+outside one), and it NEVER auto-applies a remembered default -- the
+chat door always asks, because conversation scope is the primary case
+there. The "remember" checkbox still writes a workstream default when
+checked, but ONLY for the workstream/universal pair, exactly as the
+panel's own checkbox already does.
+
+GATING IS THE CALLER'S JOB, NOT THIS FRAGMENT'S: every composer surface
+only ever includes this behind `{% templatetag openblock %} if may_
+attach_files {% templatetag closeblock %}` -- this fragment assumes
+that gate already passed and renders unconditionally once reached.
+{% endcomment %}
+<div class="attach-block">
+  <div class="attach-row">
+    <label class="attach-label-button" for="attach-files">+ Add files</label>
+    <input type="file" id="attach-files" name="files" multiple class="attach-input">
+  </div>
+  <ul class="staged-files" aria-live="polite"></ul>
+  {% comment %}
+  NO `<input type="hidden" name="workstream">` HERE any more
+  (ROUND-18-CONFIRM R6): `chat/_composer.html` is the ONE place that
+  field renders now, keyed on `composer_workstream|default:
+  attach_workstream` -- this fragment used to emit its own copy
+  whenever `attach_workstream` was set, which agreed with the
+  composer's own routing field in VALUE but duplicated it in markup.
+  {% endcomment %}
+  <fieldset class="placement attach-scope">
+    <legend>Where should this live?</legend>
+    <div class="placement-options">
+      <label><input type="radio" name="placement" value="conversation" checked required>
+        This chat only</label>
+      {% if attach_workstream %}
+      <label><input type="radio" name="placement" value="contained" required>
+        This workstream only</label>
+      {% endif %}
+      <label><input type="radio" name="placement" value="universal" required>
+        The universal library</label>
+    </div>
+    {% if attach_workstream %}
+    <label class="remember"><input type="checkbox" name="remember_placement" value="1">
+      Use this choice for all future uploads to this workstream</label>
+    <p class="hint">"This chat only" is never remembered as a workstream default —
+      only "This workstream only"/"The universal library" can be. This door always
+      asks, even when this workstream has a remembered default.</p>
+    {% endif %}
+  </fieldset>
+</div>

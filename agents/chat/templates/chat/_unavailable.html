@@ -1,0 +1,48 @@
+{% comment %}
+The read-time banner for a turn this thread cannot currently queue -- an
+unbound chat role, a picked connection that no longer resolves, or a
+model that cannot call the tools this agent needs. `thread_context`
+computes `message` on EVERY GET, through `agents.runtime.preflight.
+preflight_turn`, and never turns it into a status code: the thread
+still renders 200 regardless (`views/thread.py`'s own docstring) --
+reading what already happened is never refused, only the POST that
+would queue new work is.
+
+Modelled on `tools/vision/templates/vision/_unavailable.html` -- a
+banner usable as an XHR fragment or included inside a full page render
+-- with ONE difference: two links, not one. "Models" is the
+console that binds a role to a connection; "Install guides" is the general
+walkthrough naming which role wants a model at all, for the operator
+who has never bound anything yet. `tools/vision/forms.py`'s own
+no-model-bound message links both, for the same reason.
+
+`message` NAMES A ROLE, never a model -- `preflight_turn` writes it
+that way (ADR 0010's third amendment), and this template adds nothing
+of its own that could leak one.
+
+W-4 (IA-2 walkthrough finding): THIS FRAGMENT IS SHARED across every
+`preflight_turn` refusal reason -- an unbound role, a dead connection,
+a missing tool capability, AND `AGENT_NOT_PERMITTED` (a plain member
+restricted from an entitlement-labelled agent, `agents/runtime/
+preflight.py::_AGENT_NOT_PERMITTED_MESSAGE`) -- unlike vision's own
+split (`tools/vision/templates/vision/_forbidden.html` is a dedicated,
+link-free 403 template, because vision's 403 and 503 paths were
+already two different views). One shared fragment here means the
+smaller, honest fix is THIS ONE: gate both links on `identity_is_admin`
+(the same context-processor value `documents.html`/`_shell.html`
+already read, `identity/context_processors.py::identity`) rather than
+forking a second template for one reason among several. `inference-
+console` is class S (administrators only, `identity/routes.py`) --
+handing its link to a member who cannot act on it either way is the
+identical wrong-audience mistake the T13 review closed on the vision
+XHR path; an administrator still gets both, because for the unbound/
+dead-connection reasons this banner ALSO covers, they are exactly who
+can act on them.
+{% endcomment %}
+<div class="banner warn">
+  {{ message }}
+  {% if identity_is_admin %}
+  <a href="{% url 'inference-console' %}">Models</a>
+  <a href="{% url 'setup-index' %}">Install guides</a>
+  {% endif %}
+</div>

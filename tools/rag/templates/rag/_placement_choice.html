@@ -1,0 +1,65 @@
+{% comment %}
+THE PLACEMENT CHOOSER (spec §9's table / owner decision 5), extracted so
+it exists ONCE rather than as two copies free to drift: `rag/documents.
+html`'s own upload form and `rag/panels/documents.html`'s in-stream
+upload section (walk-fix batch, F10) both `{% templatetag openblock %}
+include{% templatetag closeblock %} "rag/_placement_choice.html"` rather
+than each spelling the three states out by hand. Legal for both to share
+-- BOTH TEMPLATES WERE RAG-OWNED, so that was an include inside one
+column, not a cross-column reach.
+
+A THIRD CALLER, `chat/_attach_files.html` (owner feedback round 9), IS a
+cross-column include -- an `agents.chat`-owned fragment reaching a
+`tools.rag`-owned template -- but a SANCTIONED one, not an accidental
+one: Django's app-directories template loader shares one flat `templates
+/` namespace across every installed app, so this has always been legal
+to spell and costs nothing to add a second column's reach to. It carries
+no IMPORT-LAW implication either way -- `foundation/ops/tests/
+test_column_boundaries.py`'s boundary checks walk the Python import
+graph, never template `{% include %}` tags, so this is not the kind of
+cross-column reach that module's own rules govern at all.
+
+Callers set two context variables, exactly as `documents.html` already
+did before this extraction:
+
+  `placement_state` -- `"choose"` (no default set; render the radios) or
+  `"default"` (a default is set; render the one-line note). `"none"`
+  (outside any workstream, or a non-owner) renders NEITHER branch --
+  intentionally: a document not going into any stream needs no placement
+  choice, and a caller that gates the whole upload section on ownership
+  already never reaches `"none"` from inside that gate.
+
+  `workstream` -- read only by the `"default"` branch, for its own
+  `default_upload_placement` and its own `pk` (the "change" link, which
+  points at `#upload-default` on the stream's SETTINGS page since the
+  settings-page split moved that whole section off the working page it
+  used to sit on).
+
+NEITHER RADIO IS PRESELECTED (spec §9): tick one, plus the "remember"
+checkbox, to set this workstream's own default going forward
+(`document_upload`'s own `remember_placement` handling).
+{% endcomment %}
+{% if placement_state == "choose" %}
+<fieldset class="placement">
+  <legend>Where should this live?</legend>
+  <div class="placement-options">
+    <label><input type="radio" name="placement" value="universal" required>
+      The universal library</label>
+    <label><input type="radio" name="placement" value="contained" required>
+      This workstream only</label>
+  </div>
+  <label class="remember"><input type="checkbox" name="remember_placement" value="1">
+    Use this choice for all future uploads to this workstream</label>
+  <p class="hint">Neither is preselected. Tick the box to set a default for this
+    workstream, so you are not asked again.</p>
+</fieldset>
+{% elif placement_state == "default" %}
+<p class="placement-default">
+  {% if workstream.default_upload_placement == "contained" %}
+    Placed in this workstream only, per this workstream’s default.
+  {% else %}
+    Placed in the universal library, per this workstream’s default.
+  {% endif %}
+  <a href="{% url 'chat-workstream-settings' workstream.pk %}#upload-default">change</a>
+</p>
+{% endif %}

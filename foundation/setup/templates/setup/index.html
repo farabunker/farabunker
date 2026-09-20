@@ -1,0 +1,159 @@
+{% extends "_settings.html" %}
+{% comment %}
+The universal setup page. Every engine section is rendered from the adapter's
+own `setup_guide` (models/contracts/engines/base.py) -- this template names no
+engine, no port, no command, so a newly registered adapter appears here with
+no template change. An adapter with no guide falls back to the facts every
+adapter has.
+{% endcomment %}
+{% comment %}
+"Install guides" since UI-2 -- the settings area's own name for this
+page, and the one name it goes by everywhere (link text == H1 ==
+<title>). The url name, the path and the view are untouched.
+{% endcomment %}
+{% block title %}Install guides — farabunker{% endblock %}
+{% block side_current_guides %}current{% endblock %}
+{% block extra_style %}{{ block.super }}
+  :root { --page-max-width: 900px; }
+  .setup-wrap { max-width: var(--page-max-width); margin: 0 auto; }
+  .card {
+    border: 1px solid var(--border); border-radius: 8px; background: var(--panel);
+    padding: 1rem 1.25rem; margin-bottom: 1.25rem;
+  }
+  {% comment %}
+  0.9rem, NOT the shell's 0.85rem `.muted` (C-23): a drift, not this
+  page's copy of the seven-site consensus, so it stays local rather than
+  being silently resized to match.
+  {% endcomment %}
+  .muted { color: var(--muted); font-size: 0.9rem; }
+  h2 { font-size: 1.15rem; margin-top: 0; }
+  ol.flow, details ol { padding-left: 1.2rem; }
+  details ol > li { margin-bottom: 0.6rem; }
+  pre {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 0.55rem 0.7rem; overflow-x: auto; margin: 0.35rem 0 0;
+  }
+  pre, code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; }
+  details.platform { margin: 0.5rem 0; }
+  details.platform summary { cursor: pointer; font-weight: 600; }
+  .status { font-weight: 600; }
+  .status.ok { color: var(--ok); }
+  .status.down { color: var(--danger); }
+  table.needs { border-collapse: collapse; width: 100%; }
+  table.needs th, table.needs td {
+    text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border);
+    vertical-align: top; font-size: 0.9rem;
+  }
+{% endblock %}
+{% block settings_content %}
+{% comment %}
+`<main class="setup-wrap">`, NOT A BARE `<div>` (Coherence Wave D, C1):
+this page had no `<main>` landmark at all -- one of three settings
+pages the audit found missing it. The class, its CSS selector and the
+900px width are all unchanged; C1 converges the wrapper ELEMENT only.
+{% endcomment %}
+<main class="setup-wrap">
+<h1>Install guides</h1>
+
+<section class="card" id="how-models-reach-farabunker">
+  <h2>How models reach farabunker</h2>
+  <p class="muted">
+    farabunker runs no model itself and downloads nothing. You install an engine,
+    you place the model files, and farabunker connects to what it finds.
+  </p>
+  <ol class="flow">
+    <li><strong>Install an engine</strong> and put your model files where it can see them — one section per engine below.</li>
+    <li><strong>Register the model</strong> on <a href="{% url 'inference-console' %}">Models</a>: it lists what each engine reports on this machine; press “Add to registered”.</li>
+    <li><strong>Assign it to a role</strong> on that same page. Until you do, the role is honestly unassigned — nothing is chosen for you.</li>
+  </ol>
+</section>
+
+{% if identity_posture == "open" %}
+{% comment %}
+The posture page (/identity/settings/) was
+linked from nowhere. This box currently has no accounts -- Install
+guides is the one PUBLIC, operator-facing page every visitor reaches
+before anything else, so it is where the discovery path for turning them
+on belongs.
+Gated on the open posture only (not `identity_is_admin` too): in the
+open posture the box's only principal already administers it, so
+there is nobody here for the link to be hidden from.
+{% endcomment %}
+<section class="card" id="accounts">
+  <h2>Accounts</h2>
+  <p class="muted">
+    This box currently has no accounts: anybody who can reach it can do anything
+    on it. <a href="{% url 'identity-settings' %}">Turn accounts on</a>.
+  </p>
+</section>
+{% endif %}
+
+{% for engine in engines %}
+<section class="card" id="{{ engine.anchor }}">
+  <h2>{{ engine.name }}</h2>
+  {% if engine.guide %}
+  <p>{{ engine.guide.summary }}</p>
+  {% else %}
+  <p>Speaks {{ engine.api_description|default:"its own HTTP API" }}.</p>
+  {% endif %}
+
+  {% for platform in engine.platforms %}
+  <details class="platform"{% if platform.open %} open{% endif %}>
+    <summary>{{ platform.label }}</summary>
+    <ol>
+      {% for step in platform.steps %}
+      <li>
+        <strong>{{ step.title }}</strong>
+        {% if step.body %}<div class="muted">{{ step.body }}</div>{% endif %}
+        {% if step.command %}<pre>{{ step.command }}</pre>{% endif %}
+      </li>
+      {% endfor %}
+    </ol>
+  </details>
+  {% empty %}
+  <p class="muted">
+    No install guide ships for this engine yet.
+    {% if engine.install_cmd_template %} Getting models looks like <code>{{ engine.install_cmd_template }}</code>.{% endif %}
+    {% if engine.well_known_ports %} It is usually served on port {{ engine.well_known_ports|join:", " }}.{% endif %}
+    {% if engine.library_url %} Project page: <a href="{{ engine.library_url }}">{{ engine.library_url }}</a>.{% endif %}
+  </p>
+  {% endfor %}
+
+  {% if engine.guide %}
+  <p><strong>Reaching it from farabunker.</strong> {{ engine.guide.network_note }}</p>
+  <p><strong>Models.</strong> {{ engine.guide.models_note }}</p>
+  {% endif %}
+
+  {% if setup_is_admin %}
+  <p>
+    <strong>Verify:</strong>
+    {% if engine.verify_url %}<code>{{ engine.verify_url }}</code>{% else %}<span class="muted">no default endpoint is configured for this engine</span>{% endif %}
+    —
+    {% if engine.status == "reachable" %}<span class="status ok">Reachable</span>
+    {% elif engine.status == "unreachable" %}<span class="status down">Not reachable</span>
+    {% else %}<span class="status muted">not checked</span>{% endif %}
+  </p>
+  {% endif %}
+</section>
+{% endfor %}
+
+{% if setup_is_admin %}
+<section class="card" id="what-each-feature-needs">
+  <h2>What each feature needs</h2>
+  <table class="needs">
+    <thead><tr><th>Feature</th><th>Needs</th><th>Served by</th><th>Assigned?</th></tr></thead>
+    <tbody>
+      {% for role in roles %}
+      <tr>
+        <td>{{ role.label }}</td>
+        <td>{{ role.capability }}</td>
+        <td>{% if role.engines %}{{ role.engines|join:", " }}{% else %}<span class="muted">no registered engine serves this yet</span>{% endif %}</td>
+        <td>{% if role.bound %}yes{% else %}<a href="{% url 'inference-console' %}">not yet</a>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+</main>
+{% endblock %}

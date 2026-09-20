@@ -1,0 +1,120 @@
+{% comment %}
+ONE ROW MENU AT A TIME (owner feedback round 21, verbatim: "when I click
+on the ..., the prior one doesn't go away when I click on another one as
+seen in the image. it should be like a drop down not a toggle menu").
+
+Two `<details class="chat-menu">` elements in the rail can both be open
+at once, because that is what plain `<details>` does: each one is its own
+independent toggle and knows nothing about its siblings. The owner is
+asking for DROPDOWN semantics -- opening one closes whichever other was
+open -- and there is no markup or CSS that expresses "close that other
+element" without a script. (`<details name="...">`, the native exclusive-
+accordion attribute, is not usable here: it groups by name across the
+document, and these rows are generated per conversation, so every rail
+would need a per-rail name and every nested Rename/Delete disclosure
+would need to stay OUT of that group. A four-line listener is smaller
+and says what it means.)
+
+ONE DELEGATED LISTENER ON THE RAIL, never one per row: the rail's rows
+are re-rendered on every page load and there is no client-side row
+insertion anywhere on this surface, but a listener per row would still
+be N listeners where one does the job, and it would have to be re-bound
+by anything that ever did insert a row.
+
+CAPTURE PHASE, AND THAT IS LOAD-BEARING. `toggle` does NOT bubble
+(`Event.bubbles` is false on it), so a listener on the rail would never
+see a row's own toggle in the bubble phase at all. Capture propagates to
+ancestors regardless of `bubbles`, which is the same reason the platform
+recommends it for `focus`/`load` delegation. The third argument to
+`addEventListener` below is that `true`.
+
+THE `chat-menu` GUARD IS ALSO LOAD-BEARING: the menu panel contains
+NESTED `<details>` of its own (Rename, and the Delete confirm), and each
+of those fires its own `toggle` through this same listener. Without the
+class check, opening Rename would close the very menu it lives inside.
+The `open` check keeps a CLOSING menu from re-entering the loop that its
+own `other.open = false` writes trigger.
+
+DISMISSAL IS THE OTHER HALF OF "LIKE A DROP DOWN" (fix round 1). Mutual
+exclusion alone left a menu open until you clicked its own summary
+again; a real dropdown also closes when you click away from it and when
+you press Escape. Both are folded into THIS script rather than a second
+one, and both reuse the same `closeMenus` the toggle handler uses:
+
+* `pointerdown` ON THE DOCUMENT, not `click`, and in the CAPTURE phase:
+  it fires before the click reaches whatever was clicked, so a menu
+  closing never swallows or re-orders the interaction that closed it.
+  `pointerdown` also covers touch and pen, which a `mousedown` listener
+  would miss. `event.target.closest("details.chat-menu")` is what keeps
+  a click INSIDE an open panel -- on Rename, on a form field, on Save --
+  from closing the menu out from under itself; only a click whose target
+  has no `.chat-menu` ancestor dismisses.
+* `keydown` ON THE DOCUMENT for `Escape`, which is where a keyboard user
+  expects it and which works whether focus is on the summary, inside the
+  Rename field, or nowhere in particular.
+
+THE `closest` GUARD IS DOCUMENT-WIDE, NOT RAIL-SCOPED, and that has a
+second effect worth naming: clicking ANY `details.chat-menu` on the page
+spares an open rail menu, including
+`chat/workstream_settings.html`'s "Manage" disclosure, which reuses this
+same class deliberately OUTSIDE the rail. So opening Manage does not
+dismiss an open rail menu. Left as it is on purpose -- it is the
+friendlier reading (two menus the operator deliberately opened, neither
+yanked away), and narrowing the guard to `rail.contains(inside)` would
+buy a tidier invariant nobody asked for at the cost of a surprise.
+
+A MENU CLOSES ALL THE WAY DOWN. `closeMenus` clears every nested
+`<details open>` inside a menu before closing the menu itself -- the
+Rename form and the Delete confirm keep their OWN `open` attribute
+otherwise, so a row whose Rename you had expanded would reopen days
+later still showing a stale, pre-filled form the operator never asked
+for. Invisible while the parent is shut, which is exactly why it has to
+be cleared on the way out rather than noticed on the way back in.
+Clearing them fires their own `toggle` events, which the handler above
+returns from immediately (they are not `.chat-menu`, and they are
+closing, not opening) -- no re-entrancy.
+
+NOTHING ELSE IS ADDED: no focus trapping, no roving tabindex, no
+click-outside-to-focus-restore. The menu is a native `<details>` and
+stays one -- Tab, Enter and Space keep working exactly as the browser
+implements them.
+
+PROGRESSIVE ENHANCEMENT, exactly like `chat/_enter_to_send.html`: with
+JavaScript off every menu still opens and closes natively -- two of them
+can simply be open at once and a click elsewhere leaves them open, which
+is the untidy-but-not-broken behaviour this surface shipped with before
+this round. Nothing here is required for any action to work; every menu
+entry is a real `<form>` posting to a real route.
+
+Included once by `chat/_sidebar.html`, the one fragment that renders
+`chat/_sidebar_row.html`'s menus -- so every surface that draws the rail
+(index, thread, workstream pages, `/chat/all/`) gets it, and no leaf page
+includes it directly.
+{% endcomment %}
+<script>
+(function () {
+  var rail = document.querySelector("nav.chat-nav");
+  if (!rail) { return; }
+  function closeMenus(except) {
+    var open = rail.querySelectorAll("details.chat-menu[open]");
+    for (var i = 0; i < open.length; i++) {
+      if (open[i] === except) { continue; }
+      var nested = open[i].querySelectorAll("details[open]");
+      for (var j = 0; j < nested.length; j++) { nested[j].open = false; }
+      open[i].open = false;
+    }
+  }
+  rail.addEventListener("toggle", function (event) {
+    var opened = event.target;
+    if (!opened.open || !opened.classList.contains("chat-menu")) { return; }
+    closeMenus(opened);
+  }, true);
+  document.addEventListener("pointerdown", function (event) {
+    var inside = event.target.closest && event.target.closest("details.chat-menu");
+    if (!inside) { closeMenus(null); }
+  }, true);
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") { closeMenus(null); }
+  });
+})();
+</script>

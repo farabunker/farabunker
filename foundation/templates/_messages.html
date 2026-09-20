@@ -1,0 +1,30 @@
+{% comment %}
+THE FLASH, rendered identically everywhere (C-19). Fifteen templates
+across chat, identity, registry, queue, rag and vision each wrote this
+loop out, and it had already drifted: five omitted the `{% templatetag
+openblock %} if message.tags {% templatetag closeblock %}` guard -- which
+renders `class="msg "` with a trailing space for a tagless message -- and
+`inference/model_sets.html` rendered loose `<div>` elements with no list
+wrapper and no empty-messages guard at all.
+
+A SIBLING OF `_shell.html`, NOT A BLOCK IN IT. Every consumer descends
+from the shell, but through four different intermediate bases
+(`_settings.html`, `jobs/base.html`, `rag/base.html`, `vision/base.html`),
+and each page puts its flash in a different place in its own content --
+above a form here, below a heading there. A block would fix the position;
+an include leaves the position to the page and shares only the markup.
+`{% templatetag openblock %} include {% templatetag closeblock %}`
+resolves against the template dirs rather than the inheritance chain, so
+this file is reachable from all fifteen regardless of what they extend.
+
+THE `.messages`/`.msg` RULES IT DEPENDS ON live in `_shell.html`'s own
+`<style>` block, at the deepest ancestor of every consumer -- see the
+comment there.
+{% endcomment %}
+{% if messages %}
+<ul class="messages">
+  {% for message in messages %}
+  <li class="msg{% if message.tags %} {{ message.tags }}{% endif %}">{{ message }}</li>
+  {% endfor %}
+</ul>
+{% endif %}

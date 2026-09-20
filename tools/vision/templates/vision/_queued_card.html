@@ -1,0 +1,46 @@
+{% comment %}
+The card for a submission that is IN THE QUEUE and has not started
+generating yet. It stands in the Recent list exactly where the real job
+card will stand, and `data-job-poll` points at `/vision/queue/<id>/`,
+which answers with the REAL card (`_job_card.html`) the moment the worker
+has created the generation row -- the script in create.html follows
+whatever `data-job-poll` the fragment it receives carries, so the swap
+needs no JavaScript of its own.
+
+It names the WORK, not the job kind (amended 2026-08-25): `card.label` is
+the queue's own `summary` for this job -- the string the registered kind's
+summarizer produced, which for `vision.generate` is the operator's prompt.
+The queue's single-job read still carries no payload; what crosses is a
+finished display string, not the submission.
+
+Same head/notes/foot grammar as `_job_card.html`, minus a body: a card
+that becomes another card must not visibly change shape when it does.
+{% endcomment %}
+<div class="card job-card" id="queue-job-{{ card.queue_job_id }}"
+     {% if not card.terminal %}data-job-poll="{{ card.poll_url }}"{% endif %}>
+  <div class="job-head">
+    <h3 class="job-title">{{ card.label|truncatechars:120 }}</h3>
+    <span class="chip chip-{{ card.state_class }}">{{ card.state_label }}</span>
+  </div>
+
+  <div class="job-notes">
+    {% comment %}
+    Elapsed since SUBMISSION (fix round 2026-08-25): the platform-side
+    wait between enqueue and this card existing, from the InferenceJob's
+    own `created_at` -- the only clock available before a `GenerationJob`
+    row exists at all. Live while not terminal, same as the real card's
+    own timing line; blank (`elapsed_display == ""`) only if the queue's
+    own status object carried no timestamp, which does not happen in
+    practice but must not crash this fragment if it ever did.
+    {% endcomment %}
+    {% if card.elapsed_display %}<p class="job-timing muted">In queue {{ card.elapsed_display }}</p>{% endif %}
+    {% if card.position %}
+    <p class="muted">Waiting in the queue — position {{ card.position }}.</p>
+    {% endif %}
+    {% if card.content_hidden %}
+    <p class="muted content-hidden-note">Content hidden — turn on “admin_sees_content” in <a href="{% url 'identity-settings' %}">Identity &amp; security</a> to read other users' conversations and files.</p>
+    {% endif %}
+    {% if card.error %}<p class="job-error">{{ card.error }}</p>{% endif %}
+    {% if not card.terminal %}<p class="muted no-js-note">Refresh to update.</p>{% endif %}
+  </div>
+</div>

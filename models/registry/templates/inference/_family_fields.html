@@ -1,0 +1,134 @@
+{% comment %}
+The multi-file model-family declaration fields (ADR 0012 D-EDIT-2/3/6) --
+family + variant + companions (text encoder, VAE). Shared, verbatim, by
+every form that can declare or edit them: the Add form's two copies
+(cold-start and warm state, `console.html`) and the Edit form
+(`_connection_edit.html`, final-review B1) -- one partial, so a family (or
+variant) option list rendered wrong in one place cannot drift from the
+other two.
+
+Renders nothing (`{% if family_fields_offered %}` guards the whole
+fieldset) when no registered engine adapter declares a family vocabulary at
+all -- and ONLY then. No shipped configuration is such an install: the
+image adapter registers unconditionally at import
+(`models.contracts.engines`), so in production this fieldset ALWAYS
+renders, on every box including a chat-only one, inside the collapsed
+"Add a connection manually" disclosure. The empty branch is for a build
+whose adapter set was cut down, and for tests that mock `ENGINES`.
+
+The gate used to be `family_options` instead, which made "this install has
+no such concept" and "that server reported no families" render identically:
+the fields vanished from the form with no sign they exist, which is the
+onboarding gap a fresh registry hit on every render that was not carrying
+an operator's `?endpoint=` override. An empty list now renders the fieldset
+with an honest empty state instead (see `family_engine_name`/
+`family_endpoint` below).
+
+Every option list, plus those three flags, is unconditional context, built
+once in `models.registry.views._build_context`.
+
+Context this partial needs:
+  `family_fields_offered`  whether a registered adapter declares a family
+                       vocabulary AT ALL -- the fieldset's only gate.
+  `family_options` / `variant_options` / `text_encoder_options` /
+  `vae_options`        the engine's own lists (context, unconditional, same
+                       for every caller on one page render). An empty one
+                       carries TWO meanings and the copy below must not
+                       pick between them: `views._engine_options` swallows
+                       every exception, so `[]` is either "that server did
+                       not answer" or "it answered, and after intersecting
+                       its vocabulary with the templates this platform can
+                       run, nothing was left". The second happens without
+                       any outage -- which is why the empty state says
+                       "reported none" and names both possibilities rather
+                       than announcing an outage it cannot see.
+                       Those same three are cached for ~30s by
+                       `probe_cache`, failures included, so a just-started
+                       engine does not show up on the very next reload --
+                       which is why the copy below tells the operator to
+                       give it a moment rather than implying "reload" is
+                       instant.
+                       `variant` is not intersected with any engine
+                       vocabulary (ADR 0012 D-EDIT-6) and is read offline,
+                       so it is the one list that survives an unreachable
+                       engine -- and so the empty-state sentence names the
+                       other three lists, never that one.
+  `family_engine_name` / `family_endpoint`
+                       who was asked, and at which address -- the empty
+                       state states both rather than leaving an operator to
+                       guess which server owes them a list.
+  `id_prefix`          namespaces the `id`/`for` pairs so more than one
+                       copy of this partial can render on the same page
+                       without colliding (the Edit form renders once PER
+                       registered connection) -- required.
+  `selected_family` / `selected_variant` / `selected_text_encoder` /
+  `selected_vae`       the value each `<select>` should preselect: the Edit
+                       form's `connection.config.*`, or nothing at all on
+                       the Add form. The Add form's two include sites pass
+                       `form_values.*`, which NO view sets -- so those four
+                       resolve to the empty string and the Add form's
+                       selects are always unselected. (That is a dead
+                       hand-off, not a live one: a validation bounce
+                       re-renders nothing here. Left in place rather than
+                       cut, because removing it is a change to the Add
+                       form's contract and belongs with whoever wires a
+                       real bounce.)
+
+Each `<select>` renders a non-empty `selected_*` the live list does NOT
+contain as its own selected option, the same way the engine `<select>`
+carries a stored-but-unregistered engine. That is load-bearing, not
+cosmetic: `connection_add` reads the presence of the `family` field as
+"this submission declares the group" and REPLACES the stored config with
+what the selects hold (views.py, `family_declared`). While the fieldset
+was gated on a live list, a down engine meant no field and so no
+replacement; now that it always renders, dropping a stored declaration
+from the options would silently erase it on the operator's next save.
+{% endcomment %}
+{% if family_fields_offered %}
+<fieldset class="family-fields">
+  <legend>Multi-file model (leave blank for a self-contained checkpoint)</legend>
+  {% if not family_options %}
+  <p class="empty">No families to choose from — “{{ family_engine_name }}” at {{ family_endpoint }} reported none. The family, text-encoder and VAE lists come from that server: if it isn't running, start it and reload this page — the check refreshes about every half-minute, so give it a moment — or scan for it, if it moved; if it is running, it has no model family this platform can run yet.</p>
+  {% endif %}
+  <label for="{{ id_prefix }}family">Model family</label>
+  <select id="{{ id_prefix }}family" name="family">
+    <option value="">— none —</option>
+    {% if selected_family and selected_family not in family_options %}
+    <option value="{{ selected_family }}" selected>{{ selected_family }}</option>
+    {% endif %}
+    {% for option in family_options %}
+    <option value="{{ option }}"{% if selected_family == option %} selected{% endif %}>{{ option }}</option>
+    {% endfor %}
+  </select>
+  <label for="{{ id_prefix }}variant">Variant (only some families have one)</label>
+  <select id="{{ id_prefix }}variant" name="variant">
+    <option value="">— none —</option>
+    {% if selected_variant and selected_variant not in variant_options %}
+    <option value="{{ selected_variant }}" selected>{{ selected_variant }}</option>
+    {% endif %}
+    {% for option in variant_options %}
+    <option value="{{ option }}"{% if selected_variant == option %} selected{% endif %}>{{ option }}</option>
+    {% endfor %}
+  </select>
+  <label for="{{ id_prefix }}text_encoder">Text encoder</label>
+  <select id="{{ id_prefix }}text_encoder" name="text_encoder">
+    <option value="">— none —</option>
+    {% if selected_text_encoder and selected_text_encoder not in text_encoder_options %}
+    <option value="{{ selected_text_encoder }}" selected>{{ selected_text_encoder }}</option>
+    {% endif %}
+    {% for option in text_encoder_options %}
+    <option value="{{ option }}"{% if selected_text_encoder == option %} selected{% endif %}>{{ option }}</option>
+    {% endfor %}
+  </select>
+  <label for="{{ id_prefix }}vae">VAE</label>
+  <select id="{{ id_prefix }}vae" name="vae">
+    <option value="">— none —</option>
+    {% if selected_vae and selected_vae not in vae_options %}
+    <option value="{{ selected_vae }}" selected>{{ selected_vae }}</option>
+    {% endif %}
+    {% for option in vae_options %}
+    <option value="{{ option }}"{% if selected_vae == option %} selected{% endif %}>{{ option }}</option>
+    {% endfor %}
+  </select>
+</fieldset>
+{% endif %}

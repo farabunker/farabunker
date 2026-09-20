@@ -1,0 +1,30 @@
+{% comment %}
+The create page's Recent region -- ONE loop, TWO readers (T1,
+2026-09-16). `create.html` includes this directly, inheriting its own
+context (`jobs`, `queued_card`, `input_targets`, `selected_connection`)
+the ordinary way `{% include %}` does; `views.jobs_strip` renders it
+standalone as the discovery poll's answer, with the same `jobs`/
+`input_targets`/`selected_connection` built the same way (`_recent_jobs`,
+`input_targets()`, `picked_connection`) but no `queued_card` at all --
+this file never had an opinion of its own about a placeholder, so it need
+not declare one.
+
+`{% if not queued_card %}` still guards the empty-state paragraph:
+`create.html`'s own include shares its context, so `queued_card` reads
+as whatever the page itself is showing; `jobs_strip`'s stand-alone render
+never puts that key in its context at all, and an undefined variable in
+a template `{% if %}` is simply falsy -- `not queued_card` is `True`
+there, so an empty Recent list still renders `#jobs-empty` on its own.
+
+Factored out of `create.html` byte-for-byte (this is the SAME `{% for
+%}`/`{% empty %}`/`{% endfor %}` block that lived inline there) so the
+page's own render and this fragment can never drift on which jobs count
+as recent -- the same one-loop-two-readers rule the chat thread already
+uses for its own message list.
+{% endcomment %}
+{% for job in jobs %}{% include "vision/_job_card.html" %}
+{% empty %}
+{% if not queued_card %}
+<p class="muted" id="jobs-empty">Nothing generated yet.</p>
+{% endif %}
+{% endfor %}

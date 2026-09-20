@@ -1,0 +1,314 @@
+{% extends "chat/base.html" %}
+{% block title %}{{ workstream.name }} settings — farabunker{% endblock %}
+{% comment %}
+THE WORKSTREAM SETTINGS PAGE (owner feedback: "the workstream chat needs
+to keep the settings that are not often updated on a separate settings
+page, we dont need to see all the items when we go to a workstream").
+Section order: Manage, Instructions, Scope, Upload default, Tags, Shared
+with -- the same order these sections rendered in on the working page
+before this split, now with the working sections (New chat,
+Conversations, Documents) left behind on `chat-workstream`.
+
+OWNER-ONLY, UNDER THE PLAIN HOUSE 404 RULE -- `workstream_settings`
+(`agents/chat/views/workstreams.py`) 404s anyone who is not `may_manage_
+workstream`, including a live share holder, BEFORE this template ever
+renders: there is no `stream_access`/403 branch here at all, unlike
+`chat-workstream`. Every `{% templatetag openblock %} if is_owner
+{% templatetag closeblock %}`/`{% templatetag openblock %} if
+scope_visible {% templatetag closeblock %}` guard below is therefore
+always true in practice -- kept as REAL gates rather than assumptions,
+matching `_settings_context`'s own docstring, and because it means this
+template is IDENTICAL in shape to the sections it was cut from rather
+than a rewritten copy ("reuse, don't redesign").
+
+ALMOST ZERO JAVASCRIPT. Every control on this page is a link, a
+`<details>` disclosure, or a plain POST form carrying `{% csrf_token %}`
+-- the same idiom `chat/_sidebar.html` and `chat/workstream.html`
+already document -- and every one works with no script running. The
+page contributes no script of its own; the rail it renders brings the
+one `chat/_sidebar.html` includes (`chat/_menu_exclusive.html`), which
+is why this page's own script-count pin reads 1 rather than 0.
+
+`chat_content`/`chat_sidebar`, NOT `content`, for the identical reason
+`chat/workstream.html`'s own docstring gives.
+
+CARD RECIPE UNCHANGED FROM THE COMPOSITION PASS: `.ws-card`/`.ws-card-
+head`/`.ws-card-actions`/`.ws-textarea`/`.ws-list`/`.ws-item`/`.btn-
+compact` all now live on `chat/base.html` (promoted there in this same
+split, since this page is what made a SECOND page need them) -- nothing
+below needed a new rule of its own. The Manage section's own disclosures
+(Rename/Description/Archive/Delete -- all four now, a later review fix;
+see the `{% templatetag openblock %} comment {% templatetag closeblock
+%}` above the Manage card) reuse `.chat-rename-form`/`.delete-confirm`
+verbatim from `chat/_sidebar.html`'s per-conversation menu; only the
+OUTER `.chat-menu`/`.chat-menu-body` overlay (a header-width fix that
+made no sense once these controls had a whole card to themselves) was
+left behind.
+{% endcomment %}
+{% block chat_sidebar %}{% include "chat/_sidebar.html" %}{% endblock %}
+{% block chat_content %}
+<article class="workstream">
+  {% comment %}
+  F9 (walk-fix batch), now living HERE rather than on `chat/workstream.
+  html`: every POST handler that can refuse with a message (`workstream_
+  edit`'s rename/delete branches, `workstream_scope`, `workstream_share`)
+  re-renders THIS page now, since their forms all moved here in the
+  settings-page split -- `chat/workstream.html` itself has had `page_
+  error` removed entirely, not merely left unused, because nothing can
+  populate it there any more. The established idiom is unchanged: the
+  `.banner.warn` + `.job-error` pair `chat/_form_errors.html` already
+  renders elsewhere on /chat/.
+  {% endcomment %}
+  {% if page_error %}
+  <div class="banner warn"><p class="job-error" role="alert">{{ page_error }}</p></div>
+  {% endif %}
+  {% include "chat/_messages.html" %}
+
+  <header class="ws-head">
+    <div>
+      <h1>{{ workstream.name }}</h1>
+      <p class="muted">Settings — <a href="{% url 'chat-workstream' workstream.pk %}">back to the stream</a></p>
+    </div>
+  </header>
+
+  {% if is_owner %}
+  <div class="ws-card" id="manage">
+    <h2 class="ws-card-head">Manage</h2>
+    {% comment %}
+    FOUR MATCHING AFFORDANCES, NOT THREE-PLUS-ONE (review fix): Archive
+    used to be the one bare form/button sitting between two `<details>`
+    disclosures and one more below it -- a leftover from the composition
+    pass, where it was styled as "a quiet text link" specifically because
+    it sat inside the old `.chat-menu-body` OVERLAY (cramped, so a fourth
+    always-visible row was the cheap fix). That reason is gone now that
+    Manage is a full-width card, and `identity/templates/identity/
+    entitlement.html`'s own grouped owner actions (Rename/Delete, each
+    its own always-visible `<section>`) is not this page's shape either
+    -- FOUR ROWS packed into ONE card reads better closed than open, the
+    same call Delete already made here. Archive/Unarchive is wrapped in
+    `<details>` to match Rename/Description/Delete: same trigger recipe
+    (`.ws-card summary`), same "closed by default, one click away" rule,
+    for every action in this card alike. No POST semantics moved -- same
+    `action`/hidden field, same button -- only the markup around it.
+    {% endcomment %}
+    <details>
+      <summary>Rename</summary>
+      <form class="chat-rename-form" method="post" action="{% url 'chat-workstream-edit' workstream.pk %}">
+        {% csrf_token %}<input type="hidden" name="action" value="rename">
+        <input type="text" name="name" value="{{ workstream.name }}" required>
+        <button type="submit">Save</button>
+      </form>
+    </details>
+    <details>
+      <summary>Description</summary>
+      <form class="chat-rename-form" method="post" action="{% url 'chat-workstream-edit' workstream.pk %}">
+        {% csrf_token %}<input type="hidden" name="action" value="description">
+        <textarea name="description" rows="2">{{ workstream.description }}</textarea>
+        <button type="submit">Save</button>
+      </form>
+    </details>
+    <details>
+      <summary>{% if workstream.archived_at %}Unarchive{% else %}Archive{% endif %}</summary>
+      <form method="post" action="{% url 'chat-workstream-edit' workstream.pk %}">
+        {% csrf_token %}
+        <input type="hidden" name="action"
+               value="{% if workstream.archived_at %}unarchive{% else %}archive{% endif %}">
+        <button type="submit">{% if workstream.archived_at %}Unarchive{% else %}Archive{% endif %}</button>
+      </form>
+    </details>
+    <details>
+      <summary>Delete</summary>
+      <div class="delete-confirm">
+        <span class="muted">Deleting is refused while this workstream still holds
+          conversations or documents. Delete them first.</span>
+        <form method="post" action="{% url 'chat-workstream-edit' workstream.pk %}">
+          {% csrf_token %}<input type="hidden" name="action" value="delete">
+          <button type="submit" class="danger">Delete this workstream</button>
+        </form>
+      </div>
+    </details>
+  </div>
+  {% endif %}
+
+  {% if is_owner %}
+  <div class="ws-card" id="instructions">
+    <h2 class="ws-card-head">Instructions</h2>
+    <form method="post" action="{% url 'chat-workstream-edit' workstream.pk %}">
+      {% csrf_token %}<input type="hidden" name="action" value="instructions">
+      <textarea name="instructions" rows="6" class="ws-textarea">{{ workstream.instructions }}</textarea>
+      <div class="ws-card-actions"><button type="submit">Save</button></div>
+    </form>
+    <p class="muted">Sent with every turn in this workstream, labelled as the
+      workstream’s instructions.</p>
+  </div>
+  {% endif %}
+
+  {% if scope_visible %}
+  <div class="ws-card" id="scope">
+    <h2 class="ws-card-head">Scope</h2>
+    <form method="post" action="{% url 'chat-workstream-scope' workstream.pk %}">
+      {% csrf_token %}
+      <div class="chip-picker">
+        {% for id, name in scope_options %}
+          {% comment %}
+          F4 (walk-fix batch, a11y), carried forward onto the chip-picker
+          component: the checkbox sits INSIDE the `<label>`, so its
+          accessible name is the label's own text content (the
+          entitlement's name) rather than the checkbox's bare value --
+          the same guarantee `id`/`for` gave explicitly, reached here by
+          wrapping instead, which is the chip-picker's own established
+          idiom (`_shell.html`'s document-library upload card already
+          works this way).
+          {% endcomment %}
+          <label class="chip-check">
+            <input type="checkbox" name="entitlements" value="{{ id }}"
+              {% if id in scope_selected %}checked{% endif %}>
+            <span class="chip">{{ name }}</span>
+          </label>
+        {% empty %}
+          <p class="muted">You hold no entitlements, so there is nothing to narrow to.</p>
+        {% endfor %}
+      </div>
+      <div class="ws-card-actions"><button type="submit">Save scope</button></div>
+    </form>
+    <p class="muted">With a scope set, this workstream retrieves only material under these
+      entitlements — and not unlabelled material.</p>
+  </div>
+  {% endif %}
+
+  {% comment %}
+  UPLOAD DEFAULT (spec decision 10 / §9's table -- "the upload default"
+  is a settings-page section, and the upload form's own "change" link
+  (`tools/rag/templates/rag/documents.html`) points at `#upload-default`
+  on THIS page now, retargeted in the settings-page split). OWNER-ONLY,
+  gated the same way Instructions is.
+  {% endcomment %}
+  {% if is_owner %}
+  <div class="ws-card" id="upload-default">
+    <h2 class="ws-card-head">Upload default</h2>
+    <p class="muted">
+      {% if workstream.default_upload_placement == "universal" %}
+        New uploads to this workstream go to the universal library by default.
+      {% elif workstream.default_upload_placement == "contained" %}
+        New uploads to this workstream stay contained to it by default.
+      {% else %}
+        You are asked where each upload goes, every time.
+      {% endif %}
+    </p>
+    <details><summary>Change</summary>
+      <form method="post" action="{% url 'chat-workstream-edit' workstream.pk %}">
+        {% csrf_token %}<input type="hidden" name="action" value="upload_default">
+        <label><input type="radio" name="placement" value=""
+          {% if not workstream.default_upload_placement %}checked{% endif %}> Ask every time</label>
+        <label><input type="radio" name="placement" value="universal"
+          {% if workstream.default_upload_placement == "universal" %}checked{% endif %}> Always the universal library</label>
+        <label><input type="radio" name="placement" value="contained"
+          {% if workstream.default_upload_placement == "contained" %}checked{% endif %}> Always contained to this workstream</label>
+        <div class="ws-card-actions"><button type="submit">Save</button></div>
+      </form>
+    </details>
+  </div>
+  {% endif %}
+
+  {% comment %}
+  ROUND 17 (owner, verbatim: "The documents section should be better
+  organized ... we should have a bool in settings to use all rag
+  documents (or something to that effect) in settings to toggle on/off
+  the inclusion of the rag documents in the system and default it on.
+  The documents shown should only include documents that are pinned to
+  this project, not all documents in the system. If I have 50 documents
+  in the system this UI is usless."). OWNER-ONLY, gated the same way
+  Instructions/Upload default already are -- this is a corpus-shaping
+  setting, not a working-page control.
+
+  A PLAIN CHECKBOX, NOT A RADIO PAIR (unlike Upload default's three-way
+  choice above it): this is a true on/off toggle with no third state,
+  so it gets the simplest control that says so -- `checked` mirrors
+  `workstream.include_universal` directly (DEFAULT TRUE on every
+  existing and newly-created stream, `agents.models.Workstream.
+  include_universal`'s own migration default).
+  {% endcomment %}
+  {% if is_owner %}
+  <div class="ws-card" id="include-universal">
+    <h2 class="ws-card-head">Document library</h2>
+    <form method="post" action="{% url 'chat-workstream-edit' workstream.pk %}">
+      {% csrf_token %}<input type="hidden" name="action" value="include_universal">
+      <label><input type="checkbox" name="include_universal"
+        {% if workstream.include_universal %}checked{% endif %}> Use the full document
+        library</label>
+      <div class="ws-card-actions"><button type="submit">Save</button></div>
+    </form>
+    <p class="muted">When off, this workstream retrieves only from documents pinned to or
+      contained in it — the universal library is excluded entirely, even the material a
+      wall (above) would otherwise admit. Documents pinned to this workstream and files
+      attached inside a chat always stay available here, on or off.</p>
+  </div>
+  {% endif %}
+
+  {% comment %}
+  SECTIONS 8 AND 9 (spec §15.3): TAGS, THEN SHARING -- absent, not
+  disabled, on an open box (`accounts_on`), and never on a household
+  operator's own screen at all. Both gates are real here even though
+  this whole page is already owner-only -- `_settings_context`'s own
+  docstring explains why they stay rather than being assumed.
+  {% endcomment %}
+  {% if accounts_enabled %}
+  {% if workstream_tags %}
+  <div class="ws-card" id="tags">
+    <h2 class="ws-card-head">Tags</h2>
+    <p>Material from these entitlements has been retrieved into this workstream:
+      {% for id, name in workstream_tags %}<strong>{{ name }}</strong>{% if not forloop.last %}, {% endif %}{% endfor %}.
+      Anyone you share it with must hold all of them.</p>
+  </div>
+  {% endif %}
+
+  {% if is_owner %}
+  <div class="ws-card share-panel" id="sharing">
+    <h2 class="ws-card-head">Shared with</h2>
+    <div class="ws-list">
+      {% for row in stream_shares %}
+        <div class="ws-item">
+          <span class="ws-item-title">
+            {% if row.share.user_id %}{{ row.share.user.username }}{% else %}group: {{ row.share.group.name }}{% endif %}
+            {% if row.dormant %}
+              — <strong class="dormant">Dormant</strong>: that account no longer holds
+              {% for id, name in row.named %}{{ name }}{% if not forloop.last %}, {% endif %}{% endfor %}{% if row.unnamed_count %}{% if row.named %}, and {% endif %}{{ row.unnamed_count }} entitlement{{ row.unnamed_count|pluralize }} you don’t hold{% endif %}.
+            {% else %}
+              — live
+            {% endif %}
+          </span>
+          <span class="ws-item-meta">
+            <form method="post" action="{% url 'chat-workstream-share' workstream.pk %}"
+                  class="ws-inline-form">
+              {% csrf_token %}
+              <input type="hidden" name="action" value="revoke">
+              <input type="hidden" name="share" value="{{ row.share.pk }}">
+              <button type="submit" class="btn-compact">Remove</button>
+            </form>
+          </span>
+        </div>
+      {% empty %}
+        <p class="muted">Nobody yet.</p>
+      {% endfor %}
+    </div>
+    <form class="share-form" method="post" action="{% url 'chat-workstream-share' workstream.pk %}">
+      {% csrf_token %}
+      <label for="ws-share-user">Share with an account</label>
+      <select name="user" id="ws-share-user">
+        <option value="">— choose —</option>
+        {% for pk, name in share_subjects.users %}<option value="{{ pk }}">{{ name }}</option>{% endfor %}
+      </select>
+      <label for="ws-share-group">or a group</label>
+      <select name="group" id="ws-share-group">
+        <option value="">— choose —</option>
+        {% for pk, name in share_subjects.groups %}<option value="{{ pk }}">group: {{ name }}</option>{% endfor %}
+      </select>
+      <button type="submit">Share</button>
+    </form>
+    <p class="muted">A workstream share always lets its recipient read and converse (owner
+      decision 7) — there is no view-only workstream share.</p>
+  </div>
+  {% endif %}
+  {% endif %}
+</article>
+{% endblock %}

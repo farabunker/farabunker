@@ -1,0 +1,98 @@
+{% comment %}
+One tool call. Rendered inside `_turn_card.html`, which is itself
+rendered BOTH inline by the conversation page and standalone by
+`turn_status`'s poll body -- so this fragment takes a card dict
+(`agents/chat/rendering.py::tool_card`) and decides nothing itself.
+
+`state` is `agents.runtime.audit.invocation_state`, NOT
+`ToolInvocation.outcome`: an unfinished row reads as "running", because
+`invoke_tool` creates it with `outcome=ERROR` as a placeholder. A card
+that read the column directly would show red for a working call.
+
+U1 (chat-polish P3.1): citations and images -- the structured, useful
+half of a call's result -- render BEFORE `tool.message`, and
+`tool.message` collapses behind a `<details>` when
+`tool.message_collapsed` (`rendering.py`'s own threshold) says it is
+long. A `Search the library` call used to print the entire concatenated
+result text, `<EOS> <pad>` tokens and all, ABOVE its own citation list.
+Argument rows split the same way: `tool.args` (non-null, what the
+caller actually supplied) show inline; `tool.hidden_args` (the union
+spec's own null filler -- labelled "Unused arguments", fix round 1's
+R3; the count is the HIDDEN rows only, never every argument the call
+declared) sit behind a second, separate disclosure.
+
+NO `_artifact_files.html` include here (fix round 1, R6): a turn's
+`artifacts` column is the UNION of every tool call the job made
+(`agents/runtime/loop.py`'s own `_finish`), so a document this call
+cited is ALSO on the eventual answer turn's own `files` -- rendering
+the list here too showed every source document twice, once per card.
+This card's own `tool.citations` list already links the same document
+with a title, locator and score; `_turn_card.html`'s answer-card branch
+is the one place `files` renders now.
+{% endcomment %}
+<div class="tool-card tool-{{ tool.state|default:'unknown' }}">
+  <div class="tool-head">
+    <span class="tool-name">{{ tool.label }}</span>
+    <span class="tool-state">{{ tool.state|default:"outcome not recorded" }}</span>
+  </div>
+  {% if tool.args %}
+  <dl class="tool-args">
+    {% for key, value in tool.args %}<dt>{{ key }}</dt><dd>{{ value }}</dd>{% endfor %}
+  </dl>
+  {% endif %}
+  {% if tool.hidden_args %}
+  <details class="tool-args-all">
+    <summary>Unused arguments ({{ tool.hidden_args|length }})</summary>
+    <dl class="tool-args">
+      {% for key, value in tool.hidden_args %}<dt>{{ key }}</dt><dd>{{ value }}</dd>{% endfor %}
+    </dl>
+  </details>
+  {% endif %}
+  {% if tool.images %}
+  <div class="tool-images">
+    {% include "chat/_artifact_images.html" with images=tool.images %}
+  </div>
+  {% endif %}
+  {% if tool.citations %}
+  <ul class="tool-citations">
+    {% for citation in tool.citations %}
+    <li>
+      {% if citation.url %}<a href="{{ citation.url }}">{{ citation.title }}</a>{% else %}{{ citation.title }}{% endif %}{{ citation.locator_text }}
+      {% if citation.score_display %}<span class="muted">{{ citation.score_display }}</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if tool.message %}
+    {% if tool.message_collapsed %}
+    <details class="tool-output">
+      <summary>Show output</summary>
+      <p class="tool-message">{{ tool.message }}</p>
+    </details>
+    {% else %}
+    <p class="tool-message">{{ tool.message }}</p>
+    {% endif %}
+  {% endif %}
+  {% comment %}
+  UI-3c: the owner's request -- "there should be a button to take me to
+  the vision page and to that submission directly. currently it just
+  shows me the image." An `<a>`, not a form: this opens a page, it
+  changes nothing, and a GET is what a link is for.
+
+  `tool.generation_url` is `""` for every tool that is not the image
+  generator, for a result that carries no generation id (a call that
+  failed before it submitted anything), and on a box where the image
+  surface is not mounted at all -- `rendering.py::_generation_url` makes
+  all three the same empty string, so this template asks one question
+  instead of three and a historical thread renders on a flag-off box
+  exactly as it did before.
+  {% endcomment %}
+  {% if tool.generation_url %}
+  <p class="tool-actions">
+    <a class="tool-action" href="{{ tool.generation_url }}">View in Gallery</a>
+  </p>
+  {% endif %}
+  {% if tool.discarded %}
+  <p class="muted">Not run this step: {{ tool.discarded|join:", " }}</p>
+  {% endif %}
+</div>

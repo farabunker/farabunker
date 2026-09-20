@@ -1,0 +1,82 @@
+# Farabunker — core + RAG module dependencies
+# Web / API
+# 5.1 is the floor, not an upgrade: `CheckConstraint(condition=...)` --
+# the keyword the entitlement and share constraints need -- exists from
+# 5.1, and 5.0's `check=` spelling is deprecated in 5.1 and removed in
+# 6.0. Writing to the old spelling would mean shipping a deprecation
+# the next upgrade has to unpick. The installed version already
+# satisfies this.
+Django>=5.1,<6.0
+uvicorn[standard]>=0.30
+
+# Data / config
+dj-database-url>=2.2,<2.3
+psycopg[binary]>=3.1
+# Removed 2026-09-10 (dependency audit UNUSED-3): `pgvector>=0.3`. The
+# Python package (pgvector.django's VectorField, pgvector.psycopg) is
+# imported NOWHERE in this codebase, migrations included -- LlamaIndex's
+# PGVectorStore is the only thing here that talks pgvector and it does so
+# through its own SQLAlchemy layer. It resolves transitively from
+# llama-index-vector-stores-postgres regardless, so this line pinned a
+# floor on a package nothing enforced any use of. The pgvector EXTENSION
+# in Postgres is a different thing and is unaffected.
+#
+# CEILING RAISED 2026-09-10 (dependency audit VULN-4). CVE-2026-28684:
+# set_key()/unset_key() follow symlinks when rewriting .env, so a local
+# attacker who controls a symlink at that path gets an arbitrary file
+# overwritten. Fixed in 1.2.2. This codebase only ever calls load_dotenv
+# (config/settings.py, verified: no set_key/unset_key anywhere), so the
+# exposure was low -- but the OLD `<1.1` ceiling structurally prevented
+# ever taking the fix, which is the finding. load_dotenv's signature is
+# unchanged through 1.2.2.
+python-dotenv>=1.2.2,<2.0
+
+# RAG (LlamaIndex) — inference is remote via Ollama, no local torch needed
+llama-index-core>=0.12
+llama-index-llms-ollama>=0.5
+llama-index-embeddings-ollama>=0.6
+# CEILING ADDED 2026-09-10 (dependency audit PIN-1). tools/rag/index.py::
+# disposing_vector_store reaches for PGVectorStore's PRIVATE `_engine`
+# attribute to dispose its SQLAlchemy pool, because the package's own
+# close() is an async coroutine and that path is synchronous. An open
+# floor put no ceiling between this pin and a release that renames the
+# attribute -- which would silently stop disposing the pool and regress
+# the connection leak that function's docstring says it exists to fix.
+# tools/rag/tests/test_index.py fails loudly if the attribute goes.
+llama-index-vector-stores-postgres>=0.9,<0.10
+httpx>=0.27
+
+# Ingestion (tabular + document parsing)
+pandas>=2.2,<2.3
+openpyxl>=3.1,<3.2
+pypdf>=4.2
+python-docx>=1.1
+watchdog>=4.0
+# Declared as first-party security dependencies 2026-09-10 (security
+# audit round 3, B-7): both used to arrive only transitively (lxml via
+# python-docx, defusedxml via openpyxl's own OPENPYXL_DEFUSEDXML default,
+# itself pulled in transitively by something else entirely). Together
+# they are what keeps `.docx`/`.xlsx` parsing from resolving a
+# file-reading external entity (XXE) -- lxml's parser is built with
+# resolve_entities=False, and openpyxl's worksheet reader refuses to
+# parse at all once defusedxml sees a DTD entity declaration. A resolver
+# that drops either transitive provider, or a pin back to a permissive
+# XML parser, would silently reopen that hole with nothing to catch it.
+# tools/rag/tests/test_readers_xxe.py is the negative test that backs
+# this.
+lxml>=5
+defusedxml>=0.7
+
+# Media (rasterization + image normalization) -- media-into-RAG plan T5.
+# Both permissive licenses, chosen deliberately: pymupdf (AGPL) was rejected
+# as incompatible with this project's dual-license model (ADR 0002/0003).
+# Pillow was already a transitive dependency (pulled in by other packages);
+# it's now first-party here since tools/rag/transcode.py imports it
+# directly for image normalization/downscaling.
+pypdfium2>=4
+Pillow>=10
+
+# Dev / testing dependencies live in requirements-dev.txt (dependency
+# audit IMAGE-7): the Dockerfile installs THIS file into the image the
+# web, watcher and worker services all share, and a comment saying
+# "not required at runtime" is not a mechanism.

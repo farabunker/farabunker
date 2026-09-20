@@ -1,0 +1,33 @@
+{% comment %}
+Every source-document link in `files` (a `rendering.artifact_links`
+list) -- a labelled "Files" list, the document's own TITLE (`file.
+title`, chat-polish P3.1 R5 -- `mint_artifact` embeds it at the moment
+`tools/rag/tools.py` mints the reference, falling back to "Document
+<id>" for a reference minted before this or with no title recorded) to
+`url`, or an honest "not available on this install" span when the
+route is not mounted (vision/media turned off).
+
+Included by `_turn_card.html` (`files=card.files`) -- the ANSWER card,
+never `_tool_card.html` (chat-polish P3.1 R6): a turn's `artifacts`
+column is the UNION of every tool call the job made
+(`agents/runtime/loop.py`'s own `_finish`), so a document a search
+tool cited was ALREADY on both the tool row and the assistant row, and
+rendering this list from both cards showed it twice. The tool card's
+own citation list already links the same document with a title,
+locator and score -- strictly more than a bare file link -- so keeping
+this list on the answer card (the turn's own sources) loses nothing.
+{% endcomment %}
+{% if files %}
+<p class="muted artifact-files-label">Files</p>
+<ul class="artifact-files">
+  {% for file in files %}
+  <li>
+    {% if file.url %}
+    <a href="{{ file.url }}">{{ file.title }}</a>
+    {% else %}
+    <span class="muted">{{ file.title }} (not available on this install)</span>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}

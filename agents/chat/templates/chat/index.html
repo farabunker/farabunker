@@ -1,0 +1,103 @@
+{% extends "chat/base.html" %}
+{% comment %}
+The "new conversation" box, beside the conversation sidebar (UI-3b).
+
+THIS PAGE NO LONGER LISTS CONVERSATIONS IN ITS PANE. The list is the
+SIDEBAR now (`chat/_sidebar.html`), rendered here and on every thread
+page alike, so clicking between conversations never returns to a
+landing screen. What is left in the pane is the one thing this page
+does that a thread page does not: start a new conversation.
+`?archived=1` USED TO RENDER THE SAME PAGE with the sidebar showing the
+archive; ROUND 14, PART 2 RETIRES THAT -- `ChatIndexView.get()` now
+REDIRECTS that query string to `/chat/all/?archived=1` before this
+template ever renders, so `sidebar_archived` is always `False` here
+(the h1/title below no longer branch on it -- see that block's own
+truth-swept comment).
+
+NOT an agent builder (spec section 8, first paragraph): there is no
+create-agent form, no tool picker, and no flow editor here. Agents come
+from the shipped catalogue when an operator ADDS one (ruling 2), or
+from rows they write by other means until a builder is designed. A GET
+of this page installs nothing.
+
+Works with no JavaScript at all: the form is a plain POST and the
+answer is a redirect. `chat/_composer.html`'s own `chat/_enter_to_send.
+html` include (owner feedback round 8) layers Enter-to-send onto the
+composer's textarea -- progressive enhancement over that same POST,
+not a replacement for it; the Start button still works identically
+with the script absent.
+
+THE START FORM SHOWS ONLY WHEN THERE IS AN AGENT TO PICK. With zero
+agents installed, the `<select>` would have nothing in it and the
+"nothing installed" banner plus the offers below already say what to
+do -- a form that submits with an empty select is worse than no form.
+
+`start_error` is this page's re-render of a refused
+`conversation_start` that carried a first message -- the just-created
+empty conversation was already deleted by the time this renders, so
+the banner is the only trace of the attempt.
+
+ROUND 18 (owner feedback, verbatim: "the ability to add an attachment
+isn't on the intial new chat screen... why is there something using a
+different sub-template?"): this page's own start box is now `chat/
+_composer.html`, the SAME fragment `chat/workstream.html`'s New-chat
+card and `chat/conversation.html`'s message form render -- see that
+fragment's own module comment for the full ruling and what is
+parameterised versus shared. `may_attach_files`/`attach_workstream`/
+`picker`/`selected_connection` are built by `agents.chat.service.
+composer_attach_context`, called from `_index_context` below.
+{% endcomment %}
+{% comment %}
+ALWAYS "Chat" (round 14 truth-sweep): this page used to also render as
+"Archived conversations" on `?archived=1`, and the comment here used to
+explain why the `<title>` had to track that `<h1>`'s own conditional --
+both are gone now that the query string redirects to `/chat/all/`
+before this template ever renders (this view's own docstring). `/chat/
+all/`'s own `<title>`/`<h1>` carry whatever archived-view naming is
+worth doing now; this page has exactly one name again.
+{% endcomment %}
+{% block title %}Chat — farabunker{% endblock %}
+{% block chat_style %}
+    {% comment %}
+    THE COMPOSER'S OWN CSS (`.composer-card`/`.composer-toolbar`/
+    `.attach-*` and neighbours) lives in `chat/base.html` now, not here
+    -- round 18 makes `chat/_composer.html` a THIRD consumer of it
+    (conversation.html was already the second), and a shared fragment's
+    CSS belongs to the shared ancestor from birth (the placement rule
+    `foundation/ops/tests/test_css_ownership.py`'s own docstring
+    states). `.offers-list`/`.offer` stay here -- nothing else on
+    `/chat/` renders a list of shipped-default offers.
+    {% endcomment %}
+    .offers-list { list-style: none; padding: 0; margin: 0 0 1.5rem; }
+    .offer { border: 1px solid var(--border); border-radius: 8px; background: var(--panel);
+             padding: 0.75rem 1rem; margin-bottom: 0.6rem; display: flex;
+             align-items: center; justify-content: space-between; gap: 1rem; }
+{% endblock %}
+{% block chat_sidebar %}{% include "chat/_sidebar.html" %}{% endblock %}
+{% block chat_content %}
+<h1>Chat</h1>
+
+{% include "chat/_messages.html" %}
+{% if nothing_installed %}
+<div class="banner warn">{{ nothing_installed }}</div>
+{% endif %}
+{% if start_error %}
+<div class="banner warn">{{ start_error }}</div>
+{% endif %}
+{% if offers %}{% include "chat/_offers.html" %}{% endif %}
+{% if agents %}
+{% url 'chat-start' as composer_action_url %}
+{% include "chat/_composer.html" with composer_mode="start" composer_action=composer_action_url composer_agents=agents composer_placeholder="Message" composer_button="Start" composer_show_model_picker=True composer_workstream=None %}
+{% comment %}
+C-02, WHOSE BLURB THIS IS, SAID OUT LOUD. `agents.0` is the option the
+`<select name="agent">` below (`chat/_composer.html`) renders selected, so
+this paragraph describes what pressing Start does right now. Because this
+page carries no JavaScript -- the shell's own doctrine, not an oversight
+-- it cannot follow the picker afterwards, and naming the agent is what
+makes that honest: a reader who changes the picker sees that the sentence
+below it is about a different agent, instead of reading a description
+that silently belongs to someone else. Correct at one agent and at ten.
+{% endcomment %}
+<p class="muted">{{ agents.0.name }} — {{ agents.0.description }}</p>
+{% endif %}
+{% endblock %}

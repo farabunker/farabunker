@@ -1,0 +1,77 @@
+{% extends "rag/base.html" %}
+{% comment %}
+Document transcript page (T10): a zero-JS listing of one document's
+transcription/extraction sidecar -- `[mm:ss] text` per segment for audio/
+video, or `— p. N —` headers + text for a page-keyed (scanned PDF/image)
+sidecar. `tools.rag.views.document_transcript` reads `extract.json`
+directly rather than importing `tools.rag.media` (worker-only, never
+importable from an HTTP-request thread -- see that module's own
+docstring), so this page is reachable the instant a sidecar finishes,
+with no model/ffmpeg dependency of its own.
+{% endcomment %}
+{% block title %}{{ document.transcript_label }}: {{ document.title }} — farabunker{% endblock %}
+
+{% block extra_style %}
+  :root {
+    --page-max-width: 820px;
+  }
+  main {
+    max-width: var(--page-max-width);
+    margin: 0 auto;
+  }
+  .tagline a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .tagline a:hover {
+    text-decoration: underline;
+  }
+  ul.segments {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .segment {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.5rem;
+  }
+  .segment-heading {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.82rem;
+    color: var(--muted);
+    margin: 0 0 0.3rem;
+  }
+  .segment-text {
+    margin: 0;
+    white-space: pre-wrap;
+  }
+  .empty-state {
+    color: var(--muted);
+    padding: 1rem 0;
+  }
+{% endblock %}
+
+{% block nav_current_documents %}current{% endblock %}
+
+{% block content %}
+<main>
+  <h1>{{ document.transcript_label }}</h1>
+  <p class="tagline">{{ document.title }} — <a href="{% url 'rag-document-file' document.id %}">open the source file</a></p>
+
+  {% if lines %}
+  <ul class="segments">
+    {% for line in lines %}
+    <li class="segment">
+      <p class="segment-heading">{{ line.heading }}</p>
+      <p class="segment-text">{{ line.text }}</p>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="empty-state">This sidecar has no segments yet.</p>
+  {% endif %}
+</main>
+{% endblock %}

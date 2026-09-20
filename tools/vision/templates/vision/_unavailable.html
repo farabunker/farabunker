@@ -1,0 +1,9 @@
+{% comment %}
+The 503 body for a generate attempt made while the role is unbound or the
+engine is unreachable -- the same honest message the page banner shows,
+usable as a fragment (XHR) or a whole small page (no JS).
+{% endcomment %}
+<div class="banner warn">
+  {{ message }}
+  <a href="{% url 'inference-console' %}">Models</a>
+</div>

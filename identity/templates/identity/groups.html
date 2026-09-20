@@ -1,0 +1,167 @@
+{% extends "_settings.html" %}
+{% comment %}
+Groups: create, delete, add and remove members. Zero JS, one POST per
+action, every mutation through `identity.services`.
+
+Membership only -- this platform never reads `Group.permissions`.
+{% endcomment %}
+{% block title %}Groups — farabunker{% endblock %}
+{% block side_current_groups %}current{% endblock %}
+{% block extra_style %}{{ block.super }}
+  :root { --page-max-width: 820px; }
+  {% comment %}
+  A CENTERED COLUMN, which this page did not have: it carried a
+  `main { max-width: … }` rule and no `<main>` element for it to match,
+  so the rule was inert and a page of small forms ran the full width of
+  the window. The same fault sat on several sibling admin pages; see
+  `chat/tool_entitlements.html` for how they were found, and why that
+  note is careful not to read as a closed list.
+  {% endcomment %}
+  main { max-width: var(--page-max-width); margin: 0 auto; }
+  {% comment %}
+  NO LOCAL `.msg.error` (Coherence Wave D, C3): `_settings.html` now
+  owns the one shared spelling every settings leaf inherits via
+  `{{ block.super }}` above; this page's own copy used to be the
+  identical rule and was removed rather than left to drift.
+  {% endcomment %}
+  section { background: var(--panel); border: 1px solid var(--border);
+            border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+  section h2 { font-size: 1rem; margin: 0 0 .75rem; }
+  {% comment %}
+  ONE LABELLED-FIELD SHAPE for every input on the page -- the same
+  column-of-label-then-control the settings page and the Accounts create
+  form already use, so a form here does not read as a different kind of
+  object from a form there.
+  {% endcomment %}
+  .field { display: flex; flex-direction: column; gap: .3rem; }
+  .field label { font-weight: 600; font-size: .85rem; }
+  .form-row { display: flex; align-items: flex-end; gap: .6rem; flex-wrap: wrap; }
+  input[type="text"], select {
+    padding: .45rem .6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: .9rem;
+  }
+  .errorlist { list-style: none; margin: .25rem 0 0; padding: 0;
+               color: var(--danger); font-size: .8rem; }
+  .held { display: flex; align-items: baseline; flex-wrap: wrap; gap: .3rem; margin: 0 0 .75rem; }
+  .held .label { color: var(--muted); font-size: .85rem; margin-right: .2rem; }
+  .held .none { color: var(--muted); font-size: .85rem; }
+  ul.members { list-style: none; padding: 0; margin: 0 0 .85rem; }
+  ul.members li {
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+    font-size: .9rem;
+    padding: .35rem 0;
+    border-top: 1px solid var(--border);
+  }
+  ul.members li:first-child { border-top: none; }
+  ul.members .name { margin-right: auto; }
+  ul.members button, .form-row button { padding: .3rem .7rem; font-size: .82rem; }
+  ul.members form { margin: 0; }
+  .danger-row {
+    display: flex;
+    align-items: baseline;
+    gap: .75rem;
+    flex-wrap: wrap;
+    margin-top: .85rem;
+    padding-top: .75rem;
+    border-top: 1px solid var(--border);
+  }
+  .danger-row form { margin: 0; }
+  .danger-row button {
+    background: transparent;
+    color: var(--danger);
+    border: 1px solid var(--danger);
+    padding: .3rem .7rem;
+    font-size: .82rem;
+  }
+  .danger-row .note { color: var(--muted); font-size: .82rem; margin: 0; }
+{% endblock %}
+{% block settings_content %}
+<main>
+  <h1>Groups</h1>
+  {% include "_messages.html" %}
+
+  <section id="new-group">
+    {% comment %}
+    The FORM'S OWN FIELDS, not hand-written inputs -- the same shape
+    `identity/templates/identity/users.html` uses. A hand-written
+    `<input name="name">` would render fine and lose every per-field
+    error the view flashes, which is the half of a form that matters
+    when somebody gets it wrong.
+    {% endcomment %}
+    <h2>New group</h2>
+    <form method="post" action="{% url 'identity-groups' %}{{ assistant.open_query }}">
+      {% csrf_token %}
+      <div class="form-row">
+        <div class="field">
+          <label for="{{ form.name.id_for_label }}">Name</label>
+          {{ form.name }}
+        </div>
+        <button type="submit">Create</button>
+      </div>
+      {% if form.name.errors %}<ul class="errorlist">{% for error in form.name.errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
+    </form>
+  </section>
+
+  {% comment %}
+  A SPAN, not an id on the loop's first `<section>`: the loop can be
+  empty (a box with no groups yet renders only the `{% templatetag
+  openblock %} empty {% templatetag closeblock %}` fallback), and an
+  anchor that disappears on an empty box is an anchor the settings
+  assistant's own drift test cannot rely on. The empty-span anchor is
+  `inference/console.html:1021`'s own shape.
+  {% endcomment %}
+  <span id="group-list"></span>
+  {% for group in groups %}
+  <section>
+    <h2>{{ group.name }}</h2>
+    <p class="held">
+      <span class="label">Entitlements</span>
+      {% for grant in group.entitlement_grants.all %}<span class="chip">{{ grant.entitlement.name }} · {{ grant.role }}</span>{% empty %}<span class="none">none</span>{% endfor %}
+    </p>
+    <ul class="members">
+      {% for member in group.user_set.all %}
+        <li>
+          <span class="name">{{ member.username }}</span>
+          <form method="post" action="{% url 'identity-group-edit' group.pk %}{{ assistant.open_query }}">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="remove_member">
+            <input type="hidden" name="user" value="{{ member.pk }}">
+            <button type="submit">Remove</button>
+          </form>
+        </li>
+      {% empty %}<li><span class="name">No members yet.</span></li>{% endfor %}
+    </ul>
+    <form method="post" action="{% url 'identity-group-edit' group.pk %}{{ assistant.open_query }}">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="add_member">
+      <div class="form-row">
+        <div class="field">
+          <label for="add-member-{{ group.pk }}">Add member</label>
+          <select name="user" id="add-member-{{ group.pk }}">
+            {% for candidate in users %}<option value="{{ candidate.pk }}">{{ candidate.username }}</option>{% endfor %}
+          </select>
+        </div>
+        <button type="submit">Add</button>
+      </div>
+    </form>
+    <div class="danger-row">
+      <form method="post" action="{% url 'identity-group-edit' group.pk %}{{ assistant.open_query }}">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="delete">
+        <button type="submit">Delete group</button>
+      </form>
+      <p class="note">Deleting a group removes its entitlement grants and its shares.</p>
+    </div>
+  </section>
+  {% empty %}
+  <p>No groups yet.</p>
+  {% endfor %}
+</main>
+{% endblock %}

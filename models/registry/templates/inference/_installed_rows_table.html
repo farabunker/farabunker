@@ -1,0 +1,33 @@
+{% comment %}
+The "On this machine" grid — reuses the needs-table idiom (a CSS grid with
+`display: contents` rows, so real aligned columns render without a
+`<table>` element; see console.html's `.machine-table` rules) for the
+columns Model | Capability | On disk | Runtime | Status | Action. Wraps
+the `installed_rows` loop.
+
+Shared by the warm page's "On this machine" section and the cold-start
+"Found on your machine" list (same as `_installed_row.html` always has
+been), so both states render the identical table. `installed_rows` plus
+`endpoint` / `endpoint_override` / `capabilities` already in the
+surrounding context (plain include, no `with ... only`).
+
+Per-cell `border-bottom`s make the row divider look fragmented, broken by
+the grid's column gaps. A single `.row-rule` span (a `grid-column: 1 / -1`
+sliver, console.html) after the header row and after each data row's
+cells draws ONE continuous rule per row instead; `.machine-cell` itself
+carries no border.
+{% endcomment %}
+<div class="machine-table" role="table" aria-label="Models on this machine">
+  <div class="machine-row-head" role="row">
+    <span class="machine-cell" role="columnheader">Model</span>
+    <span class="machine-cell" role="columnheader">Capability</span>
+    <span class="machine-cell" role="columnheader">On disk</span>
+    <span class="machine-cell" role="columnheader">Runtime</span>
+    <span class="machine-cell" role="columnheader">Status</span>
+    <span class="machine-cell" role="columnheader">Action</span>
+  </div>
+  <span class="row-rule" aria-hidden="true"></span>
+  {% for item in installed_rows %}
+  {% include "inference/_installed_row.html" %}
+  {% endfor %}
+</div>

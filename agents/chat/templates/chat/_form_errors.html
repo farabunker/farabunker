@@ -1,0 +1,16 @@
+{% comment %}
+The 400 body for a blank turn submission made via XHR: just the
+message, no page chrome -- `conversation.html`'s submit handler renders
+it into `#turn-errors`. The non-XHR path re-renders the whole thread
+page instead (`turn_create`'s own docstring), with the identical
+message in the identical slot (`turn_error`), so a rejected message
+reads the same whether or not a script ran.
+
+Modelled on `tools/vision/templates/vision/_form_errors.html`,
+simplified: a turn submission has one field (`text`), not a Django
+`Form` to iterate field by field, so this fragment takes a single
+`message` string rather than a `form`.
+{% endcomment %}
+<div class="banner warn">
+  <p class="job-error">{{ message }}</p>
+</div>

@@ -1,0 +1,62 @@
+{% comment %}
+The "Getting models" block. Three durable, registry/adapter-derived
+pieces, nothing pinned and NO model names (pinned names were rejected
+twice -- they age; the live names already appear in the role dropdowns and
+"On this machine"):
+
+- needs checklist (`needs_checklist`, views.py::_needs_checklist): one ROW
+  per DISTINCT capability among registered roles, rendered as a 3-column
+  table (Requirement / Used by / Status; a prose list put its ✓ at a
+  different horizontal spot per row, so what was missing wasn't scannable
+  at a glance) with LIVE status derived from the
+  same installed rows the page already scanned -- "satisfied" means a
+  model with that capability is installed on this machine (binding status
+  lives in "In use", not here). A missing row's copy is deliberately
+  actionable ("install one from the library below") and rendered with the
+  shared warning palette (`--warn-bg`/`--warn-text`, the same tokens the
+  drift banner uses) so it reads as distinctly different from a satisfied
+  row, not just a different word.
+- server facts (`supported_engines`): one line per registered model-server
+  adapter, every fact read off the adapter itself -- usual address (first
+  well-known port), library link (plain link, never fetched; this platform
+  makes no outbound calls on an operator's behalf), install shape
+  (`install_cmd_template`, a placeholder template, not a runnable pinned
+  command). A second registered adapter adds its own line with zero
+  template change; only registered adapters ever appear (no examples, no
+  coming-soon entries).
+- freshness pointer: the library IS the current model list; its popularity
+  sort is the recommendation.
+
+Shared by the cold-start page (all sub-states) and the warm page so none of
+them can drift.
+{% endcomment %}
+<div class="getting-models">
+  <p class="section-note needs-lead">This system needs:</p>
+  <div class="needs-table" role="table" aria-label="Model requirements">
+    <div class="needs-row needs-row-head" role="row">
+      <span class="needs-cell" role="columnheader">Requirement</span>
+      <span class="needs-cell" role="columnheader">Used by</span>
+      <span class="needs-cell" role="columnheader">Status</span>
+    </div>
+    {% for item in needs_checklist %}
+    <div class="needs-row" role="row">
+      <span class="needs-cell" role="cell">{{ item.requirement }}</span>
+      <span class="needs-cell" role="cell">{{ item.used_by }}</span>
+      {% if item.satisfied %}
+      <span class="needs-cell need-status ok" role="cell">✓ installed at your model server</span>
+      {% else %}
+      <span class="needs-cell need-status missing" role="cell">✗ missing — install one from the library below</span>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  <p class="section-note needs-lead">Get models from your model server's own library:</p>
+  <ul class="server-facts">
+    {% for eng in supported_engines %}
+    <li>
+      <code>{{ eng.name }}</code>{% if eng.default_endpoint %} — usually at <code>{{ eng.default_endpoint }}</code>{% endif %}{% if eng.library_url %} — library: <a href="{{ eng.library_url }}" target="_blank" rel="noopener">{{ eng.library_url }}</a>{% endif %}{% if eng.install_cmd_template %} — install with <code>{{ eng.install_cmd_template }}</code>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  <p class="section-note">The library is sorted by popularity — the top entries are the community's current picks. Any model your model server can run works here; installed models are detected when this page loads.</p>
+</div>

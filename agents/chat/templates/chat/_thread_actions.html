@@ -1,0 +1,103 @@
+{% comment %}
+THE THREAD'S QUIET ACTIONS ROW -- Share… and Delete, the two things a
+reader does to a CONVERSATION rather than inside it, in one muted row
+below the composer.
+
+EXTRACTED FROM `chat/conversation.html` (audit 2, S2's second half; the
+first was round 18's `chat/_composer.html`). That page was three files
+wearing one filename -- the transcript, the composer and this row --
+and this is the one of the three with ZERO shared state with the other
+two: it reads `may_see_shares`, `identity_posture` and `conversation`,
+all of which `{% templatetag openblock %} include {% templatetag
+closeblock %}` inherits from the page's own context, so the extraction
+threads nothing and changes no rendered byte.
+
+ITS CSS STAYS IN `chat/conversation.html`'s own `chat_style`, and that
+is correct rather than an oversight: this fragment has exactly ONE
+consumer, that same page, so the page IS the deepest template that is
+an ancestor of every template using `.thread-actions` -- the placement
+rule `foundation/ops/tests/test_css_ownership.py` states, and the
+single-consumer shape its own S27 scoping names. A SECOND page
+including this fragment is what would move those rules to `chat/base.
+html`, and the gate is what will say so.
+{% endcomment %}
+  {% comment %}
+  QUIET ACTIONS ROW (owner feedback round 9, verbatim: "when I'm on the
+  chat screen the share shouldn't be a main feature. it should be a
+  suble side feature (like below the chat and if i click on it I get
+  more options (via a popup)." -- Share and Delete land in this ONE
+  row, below the composer, `chat_style`'s own `.thread-actions` above.
+  ROUND 9c moved this row inside `.composer-block` (this block's own
+  top comment); ROUND 9d moved `+ Add files` back OUT of it, onto the
+  composer row itself (this file's own comment above `.composer-card`)
+  -- the owner's own verdict was that attach's subtlety here had failed
+  discoverability twice, while Share/Delete's subtlety was correct and
+  unchanged.
+
+  `Share…` is a `<details class="chat-menu">` overlay -- the exact ⋯
+  chat-menu popup `chat/base.html` documents for the sidebar's per-
+  conversation menu, reused rather than re-invented (this page's own
+  `chat_style` widens the panel for this wider column; see its comment
+  above). It renders no control this row's own POST would refuse:
+  `may_see_shares` is the SAME predicate `thread_context` computes for
+  the form the panel actually contains, so a page that shows the button
+  always shows a working form behind it (render-vs-gate).
+
+  `chat/_share_panel.html` is UNCHANGED content-wise from before round
+  9 (list, form, leak warning) -- only its wrapper moved, from a
+  full-width mid-page `<section>` to this popup's panel.
+
+  Delete keeps its EXISTING confirm flow (unchanged POST/markup from
+  before round 9) -- just muted and moved into this row; see `chat_
+  style`'s own comment above for why it shares `chat-menu`'s summary
+  styling without `chat-menu-body`'s overlay.
+
+  CLIP-AUDIT (re-run for round 9c, unaffected by round 9d moving a
+  DIFFERENT popup out of this row): the ancestor chain from here is
+  `html > body > .chat-layout > .chat-wrap > .composer-block >
+  .thread-actions > details.chat-menu` -- ONE level deeper than round
+  9's own chain. `.composer-block` sets `flex-shrink: 0` ONLY (`chat_
+  style` above) -- no `overflow`, `transform`, `filter`, `contain` or
+  `perspective` -- so it establishes neither a clipping context nor a
+  new containing block for the popup's own `position: absolute` panel,
+  exactly as round 9's audit found for every OTHER box in this chain.
+  The popup's own upward-opening (`bottom: 100%`) and `left: 0` anchor
+  (`chat_style`'s own round 9b comment) are UNCHANGED and still
+  correct: both reason about `.thread-actions`' OWN position relative
+  to `.chat-wrap`, which this fix does not move -- `.composer-block`
+  adds a wrapper around it, not a repositioning of it. `Share…`'s own
+  popup is `.thread-actions`' only one now (round 18 retires the attach
+  door's own separate `.attach-trigger` popup this comment used to
+  cross-reference here alongside it -- see `chat/_attach_files.html`'s
+  own module comment for the rewrite).
+  {% endcomment %}
+  <div class="thread-actions">
+    {% if may_see_shares and identity_posture != "open" %}
+    <details class="chat-menu">
+      <summary>Share…</summary>
+      <div class="chat-menu-body">
+        {% include "chat/_share_panel.html" %}
+      </div>
+    </details>
+    {% endif %}
+    <details class="chat-menu">
+      {% comment %}
+      Dialog-free by design, modelled on `tools/vision/templates/vision/
+      _delete_control.html`: a native <details> reveals the real form,
+      no `confirm()`/`alert()`/`prompt()` anywhere. The turns go with the
+      conversation (`Turn.conversation` is CASCADE); the tool-call audit
+      trail does not (`Turn.invocation` is SET_NULL) -- see
+      `conversation_delete`'s own docstring for the full asymmetry.
+      {% endcomment %}
+      <summary>Delete this conversation</summary>
+      <div class="delete-confirm">
+        <span class="muted">Delete this conversation and every turn in it? Its
+          tool-call audit trail is kept.</span>
+        <form method="post" action="{% url 'chat-conversation-delete' conversation.id %}">
+          {% csrf_token %}
+          <button type="submit" class="danger">Yes, delete</button>
+        </form>
+        <button type="button" class="secondary" onclick="this.closest('details').removeAttribute('open')">Cancel</button>
+      </div>
+    </details>
+  </div>

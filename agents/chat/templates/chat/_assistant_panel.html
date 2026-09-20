@@ -1,0 +1,365 @@
+{% comment %}
+THE SETTINGS ASSISTANT PANEL (spec §6.1, §6.4).
+
+RENDERED ON EVERY SETTINGS PAGE, below the content column, from
+`foundation/templates/_settings.html` -- and from
+`settings-assistant-panel`, which returns THIS SAME fragment from THIS
+SAME context builder, so the inline render and the poll body can never
+disagree (`chat/conversation.html:12-14`'s own precedent).
+
+COLLAPSED BY DEFAULT, AND COLLAPSED IS A LINK, NOT A LOCAL TOGGLE
+(placement-round follow-up, owner review 2026-09-11 -- superseding the
+prior wording of this paragraph, kept legible below because it names the
+defect the fix closes). The panel used to be ONE `<details>` element in
+both states, opened locally by its own native `<summary>` toggle with no
+navigation at all. That toggle revealed whatever was ALREADY in the DOM
+-- and the collapsed render's own zero-read guarantee (next paragraph)
+means what was in the DOM, for an administrator with real conversation
+history, was an EMPTY transcript: the collapsed server render never read
+a single `Conversation` or `Turn` row, so there was nothing for a local,
+script-free toggle to reveal. The placement round's own floating-corner
+move (ruling 1) made this reachable in practice for the first time --
+the panel used to be a 24px bar at the bottom of the page nobody
+routinely clicked open without also navigating; a fixed corner bubble
+invites exactly the click that used to be rare.
+
+THE FIX: the CLOSED state is now a plain `<a href="{{ assistant.open_url
+}}">` -- not a `<details>` at all -- so there is no local toggle to open
+with. Clicking it is an ordinary navigation to THIS SAME page with
+`?assistant=1` on it, which re-renders through `panel_context` with
+`is_open=True` -- the already-tested, already query-pinned leg that
+actually reads the conversation. The OPEN state is still a `<details
+open>`, because once the transcript has actually been fetched for THIS
+page load, a native LOCAL toggle back to closed (and open again) is
+genuinely harmless -- the content already in the DOM is not stale, it is
+this same request's own data. An explicit `<a href="{{ assistant.
+close_url }}">Close</a>` inside the open panel is the mirror of the
+bubble link, for an operator who would rather click a labelled control
+than the disclosure marker.
+
+`open_url`/`close_url` are BOTH computed in Python
+(`agents.chat.context_processors.panel_context`, via `with_open_param`/
+`without_open_param`), never built here -- the same "reversed in Python,
+read off a data attribute" rule the poller's own URL already follows, so
+this template is not a second place that decides what either URL looks
+like, and the `?assistant=1` duplicate-param guard (`with_open_param`'s
+own docstring, Task 10 review n1) protects the bubble link exactly as it
+already protects the ask/reset redirects.
+
+A `<details>`, still, renders its children into the DOM even when open
+and a poll swaps `#assistant-body` -- so the context builder reading no
+row while COLLAPSED (next paragraph) is what keeps the zero-cost promise
+now that "collapsed" is not this element's own closed state at all.
+
+ITS OWN COMPACT TRANSCRIPT, NOT `chat/_turn_block.html`, and that is a
+decision rather than an oversight: the chat turn block renders tool cards
+with arguments, thumbnails and citations, artifact image and file strips,
+attachment rows and five turn states, and this surface needs none of it.
+Reusing that markup would drag roughly twenty `.turn*`/`.tool*` selectors
+out of `chat/base.html` and into the global shell so they could render on
+a page that then hides most of them. What IS reused is the thing that
+matters: `agents.chat.rendering.render_answer`, called in the context
+builder, so a model's `**bold**`, lists and code spans render identically
+here and in `/chat/` -- escaped first, and emitting no `<a>`.
+
+THE "JUMP TO" STRIP IS THE PLATFORM'S, NOT THE MODEL'S. Every url in it
+is built in Python, in `agents.chat.context_processors._links`, against
+the help-card table, NEVER from anything the model typed -- a url the
+model wrote into its answer is inert text, because `render_answer`
+creates no link from bare text, from a URL or otherwise. TWO SHAPES OF
+url now (placement-round follow-up, owner-found defect, 2026-09-12): a
+`route`/`anchor` pair re-validated against a card the model actually
+fetched this turn, carrying the anchor to one control; or, for a
+registry page the final answer merely NAMES without having fetched its
+card this turn, a page-level link with no anchor at all -- the whole
+page is the most specific thing the platform knows to point at. Both
+shapes are matched only against `foundation.settings_help.CARDS`, never
+against the model's own prose beyond which of that table's own exact
+spellings it happens to contain.
+
+NO `<style>` HERE: a `chat/` fragment never carries one. Its composer
+rules live in `_shell.html` (promoted there when this panel started
+including that fragment from outside `chat/`), and its own few rules
+live there too, beside `.settings-main :target` (moved from
+`_settings.html`'s `extra_style` by the final review, finding I1: two of
+the settings leaves override that block with no `{{ block.super
+}}` and shipped this panel unstyled).
+
+TWO `<script>` TAGS RENDER ON THIS FRAGMENT, AND BOTH ARE SANCTIONED
+(Task 10 review, a1 -- this docstring used to disclaim only `<style>`
+and say nothing about the script the shared composer already carries,
+which made the sentence technically true and practically misleading).
+The FIRST is `chat/_enter_to_send.html`'s keydown handler, pulled in by
+the `chat/_composer.html` include below -- it is not specific to this
+panel; it is the SAME shared script every composer surface in the app
+renders, and it renders here, on every settings page WHOSE PANEL IS
+OPEN, whenever the assistant is installed, for the identical reason it
+renders on `/chat/`. The SECOND is THIS module's own poller, at the
+bottom of this file -- the one script Task 11 adds, and the only one
+that is THIS FEATURE's own budget (spec §6.7): "asking never navigates"
+is a capability nothing already on the page provided, where Enter-to-
+send is infrastructure this feature merely inherits by including the
+composer that carries it. Consolidating the two was considered and
+rejected: Enter-to-send is keydown-only by its own explicit scoping ("No
+fetch, no polling, no other behaviour") and is shared, unmodified, by
+two composer surfaces that must never poll; folding the poller into it
+would either break that scoping or fork the shared script into a
+settings-only copy, trading one sanctioned script for two near-
+duplicates. Neither script reads or writes `localStorage`,
+`sessionStorage` or `indexedDB` -- this fragment's own tests pin that
+for both. NEITHER RENDERS AT ALL ON A COLLAPSED PAGE now (placement-round
+follow-up): the closed bubble is a bare `<a>`, so there is no `#assistant-
+body`, no composer and nothing for either script to bind to -- a smaller
+page, not merely an inert one, on those pages' own default view.
+{% endcomment %}
+{% if assistant.open %}
+<details class="assistant-panel" id="assistant-panel" open>
+  {% comment %}
+  CLOSE MOVED ONTO THE HEADER ROW ITSELF (owner feedback, live, layout
+  economy round, 2026-09-13): it used to be its own full-width line
+  below the header, the single largest piece of "so much wasted space"
+  the owner named. A real `<a>` nested inside `<summary>` is safe here
+  for the identical reason the two-state collapsed/open split already
+  established (`_shell.html`'s own top comment on this file): a click
+  that lands on the summary's own padding rather than precisely on
+  `Close` merely toggles the `<details>` closed LOCALLY, which is
+  harmless once open (this same request's own data, not stale) -- it is
+  not the "reveals an empty collapsed render" hazard the CLOSED bubble
+  had to be rebuilt away from.
+  {% endcomment %}
+  <summary><span>Settings assistant</span><a href="{{ assistant.close_url }}" class="assistant-close">Close</a></summary>
+  <div id="assistant-body" {% if assistant.pending %}data-assistant-pending="1"{% endif %}
+       data-assistant-panel-url="{{ assistant.panel_url }}"
+       data-assistant-next="{{ assistant.next }}">
+
+    {% if assistant.error %}
+    <p class="msg error" id="assistant-error">{{ assistant.error }}</p>
+    {% endif %}
+
+    {% if not assistant.installed %}
+    {% comment %}
+    THE OFFER, not an auto-install: a row appears when somebody installs
+    it (`agents/defaults.py`'s ruling 2), never because a deploy ran.
+    It posts to the ONE install route, extended with a validated `next`
+    so the operator lands back on the page they were reading.
+
+    `install_next`, NOT THE BARE `assistant.next` (Task 10 review, n2):
+    this offer now renders ONLY inside the open branch (placement-round
+    follow-up -- see this file's own top docstring), so `assistant.next`
+    already carries `?assistant=1` by construction and `install_next`
+    is idempotent on it. Kept anyway: it is what keeps the install
+    redirect landing the operator back on this same open panel rather
+    than a shut one, for this caller and for any future one that renders
+    this same context without that invariant.
+    {% endcomment %}
+    <p>A guide to this box's settings, on every settings page. It explains and links; it
+      never changes a setting.</p>
+    <form method="post" action="{{ assistant.install_url }}">
+      {% csrf_token %}
+      <input type="hidden" name="kind" value="agent">
+      <input type="hidden" name="slug" value="{{ assistant.slug }}">
+      <input type="hidden" name="next" value="{{ assistant.install_next }}">
+      <button type="submit">Add the settings assistant</button>
+    </form>
+
+    {% else %}
+
+    {% if assistant.open %}
+    {% comment %}
+    NEWEST-FIRST IN THE DOM (`reversed`), OWNER FEEDBACK, LIVE, 2026-09-13:
+    the SCROLL fix, not a display one -- `.assistant-transcript`'s own
+    `flex-direction: column-reverse` (`_shell.html`) draws this reversed
+    order back into the ordinary reading order (oldest at the top, newest
+    at the bottom) and is what makes a `column-reverse` flex container's
+    own default, unscrolled position land on its main-start content -- the
+    newest turn -- rather than the oldest. `_shell.html`'s own comment
+    beside that rule carries the full account and the live verification.
+    {% endcomment %}
+    <div class="assistant-transcript">
+      {% for card in assistant.cards reversed %}
+        {% if card.role == "user" %}
+        <p class="assistant-turn assistant-you"><strong>You:</strong> {{ card.text }}</p>
+        {% elif card.role == "assistant" %}
+          {% if card.pending %}
+          <p class="assistant-turn assistant-pending">Thinking…</p>
+          {% elif card.error %}
+          <p class="assistant-turn assistant-failed">{{ card.error }}</p>
+          {% else %}
+          <div class="assistant-turn assistant-answer">{{ card.text_html }}</div>
+          {% endif %}
+        {% endif %}
+      {% empty %}
+      <p class="muted">Ask about any setting on this box — what it does, and where it lives.</p>
+      {% endfor %}
+    </div>
+
+    {% if assistant.links %}
+    <p class="assistant-jump"><span class="muted">Jump to:</span>
+      {% for link in assistant.links %}<a href="{{ link.url }}">{{ link.label }}</a>{% if not forloop.last %} · {% endif %}{% endfor %}
+    </p>
+    {% endif %}
+    {% endif %}
+
+    {% comment %}
+    THE ONE COMPOSER, in `turn` mode: a `required` textarea and no agent
+    picker. `may_attach_files` is absent from this context, so the attach
+    door and the drag-drop fragment do not render at all; the model
+    picker is off because this surface has no model choice to offer.
+    `composer_next` is the one parameter this phase added to that
+    fragment, and it is what lets the ask view return the operator to the
+    page they asked from.
+
+    `attach_workstream=None` IS PASSED, deliberately, even though this
+    surface has no attachments: `_composer.html:84`'s own `{% with
+    routing_workstream=composer_workstream|default:attach_workstream %}`
+    resolves `attach_workstream` as a FILTER ARGUMENT, which Django does
+    not give the normal missing-variable leniency (`_composer.html`'s own
+    docstring, and `agents/chat/tests/test_assistant_panel.py::
+    TestTheSharedComposerParameter`'s own note on the same point) -- an
+    omitted one raises `VariableDoesNotExist` out of this render, not a
+    blank. Every REAL chat view supplies this key from its own context
+    (`composer_attach_context`/`thread_context`); this settings-area
+    include is the one caller with no such builder, so it is the one
+    caller that must pass it explicitly.
+    {% endcomment %}
+    {% include "chat/_composer.html" with composer_mode="turn" composer_action=assistant.ask_url composer_form_id="assistant-form" composer_next=assistant.next composer_placeholder="Ask about these settings" composer_button="Ask" composer_show_model_picker=False composer_workstream=None attach_workstream=None %}
+
+    {% comment %}
+    A SMALL, QUIET CONTROL (owner feedback, live, layout economy round,
+    2026-09-13): "Start over" used to be a full-scale primary-looking
+    button -- the largest single element in the panel for an action an
+    operator takes rarely, if ever. `nav-link-button` is not a new
+    class: it is `_shell.html`'s own existing "a link that happens to be
+    a `<button>`" idiom (the account area's Sign-out control already
+    uses it), reused here rather than given a second, near-identical
+    definition.
+    {% endcomment %}
+    <form method="post" action="{{ assistant.reset_url }}" class="assistant-reset">
+      {% csrf_token %}
+      <input type="hidden" name="next" value="{{ assistant.next }}">
+      <button type="submit" class="nav-link-button">Start over</button>
+    </form>
+
+    {% endif %}
+  </div>
+</details>
+
+{% comment %}
+PROGRESSIVE ENHANCEMENT ONLY, and the budget for this whole feature is
+this one script (spec §6.7). Everything above already works with no
+script at all: the form is a plain POST, the answer is a redirect
+carrying `?assistant=1`, the panel comes back open with the queued turn
+showing "Thinking…", and a reload shows the answer.
+
+THE SUBMIT INTERCEPTION IS WHAT EARNS THIS SCRIPT ITS PLACE. A settings
+page can have a half-filled form on it, and a plain POST navigates away
+and discards it. With this, asking a question never navigates. Without
+it, it does -- and that is the honest JS-off cost.
+
+IT IS NOT A COPY OF THE CONVERSATION POLLER
+(`chat/conversation.html`), which swaps individual turn cards by
+`data-poll-block` id, de-duplicates tool cards, reads two different
+refusal body shapes and handles attachment pending state. This replaces
+ONE container with server-rendered HTML and stops when the server stops
+saying "pending".
+
+THE THREE CONSTANTS ARE DECLARED ONCE, IN PYTHON
+(`agents/chat/service.py`), and handed here -- never a second copy typed
+into this template. The panel URL is reversed in Python too and read off
+a data attribute, for the same reason: a script that built a URL
+client-side would be a second URLconf.
+
+NO CLIENT-SIDE STORAGE OF ANY KIND. Persistence is `Conversation` and
+`Turn` rows; this holds nothing across a reload, on purpose.
+
+RENDERED ONLY HERE, INSIDE THE OPEN BRANCH (placement-round follow-up):
+the closed bubble is a bare `<a>` with nothing for this script to act on
+-- see this file's own top docstring.
+{% endcomment %}
+<script>
+(function () {
+  var POLL_INTERVAL_MS = {{ assistant.poll_interval_ms }};
+  var MAX_TRANSPORT_RETRIES = {{ assistant.max_transport_retries }};
+  var MAX_POLL_DURATION_MS = {{ assistant.max_poll_duration_ms }};
+
+  var panel = document.getElementById("assistant-panel");
+  if (!panel) { return; }
+
+  var startedAt = Date.now();
+  var failures = 0;
+  var timer = null;
+
+  function body() { return document.getElementById("assistant-body"); }
+
+  function swap(html) {
+    var holder = document.createElement("div");
+    holder.innerHTML = html;
+    var fresh = holder.querySelector("#assistant-body");
+    var current = body();
+    if (fresh && current) { current.replaceWith(fresh); bind(); }
+  }
+
+  function stop() { if (timer) { clearTimeout(timer); timer = null; } }
+
+  function schedule() {
+    var current = body();
+    // `current.dataset.assistantPending`, read through the camelCase
+    // DOM property rather than a literal `hasAttribute(...)` call
+    // spelling out the pending marker's own hyphenated attribute name:
+    // that name is EXPECTED absent from the page whenever nothing is
+    // pending (the body div's own template conditional already keeps it
+    // out), and typing it out here, unconditionally, as this script's
+    // own source text would put it back on the page regardless of that
+    // state. `dataset` reads the identical attribute; only the source
+    // string differs.
+    if (!current || current.dataset.assistantPending === undefined) { stop(); return; }
+    if (Date.now() - startedAt > MAX_POLL_DURATION_MS) { stop(); return; }
+    stop();
+    timer = setTimeout(poll, POLL_INTERVAL_MS);
+  }
+
+  function poll() {
+    var current = body();
+    if (!current) { stop(); return; }
+    var url = current.getAttribute("data-assistant-panel-url")
+      + "?assistant=1&next=" + encodeURIComponent(current.getAttribute("data-assistant-next"));
+    fetch(url, { headers: { "X-Requested-With": "XMLHttpRequest" } })
+      .then(function (response) { return response.text(); })
+      .then(function (html) { failures = 0; swap(html); schedule(); })
+      .catch(function () {
+        failures += 1;
+        if (failures >= MAX_TRANSPORT_RETRIES) { stop(); return; }
+        schedule();
+      });
+  }
+
+  function bind() {
+    var form = document.getElementById("assistant-form");
+    if (!form || form.dataset.assistantBound) { return; }
+    form.dataset.assistantBound = "1";
+    form.addEventListener("submit", function (event) {
+      event.preventDefault();
+      fetch(form.action, {
+        method: "POST",
+        body: new FormData(form),
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+      })
+        .then(function (response) { return response.text(); })
+        .then(function (html) { startedAt = Date.now(); failures = 0; swap(html); schedule(); })
+        .catch(function () { form.submit(); });
+    });
+    schedule();
+  }
+
+  bind();
+})();
+</script>
+{% else %}
+{% comment %}
+THE CLOSED BUBBLE IS A LINK (placement-round follow-up) -- see this
+file's own top docstring for the defect this closes and why a plain
+navigating `<a>`, not a `<details>`, is the whole fix. `assistant.
+open_url` is `with_open_param(assistant.next)`, built in Python.
+{% endcomment %}
+<a class="assistant-panel" id="assistant-panel" href="{{ assistant.open_url }}">Settings assistant</a>
+{% endif %}

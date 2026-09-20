@@ -1,0 +1,121 @@
+{% extends "chat/base.html" %}
+{% block title %}New workstream — farabunker{% endblock %}
+{% comment %}
+THE WORKSTREAM SETUP SCREEN (owner feedback round 7, verbatim: "should
+we have it on it's on screen rather than chilling at the top. I.e.
+Workstream setup that has key items and whos full extent?" -- creation
+moves off the list page's own inline name+Create row onto its own
+screen, the same "give it room to breathe" reasoning the settings-page
+split already gave Manage/Instructions/Scope/Upload default). NOT
+BEHAVIOUR-FROZEN, unlike the design-only rounds before it: this adds a
+real route (`chat-workstream-new`) and a real view (`workstream_new`,
+`agents/chat/views/workstreams.py`).
+
+ONE FORM, ONE SUBMIT, FIVE KEY ITEMS: Name (required), Description,
+Instructions, Scope, Upload default -- everything a stream needs to
+start life WITH its "full extent" already set, rather than a bare name
+that then sends the owner hunting for the rest on the settings page one
+section at a time. Every card below reuses `chat/workstream_settings.
+html`'s own field-level markup where the sections match (the chip-picker,
+the `.ws-textarea`, the three-way placement radios, the exact copy under
+each) -- REUSE, NOT REDESIGN, the same rule that page's own docstring
+states. What could NOT be reused verbatim is the FORM BOUNDARY: the
+settings page gives each section its own `<form>`/`{% templatetag
+openblock %} csrf_token {% templatetag closeblock %}`/submit button,
+because each one POSTs and saves independently; this page has exactly
+ONE submit for all five, so the per-section `<form>` wrappers, hidden
+`action` fields, and per-card "Save" buttons are gone -- one outer
+`<form>`, one hidden CSRF token, one "Create workstream" button at the
+end.
+
+CLASS A, THE SAME CLASS `chat-workstreams` ITSELF CARRIES: there is no
+row until the POST succeeds, so nothing here is row-addressed and
+nothing 404s.
+
+SCOPE GATED ON `accounts_on()` ALONE (ruling A) -- `_setup_context`'s
+own docstring explains why there is no second "is_owner" question left
+to ask on a page whose whole point is describing a stream that does not
+exist yet. Absent entirely on an open box, exactly like the settings
+page's own gating.
+
+ALMOST ZERO JAVASCRIPT: this page is one plain POST form, carrying `{%
+templatetag openblock %} csrf_token {% templatetag closeblock %}` --
+the same idiom every other form on this box already uses -- and it
+contributes no script of its own. The rail it renders brings the one
+`chat/_sidebar.html` includes (`chat/_menu_exclusive.html`), a
+progressive enhancement this form does not depend on.
+{% endcomment %}
+{% block chat_sidebar %}{% include "chat/_sidebar.html" %}{% endblock %}
+{% block chat_content %}
+<article class="workstream">
+  {% if page_error %}
+  <div class="banner warn"><p class="job-error" role="alert">{{ page_error }}</p></div>
+  {% endif %}
+  {% include "chat/_messages.html" %}
+
+  <header class="ws-head">
+    <div>
+      <h1>New workstream</h1>
+      <p class="muted"><a href="{% url 'chat-workstreams' %}">back to workstreams</a></p>
+    </div>
+  </header>
+
+  <form method="post" action="{% url 'chat-workstream-new' %}">
+    {% csrf_token %}
+
+    <div class="ws-card" id="name">
+      <h2 class="ws-card-head">Name</h2>
+      <input type="text" name="name" value="{{ name }}" placeholder="Name this workstream" required>
+    </div>
+
+    <div class="ws-card" id="description">
+      <h2 class="ws-card-head">Description</h2>
+      <textarea name="description" rows="2" class="ws-textarea">{{ description }}</textarea>
+    </div>
+
+    <div class="ws-card" id="instructions">
+      <h2 class="ws-card-head">Instructions</h2>
+      <textarea name="instructions" rows="6" class="ws-textarea">{{ instructions }}</textarea>
+      <p class="muted">Sent with every turn in this workstream, labelled as the
+        workstream’s instructions.</p>
+    </div>
+
+    {% if scope_visible %}
+    <div class="ws-card" id="scope">
+      <h2 class="ws-card-head">Scope</h2>
+      <div class="chip-picker">
+        {% for ent_id, ent_name in scope_options %}
+          {% comment %}
+          IDENTICAL WRAPPING TO `chat/workstream_settings.html`'s OWN
+          chip-picker (F4, walk-fix batch, carried forward a second
+          time): the checkbox sits INSIDE the `<label>`, so its
+          accessible name is the label's own text content.
+          {% endcomment %}
+          <label class="chip-check">
+            <input type="checkbox" name="entitlements" value="{{ ent_id }}"
+              {% if ent_id in scope_selected %}checked{% endif %}>
+            <span class="chip">{{ ent_name }}</span>
+          </label>
+        {% empty %}
+          <p class="muted">You hold no entitlements, so there is nothing to narrow to.</p>
+        {% endfor %}
+      </div>
+      <p class="muted">With a scope set, this workstream retrieves only material under these
+        entitlements — and not unlabelled material.</p>
+    </div>
+    {% endif %}
+
+    <div class="ws-card" id="upload-default">
+      <h2 class="ws-card-head">Upload default</h2>
+      <label><input type="radio" name="placement" value=""
+        {% if not placement %}checked{% endif %}> Ask every time</label>
+      <label><input type="radio" name="placement" value="universal"
+        {% if placement == "universal" %}checked{% endif %}> Always the universal library</label>
+      <label><input type="radio" name="placement" value="contained"
+        {% if placement == "contained" %}checked{% endif %}> Always contained to this workstream</label>
+    </div>
+
+    <div class="ws-card-actions"><button type="submit">Create workstream</button></div>
+  </form>
+</article>
+{% endblock %}

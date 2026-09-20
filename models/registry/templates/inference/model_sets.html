@@ -1,0 +1,161 @@
+{% extends "inference/base.html" %}
+{% comment %}
+Model sets (IA-2 T14, spec section 6.10): a named group of registered
+connections, and the unit an entitlement ATTACHES TO -- so one change
+("add this model to the Finance set") can reach every entitlement
+already attached, and attaching a second entitlement reaches every
+model already in. The two edges are edited INDEPENDENTLY: this page owns
+attaching an entitlement to a set; `_registered_connection.html`'s own
+multiselect (on the console) owns putting a connection IN a set.
+
+DECISION 28: a set with no entitlement attached restricts NOBODY -- a
+connection in it stays exactly as usable as if it were in no set at all.
+That is not an edge case; it is the middle of the routine workflow
+(create the set, add the models, attach the entitlement), so the warning
+below is loud rather than a footnote, and the sentence is worded so it
+reads correctly in EITHER state.
+
+Zero JS, one POST per action, class S throughout (a model connection is
+box inventory, not somebody's library row -- `identity/routes.py`
+classifies every route on this page S, and `IdentityGateMiddleware`
+already refuses a non-admin before this template ever renders; no
+`identity.gate` import belongs anywhere on this page).
+{% endcomment %}
+{% block title %}Model sets — farabunker{% endblock %}
+{# A SUB-PAGE OF Models, so it marks the PARENT sidebar entry: the sidebar names sections, not URLs, and this page is reached from the console's own "Model sets" link. #}
+{% comment %}
+ROUND 17 ADDENDUM: `current-parent`, not `current` -- this page marks
+its PARENT sidebar entry (Models) current from a CHILD url (`/inference
+/sets/`, not `inference-console` itself), so the link must stay
+clickable (`foundation/templates/_shell.html`'s own `.current-parent`
+comment has the full reasoning). `inference/console.html` -- the
+section's own index, marking itself current from its own exact url --
+is unaffected and keeps plain `current`.
+{% endcomment %}
+{% block side_current_models %}current-parent{% endblock %}
+{% block extra_style %}{{ block.super }}
+  {% comment %}
+  COHERENCE WAVE A FIX-ROUND (review M1): this override opened without
+  `{{ block.super }}` above -- the same F5 defect the wave fixed on
+  `console.html`/`setup/index.html` but did not sweep for elsewhere,
+  because this page extends `inference/base.html`, not `_settings.html`
+  directly, putting it outside the drift guard that check ran against at
+  the time. `foundation/ops/tests/test_css_ownership.py`'s new transitive
+  sweep (review M1) is what actually found it. The page's own `.msg` rule
+  just below was a byte-for-byte duplicate of `_settings.html`'s shared
+  one in every particular except `color: var(--text)`, which `_shell.
+  html`'s own `body` rule already supplies -- removed now that
+  `{{ block.super }}` inherits it. `.msg.error` is gone the same way
+  (Coherence Wave D, C3): `_settings.html` now owns the one spelling
+  every settings leaf inherits; see `identity/templates/identity/
+  groups.html` for the reasoning.
+
+  A CENTERED COLUMN. This page carried a `main { max-width: … }` rule and
+  no `<main>` element for it to match, so the rule was inert and an admin
+  surface of short forms ran the full width of the window -- the same
+  fault the UI-1 batch fixed on five other pages, and the sixth instance,
+  found by pairing every `main {` rule in the tree against a `<main>`
+  rather than by noticing the symptom. The width goes through
+  `--page-max-width` like everywhere else.
+
+  SINCE UI-2, 900 IS NOT THE NUMBER EITHER EDGE LANDS ON (review, Nit
+  2). This is a settings-area page, so the token sizes the whole
+  settings block rather than this column: the bar takes `max(900,
+  --app-bar-min-width)` = 1000, and `main` fills the content column that
+  is left after the sidebar and its gutter -- 770px. 900 is above that,
+  so on this page the token currently binds nothing at all; it stays
+  because it is the shared mechanism (it would bind again the moment the
+  shell's floor moved above 1130), and because a settings page that
+  declared no token would silently inherit the shell's 720px default and
+  read as a different width from its siblings. See `.settings-layout` in
+  `foundation/templates/_shell.html` for the arithmetic.
+  {% endcomment %}
+  :root { --page-max-width: 900px; }
+  main { max-width: var(--page-max-width); margin: 0 auto; }
+  section { background: var(--panel); border: 1px solid var(--border);
+            border-radius: 8px; padding: 1rem; margin-bottom: 1.25rem; }
+  h2 { font-size: 1rem; margin: 0 0 .75rem; }
+  form.inline { display: inline; }
+  ul.members { list-style: none; padding: 0; margin: .4rem 0 0; }
+  ul.members li { font-size: .9rem; }
+  .chips { color: var(--muted); font-size: .85rem; }
+  .warn { color: var(--danger); font-size: .88rem; }
+{% endblock %}
+{% block settings_content %}
+<main>
+<h1>Model sets</h1>
+<p class="tagline">A set is a named group of registered connections. A connection in NO set stays
+  usable by everyone who may use its capability. Attaching an entitlement to a set narrows every
+  model in it to the people who hold that entitlement — a set with no entitlement attached
+  narrows nothing.</p>
+
+{% include "_messages.html" %}
+
+<section>
+  <h2>New model set</h2>
+  <form method="post" action="{% url 'inference-model-sets' %}">
+    {% csrf_token %}
+    <label for="new-set-name">Name</label>
+    <input type="text" name="name" id="new-set-name" required>
+    <label for="new-set-description">Description</label>
+    <input type="text" name="description" id="new-set-description">
+    <button type="submit">Create</button>
+  </form>
+</section>
+
+{% for model_set in model_sets %}
+<section>
+  <h2>{{ model_set.name }}</h2>
+  {% if model_set.description %}<p class="chips">{{ model_set.description }}</p>{% endif %}
+
+  <p class="chips">Models:
+    {% for member in model_set.members.all %}{{ member.connection.name }}{% if not forloop.last %}, {% endif %}{% empty %}none yet — add one from the connection's own edit form on the console{% endfor %}
+  </p>
+
+  {% if not model_set.entitlement_attachments.all %}
+  <p class="warn">No entitlement is attached, so this set restricts nobody — every account that
+    may use the capability can still use these models. Attach an entitlement to narrow them.</p>
+  {% endif %}
+
+  <ul class="members">
+    {% for attachment in model_set.entitlement_attachments.all %}
+      <li>{{ attachment.entitlement.name }}
+        <form class="inline" method="post" action="{% url 'inference-model-set-edit' model_set.pk %}">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="detach">
+          <input type="hidden" name="entitlement" value="{{ attachment.entitlement_id }}">
+          <button type="submit">Detach</button>
+        </form>
+      </li>
+    {% empty %}<li>No entitlement attached yet.</li>{% endfor %}
+  </ul>
+  <form method="post" action="{% url 'inference-model-set-edit' model_set.pk %}">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="attach">
+    <select name="entitlement">
+      {% for pk, name in entitlements %}<option value="{{ pk }}">{{ name }}</option>{% endfor %}
+    </select>
+    <button type="submit">Attach entitlement</button>
+  </form>
+
+  <form class="inline" method="post" action="{% url 'inference-model-set-edit' model_set.pk %}">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="rename">
+    <input type="text" name="name" value="{{ model_set.name }}" required>
+    <button type="submit">Rename</button>
+  </form>
+
+  <form class="inline" method="post" action="{% url 'inference-model-set-edit' model_set.pk %}">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="delete">
+    <button type="submit">Delete set</button>
+  </form>
+  <p class="chips">Deleting this set removes Models: {{ model_set.delete_counts.Models }},
+    Entitlements: {{ model_set.delete_counts.Entitlements }}.
+    The connections themselves are never deleted; only this grouping and its attachments are.</p>
+</section>
+{% empty %}
+<p>No model sets yet.</p>
+{% endfor %}
+</main>
+{% endblock %}

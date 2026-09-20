@@ -1,0 +1,182 @@
+{% comment %}
+THE `rag.documents` STREAM-PAGE PANEL (spec §15.3 item 6), registered by
+`tools/rag/apps.py::ready()` in the SAME COMMIT as the handler
+(`tools.rag.workstreams.panel`) that landed with Task 7 -- this template
+is that registration's other half, so the include the wrapper
+(`chat/_workstream_panel.html`) performs actually resolves.
+
+THE PIN CONTROLS LAND HERE, IN THE SAME COMMIT AS THE ROUTE
+(`rag-workstream-pin`) THEY POST TO -- a template that reverses a URL name
+no `urls.py` has yet is a `NoReverseMatch`, and this panel renders for
+every owner including the open box's single principal (which is exactly
+what Task 13's `test_the_documents_panel_renders_from_the_registry`,
+running under `posture("open")` where `sees_all_content` is True and
+`is_owner` is therefore True, already exercises).
+
+`panel.data` is `tools.rag.workstreams.panel`'s own return shape:
+`contained` (a queryset of `Document` rows), `pinned` (a list of
+`{"pin": WorkstreamPin, "document": Document}` dicts), `pinnable` (ROUND
+17: a capped list of `{"id", "name", "checked"}` dicts, the round-16
+searchable-checkbox dropdown's own row shape -- `panel`'s own docstring
+has the "why dicts, not `Document` rows" reasoning) and `capped`
+(whether `MAX_PINS_PER_STREAM` is reached).
+
+`is_owner`/`workstream` are NOT `panel.data` fields -- they come from the
+enclosing `chat/workstream.html` context, `{% include %}`d straight
+through by the wrapper, exactly as `is_owner` already gates that page's
+own edit/instructions/scope forms. `is_owner` is
+`may_manage_workstream(principal, stream)` (`agents/chat/views/
+workstreams.py`), the SAME predicate `workstream_scope(...).may_upload`
+answers at the route -- pinning is owner-only in v1 (owner decision 7),
+so the control never renders for somebody the route would 404 anyway.
+{% endcomment %}
+{% comment %}
+F10 (walk-fix batch): THE REAL GAP this panel closes. The placement
+chooser (spec §15.3 "uploads" / §9's table) was fully built at
+`document_upload` + `documents.html`, gated on a `workstream` POST
+field that no page inside a stream ever sent -- so the chooser never
+rendered, and every UI upload landed universal regardless of what an
+owner actually wanted. This form is that missing sender: a plain
+multipart POST straight to the SAME `rag-document-upload` endpoint
+`documents.html`'s own form posts to, carrying `workstream` as a hidden
+field so the view's existing placement resolution (`workstream_scope`,
+`default_upload_placement`, the `remember_placement` write-back) runs
+exactly as it already does for a library-page upload made from `?
+pin_into=`. `document_upload`'s existing redirect (to the library) is
+UNCHANGED -- v1 accepts landing there rather than back on this page.
+
+Owner-only, gated on `is_owner` -- the SAME predicate the pin controls
+above already gate on, and for the same reason (this template's own
+docstring, above): `is_owner` IS `workstream_scope(...).may_upload`
+under another name, so a recipient the route would 404 never sees a
+control for it.
+
+ALSO GATED ON `may_upload_tool` (F10 review round 2, Important finding
+1): `is_owner` alone answers "may this principal MANAGE the stream",
+not "does this principal hold the `rag.ingest` entitlement" -- the two
+are independent (an admin can label `rag.ingest` to an entitlement a
+stream's owner does not hold), and `documents.html`'s own sibling form
+gates on BOTH (`may_upload` there, `tools/rag/views.py::_may_upload`).
+Without this, an owner missing that label would see a form that looks
+identical to a working one and then gets a bare 403 on submit -- the
+exact render-vs-gate defect the `pin_into_scope.may_upload` comment in
+`tools/rag/views.py` documents for the pin banner. `may_upload_tool`
+crosses from `agents/chat/views/workstreams.py::_working_context` (the
+settings-page split's own working-page builder; `_page_context` was its
+pre-split name) as a plain boolean (that module's own docstring says why
+it cannot import `tools.rag.tools.RAG_INGEST_TOOL_KEY` directly).
+
+`placement_state`/`workstream`/`may_upload_tool` are NOT `panel.data`
+fields either, same as `is_owner` -- all cross straight through from
+`chat/workstream.html`'s own context (`agents/chat/views/workstreams.
+py::_working_context` already computes `placement_state` for the stream
+page's OWN upload-default section), so this form and that section can
+never disagree on which of the three placement states applies, or on
+whether uploading is available at all.
+{% endcomment %}
+{% comment %}
+WORKSTREAM COMPOSITION PASS (owner feedback: match the library's own
+upload card, no bullets, one row idiom). `.ws-subhead`/`.ws-upload-form`
+are defined on `chat/workstream.html`'s own `chat_style` block -- the
+ONE page that ever includes this panel -- not here: a fragment cannot
+own rules a page has to load, the same rule `chat/_turn_card.html` and
+`chat/_share_panel.html` already follow. `.ws-list`/`.ws-item`/`.ws-
+item-title`/`.ws-item-meta`/`.ws-inline-form`/`.btn-compact` USED TO live
+there too, but the settings-page split promoted all six into `chat/
+base.html` once a second page (`chat/workstream_settings.html`) needed
+the identical row/button idiom -- this panel still renders those classes
+below, it just no longer gets to say where they are defined.
+{% endcomment %}
+{% if is_owner and may_upload_tool %}
+<h3 class="ws-subhead">Upload</h3>
+<form class="ws-upload-form" method="post" action="{% url 'rag-document-upload' %}" enctype="multipart/form-data">
+  {% csrf_token %}
+  <input type="file" name="files" multiple required aria-label="Files to upload">
+  {% include "rag/_placement_choice.html" %}
+  <input type="hidden" name="workstream" value="{{ workstream.pk }}">
+  <button type="submit">Upload</button>
+</form>
+{% endif %}
+{% comment %}
+ADDENDUM (owner, verbatim: "I have no idea what Pinned is, we should
+have an info icon for it"). A zero-JS `<details>` disclosure -- NOT
+nested inside the `<h3>` (invalid: a heading's own content model is
+phrasing content only, and `<details>` is not), a SIBLING right after
+it instead, same idiom the Manage card's own Rename/Description/
+Archive/Delete rows already use on the settings page. "While there: if
+CONTAINED has no equivalent explanation, give both headers the same
+treatment" (the brief's own words) -- it did not, so both get one now,
+each one line, each verified against the AS-BUILT corpus formula
+(`tools.rag.workstreams.stream_documents`) including round 17's own
+`include_universal` toggle, not merely copied from the spec prose.
+{% endcomment %}
+<h3 class="ws-subhead">Contained</h3>
+<details class="ws-info"><summary aria-label="What does Contained mean?">&#9432; What's this?</summary>
+  <p class="muted">Contained documents live only in this workstream — they were never part of the shared library, and stay included here regardless of the wall or the "Use the full document library" setting on the settings page.</p>
+</details>
+<div class="ws-list">{% for d in panel.data.contained %}
+  <div class="ws-item">
+    <a class="ws-item-title" href="{% url 'rag-document-file' d.pk %}" title="{{ d.title }}">{{ d.title }}</a>
+    <span class="ws-item-meta">
+      {% if d.origin == "notes" %}<span class="chip">notes</span>{% endif %}
+      {% if d.status == "failed" %}<span class="chip failed">FAILED</span>{% endif %}
+      {% if is_owner and d.status == "failed" and d.origin == "notes" and d.notes_conversation_id %}
+      <form method="post" action="{% url 'chat-workstream-consolidate' workstream.pk %}"
+            class="ws-inline-form">
+        {% csrf_token %}
+        <input type="hidden" name="conversation" value="{{ d.notes_conversation_id }}">
+        <button type="submit" class="btn-compact">Re-consolidate</button>
+      </form>
+      {% endif %}
+    </span>
+  </div>
+{% empty %}<p class="muted">Nothing contained here yet.</p>{% endfor %}</div>
+<h3 class="ws-subhead">Pinned</h3>
+<details class="ws-info"><summary aria-label="What does Pinned mean?">&#9432; What's this?</summary>
+  <p class="muted">Pinned documents come from the shared library but always count as part of this workstream — they're retrievable here even when they fall outside this workstream's wall, and stay included even if you turn the full document library off.</p>
+</details>
+<div class="ws-list">{% for row in panel.data.pinned %}
+  <div class="ws-item">
+    <a class="ws-item-title" href="{% url 'rag-document-file' row.document.pk %}"
+       title="{{ row.document.title }}">{{ row.document.title }}</a>
+    {% if is_owner %}
+    <span class="ws-item-meta">
+      <form method="post" action="{% url 'rag-workstream-pin' workstream.pk %}" class="ws-inline-form">
+        {% csrf_token %}<input type="hidden" name="action" value="unpin">
+        <input type="hidden" name="pin" value="{{ row.pin.pk }}">
+        <button type="submit" class="btn-compact">Unpin &ldquo;{{ row.document.title }}&rdquo;</button>
+      </form>
+    </span>
+    {% endif %}
+  </div>
+{% empty %}<p class="muted">Nothing pinned here yet.</p>{% endfor %}</div>
+{% if is_owner %}
+{% comment %}
+ROUND 17 (owner, verbatim: "The documents section should be better
+organized, you have all documents in the system, but many documents
+will make this cumbersome ... If I have 50 documents in the system
+this UI is usless"). The plain `<select>` this used to be rendered
+EVERY offered universal title inline the moment this `<details>`
+opened -- exactly the "all documents in the system" complaint, just
+one click deeper than before. REPLACED with the round-16 searchable-
+checkbox dropdown, REUSED rather than copied (`chat/_search_checklist.
+html`'s own consolidation docstring): `sc_input_type="radio"` keeps
+this a single-document choice, the SAME `document=<id>` form field the
+POST route (`rag-workstream-pin`) has always read, so neither that
+route nor its own refusal messages/cap needed to change at all -- only
+how the CANDIDATE is picked, never what gets submitted.
+{% endcomment %}
+{% comment %}
+THE SHARED FRAGMENT RENDERS NO `<form>` OF ITS OWN (its own docstring:
+"must be included INSIDE the caller's own surrounding form") -- this
+wrapper, and the hidden `action=pin` field, are this consumer's own,
+unchanged in shape from the `<select>` this replaces.
+{% endcomment %}
+<form method="post" action="{% url 'rag-workstream-pin' workstream.pk %}">
+  {% csrf_token %}<input type="hidden" name="action" value="pin">
+  {% include "chat/_search_checklist.html" with sc_summary_text="Pin a document" sc_input_type="radio" sc_input_name="document" sc_rows=panel.data.pinnable sc_search_placeholder="Filter documents…" sc_search_title="Type to filter the list below — requires JavaScript. The list and the Pin button work with or without it." sc_submit_label="Pin" %}
+</form>
+{% include "_filter_rows_script.html" %}
+<p class="muted"><a href="{% url 'rag-documents' %}?pin_into={{ workstream.pk }}">browse
+  the library</a>{% if panel.data.capped %} — this workstream is at its pin limit.{% endif %}</p>
+{% endif %}

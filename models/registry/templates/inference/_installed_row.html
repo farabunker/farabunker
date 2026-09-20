@@ -1,0 +1,163 @@
+{% comment %}
+One "on this machine" row — the head of the found → registered → in-use
+pipeline. Bound to a `_installed_views` item via `item`, with `endpoint` /
+`endpoint_override` / `capabilities` already in the surrounding context
+(plain include, no `with ... only` — it deliberately inherits those).
+Shared by the warm "On this machine" section and the cold-start "Found on
+your machine" list, so first run teaches the permanent interface. Always
+rendered inside `_installed_rows_table.html`'s `.machine-table` grid —
+`.inventory-item` and `.installed-row` both collapse to `display: contents`
+there (console.html), so the six `.machine-cell` spans below land directly
+in the shared grid's columns: Model | Capability | On disk | Runtime |
+Status | Action.
+
+The Model cell carries the name; Capability the detected/registered
+capability; On disk the size-on-disk fact (bare, e.g. "4.4 GB" — the
+column header already says "on disk", so no per-row repeat; empty when
+unknown, same no-filler rule as Status/Action, rather than an em-dash);
+Runtime the loaded-now truth ("loaded · X GB" straight from the
+already-fetched /api/ps report, vs "idle" — closing the gap where a model
+silently holding tens of GB of memory was invisible; the section intro
+already carries the "in memory"/"loads on demand" meaning, so it isn't
+repeated per row); Status the row's pipeline state (a "registered ✓" chip
+plus an "in use" chip while a role is bound to it, rendered as
+non-wrapping `.badge` pill chips, same styling the "explicit environment
+override" chip elsewhere on the page uses, empty when neither applies
+rather than an em-dash filler); and Action is the control for that state:
+
+- unregistered + capability detected: the "Add to registered" button —
+  one plain POST to `machine_model_add`, every field auto-filled from
+  detection, idempotent (norm_tag + endpoint reuse), carrying an active
+  endpoint override like every other form on the page. T9: the row's FULL
+  detected capability set (`item.row.capabilities`) posts as one hidden
+  `capability` input PER capability, all named "capability" -- a
+  vision-capable chat row detected as chat+vision registers a connection
+  carrying BOTH, read back on the server via `getlist("capability")`.
+  `item.row.capabilities` falls back to the single `item.row.capability`
+  when empty (an older/stub `DiscoveryRow` predating this field);
+- unregistered + capability UNKNOWN (degraded engine metadata): a link to
+  the manual form below, prefilled with model_id + endpoint — the console
+  never guesses a capability, the operator supplies it (the standing
+  never-guess rulings);
+- registered: nothing to do here — the Status cell already says so, and
+  this cell stays empty rather than an em-dash filler.
+
+The "Connection details" disclosure nests INSIDE the Model cell, beneath
+the name, so collapsed it costs zero extra grid rows (it just adds height
+to the Model cell's own box, same as any wrapped cell content would) —
+rendering it as its own full-width row below the six cells would double
+the table's rendered height and add stray rules. Its content — every
+value used to connect and where each came from (`item.source_label`) — is
+read-only, ending with an anchor link to the connection's one edit form
+(`#conn-<pk>`) when the row is backed by a registered connection. Kept
+simple: the expanded content stays within the
+Model column's own width rather than spanning the full grid — the
+spec allowed either, and constraining it avoids the extra plumbing a
+`grid-column: 1/-1` region nested inside a non-grid-item box would need.
+{% endcomment %}
+<div class="inventory-item">
+  <div class="installed-row" role="row">
+    <span class="machine-cell" role="cell">
+      <span class="name">{{ item.row.name }}</span>
+      <details class="conn-details">
+        <summary>Connection details</summary>
+        <dl>
+          <dt>Model server</dt><dd>{{ item.row.engine }}</dd>
+          <dt>Model ID</dt><dd><code>{{ item.row.model_id }}</code> <span class="source-note">— sent to the API as-is</span></dd>
+          <dt>Endpoint</dt><dd><code>{{ item.endpoint|default:endpoint }}</code> <span class="source-note">— where this model was found</span></dd>
+          <dt>Capability</dt>
+          <dd>
+            {% if item.row.capability %}
+            {{ item.row.capability }}{% if item.source_label %} <span class="source-note">— {{ item.source_label }}</span>{% endif %}
+            {% else %}
+            unknown <span class="source-note">— the model server didn't report one; register it manually with the capability you know it has</span>
+            {% endif %}
+          </dd>
+          {% if item.row.embed_dim %}
+          <dt>Embedding dimension</dt><dd>{{ item.row.embed_dim }}{% if item.source_label %} <span class="source-note">— {{ item.source_label }}</span>{% endif %}</dd>
+          {% endif %}
+          {% if item.connection %}
+          <dt>Connection</dt><dd>“{{ item.connection.name }}”, registered {{ item.connection.created_at|date:"N j, Y" }}</dd>
+          {% endif %}
+        </dl>
+        {% if item.connection %}
+        <p class="edit-link"><a href="#conn-{{ item.connection.pk }}">Edit in Registered connections ↓</a></p>
+        {% endif %}
+      </details>
+    </span>
+    <span class="machine-cell" role="cell">
+      {% if item.row.capabilities %}
+      {% comment %}T9: the model's FULL reported capability set, joined -- e.g. "chat,
+         vision" for a vision-capable chat model, the truth about what it
+         can do (not just whichever one the tie-break chose as primary).{% endcomment %}
+      <span class="meta">{{ item.row.capabilities|join:", " }}</span>
+      {% else %}
+      <span class="meta">{{ item.row.capability|default:"capability unknown" }}</span>
+      {% endif %}
+    </span>
+    <span class="machine-cell" role="cell">
+      {% if item.size_display %}
+      <span class="meta" title="Size on disk — nothing here gates by hardware">{{ item.size_display }}</span>
+      {% endif %}
+    </span>
+    <span class="machine-cell" role="cell">
+      {% if item.row.loaded %}
+      <span class="loaded-tag" title="In memory right now, according to the model server">loaded{% if item.loaded_size_display %} · {{ item.loaded_size_display }}{% endif %}</span>
+      {% else %}
+      <span class="meta idle-tag" title="Loads into memory on first use, unloads when idle">idle</span>
+      {% endif %}
+    </span>
+    <span class="machine-cell" role="cell">
+      {% if item.connection %}<span class="badge chip" title="A registered connection exists for this model — see Registered connections">registered ✓</span>{% endif %}
+      {% if item.in_use %}<span class="badge healthy">in use</span>{% endif %}
+    </span>
+    <span class="machine-cell" role="cell">
+      {% if not item.connection %}
+      {% if item.row.capability %}
+      <form method="post" action="{% url 'inference-machine-add' %}{{ assistant.open_query }}" class="inline-form add-to-registered">
+        {% csrf_token %}
+        {% if endpoint_override %}<input type="hidden" name="endpoint_override" value="{{ endpoint_override }}">{% endif %}
+        <input type="hidden" name="engine" value="{{ item.row.engine }}">
+        <input type="hidden" name="model_id" value="{{ item.row.model_id }}">
+        <input type="hidden" name="endpoint" value="{{ item.endpoint|default:endpoint }}">
+        <input type="hidden" name="loader" value="{{ item.row.loader }}">
+        {% comment %}
+        T9: one hidden "capability" input PER detected capability -- a
+        vision-capable chat row (`item.row.capabilities` == ("chat",
+        "vision")) posts BOTH, read back server-side with
+        `request.POST.getlist("capability")`, so the resulting connection
+        carries the model's whole truth and binds to either role. Falls
+        back to the single `item.row.capability` when `capabilities` is
+        empty (an older/stub row predating this field) -- back-compat,
+        never a capability-less post.
+        {% endcomment %}
+        {% if item.row.capabilities %}
+        {% for cap in item.row.capabilities %}
+        <input type="hidden" name="capability" value="{{ cap }}">
+        {% endfor %}
+        {% else %}
+        <input type="hidden" name="capability" value="{{ item.row.capability }}">
+        {% endif %}
+        <input type="hidden" name="embed_dim" value="{{ item.row.embed_dim|default_if_none:'' }}">
+        <button type="submit">Add to registered</button>
+      </form>
+      {% else %}
+      {% comment %}
+      `&amp;assistant=1` (review round 1, M1): this anchor navigates
+      console -> console, and the console IS a settings page, so it is a
+      settings link like any in the sidebar and must not shut the
+      assistant panel. NOT the `{% templatetag openvariable %}
+      assistant.open_query {% templatetag closevariable %}` suffix every
+      settings FORM writes: that one starts with `?`, and this href
+      already has a query, so the joiner is `&` -- and it has to land
+      BEFORE the fragment, or no query parser would ever see it (the
+      same rule `foundation.settings_area.with_assistant_flag` follows
+      in Python for the redirects).
+      {% endcomment %}
+      <a class="manual-add-link" href="{% url 'inference-console' %}?{% if endpoint_override %}endpoint={{ endpoint_override|urlencode }}&amp;{% endif %}prefill_model_id={{ item.row.model_id|urlencode }}&amp;prefill_endpoint={{ item.endpoint|default:endpoint|urlencode }}{% if assistant.open %}&amp;assistant=1{% endif %}#add-connection">Add to registered manually ↓</a>
+      {% endif %}
+      {% endif %}
+    </span>
+  </div>
+  <span class="row-rule" aria-hidden="true"></span>
+</div>

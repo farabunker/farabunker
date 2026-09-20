@@ -1,0 +1,116 @@
+{% extends "_settings.html" %}
+{% comment %}
+Agent and flow labels. One form per row, so an operator's single change
+can never read as a wipe of every other row -- the same shape
+`chat/tool_entitlements.html` uses for its own `tool_key` forms, and
+since phase 2 the same collapsed `<details>` over the shared two-pane
+transfer panel. The form posts a DIFFERENCE (`op` plus `add`/`remove`)
+rather than a whole set, so two administrators editing different
+entitlements on one agent cannot clobber each other either.
+
+The two consequences are named ONCE, above the list, rather than
+discovered later: this page is the only surface either can be caused
+from, and there is no agents admin page on which to notice them
+afterwards.
+{% endcomment %}
+{% block title %}Agent access — farabunker{% endblock %}
+{% block side_current_agent_access %}current{% endblock %}
+{% block extra_style %}
+  {{ block.super }}
+  {% comment %}
+  `block.super`, ABOVE, IS `_settings.html`'s OWN SHARED FOUR (`.warn`,
+  `.label-row`, `.label-row button`, `.no-labels`) -- consolidation
+  confirm residual 3: this page and `chat/tool_entitlements.html` used
+  to carry byte-identical copies of five, `.lede` included; see
+  `_settings.html`'s own `extra_style` block for why that template, not
+  `chat/base.html`, is their shared home. `.lede` itself is gone now
+  (Coherence Wave D, M1 review fix): C5 converged this page's own two
+  ledes onto `.tagline`/`.warn`, which left the shared `.lede` rule with
+  no consumer anywhere `_settings.html` reaches.
+  {% endcomment %}
+  :root { --page-max-width: 820px; }
+  {% comment %}
+  A CENTERED COLUMN, which this page did not have: the
+  `main { max-width: … }` rule had no `<main>` element to match, so it
+  was inert and the page ran the full width of the window. See
+  `chat/tool_entitlements.html` -- the same fix on the same fault.
+  {% endcomment %}
+  main { max-width: var(--page-max-width); margin: 0 auto; }
+  {% comment %}
+  NO LOCAL `.msg.error`, `section.row`, `section.row h2` (Coherence
+  Wave D, C3/C4) -- `_settings.html`'s own `extra_style` block now owns
+  all three, `section.row` shared with `chat/tool_entitlements.html`'s
+  own per-tool card (byte-identical, renamed there from `tool` to
+  match). See `identity/templates/identity/groups.html` for the
+  `.msg.error` reasoning.
+  {% endcomment %}
+  .muted { color: var(--muted); font-size: .85rem; margin: 0 0 .3rem; }
+  h2.group-head {
+    font-size: .78rem;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 1.5rem 0 .6rem;
+    font-family: inherit;
+  }
+{% endblock %}
+{% block settings_content %}
+<main>
+  <h1>Agent access</h1>
+  <p class="tagline">An agent or a flow with no entitlement is runnable by everyone signed in.
+    Labelling one narrows it to the people who hold any of its entitlements.</p>
+  <p class="warn">A labelled agent or flow is unavailable to the watcher and the command line, and
+    that includes the ones this platform ships — automated callers hold no entitlements, so
+    <code>manage.py agent_turn</code> simply cannot run it. A label also applies to the account
+    that <em>created</em> the agent: if they do not hold one of its entitlements they can no longer
+    run it, though the conversations they already started stay readable.</p>
+
+  {% include "_messages.html" %}
+
+  {% comment %}
+  ONE COLLAPSED ROW PER AGENT AND PER FLOW (phase 2), the same shape
+  `chat/tool_entitlements.html` uses and for the same reason: the row
+  used to carry a checkbox for EVERY entitlement on the box, which is
+  (agents + flows) x entitlements checkboxes in one render. The summary
+  states what the row carries; the `<details>` opens onto the shared
+  transfer panel (`foundation/templates/_transfer_panel.html`), the SAME
+  component the entitlement page renders in the other direction.
+
+  `<details>` is native, so the collapse needs no script; `open` comes
+  from `?open=<anchor>` on the URL after a save. `save_action` and
+  `no_entitlements` come from the view -- see the tool page's own
+  comment for why.
+  {% endcomment %}
+  <span id="agent-labels"></span>
+  <h2 class="group-head">Agents</h2>
+  {% for row in agent_rows %}
+  <section class="row" id="{{ row.anchor }}">
+    <h2>{{ row.slug }}</h2>
+    <p class="muted">{{ row.name }}</p>
+    <details{% if row.open %} open{% endif %}>
+      <summary class="access-summary">{{ row.summary }}</summary>
+      {% include "_transfer_panel.html" with tp_key=row.anchor tp_anchor=row.panel_anchor tp_fields=row.fields tp_bare=1 tp_action=save_action tp_available=row.available tp_active=row.active tp_available_count=row.available_count tp_active_count=row.active_count tp_total=row.total tp_empty_catalogue=no_entitlements %}
+    </details>
+  </section>
+  {% empty %}
+  <p class="muted">No agents on this install yet.</p>
+  {% endfor %}
+
+  <span id="flow-labels"></span>
+  <h2 class="group-head">Flows</h2>
+  {% for row in flow_rows %}
+  <section class="row" id="{{ row.anchor }}">
+    <h2>{{ row.slug }}</h2>
+    <p class="muted">{{ row.name }}</p>
+    <details{% if row.open %} open{% endif %}>
+      <summary class="access-summary">{{ row.summary }}</summary>
+      {% include "_transfer_panel.html" with tp_key=row.anchor tp_anchor=row.panel_anchor tp_fields=row.fields tp_bare=1 tp_action=save_action tp_available=row.available tp_active=row.active tp_available_count=row.available_count tp_active_count=row.active_count tp_total=row.total tp_empty_catalogue=no_entitlements %}
+    </details>
+  </section>
+  {% empty %}
+  <p class="muted">No flows on this install yet.</p>
+  {% endfor %}
+  {% if agent_rows or flow_rows %}{% include "_filter_rows_script.html" %}{% endif %}
+</main>
+{% endblock %}

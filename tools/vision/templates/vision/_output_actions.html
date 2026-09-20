@@ -1,0 +1,36 @@
+{% comment %}
+The ONE action set an existing output offers, rendered by the gallery
+figure AND by the job card. It was the gallery's alone; the Recent cards
+showed only Delete, so reloading the inputs that made an image meant a
+trip to the gallery (the owner's own words). Sharing the markup -- rather
+than copying five links into the card -- is what keeps a mode registered
+tomorrow from appearing in one place and not the other.
+
+Context it needs:
+  `output`             the `GeneratedOutput` these actions act on;
+  `job`                its `GenerationJob`, passed EXPLICITLY by the caller.
+                       The gallery has it select_related; the card has it in
+                       hand. Reading `output.job` here instead would issue
+                       one query per tile on a page showing a dozen.
+  `input_targets`      `views.input_targets()` -- every registered mode
+                       that takes a file, read from the REGISTRY, so this
+                       template names no operation of its own.
+                       Each `url` already carries `?operation=<key>` (the
+                       canonical form, ADR 0012 D-EDIT-13), so everything
+                       appended here joins with `&`.
+  `selected_connection` the create page's own picked-model pk (blank
+                       everywhere else -- the gallery has no picker of its
+                       own). Carried onto the link so following it lands on
+                       the SAME model the card/gallery was rendered under,
+                       not whatever the role binding happens to be: without
+                       it, "Use in ..." would silently swap operations the
+                       moment the picked model differs from the primary
+                       (owner ruling 2026-08-24(a) review finding F1).
+{% endcomment %}
+<div class="output-actions">
+  {% for target in input_targets %}
+  <a href="{{ target.url }}&input_{{ target.param_key }}=output:{{ output.id }}{% if selected_connection %}&connection={{ selected_connection }}{% endif %}">Use in {{ target.label }}</a>
+  {% endfor %}
+  <a href="{% url 'vision-create' %}?reuse={{ job.id }}">Reuse settings</a>
+  <a href="{% url 'vision-output-file' output.id %}?download=1">Download</a>
+</div>

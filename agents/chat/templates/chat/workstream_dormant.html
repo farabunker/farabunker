@@ -1,0 +1,52 @@
+{% extends "chat/base.html" %}
+{% comment %}
+THE PLATFORM'S ONE FENCED EXCEPTION TO THE 404 HOUSE RULE (spec §12.3).
+Reached only from `workstream_page`, only for a principal holding a
+real, live `Share` row whose grants no longer cover this stream's tags
+-- a stranger or a revoked recipient never gets here at all, because
+`visible_workstreams` already excluded the row and the view already
+answered 404.
+
+RENDERS NO STREAM CONTENT -- not the conversations, not the documents,
+not the other recipients -- and NOT THE ORDINARY CHAT SIDEBAR either,
+deliberately: `chat/_sidebar.html`'s "Conversations" nav is built from
+`visible_conversations`, which (this same task's own two new clauses)
+now admits every conversation IN this stream to a live share holder
+regardless of the stream's own dormancy -- gate two gates the STREAM
+PAGE, not each conversation read (spec §14's route table names only
+`chat-workstream` and `chat-start`). Rendering that ambient list HERE
+would put this stream's own conversation titles on the one page whose
+entire job is to reveal nothing about them
+(`test_the_403_page_reveals_nothing_about_the_streams_contents`). The
+plain "All chats" link below is the escape hatch instead -- the same
+one the brief's own template carries.
+
+THE WORKSTREAM'S OWN NAME IS SHOWN. That is not a "contents" leak: the
+recipient already has it, in their own sidebar's Workstreams section
+(`test_a_dormant_share_still_LISTS_in_the_recipients_sidebar`, asserted
+on `/chat/`, not here) -- fence rule 1 names exactly this exemption.
+
+Every missing entitlement is named and nothing else is
+(`disclose_all=True`, ruling E), capped at `NAME_CAP` with the rest
+counted.
+
+ZERO JAVASCRIPT, the same idiom every other chat template uses.
+
+THE `.dormant` MARKER IS ONE WORD, NOT THIS PAGE. `chat/base.html`'s
+rule is `color: var(--danger)` and `color` INHERITS -- on the
+top-level `<article>` (where this page used to carry it) it turned the
+stream's own name, the lede and the three paragraphs below it red, which is not
+what a marker written for a `<span>` beside a name in `chat/
+_sidebar.html` means. The class is the sidebar's; so is the shape it
+hangs on.
+{% endcomment %}
+{% block content %}
+<article>
+  <h1>{{ workstream.name }}</h1>
+  <p class="lede"><span class="dormant">Dormant</span> — this workstream is not readable right now.</p>
+  <p>It contains material from entitlements you don’t hold:
+    {% for id, name in named %}<strong>{{ name }}</strong>{% if not forloop.last %}, {% endif %}{% endfor %}{% if unnamed_count %}, and {{ unnamed_count }} more{% endif %}.</p>
+  <p>Ask an administrator for those entitlements, or ask the workstream’s owner.</p>
+  <p><a href="{% url 'chat-index' %}">All chats</a></p>
+</article>
+{% endblock %}

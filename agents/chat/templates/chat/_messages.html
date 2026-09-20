@@ -1,0 +1,18 @@
+{% comment %}
+The `django.contrib.messages` flash, shared by every /chat/ page that can
+redirect back to itself with something to say: the index (delete/rename/
+duplicate/archive/unarchive from the sidebar menu), the thread page (a
+share/revoke redirect), and the workstream page (pin/unpin, and every
+edit/scope/share action on that box). One include, rendered identically on
+all three.
+
+A ONE-LINE PASSTHROUGH (C-19): the markup itself now lives in
+`foundation/templates/_messages.html`, included at fifteen other sites
+across the codebase too -- this file stays only because `chat/index.html`,
+`chat/workstream.html`, `chat/all.html`, `chat/workstream_new.html`,
+`chat/workstream_settings.html` and the held `chat/conversation.html`
+already include it BY THIS NAME, and `conversation.html` is off limits
+for this task. Repointing those six directly and deleting this file would
+touch the held file too.
+{% endcomment %}
+{% include "_messages.html" %}

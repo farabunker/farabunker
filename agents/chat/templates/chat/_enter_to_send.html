@@ -1,0 +1,94 @@
+{% comment %}
+Shared Enter-to-send keydown handler (owner feedback round 8, verbatim:
+"the chat didn't send the message when it pressed enter ... it should
+be sending a message when i hit enter or doing a newline when i do
+shift eneter"). `conversation.html`'s own composer wired Enter-to-send
+up in 7f99cae; the New-chat start boxes on `chat/index.html` and
+`chat/workstream.html` shared that same markup but never got a script
+at all, so Enter there just did what any plain `<textarea>` does --
+inserted a newline. This fragment closed that gap for the two start
+boxes, duplicated rather than shared with `conversation.html`'s own
+copy, for a reason its own comment named at the time: `form.start-box`
+was the only selector on offer, and `#turn-form` was a different id on
+a different page's own form -- sharing across that would mean either
+fragment reaching into the other's own internals.
+
+ROUND 18 RETIRES THE DUPLICATE (owner feedback: "why is there something
+using a different sub-template?" -- `chat/_composer.html`'s own module
+comment has the full ruling). ALL THREE composer surfaces now render
+the SAME `<form data-enter-submits>` (`chat/_composer.html`), which is
+exactly the generic hook this fragment's own predecessor comment named
+as the missing piece: `form[data-enter-submits]`, not `form.start-box`,
+selects every composer on the page, start or turn alike, with no
+fragment reaching into another's internals. `chat/conversation.html`'s
+own former inline duplicate of this handler (its "WHOLE-BRANCH REVIEW
+Minor 1" comment, now gone with it) is retired in favour of this one
+include -- the sanctioned-script-BUDGET reasoning that comment gave for
+keeping two copies no longer applies, because there is no longer a
+second copy to budget for: this fragment IS the shared script for that
+budget now, on all three pages alike.
+
+KEYDOWN ONLY. No fetch, no polling, no other behaviour -- this include
+is scoped to exactly the one thing its name says. `chat/conversation.
+html`'s own `{% templatetag openblock %} block scripts {% templatetag
+closeblock %}` still owns everything else about that page's own
+composer (busy-state, the poller, the fetch-based submit) -- this
+fragment only ever calls `form.requestSubmit()`, which fires that
+page's own native `submit` listener exactly as a real Send click would.
+
+THE GUARDS: `shiftKey` leaves the newline alone -- Shift+Enter must
+return before anything else runs. `isComposing`, plus the classic
+`keyCode === 229` fallback, skips an IME's own Enter-to-confirm
+keystroke, which must never submit the form out from under someone
+still composing text. A disabled submit button is checked EXPLICITLY,
+since `requestSubmit()` called with no argument sets `submitter` to the
+form element itself, never one of its buttons, so it never consults a
+button's own `disabled` attribute on its own. `requestSubmit()` --
+NEVER `submit()` -- is what routes Enter through the browser's native
+validation, the identical path a real click on Send/Start gets, so a
+`required` field (where one exists) blocks an empty submission exactly
+the same way either way.
+
+PROGRESSIVE ENHANCEMENT: nothing on any page depends on this script
+existing. A JS-off browser still submits the SAME form with its own
+Send/Start button; this only layers a keyboard shortcut on top.
+
+Included once by `chat/_composer.html`, so every page that renders a
+composer gets it -- never included directly by a leaf page itself any
+more.
+
+A DOCUMENT-LEVEL DELEGATED LISTENER (final review, m1), not a listener
+bound to one parse-time element. The settings assistant panel
+(`chat/_assistant_panel.html`) replaces its own composer's container
+wholesale on every poll -- `current.replaceWith(fresh)` -- and an
+`innerHTML`-built fragment never re-executes the `<script>` tags inside
+it, so a listener bound once, here, to `form.querySelector("textarea")`
+at parse time would be attached to a node the FIRST swap throws away,
+silently losing Enter-to-send on the panel from the first XHR ask
+onward until a full page load. `bind()` in the panel's own script
+rebinds the submit handler on the fresh form for exactly this reason;
+nothing rebound this one. Delegating to `document` sidesteps the whole
+problem instead of chasing every future swap site: `event.target` is
+resolved at EVENT time, against whatever `<textarea>` is in the DOM
+right now, so a swapped-in composer needs no re-binding call at all --
+this script runs once, ever, and stays correct through any number of
+later replacements. `closest("form[data-enter-submits]")` is the same
+selector the old per-element binder used, walked from the event target
+rather than captured in a closure.
+{% endcomment %}
+<script>
+(function () {
+  document.addEventListener("keydown", function (event) {
+    if (event.key !== "Enter" || event.shiftKey) { return; }
+    if (event.isComposing || event.keyCode === 229) { return; }
+    var textarea = event.target;
+    if (!textarea || textarea.tagName !== "TEXTAREA") { return; }
+    var form = textarea.closest("form[data-enter-submits]");
+    if (!form) { return; }
+    var button = form.querySelector('button[type="submit"]');
+    if (button && button.disabled) { return; }
+    event.preventDefault();
+    form.requestSubmit();
+  });
+})();
+</script>

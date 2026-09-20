@@ -1,0 +1,480 @@
+{% extends "rag/base.html" %}
+{% comment %}
+Ask-a-question page. Shared shell (tokens, body, nav, button base) lives in
+rag/base.html; only ask-specific styles/markup/JS are here.
+
+T6 (the execution-queue build): submit POSTs to /rag/ask/, which now only
+enqueues a `rag.ask` job and returns 202 with a `status_url` -- it never
+answers inline. The submit handler then polls that `status_url` every
+2 seconds until the job reaches a terminal state (succeeded/failed/
+cancelled), a hard 10-minute timeout, or the server stops responding
+(3 failed polls in a row). `renderResults`/`renderCitation` are unchanged
+from the old synchronous flow -- only how/when they get called changed.
+{% endcomment %}
+{% block title %}Ask — farabunker{% endblock %}
+
+{% block extra_style %}
+  main {
+    max-width: var(--page-max-width);
+    margin: 0 auto;
+  }
+  form {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+  }
+  label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+  }
+  textarea {
+    width: 100%;
+    min-height: 6rem;
+    resize: vertical;
+    padding: 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+  }
+  select {
+    width: 100%;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+  }
+  .field {
+    margin-top: 0.9rem;
+  }
+  .form-row {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 0.75rem;
+  }
+  #status {
+    margin-top: 1rem;
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+  #error {
+    margin-top: 1rem;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    background: var(--error-bg);
+    color: var(--error-text);
+    display: none;
+  }
+  #results {
+    margin-top: 1.5rem;
+    display: none;
+  }
+  #answer {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    white-space: pre-wrap;
+  }
+  #answered-by {
+    margin-top: 0.4rem;
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+  h2 {
+    font-size: 1.05rem;
+    margin: 1.5rem 0 0.5rem;
+  }
+  ul#citations {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  ul#citations li {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.6rem;
+  }
+  .citation-title {
+    font-weight: 600;
+  }
+  .citation-title a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .citation-title a:hover {
+    text-decoration: underline;
+  }
+  .citation-locator {
+    font-weight: 400;
+    color: var(--muted);
+  }
+  .citation-download {
+    font-size: 0.85rem;
+    font-weight: 400;
+    margin-left: 0.5rem;
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .citation-download:hover {
+    text-decoration: underline;
+  }
+  .citation-meta {
+    color: var(--muted);
+    font-size: 0.85rem;
+    margin-top: 0.25rem;
+  }
+  .tabular-note {
+    margin-top: 0.75rem;
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+{% endblock %}
+
+{% block nav_current_ask %}current{% endblock %}
+
+{% block content %}
+<main>
+  <h1>Ask</h1>
+  <p class="tagline">One question, answered from your own documents, with the passages it used.</p>
+
+  <form id="ask-form">
+    {% csrf_token %}
+    <label for="question">Question</label>
+    <textarea id="question" name="question" placeholder="Ask something about your ingested documents…" required></textarea>
+    <div class="field">
+      <label for="category">Category</label>
+      <select id="category" name="category">
+        <option value="">All categories</option>
+        {% for category in categories %}
+        <option value="{{ category.name }}">{{ category.name }}</option>
+        {% endfor %}
+        <option value="Uncategorized">Uncategorized</option>
+      </select>
+    </div>
+    {% if connection_options %}
+    <div class="field">
+      <label for="connection">Model</label>
+      <select id="connection" name="connection">
+        {% for opt in connection_options %}
+        <option value="{{ opt.value }}"{% if opt.selected %} selected{% endif %}>{{ opt.label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    {% endif %}
+    <div class="field">
+      <label for="priority">Priority (optional — lower runs first; blank uses the default)</label>
+      <input type="number" min="1" step="1" id="priority" name="priority">
+    </div>
+    <div class="form-row">
+      <button type="button" id="submit-btn">Ask</button>
+    </div>
+  </form>
+
+  {% if tabular_count %}
+  <div class="tabular-note">
+    {{ tabular_count }} table file(s) in the library aren't searched — tables are stored but not part of retrieval yet.
+  </div>
+  {% endif %}
+
+  <div id="status"></div>
+  <div id="error"></div>
+
+  <div id="results">
+    <h2>Answer</h2>
+    <div id="answer"></div>
+    <div id="answered-by"></div>
+
+    <h2>Citations</h2>
+    <ul id="citations"></ul>
+  </div>
+</main>
+{% endblock %}
+
+{% block scripts %}
+{% include "_poller.html" %}
+<script>
+(function () {
+  "use strict";
+
+  function getCsrfToken() {
+    var input = document.querySelector('#ask-form input[name="csrfmiddlewaretoken"]');
+    return input ? input.value : "";
+  }
+
+  // T10 review MINOR 4: "file.mp4 at 12:40" / "report.pdf, p. 3" --
+  // `citation.locator_text` (server-built, `tools.rag.retrieval.
+  // locator_text_for`) is now the FULL connector-prefixed span text
+  // (" at 12:40" / ", p. 3" / "") -- the "," vs " at " decision used to
+  // be made HERE, off `citation.page`, duplicating history.html's own
+  // template conditional; both now just render the one server-built
+  // field, so the two surfaces can't drift apart on the connector rule
+  // again.
+  function renderLocatorSpan(citation) {
+    var span = document.createElement("span");
+    span.className = "citation-locator";
+    span.textContent = citation.locator_text;
+    return span;
+  }
+
+  function renderCitation(citation) {
+    var li = document.createElement("li");
+
+    var title = document.createElement("div");
+    title.className = "citation-title";
+
+    if (citation.document_id !== null && citation.document_id !== undefined) {
+      var fileUrl = "/rag/documents/" + encodeURIComponent(citation.document_id) + "/file/";
+
+      var link = document.createElement("a");
+      link.href = fileUrl;
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.textContent = citation.title || "(untitled)";
+      title.appendChild(link);
+
+      if (citation.locator_text) {
+        title.appendChild(renderLocatorSpan(citation));
+      }
+
+      var download = document.createElement("a");
+      download.className = "citation-download";
+      download.href = fileUrl + "?download=1";
+      download.textContent = "Download";
+      title.appendChild(download);
+    } else {
+      title.textContent = citation.title || "(untitled)";
+      if (citation.locator_text) {
+        title.appendChild(renderLocatorSpan(citation));
+      }
+    }
+
+    li.appendChild(title);
+
+    var metaParts = [];
+    if (citation.source) metaParts.push("source: " + citation.source);
+    if (typeof citation.score === "number") metaParts.push("score: " + citation.score.toFixed(4));
+    if (citation.row_index !== null && citation.row_index !== undefined) {
+      metaParts.push("row: " + citation.row_index);
+    }
+    if (metaParts.length) {
+      var meta = document.createElement("div");
+      meta.className = "citation-meta";
+      meta.textContent = metaParts.join(" · ");
+      li.appendChild(meta);
+    }
+
+    if (citation.snippet) {
+      var snippet = document.createElement("div");
+      snippet.className = "citation-meta";
+      snippet.textContent = citation.snippet;
+      li.appendChild(snippet);
+    }
+
+    return li;
+  }
+
+  function renderResults(data) {
+    var answerEl = document.getElementById("answer");
+    var answeredByEl = document.getElementById("answered-by");
+    var citationsEl = document.getElementById("citations");
+    var resultsEl = document.getElementById("results");
+
+    answerEl.textContent = data.answer || "(no answer)";
+
+    // `answered_by` is record data from the response, never static copy --
+    // it names whichever connection (picked, or the role path's current
+    // primary) actually answered this question.
+    answeredByEl.textContent = data.answered_by ? "answered by " + data.answered_by : "";
+
+    citationsEl.innerHTML = "";
+    var citations = data.citations || [];
+    if (citations.length === 0) {
+      var li = document.createElement("li");
+      li.textContent = "(no citations)";
+      citationsEl.appendChild(li);
+    } else {
+      citations.forEach(function (citation) {
+        citationsEl.appendChild(renderCitation(citation));
+      });
+    }
+
+    resultsEl.style.display = "block";
+  }
+
+  function showError(message, setupUrl) {
+    var errorEl = document.getElementById("error");
+    errorEl.textContent = message;
+    if (setupUrl) {
+      var link = document.createElement("a");
+      link.href = setupUrl;
+      link.textContent = "Open the model console";
+      link.style.marginLeft = "0.5rem";
+      errorEl.appendChild(link);
+    }
+    errorEl.style.display = "block";
+  }
+
+  function hideError() {
+    var errorEl = document.getElementById("error");
+    errorEl.style.display = "none";
+    errorEl.textContent = "";
+  }
+
+  // The button is type="button" so a click can never trigger a native form
+  // submission (which would reload the page and discard the answer). Route the
+  // click through the form's own submit handler via requestSubmit(), which also
+  // runs HTML validation (the textarea is `required`).
+  document.getElementById("submit-btn").addEventListener("click", function () {
+    document.getElementById("ask-form").requestSubmit();
+  });
+
+  function pollJobStatus(statusUrl, submitBtn, statusEl) {
+    function finish() {
+      submitBtn.disabled = false;
+    }
+
+    pollUntilTerminal(statusUrl, {
+      onResponse: function (response) {
+        return response.json().then(function (data) {
+          if (response.status === 404) {
+            statusEl.textContent = "";
+            showError(data.error || "That question is no longer in the queue.");
+            finish();
+            return null;
+          }
+          if (response.status === 503) {
+            statusEl.textContent = "";
+            showError(data.error || "The queue isn't ready yet.", data.setup_url);
+            finish();
+            return null;
+          }
+
+          if (data.state === "queued") {
+            statusEl.textContent = data.position === 1
+              ? "Waiting…"
+              : (typeof data.position === "number"
+                  ? "Position " + data.position + " of queue — higher-priority questions can move ahead."
+                  : "Queued…");
+            return { retry: true };
+          }
+          if (data.state === "running") {
+            statusEl.textContent = "Answering…";
+            return { retry: true };
+          }
+          if (data.state === "succeeded") {
+            statusEl.textContent = "";
+            renderResults(data);
+            finish();
+            return null;
+          }
+          if (data.state === "failed") {
+            statusEl.textContent = "";
+            showError(data.error || "The question failed.", data.setup_url);
+            finish();
+            return null;
+          }
+          if (data.state === "cancelled") {
+            statusEl.textContent = "";
+            showError("This question was cancelled.");
+            finish();
+            return null;
+          }
+          // Unrecognized state: keep polling rather than silently
+          // stopping -- a forward-compatible state added later should
+          // not strand the page mid-question.
+          return { retry: true };
+        });
+      },
+      onGiveUp: function (reason) {
+        statusEl.textContent = "";
+        if (reason === "duration") {
+          showError(
+            "Still queued after 10 minutes — this page stopped checking. " +
+            "Your question is still in the queue; check Ask history when it finishes."
+          );
+        } else {
+          showError("Lost contact with the server — reload this page. Your question is still in the queue.");
+        }
+        finish();
+      }
+    });
+  }
+
+  document.getElementById("ask-form").addEventListener("submit", function (event) {
+    event.preventDefault();
+
+    var question = document.getElementById("question").value.trim();
+    if (!question) {
+      return;
+    }
+
+    var category = document.getElementById("category").value;
+    var connectionSelect = document.getElementById("connection");
+    var priorityInput = document.getElementById("priority");
+
+    var submitBtn = document.getElementById("submit-btn");
+    var statusEl = document.getElementById("status");
+    var resultsEl = document.getElementById("results");
+
+    hideError();
+    resultsEl.style.display = "none";
+    submitBtn.disabled = true;
+    statusEl.textContent = "Thinking…";
+
+    var payload = { question: question };
+    if (category) {
+      payload.category = category;
+    }
+    // Blank (the env-override "use the role path" option, or no picker at
+    // all) sends no `connection` key -- identical to today's role path.
+    if (connectionSelect && connectionSelect.value) {
+      payload.connection = connectionSelect.value;
+    }
+    // Blank leaves priority out entirely -- the queue's own priority chain
+    // decides (models.contracts.queue.enqueue's `priority=None` rung).
+    if (priorityInput && priorityInput.value !== "") {
+      payload.priority = priorityInput.value;
+    }
+
+    fetch("{% url 'rag-ask' %}", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRFToken": getCsrfToken(),
+        "X-Requested-With": "XMLHttpRequest"
+      },
+      body: JSON.stringify(payload)
+    })
+      .then(function (response) {
+        return response.json().then(function (data) {
+          return { ok: response.ok, data: data };
+        });
+      })
+      .then(function (result) {
+        if (!result.ok) {
+          throw new Error(result.data.error || "Request failed.");
+        }
+        // 202: the question is queued, not answered yet -- poll status_url
+        // (never a hand-built URL) until it reaches a terminal state. The
+        // submit button stays disabled for the whole queued/running
+        // stretch; pollJobStatus re-enables it on every terminal outcome.
+        statusEl.textContent = "Waiting…";
+        pollJobStatus(result.data.status_url, submitBtn, statusEl);
+      })
+      .catch(function (err) {
+        showError(err.message || "Something went wrong.");
+        submitBtn.disabled = false;
+        statusEl.textContent = "";
+      });
+  });
+})();
+</script>
+{% endblock %}

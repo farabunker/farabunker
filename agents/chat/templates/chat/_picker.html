@@ -1,0 +1,20 @@
+{% comment %}
+The per-turn model chooser (deviation P3-D7). Rendered by the index's
+"new conversation" form and by the thread's message form, from the SAME
+`picker_options` list `/rag/` and `/vision/` build theirs from
+(models/registry/bindings.py:233).
+
+`None` -- nothing to pick from at all -- renders nothing, not an empty
+select: a chooser with no choices is a control that lies about having
+one.
+{% endcomment %}
+{% if picker %}
+<label class="picker">
+  <span class="muted">Model</span>
+  <select name="connection">
+    {% for option in picker %}
+    <option value="{{ option.value }}"{% if option.selected %} selected{% endif %}>{{ option.label }}</option>
+    {% endfor %}
+  </select>
+</label>
+{% endif %}

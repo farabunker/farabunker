@@ -1,0 +1,8 @@
+{% comment %}
+A run of cards. Rendered by conversation.html for the whole thread and
+by `turn_status`'s `done` body for the block one job wrote (M6), so the
+polled thread and the refreshed one come out of the SAME loop over the
+same fragment. Two copies of `{% for %}{% include %}{% endfor %}` is
+exactly how they would come to disagree about nesting or wrappers.
+{% endcomment %}
+{% for card in cards %}{% include "chat/_turn_card.html" %}{% endfor %}

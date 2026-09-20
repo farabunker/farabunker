@@ -1,0 +1,261 @@
+{% comment %}
+THE APP RAIL (UI-3b; ROUND 14 OWNER AMENDMENT; SLIMMED, ROUND 15 OWNER
+FEEDBACK). Rendered by every page that overrides `{% templatetag
+openblock %} block chat_sidebar {% templatetag closeblock %}` -- a
+structural claim rather than a list of filenames, which is what an
+enumeration here kept getting wrong: `chat/workstream_dormant.html`
+extends `chat/base.html` and does NOT render the rail (it overrides
+`content` outright), while `chat/all.html` does and was missing from
+the list. Every page that renders it gets the same context from the
+one builder `agents/chat/sidebar.py` gives all of them, so the rail
+cannot look one way on the index and another way inside a thread.
+
+ROUND 15, OWNER VERBATIM (a PARTIAL REVERSAL of round 14's own
+amendment): "the navigation bar needs to be consistant on the top, you
+should not override the main navigation template for main, what the
+fuck, this looks like dog shit." The rail CONCEPT stays; round 14's own
+decision to remove the standard top bar and fold its contents (brand,
+app-nav links, account block) into the rail was wrong and is undone
+here. This fragment now carries CHAT-DOMAIN CONTENT ONLY -- the "+ New
+chat" primary row, Workstreams, Pinned (round 20, rendered only when
+the principal has at least one pinned conversation), Chats -- and
+`chat/base.html` no longer
+overrides `{% templatetag openblock %} block nav {% templatetag
+closeblock %}` at all, so every chat page gets the SAME top bar every
+other page on the box already has (brand, nav links, account area, all
+in `foundation/templates/_shell.html`, byte-consistent with the rest of
+the app). See `chat/base.html`'s own comment at that block for the
+mechanism, and `agents/chat/README.md`'s "ROUND 14 (owner amendment):
+the app rail" section for the round-15 correction note.
+
+ROUND 14 RETIRES THE STREAM-SCOPED CHATS VARIANT (owner: "when I cycle
+through the chats and i click on a project, it takes me to that
+workstreams chat... I believe we should remove the workstream chats
+from the side bar"), UNCHANGED BY ROUND 15. Through round 13 this
+fragment rendered EITHER a scoped stream's own conversation list (when
+`agents/chat/views/workstreams.py` passed `workstream=` into `sidebar_
+context`) OR the flat global list -- never both, and the WORKSTREAMS
+section vanished entirely whenever the scoped variant was showing.
+`sidebar_context` no longer accepts a `workstream=` keyword at all: the
+CHATS section below is ALWAYS the global list, stream conversations
+included, each carrying its own small workstream CHIP (`row.
+conversation.workstream.name`, free off the `select_related` `sidebar_
+context` already pays for the stream-owner branch of `may_manage_
+conversation`) -- the stream's own conversation list still lives on the
+stream page itself, unchanged, as Part 1 of the round-14 brief asked.
+
+ALMOST ZERO JAVASCRIPT, and the rail's own markup has none of it. The
+`<nav class="chat-nav">` below carries no `<script>` and no inline
+handler: every menu is a native `<details>` and every action is a plain
+CSRF-protected POST form -- the same idiom the thread page's delete
+confirm and the setup page's platform disclosures already use. With JS
+off, every one of them still works.
+
+THE ONE EXCEPTION is included at the very bottom of this file, AFTER
+the `</nav>` it operates on: `chat/_menu_exclusive.html` (round 21),
+the progressive-enhancement script that makes the rail's `<details>`
+menus behave like drop-downs -- one open at a time, dismissed by an
+outside click or Escape. Read that fragment for the mechanism and for
+both halves of its trade; it is not restated here. Because it rides
+this fragment, it renders on every page that shows the rail, `/chat/
+all/` included -- so a page's own script count includes it.
+{% endcomment %}
+<nav class="chat-nav" aria-label="Chat">
+  {% comment %}
+  THE ONE PRIMARY ACTION (owner amendment, round 14: "+ New chat,
+  visually distinct"; kept unchanged by round 15's own reversal --
+  ONLY the brand/app-nav/account rows above and below it were the
+  round-14 additions round 15 undid). Points at `chat-index` -- the
+  start composer.
+  {% endcomment %}
+  <a href="{% url 'chat-index' %}" class="chat-rail-primary">+ New chat</a>
+
+  <details class="chat-workstreams chat-nav-section" open>
+    <summary>Workstreams</summary>
+    <a class="chat-new chat-workstreams-new" href="{% url 'chat-workstream-new' %}"
+       aria-label="New workstream">+</a>
+    <div class="chat-nav-group">
+      {% for w in sidebar_workstreams %}
+        <div class="chat-nav-row">
+          <a href="{% url 'chat-workstream' w.pk %}" title="{{ w.name }}">{{ w.name }}</a>{% if w.pk in sidebar_dormant_workstream_ids %} <span class="dormant">Dormant</span>{% endif %}
+        </div>
+      {% empty %}
+        <p class="muted">No workstreams yet — <a href="{% url 'chat-workstream-new' %}">New</a></p>
+      {% endfor %}
+      {% comment %}
+      "5 MOST RECENT... AND THE ABILITY TO SEE MORE" (owner feedback).
+      `WORKSTREAM_SIDEBAR_LIMIT` (`agents/chat/sidebar.py`) is the 5
+      that render above; this is the honest count of the rest, the same
+      "N older conversations" idiom `sidebar_older_count` already uses
+      below for the conversation list, pointing at the full list page
+      (`chat-workstreams`) as the see-more.
+      {% endcomment %}
+      {% if sidebar_workstreams_older_count %}
+        <p class="muted"><a href="{% url 'chat-workstreams' %}">…{{ sidebar_workstreams_older_count }} more</a></p>
+      {% endif %}
+    </div>
+  </details>
+
+  {% comment %}
+  PINNED (round 20, owner verbatim: "can we add the ability t[o] pin
+  chats so it's always shown in its own se[c]tion ibetween Workstreams
+  and chats. It shoudl only appear if we have somethign that is pinned,
+  but it should hide otherwise."). STRICTLY BETWEEN Workstreams (above)
+  and Chats (below), and ENTIRELY ABSENT -- no header, no empty state,
+  no `<div>` at all -- when `sidebar_pinned_rows` is empty: this `{%
+  templatetag openblock %} if {% templatetag closeblock %}` is the
+  whole mechanism, not a CSS `display: none` on an always-rendered
+  section. Same row component as CHATS (`chat/_sidebar_row.html`,
+  shared by both loops) -- title, stream chip, the ⋯ menu including
+  Unpin, current-conversation marking, all identical.
+
+  THE ⓘ EXPLAINER (ROUND-20-CONFIRM R8): on a workstream's own page,
+  this heading and the Documents panel's own ws-subhead-styled "Pinned"
+  line (`rag/panels/documents.html`, round 17) name TWO UNRELATED
+  THINGS with the identical word -- pinned CONVERSATIONS here, pinned
+  DOCUMENTS there. Round 17 gave its own "Pinned" a `.ws-info`
+  disclosure for the identical reason (owner, verbatim, that round: "I
+  have no idea what Pinned is"), and this heading first copied that
+  recipe outright.
+
+  ROUND 22 REPLACES THAT COPY HERE (owner, verbatim: "can we make it on
+  the same line as pinned, but make it as a pop up info line when
+  clicked rather than an inline modification and an entire line wasted
+  on what is this. lThe symbol should be sufficient rather than the
+  text 'what is this'"). Three changes, all of them the owner's words:
+
+  1. IT MOVES ONTO THE HEADER ROW. `.chat-nav-section-head` is already
+     a `justify-content: space-between` flex row whose other users put
+     an action at its end (`.chat-new`, "All chats"), so the ⓘ needs no
+     new layout -- it IS that slot, filled by a different control. The
+     card is two lines again: header, then the pinned row.
+  2. THE SYMBOL IS THE WHOLE AFFORDANCE -- no "What's this?" text and
+     no `▶` marker (`.chat-menu > summary` already suppresses the
+     marker for the row menus). The accessible name and the hover hint
+     carry what the words used to: a screen reader and a hovering
+     mouse both still get a full sentence, it just no longer costs a
+     line of a 240px rail.
+  3. IT IS THE ROW-MENU OVERLAY, NOT AN INLINE DISCLOSURE. `class=
+     "chat-menu chat-info"` is not decoration: `.chat-menu` IS the
+     overlay mechanism (`chat/base.html` -- `position: relative` on the
+     details, an absolutely-positioned `.chat-menu-body` panel at
+     `z-index: 5`), so the explainer floats over the rows below with
+     ZERO layout shift, exactly as the owner asked and exactly as every
+     `⋯` menu already behaves.
+
+     AND IT FALLS INTO THE ROUND-21 DISMISSAL BEHAVIOUR FOR FREE, with
+     no carve-out: `chat/_menu_exclusive.html` selects `details.chat-
+     menu` inside `nav.chat-nav`, so this popup closes on an outside
+     click, closes on Escape, and is one-open-at-a-time with the row
+     menus in both directions. That is the whole reason it reuses the
+     class rather than getting a second recipe of its own.
+
+  NOT CLIPPED, and that was checked rather than assumed: the round-20
+  bound that clips the pinned MENUS (`max-height`/`overflow-y: auto`)
+  is on `.chat-nav-group`, and this control is the header's sibling of
+  that element, not a descendant -- so the round-21 item-C `:has()`
+  unclip has nothing to do for it.
+
+  JS-OFF: a plain `<details>` that opens and closes on click, still an
+  overlay (the CSS needs no script), just without outside-click or
+  Escape -- the same progressive-enhancement floor every sanctioned
+  script on this surface degrades to.
+
+  THE DOCUMENTS PANEL'S OWN `.ws-info` EXPLAINERS ARE DELIBERATELY NOT
+  TOUCHED (round 22 scope fence): `rag/panels/documents.html`'s
+  Contained/Pinned pair still uses the round-17 inline disclosure. The
+  asymmetry is known -- the owner's report was about the RAIL card,
+  where a wasted line costs a fifth of a 240px column, which is not the
+  same complaint on a full-width panel -- and a later round can align
+  them if the owner asks. `.ws-info`'s own rule stays in `chat/base.
+  html` for that reason: it still has a live consumer.
+  {% endcomment %}
+  {% if sidebar_pinned_rows %}
+  <div class="chat-nav-section chat-nav-pinned">
+    <div class="chat-nav-section-head">
+      <h2 class="chat-nav-label">Pinned</h2>
+      <details class="chat-menu chat-info">
+        <summary aria-label="What does Pinned mean, here?"
+                 title="What does Pinned mean, here?">&#9432;</summary>
+        <div class="chat-menu-body">
+          <p class="muted">Chats you've pinned, so you can always find them here — separate from the Documents panel's own "Pinned", which is about documents, not conversations.</p>
+        </div>
+      </details>
+    </div>
+    <div class="chat-nav-group">
+      {% for row in sidebar_pinned_rows %}
+        {% include "chat/_sidebar_row.html" with row=row %}
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="chat-nav-section chat-nav-chats">
+    {% comment %}
+    ROUND-14 REVIEW NIT 2: "the rail's Chats list is unfiltered [on
+    /chat/all/]; the rail section itself still carries no label of its
+    own." Deliberately unchanged here -- this section renders
+    IDENTICALLY on every chat page (Part 1's own requirement, the same
+    one that retired the scoped sidebar variant), so a label reading
+    "unfiltered" or similar would be either wrong (misleading on every
+    OTHER page, where nothing filters it at all) or would need to know
+    which page it is rendering on, which is exactly the per-page rail
+    branching round 14 spent its own round removing. `/chat/all/`'s own
+    page-level "filtered results" note (`chat/all.html`, ROUND-14
+    REVIEW FIX MINOR 4) carries that cue instead, scoped to the one page
+    where a filtered/unfiltered distinction is ever relevant.
+    {% endcomment %}
+    <div class="chat-nav-section-head">
+      <h2 class="chat-nav-label">{% if sidebar_archived %}Archived{% else %}Chats{% endif %}</h2>
+      {% comment %}
+      "All chats" (Part 1's own affordance) REPLACES the pre-round-14
+      "+ New" action on THIS header -- the primary row above is now the
+      one and only "+ New chat" control on the rail, so this slot is
+      free for the round-14 browser's own entry point instead.
+      {% endcomment %}
+      <a href="{% url 'chat-all' %}">All chats</a>
+    </div>
+
+    <div class="chat-nav-group">
+      {% for row in sidebar_rows %}
+        {% include "chat/_sidebar_row.html" with row=row %}
+      {% empty %}
+      {% comment %}
+      ROUND-20-CONFIRM R6: "No conversations yet." was FALSE the moment
+      every conversation this principal has is pinned -- the Pinned
+      section right above renders every one of them, and this line used
+      to claim there were none at all. `sidebar_pinned_rows` is the
+      SAME context key that section itself renders from, so "is it
+      non-empty" here asks the identical question that section already
+      answered visibly one card up.
+      {% endcomment %}
+      <p class="muted">{% if sidebar_archived %}Nothing archived yet.{% elif sidebar_pinned_rows %}Nothing unpinned.{% else %}No conversations yet.{% endif %}</p>
+      {% endfor %}
+      {% comment %}
+      THE CAP, SAID OUT LOUD. `SIDEBAR_LIMIT` rows render and this line
+      names how many older ones there are -- an honest number rather than
+      a list that silently stops. `/chat/all/` (Part 2) is the real
+      see-more now; this stays a nav cap, not a paginator.
+      {% endcomment %}
+      {% if sidebar_older_count %}
+      <p class="muted">{{ sidebar_older_count }} older conversation{{ sidebar_older_count|pluralize }}</p>
+      {% endif %}
+    </div>
+
+    <div class="chat-nav-group chat-nav-foot">
+      {% if sidebar_archived %}
+      <a href="{% url 'chat-index' %}">Active conversations</a>
+      {% elif sidebar_archived_count %}
+      <a href="{% url 'chat-all' %}?archived=1">Archived ({{ sidebar_archived_count }})</a>
+      {% endif %}
+    </div>
+  </div>
+</nav>
+{% comment %}
+ROUND 21 (owner: "it should be like a drop down not a toggle menu").
+AFTER the `</nav>` it operates on, so the element `document.
+querySelector("nav.chat-nav")` looks for already exists when the script
+runs -- no `DOMContentLoaded` wrapper needed, the same placement
+`chat/_enter_to_send.html` relies on inside `chat/_composer.html`.
+{% endcomment %}
+{% include "chat/_menu_exclusive.html" %}

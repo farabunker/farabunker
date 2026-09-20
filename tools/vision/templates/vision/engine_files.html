@@ -1,0 +1,167 @@
+{% extends "_settings.html" %}
+{% comment %}
+Engine files (2026-09-02) -- the engine's own output/input folders,
+which `tools.vision.store` never manages and the gallery's delete never
+reaches. A settings-area page (extends `_settings.html`, not
+`vision/base.html`): this is box inventory an administrator opens from
+Settings > Setup, not a generation surface under the Images subnav.
+
+Zero JS throughout: select mode is a plain `?select=` GET state (copied
+from the gallery's own -- `tools/vision/templates/vision/gallery.html`)
+and delete is one POST form with a native `<details>` confirm.
+
+THUMBNAILS ARE CONTENT (`tools/vision/maintenance.py`'s module
+docstring): `show_thumbnails` is `identity.access.sees_all_content`, not
+merely "this page rendered at all" -- without it, a row still shows its
+name/size/mtime/state, just no `<img>`.
+{% endcomment %}
+{% block title %}Engine files — farabunker{% endblock %}
+{% block side_current_engine_files %}current{% endblock %}
+{% block extra_style %}{{ block.super }}
+  .engine-section { margin-bottom: 2rem; }
+  .engine-section h2 { font-size: 1.05rem; margin-bottom: 0.5rem; }
+  .engine-note { color: var(--muted); font-size: 0.85rem; }
+  .engine-files-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 1rem; }
+  .engine-file { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); padding: 0.6rem; }
+  .engine-file img { width: 100%; height: 120px; object-fit: cover; border-radius: 6px; display: block; margin-bottom: 0.4rem; }
+  .engine-file-name { font-size: 0.82rem; overflow-wrap: anywhere; margin: 0 0 0.2rem; }
+  .engine-file-meta { font-size: 0.78rem; color: var(--muted); margin: 0; }
+  .tag { display: inline-block; font-size: 0.72rem; padding: 0.05rem 0.4rem; border-radius: 4px; border: 1px solid var(--border); }
+  .tag-orphaned { color: var(--danger); border-color: var(--danger); }
+  .engine-file label { display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.4rem; }
+  .bulk-bar {
+    display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+    margin: 0 0 1rem; padding: 0.75rem 1rem; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .delete-disclosure { margin-top: 0; }
+  .delete-confirm { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.4rem; }
+  button.danger { background: transparent; color: var(--danger); padding: 0.3rem 0.6rem; font-weight: 600; border-color: var(--danger); }
+  button.secondary { background: transparent; color: var(--accent); padding: 0.3rem 0; font-weight: 500; }
+{% endblock %}
+{% block settings_content %}
+{% url 'vision-engine-files' as engine_files_url %}
+{% comment %}
+`<main>`, WRAPPING THE WHOLE BODY (Coherence Wave D, C1): this page had
+no wrapper element and no `<main>` landmark at all -- one of three
+settings pages the audit found missing it. No class, no width token
+added: this page's full-bleed layout (`--page-max-width` left unset) is
+the owner-accepted width for this page and C1 converges the wrapper
+ELEMENT only, never widths.
+
+THE LEDE'S CLASS CONVERGES TOO (C5): this first `.engine-note`
+paragraph is the page's lede -- the one `<p>` immediately under `<h1>`
+describing what the page is -- so it becomes `.tagline`, the spelling
+every other settings page's lede uses. The class stays `engine-note` on
+every OTHER use on this page (the two "not reachable" notices below and
+the thumbnails-hidden footer note): those are inline notices, not the
+page's own lede, and `.engine-note`'s own rule is untouched for them.
+{% endcomment %}
+<main>
+<h1>Engine files</h1>
+<p class="tagline">
+  Everything the image engine has written to its output folder, and everything it was
+  ever fed into its input folder — including files farabunker's own gallery delete never
+  reaches. A file is tagged "orphaned" when its name does not start with a generation id
+  this box recognizes (a name-prefix check, not a guarantee).
+</p>
+
+{% include "_messages.html" %}
+
+<div class="engine-header">
+  {% if select_mode %}
+  <a href="{{ engine_files_url }}">Done</a>
+  {% else %}
+  <a href="{{ engine_files_url }}?select=1">Select</a>
+  <a href="{{ engine_files_url }}?select=orphans">Select orphans only</a>
+  {% endif %}
+</div>
+
+{% if select_mode %}
+<form method="post" action="{% url 'vision-engine-files-delete' %}{{ assistant.open_query }}">
+  {% csrf_token %}
+  <input type="hidden" name="next" value="{{ engine_files_url }}">
+  <div class="bulk-bar">
+    <span class="muted">Selected files will be permanently deleted from disk.</span>
+    <a href="{{ engine_files_url }}?select=all">Select all</a>
+    <details class="delete-disclosure">
+      <summary>Delete selected</summary>
+      <div class="delete-confirm">
+        <span class="muted">Delete the selected files from the engine's folders? This cannot be undone.</span>
+        <button type="submit" class="danger">Yes, delete</button>
+        <button type="button" class="secondary" onclick="this.closest('details').removeAttribute('open')">Cancel</button>
+      </div>
+    </details>
+  </div>
+{% endif %}
+
+<div class="engine-section" id="output-folder">
+  <h2>Output folder</h2>
+  {% if not outputs_reachable %}
+  <p class="engine-note">This folder is not reachable from the container (no bind mount configured).</p>
+  {% elif outputs %}
+  <div class="engine-files-list">
+    {% for file in outputs %}
+    <div class="engine-file">
+      {% if select_mode %}
+      <label>
+        <input type="checkbox" name="files" value="output:{{ file.name }}"
+               {% if select_all %}checked{% elif select_orphans and not file.accounted %}checked{% endif %}>
+        Select
+      </label>
+      {% endif %}
+      {% if show_thumbnails %}
+      <img src="{% url 'vision-engine-file-thumbnail' 'output' file.name %}" alt="{{ file.name }}">
+      {% endif %}
+      <p class="engine-file-name">{{ file.name }}</p>
+      <p class="engine-file-meta">
+        {{ file.size|filesizeformat }} · {{ file.modified }} ·
+        {% if file.accounted %}<span class="tag">accounted</span>{% else %}<span class="tag tag-orphaned">orphaned</span>{% endif %}
+      </p>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="muted">Nothing here.</p>
+  {% endif %}
+</div>
+
+<div class="engine-section" id="input-folder">
+  <h2>Input folder</h2>
+  {% if not inputs_reachable %}
+  <p class="engine-note">This folder is not reachable from the container (no bind mount configured).</p>
+  {% elif inputs %}
+  <div class="engine-files-list">
+    {% for file in inputs %}
+    <div class="engine-file">
+      {% if select_mode %}
+      <label>
+        <input type="checkbox" name="files" value="input:{{ file.name }}"
+               {% if select_all %}checked{% elif select_orphans and not file.accounted %}checked{% endif %}>
+        Select
+      </label>
+      {% endif %}
+      {% if show_thumbnails %}
+      <img src="{% url 'vision-engine-file-thumbnail' 'input' file.name %}" alt="{{ file.name }}">
+      {% endif %}
+      <p class="engine-file-name">{{ file.name }}</p>
+      <p class="engine-file-meta">
+        {{ file.size|filesizeformat }} · {{ file.modified }} ·
+        {% if file.accounted %}<span class="tag">accounted</span>{% else %}<span class="tag tag-orphaned">orphaned</span>{% endif %}
+      </p>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="muted">Nothing here.</p>
+  {% endif %}
+</div>
+
+{% if select_mode %}
+</form>
+{% endif %}
+{% if not show_thumbnails %}
+<p class="engine-note">Thumbnails hidden — turn on “admin_sees_content” in <a href="{% url 'identity-settings' %}">Identity &amp; security</a> to preview these files.</p>
+{% endif %}
+</main>
+{% endblock %}

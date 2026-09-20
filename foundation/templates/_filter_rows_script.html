@@ -1,0 +1,89 @@
+{% comment %}
+THE ONE TYPE-TO-FILTER SCRIPT ON THIS BOX. Round 16 wrote it for
+`/chat/all/`'s tag dropdown; round 17 reused it for the "Pin a document"
+chooser rather than copying it; this round needs the identical idiom a
+third time, for the entitlement page's transfer panels -- so it moved
+from `chat/_search_checklist_script.html` to `foundation/templates/`,
+where `identity/`, `models/`, `agents/` and `tools/` can all reach it.
+ONE HOME, THREE CONSUMERS, no duplicated filter logic.
+
+FOUNDATION, and the reason is the same one `foundation/settings_area.py`
+gives for owning the assistant panel's query parameter: the chrome that
+needs this spans four columns, and `foundation/` is the one column all
+of them may depend on. A settings page under `identity/` reaching into
+`agents/chat/templates/` for a behaviour would be a dependency pointing
+the wrong way up the repository map, template loader or no template
+loader.
+
+WHERE THE LINE IS, since only this HALF of the component moved and the
+asymmetry is deliberate rather than half a job. The line is not a
+general ordering over the repository map -- there is no such rule, and
+an earlier version of this comment invented one. It is the two rules
+`foundation/ops/tests/test_import_law.py` actually enforces:
+
+  * RULE 4 -- `identity/` imports NOTHING from `agents/`, `models/` or
+    `tools/`. It may import `foundation/`, Django, and its own
+    `contracts`. That rule, and only that rule, is what forced this file
+    out of `agents/chat/templates/`: the new consumer is an `identity/`
+    page, so `foundation/` is the only home both it and the two existing
+    consumers can reach.
+  * RULE 2 -- every other column may import identity's four named seams
+    (`identity.contracts.*`, `.access`, `.request`, `.audit`) and
+    nothing else under `identity/`.
+
+NOTHING BARS `tools/` OR `models/` FROM `agents/`, which is why
+`tools/rag/templates/rag/panels/documents.html` keeps including
+`chat/_search_checklist.html` and the markup half of this component had
+no reason to move. That is not a tolerated exception: `models/registry/
+tools.py` imports `agents.contracts.tools` in production, registered
+from `models/registry/apps.py::ready()`, which is the tool contract
+working exactly as designed.
+
+Template includes are not Python imports and nothing enforces any of
+this for them (`test_import_law.py` reads Python; `test_css_ownership.
+py` walks the include graph only to place CSS), so for a template this
+is a stated rule rather than a gate.
+
+GENERALISED BY DATA ATTRIBUTES, not by class name. The script used to
+hardcode `.checklist-search`, `.chat-menu-body` and `.checklist-row` --
+one component's private vocabulary, which a second component with a
+different look cannot adopt without also adopting its CSS. Each search
+input now DECLARES its own two selectors:
+
+  data-filter-scope -- the ancestor to search within (`closest()`), so
+                       two instances on one page never filter each
+                       other's rows
+  data-filter-rows  -- the rows to show and hide inside that scope
+
+An input carrying neither attribute is ignored entirely, which is what
+lets this one `<script>` drive however many unrelated filter controls a
+page happens to render.
+
+GATED BY THE CALLER, the same condition the control itself is gated on:
+this include is never rendered on a page with no filter input for it to
+attach to, so a page with nothing to search never ships (or needs) this
+script either.
+
+PROGRESSIVE ENHANCEMENT: nothing on any consuming page depends on this
+script existing. Each consumer's own search input carries a `title=`
+saying plainly that live filtering needs JavaScript, in the rendered page
+itself. All this does is HIDE rows in an already-fully-rendered list as
+the operator types; it adds no row, removes no checkbox, and changes no
+`name=`/`value=` a JS-off submission would rely on.
+{% endcomment %}
+<script>
+(function () {
+  document.querySelectorAll("[data-filter-rows][data-filter-scope]").forEach(function (input) {
+    var scope = input.closest(input.getAttribute("data-filter-scope"));
+    if (!scope) { return; }
+    var rows = scope.querySelectorAll(input.getAttribute("data-filter-rows"));
+    input.addEventListener("input", function () {
+      var needle = input.value.trim().toLowerCase();
+      rows.forEach(function (row) {
+        var name = row.textContent.trim().toLowerCase();
+        row.style.display = name.indexOf(needle) === -1 ? "none" : "";
+      });
+    });
+  });
+})();
+</script>

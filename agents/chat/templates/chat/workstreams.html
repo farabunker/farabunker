@@ -1,0 +1,63 @@
+{% extends "chat/base.html" %}
+{% comment %}
+THE STREAM LIST (`/chat/w/`). ONLY lists any more: the active streams
+with their conversation counts, and a `<details>` holding the archived
+ones -- the same "one page, no second archive route" shape `chat/
+index.html` already uses for conversations (`?archived=1`), applied
+here as a disclosure instead because a stream list is short enough that
+a second page for it would be a worse read than one twist-open section.
+
+CREATION MOVED OFF THIS PAGE ENTIRELY (owner feedback round 7: "should
+we have it on its own screen rather than chilling at the top"). The
+inline name+Create row this page used to open with is GONE, along with
+`create_error`/the `.error`-fold banner it rendered on a refusal --
+`workstream_list` (`agents/chat/views/workstreams.py`) is `@require_GET`
+now and no longer accepts a POST at all. A plain link to `chat-
+workstream-new` is what remains: this page's one job is listing, not
+also hosting a second, narrower copy of the create form the setup
+screen now owns in full.
+
+CLASS A (`identity/routes.py`): this list is this principal's own
+streams plus the ones shared to them, so there is no row here to be
+addressed by and nothing on this page ever 404s.
+
+ALMOST ZERO JAVASCRIPT: this page contributes none of its own, and the
+rail it renders brings exactly one -- `chat/_menu_exclusive.html`, the
+progressive enhancement `chat/_sidebar.html` includes after its
+`</nav>`. Every control on this page itself is a link or a plain POST
+form, and works identically with no script running.
+{% endcomment %}
+{% block title %}Workstreams — farabunker{% endblock %}
+{% block chat_sidebar %}{% include "chat/_sidebar.html" %}{% endblock %}
+{% block chat_content %}
+<h1>Workstreams</h1>
+
+<section id="create-workstream">
+  <a class="pill-link" href="{% url 'chat-workstream-new' %}">New workstream</a>
+</section>
+
+<section id="workstream-list">
+  <ul>
+    {% for w in workstreams %}
+      <li class="ws-row">
+        <a href="{% url 'chat-workstream' w.pk %}">{{ w.name }}</a>
+        <span class="muted">{{ w.conversation_count }} conversation{{ w.conversation_count|pluralize }}</span>
+      </li>
+    {% empty %}<li class="hint">No workstreams yet.</li>{% endfor %}
+  </ul>
+</section>
+
+{% if archived_streams %}
+<details id="archived-workstreams">
+  <summary>Archived ({{ archived_streams|length }})</summary>
+  <ul>
+    {% for w in archived_streams %}
+      <li>
+        <a href="{% url 'chat-workstream' w.pk %}">{{ w.name }}</a>
+        <span class="muted">{{ w.conversation_count }} conversation{{ w.conversation_count|pluralize }}</span>
+      </li>
+    {% endfor %}
+  </ul>
+</details>
+{% endif %}
+{% endblock %}

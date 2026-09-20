@@ -1,0 +1,133 @@
+{% comment %}
+ONE form field, everywhere the page renders one. Takes `f`, a Django
+BoundField from the constant form (`forms.build_constant_form`).
+
+Five things, in this order and nowhere else:
+  - the label, carrying only the field's name and an ⓘ trigger -- the
+    tooltip prose itself is NOT inside `<label>`: a label's accessible
+    name is its text content, so tooltip prose living inside it would be
+    read as part of the field's name;
+  - the tooltip the ⓘ describes, a SIBLING of the label (still inside
+    `.field`). The description stays in the DOM and the WIDGET below
+    points at it with `aria-describedby` (stamped by
+    `forms.build_constant_form`), so a screen-reader user tabbing into
+    the control hears it without ever landing on the ⓘ; the ⓘ points at
+    it too, for a pointer user. The tooltip is shown by CSS alone
+    (`:hover` / `:focus`, create.html), never by script;
+  - the widget itself. A field the picked model or the picked operation
+    cannot answer carries HTML `disabled` (stamped on the widget by
+    `build_constant_form`), so the BROWSER never submits it;
+  - the reason it is disabled, inline and muted -- the tooltip is a
+    convenience, and a state the operator cannot change must be legible
+    without hovering anything;
+  - its errors.
+
+`f.field.state` / `f.field.reason` / `f.field.wide` are stamped on the
+FIELD by `build_constant_form`, so a field and its state cannot come
+apart in the loop that renders them. `f.field.kind` / `f.field.multiple`
+are stamped by `forms._field_for`, the path `build_form` and
+`build_constant_form` BOTH call, so a field's kind/multiplicity is the
+same fact whichever builder made it.
+
+Rendering rule for the three states (ADR 0012 D-EDIT-13, 2026-08-29
+amendment): "enabled" and "ignored" render this wrapper VISIBLE, with
+their reason shown for "ignored" -- the picked mode wants the field, the
+picked model's graph just can't honour it. "unused" -- the picked mode
+does not declare the field at all -- renders the wrapper `hidden`
+instead: the markup below is otherwise IDENTICAL in both branches (same
+label, widget, reason, `disabled`), because the form stays the union and
+a screen reader or a `hidden`-overriding stylesheet still needs the
+reason text to be there.
+
+`field--kind-{{ f.field.kind }}` (and `field--multi` off
+`f.field.multiple`) let create.html's grid give a file input or a chip
+group the full row instead of one auto-fit column -- both truncate
+illegibly at a ~160px column (owner screenshot: a file input showing
+"Choose File I…3", a `<select multiple>` showing clipped names). Kept as
+CSS-only classes on the wrapper rather than a template conditional
+around `.row`, so a param's kind is the ONE fact that decides its
+layout, in ONE place (create.html's CSS), the same way `f.field.wide`
+already decides prose-vs-grid placement.
+{% endcomment %}
+<div class="field field--{{ f.field.state }} field--kind-{{ f.field.kind }}{% if f.field.multiple %} field--multi{% endif %}"{% if f.field.state == "unused" %} hidden{% endif %}>
+  <label for="{{ f.id_for_label }}">{{ f.label }}
+    {% if f.help_text or f.field.reason %}
+    <span class="info" tabindex="0" aria-describedby="{{ f.auto_id }}-info">&#9432;</span>
+    {% endif %}
+  </label>
+  {% if f.help_text or f.field.reason %}
+  <span class="tip" id="{{ f.auto_id }}-info" role="tooltip">{{ f.help_text }}{% if f.field.reason %} {{ f.field.reason }}{% endif %}</span>
+  {% endif %}
+  {% if f.field.chip_group %}
+  {% comment %}
+  The platform's chip-picker pattern (shared shell CSS,
+  foundation/templates/_shell.html; reference usage
+  tools/rag/templates/rag/documents.html) instead of the raw
+  `<select multiple>` Django's default widget would render -- the owner
+  rejects raw multi-selects platform-wide. `forms._base_field_for` gives
+  a multiple-asset param `widget=forms.CheckboxSelectMultiple` and stamps
+  `field.chip_group = True`; iterating `{% for cb in f %}` over a bound
+  field with that widget yields one subwidget per option, and `cb.tag`
+  already carries every attr the plain `{{ f }}` render would have
+  (`disabled`, `aria-describedby`) -- Django's `ChoiceWidget` merges the
+  widget-level `attrs` into each subwidget, so the same three states
+  (enabled/unused/ignored) and the same tooltip wiring apply with no
+  extra code here.
+  {% endcomment %}
+  <div class="chip-picker">{% for cb in f %}<label class="chip-check">{{ cb.tag }}<span class="chip">{{ cb.choice_label }}</span></label>{% endfor %}</div>
+  {% else %}
+  {{ f }}
+  {% endif %}
+  {% comment %}
+  A stored gallery hand-off for THIS param (`views.stored_input_refs` /
+  `views._stored_input_context`, `stored_inputs` in the parent context --
+  visible here without `{% include %}...with` because Django includes
+  inherit the calling context by default). Matched by
+  `stored.param_key == f.name`: `forms.build_constant_form` keys its
+  field dict `{param.key: field}` (forms.py), so a BoundField's own
+  `.name` already IS its param key -- no dict-lookup filter or new Python
+  needed to find the (at most one) stored item that belongs to this
+  field. Only ever true for a file param, since `_stored_input_context`
+  only walks `operation.file_params()`.
+
+  Rendered directly under the widget above (create.html used to render
+  this once, as a block at the TOP of the whole form, which said "Using
+  this image as Image" while the actual Image input further down still
+  read "No file chosen" -- owner screenshot). This is also where the
+  inline script's own `.file-preview` lands after a `type="file"` input
+  on `change` (create.html): if the operator picks a file, that preview
+  appears right alongside this one. Nothing here needs to hide when that
+  happens -- `views.generate` already prefers an attached file over a
+  carried reference on submit (unchanged), so the freshest choice simply
+  wins.
+
+  `.stored-remove` (owner: "when I select use image, there is no way to
+  undo it unless I change the url") gives up this hand-off. `href` is
+  `stored.remove_url` (`views._remove_stored_input_url`) -- the create
+  page's own URL with just THIS `input_<key>` gone, so a JS-off click
+  reloads without it (the fallback; yes it reloads). With JS, the SAME
+  script that builds `.file-preview` (create.html) intercepts the click
+  and removes this whole `.stored-input` block -- hidden `input_<key>`
+  included -- in place, no reload. It ALSO removes the picker form's own
+  mirror of this same `input_<key>` (the comment above the picker form,
+  create.html) -- otherwise a later Model/Mode switch resubmits it and
+  the "removed" hand-off comes back. `data-input-name` carries the exact
+  hidden-field NAME (`input_<key>`) directly on this link, so the script
+  never has to reach into the block (about to be removed) to read it off
+  a sibling first.
+  {% endcomment %}
+  {% for stored in stored_inputs %}{% if stored.param_key == f.name %}
+  <div class="stored-input">
+    <input type="hidden" name="input_{{ stored.param_key }}" value="{{ stored.reference }}">
+    <div class="stored-thumb">
+      <a href="{{ stored.url }}" target="_blank" rel="noopener">
+        <img src="{{ stored.url }}" alt="{{ stored.label }}">
+      </a>
+      <a class="stored-remove" href="{{ stored.remove_url }}" data-input-name="input_{{ stored.param_key }}">Remove</a>
+    </div>
+    <span class="muted">Using this image as {{ stored.label }} — choose a file above to replace it.</span>
+  </div>
+  {% endif %}{% endfor %}
+  {% if f.field.reason %}<span class="muted field-reason">{{ f.field.reason }}</span>{% endif %}
+  {{ f.errors }}
+</div>

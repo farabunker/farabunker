@@ -1,0 +1,153 @@
+{% extends "chat/base.html" %}
+{% block title %}{{ workstream.name }} — farabunker{% endblock %}
+{% comment %}
+ONE STREAM'S WORKING PAGE (spec §15.3, split by the owner's settings-page
+feedback below). Section order: header, new chat, conversations,
+documents (and any other registered panel).
+
+SETTINGS-PAGE SPLIT (owner feedback, verbatim: "the workstream chat
+needs to keep the settings that are not often updated on a separate
+settings page, we dont need to see all the items when we go to a
+workstream"). This page keeps only the WORKING sections -- the ones a
+share recipient may also use (New chat, Conversations) or watch happen
+(Documents' own live Upload/Pin actions). Everything "not often
+updated" -- Rename, Description, Archive, Delete, Instructions, Scope,
+Upload default, Tags, Shared with -- moved to `chat/workstream_settings.
+html` (`chat-workstream-settings`), reached from this page's own header
+link. `agents/chat/views/workstreams.py`'s own module docstring has the
+full two-page shape; `_working_context` is this page's builder.
+
+SECTIONS THAT ARE OWNER-ONLY ARE ABSENT, NOT DISABLED. `is_owner` gates
+the header's Settings link, the new-chat hint, and the Documents panel's
+own Upload section (`is_owner and may_upload_tool`) -- a household
+operator on an open box is `is_owner` for free (`sees_all_content`), so
+none of this strands a single-operator install.
+
+ALMOST ZERO JAVASCRIPT (owner feedback round 8 narrowed this from the
+absolute claim it used to be). Every control is a link, a `<details>`
+disclosure, or a plain POST form carrying `{% csrf_token %}` -- the
+same idiom `chat/_sidebar.html` already documents -- and every one of
+them still works identically with no script running. `chat/_composer.
+html` (round 18, "New chat" below) carries its own small scripted
+enhancements the same way -- Enter-to-send, attachment staging,
+drag-and-drop -- every one of them progressive, never a dependency.
+
+ROUND 18 (owner feedback: "the ability to add an attachment isn't on
+the intial new chat screen... why is there something using a different
+sub-template?"). "New chat" is now `chat/_composer.html`, the SAME
+fragment `chat/index.html`'s own start box and `chat/conversation.
+html`'s message form render -- see that fragment's own module comment
+for the full ruling. This card's own composer never shows the model
+picker (round 18's own explicit scope line: "model picker where they
+do today" -- this card never did, and this round adds attachments, not
+a picker nobody asked for here).
+
+`chat_content`/`chat_sidebar`, NOT `content` -- `chat/base.html` OWNS
+`content` itself (`<div class="chat-layout">` wrapping `chat_sidebar`
+plus `chat_content`), the same two-column shape `index.html` and
+`conversation.html` already fill; overriding `content` directly would
+silently drop the sidebar `_working_context` already builds this page's
+own `sidebar_context(...)` for.
+
+COMPOSITION PASS (owner feedback, verbatim: "what the fuck is this...
+absolute garbage" -- the page was a raw vertical dump of naked disclosure
+rows, bare checkboxes, an unstyled tiny textarea and bulleted paragraph
+rows that never got a design pass). Every section is a bounded `.ws-card`
+(`chat/base.html`, promoted there in the settings-page split since both
+pages now share the recipe) with a small-caps `.ws-card-head` label
+inside it. "New chat" is `chat/_composer.html` (round 18, above).
+Every row list (Conversations, the Documents panel's own Contained/
+Pinned) is `.ws-list`/`.ws-item`.
+{% endcomment %}
+{% block chat_style %}
+  {% comment %}
+  `.ws-subhead` is one size down in the heading outline from `.ws-card-
+  head` (`chat/base.html`) but the IDENTICAL type treatment -- the
+  Documents panel's own Upload/Contained/Pinned subsections, `<h3>`
+  rather than a card's own `<h2>`. Kept HERE, not promoted: the settings
+  page never includes the Documents panel, so it never needs this rule.
+  {% endcomment %}
+  .ws-subhead { margin: 1rem 0 0.4rem; color: var(--muted); font-size: 0.7rem;
+                font-weight: 700; text-transform: uppercase; letter-spacing: 0.09em; }
+  .ws-subhead:first-child { margin-top: 0; }
+
+  {% comment %}
+  THE PLACEMENT CHOOSER FIELDSET (`rag/_placement_choice.html`, included
+  by the Documents panel's own Upload form) MOVED to `chat/base.html`
+  (CONSOLIDATION WAVE, audit A F4 / audit B S26a): this page's own copy
+  and `chat/conversation.html`'s own (copied from THIS page's, round
+  9b) were both page-scoped even though both pages extend the SAME
+  `chat/base.html` -- a shared style region neither copy used. `rag/
+  documents.html` keeps its OWN copy of `.placement`/`.hint` still --
+  it extends a DIFFERENT base (`rag/base.html`), a genuinely separate
+  column this promotion does not reach (O5).
+  {% endcomment %}
+  {% comment %}
+  THE UPLOAD FORM'S OWN ROW (Documents panel): the SAME flex/gap/wrap
+  shape `rag/documents.html`'s own `form.upload` card uses, minus that
+  card's own background/border -- it already sits inside `.ws-card`
+  (the Documents panel's wrapper, `chat/_workstream_panel.html`), and a
+  card inside a card is not what "match the library's upload card" asks
+  for.
+  {% endcomment %}
+  .ws-upload-form { display: flex; gap: 0.5rem; align-items: center;
+                     flex-wrap: wrap; margin-bottom: 0.5rem; }
+{% endblock %}
+{% block chat_sidebar %}{% include "chat/_sidebar.html" %}{% endblock %}
+{% block chat_content %}
+<article class="workstream">
+  {% include "chat/_messages.html" %}
+
+  <header class="ws-head">
+    <div>
+      <h1>{{ workstream.name }}</h1>
+      {% if workstream.description %}<p class="muted">{{ workstream.description }}</p>{% endif %}
+    </div>
+    {% comment %}
+    THE ONE LINK LEFT IN THIS HEADER (owner feedback: "we dont need to
+    see all the items when we go to a workstream"). Rename/Description/
+    Archive/Delete used to live here as a "Manage" overlay; all four
+    moved to `chat-workstream-settings`, so this header keeps exactly
+    one door to them rather than a second kind of control.
+    {% endcomment %}
+    {% if is_owner %}
+    <a class="pill-link" href="{% url 'chat-workstream-settings' workstream.pk %}">Settings</a>
+    {% endif %}
+  </header>
+
+  <div class="ws-card" id="new-chat">
+    <h2 class="ws-card-head">New chat</h2>
+    {% if not is_owner %}
+      <p class="muted">This is somebody else’s workstream — its owner can read the
+        conversations you start here.</p>
+    {% endif %}
+    {% url 'chat-start' as composer_action_url %}
+    {% include "chat/_composer.html" with composer_mode="start" composer_action=composer_action_url composer_agents=agents composer_placeholder="Start a conversation in this workstream" composer_button="Start" composer_show_model_picker=False composer_workstream=workstream %}
+  </div>
+
+  <div class="ws-card" id="conversations">
+    <h2 class="ws-card-head">Conversations</h2>
+    <div class="ws-list">
+      {% for c in conversations %}
+        <div class="ws-item">
+          <a class="ws-item-title" href="{% url 'chat-conversation' c.pk %}"
+             title="{{ c.title|default:'Untitled' }}">{{ c.title|default:"Untitled" }}</a>
+          {% if is_owner %}
+            <span class="ws-item-meta">
+              <span class="muted">{{ c.staleness_hint }}</span>
+              <form method="post" action="{% url 'chat-workstream-consolidate' workstream.pk %}"
+                    class="ws-inline-form">
+                {% csrf_token %}
+                <input type="hidden" name="conversation" value="{{ c.pk }}">
+                <button type="submit" class="btn-compact">Consolidate</button>
+              </form>
+            </span>
+          {% endif %}
+        </div>
+      {% empty %}<p class="muted">No conversations here yet.</p>{% endfor %}
+    </div>
+  </div>
+
+  {% for panel in panels %}{% include "chat/_workstream_panel.html" %}{% endfor %}
+</article>
+{% endblock %}

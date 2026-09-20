@@ -1,0 +1,16 @@
+# Everything a developer or CI needs, on top of the runtime set.
+#
+# ONE COMMAND, not two: `-r requirements.txt` below means
+# `pip install -r requirements-dev.txt` installs everything, so nobody
+# has to remember an ordering. The Dockerfile deliberately installs
+# requirements.txt ONLY -- the production image the web, watcher and
+# worker services share has no reason to carry a test runner, and
+# identity/testing.py (which rewrites the posture row directly, bypassing
+# all three of set_posture's refusals) has no reason to be importable
+# there either. It is barred from production IMPORTS by
+# foundation/ops/tests/test_import_law.py; this keeps it out of the image
+# as well.
+-r requirements.txt
+
+pytest>=8.0
+pytest-django>=4.9

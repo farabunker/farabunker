@@ -1,0 +1,1688 @@
+{% extends "_shell.html" %}
+{% comment %}
+App-local base for the /chat/ pages. Extends the shared project shell
+(foundation/templates/_shell.html) so the design tokens, dark-mode
+overrides, and the global nav live in ONE place -- exactly as
+tools/rag/templates/rag/base.html and tools/vision/templates/vision/
+base.html do.
+
+Template inheritance creates no Python import, so `models/contracts/`
+purity and column-privacy are unaffected by this file extending a
+project-level template.
+
+Marking the shared nav's "Chat" entry current is done the way every
+other page does it -- by overriding the matching `nav_current_*` block
+with `current`. It sits on this BASE rather than on each leaf page
+because every page under /chat/ belongs to that one nav destination.
+
+Every rule the thread and its fragments need lives HERE, not on a
+page: `_turn_card.html` and `_tool_card.html` are rendered by the
+conversation page AND standalone by `turn_status`'s poll, and a page
+cannot own rules a fragment two views render. UI-3b's `_sidebar.html`
+is the same case twice over -- the index and the thread page both
+render it -- so every rule it needs is below too.
+
+THE TWO-COLUMN LAYOUT IS OPT-IN, VIA ONE BLOCK. `{% templatetag
+openblock %} block chat_sidebar {% templatetag closeblock %}` is empty
+here; every page under `/chat/` that extends this base fills it (a
+STRUCTURAL claim, not a count that can rot -- CONSOLIDATION WAVE,
+audit B S3: this used to name "both templates... index.html and
+conversation.html," which was already wrong by the time it was
+written and drifted further with every page this base gained since --
+EIGHT templates extend `chat/base.html` today, and SEVEN of them
+override `chat_sidebar`; the one that does not, `workstream_dormant.
+html`, deliberately renders NO sidebar context at all -- its own
+docstring's own reasoning, in `agents/chat/views/workstreams.py`: a
+dormant-share 403 page must reveal nothing about the stream's own
+contents, and a sidebar built from this request's ambient context
+would put conversation titles on the one page whose entire job is to
+withhold them).
+
+THERE IS NO SIDEBAR-LESS CONSUMER LEFT. `/chat/tools/` and
+`/chat/access/` moved onto `_settings.html` in UI-2 (both now read
+`{% templatetag openblock %} extends "_settings.html" {% templatetag
+closeblock %}`), so the empty block is HEADROOM for a future page
+under this base, not a live case being served. FLEXBOX rather than the
+settings layout's grid is still the right shape -- it keeps the opt-in
+to one block instead of a block plus a column-template swap, and a
+single-child flex row needs no special case at all -- but it is now a
+choice about the next page rather than a rescue of an existing one.
+
+It does NOT extend `_settings.html` and does not reuse its markup.
+The two sidebars share the shell's design language -- the group label,
+the `.current` treatment, the 1000px stacking breakpoint -- because
+they are both this box's sidebars, not because either owns the other:
+the settings nav is a fixed list of sections and this one is a live
+list of rows with a menu on each.
+{% endcomment %}
+{% block nav_current_chat %}current{% endblock %}
+{% comment %}
+ROUND 14 (OWNER AMENDMENT) REMOVED THE TOP BAR ON CHAT PAGES; ROUND 15
+(OWNER FEEDBACK) PUTS IT BACK. Owner, verbatim: "the navigation bar
+needs to be consistant on the top, you should not override the main
+navigation template for main, what the fuck, this looks like dog
+shit." Round 14's override of `{% templatetag openblock %} block nav
+{% templatetag closeblock %}` -- EMPTY, suppressing `_shell.html`'s
+entire `<header class="app-bar">` on every page extending this file --
+is RETIRED: there is no override here any more, so every chat page
+falls through to `_shell.html`'s own DEFAULT block content, the SAME
+top bar (brand, every "use" link, Queue, Settings, the account area)
+every other page on the box already renders. Byte-consistent, not
+merely similar: this file no longer says anything about `{% templatetag
+openblock %} block nav {% templatetag closeblock %}` at all, the same
+"say nothing, inherit the shell's own default" state every OTHER
+extender of `_shell.html` was already in.
+
+THE RAIL SLIMS TO CHAT-DOMAIN CONTENT ONLY (round 15's own other
+half). Round 14's `chat/_sidebar.html` had grown a brand mark, the
+app's own nav-link rows, and an account block at its foot -- all three
+DUPLICATING what the restored top bar now renders again, and exactly
+the "override the main navigation template" the owner's feedback
+objects to. Removed from `_sidebar.html` outright, not merely hidden:
+the rail is "+ New chat" (the one primary action), Workstreams, and
+Chats -- see that file's own comment for the current shape.
+{% endcomment %}
+{% block extra_style %}
+  {% comment %}
+  THREE NUMBERS, AND THE THIRD IS THE SUM OF THE OTHER TWO PLUS THE
+  GUTTER: 900 + 240 + 40 = 1180.
+
+  `--chat-pane-width` is the THREAD's own reading measure and is the
+  number that must not move -- it was 900px before this surface had a
+  sidebar. `--page-max-width` is the BLOCK, and raising it is what buys
+  the sidebar its 240px out of new space instead of out of the thread:
+  left at 900 the layout was `max(900, 1000)` = 1000px wide and the
+  pane came out at 720, a 180px narrowing of the one column people
+  actually read. Raising the page token is the console's own pattern
+  (`inference/console.html` sets 1730 for its grid) and the app bar
+  takes the same `max()` (`_shell.html`), so the bar widens with the
+  block and the two keep sharing their edges.
+
+  At 1180 the block is viewport-capped below ~1212px anyway, so a
+  laptop sees exactly what it saw before.
+  {% endcomment %}
+  :root { --chat-pane-width: 900px; --page-max-width: 1180px; }
+  {% comment %}
+  Wider than the settings nav's 190px because the entries are DATA, not
+  a fixed vocabulary: a conversation title is whatever somebody's first
+  message was, and 190px would ellipsize almost all of them.
+  {% endcomment %}
+  :root { --chat-nav-width: 240px; }
+  {% comment %}
+  The layout block takes the SAME `max()` the app bar and the settings
+  layout take, so the sidebar's left edge sits under the brand and the
+  three blocks read as one page. `.chat-wrap` keeps its own `max-width`
+  and `margin: 0 auto`, which is what lets a page with NO sidebar --
+  the only child of this flex row -- stay centred at its own reading
+  measure rather than stretching to the block.
+  {% endcomment %}
+  .chat-layout {
+    max-width: max(var(--page-max-width), var(--app-bar-min-width));
+    margin: 0 auto;
+    display: flex;
+    align-items: flex-start;
+    gap: 2.5rem;
+    {% comment %}
+    OWNER-REQUESTED CHAT LAYOUT FIX: a viewport-height app shell, so a
+    long conversation no longer scrolls the WHOLE page (composer out of
+    reach, sidebar carried off-screen with it). `height`, not
+    `min-height` -- the row must be CAPPED so nothing inside it can push
+    `<body>` taller than the viewport; `min-height: 0` on the row itself
+    undoes the flex default (`min-height: auto`, i.e. "at least my
+    content's height"), which would otherwise silently defeat the cap.
+
+    THE SUBTRACTED NUMBER IS EVERYTHING ELSE `<body>` RENDERS ABOVE AND
+    BELOW THIS ROW, at this file's own declared sizes (`_shell.html`'s
+    default 16px root, `-apple-system` metrics assumed). ROUND 15
+    (OWNER FEEDBACK) RESTORES `header.app-bar` TO THIS PAGE (the `{%
+    templatetag openblock %} block nav {% templatetag closeblock %}`
+    override that suppressed it, above this block, is gone) -- back to
+    the PRE-round-14 arithmetic this comment carried before round 14's
+    own (now-reverted) estimate: body's own `2rem` top padding, plus
+    the bar's own ~35px rendered height and its `1.5rem` bottom margin
+    (~3.7rem combined), plus body's `4rem` bottom padding below the row
+    -- roughly 9.7rem. `10rem` is that figure rounded UP on purpose, the
+    same margin-of-safety reasoning this figure has always used -- a few
+    spare pixels of unused space at the very bottom is a cosmetic no-op,
+    while rounding down would let the row overflow the viewport by that
+    much and bring the whole-page scroll straight back. This is an
+    estimate to be confirmed against real pixels, not a measured
+    constant.
+
+    GATED TO THIS WIDTH ONLY: `@media (max-width: 1000px)` below resets
+    this back to `height: auto`, the same breakpoint the two-column
+    layout itself already stacks at, so a narrow screen keeps today's
+    plain document flow exactly as UX point 5 asks.
+    {% endcomment %}
+    height: calc(100vh - 10rem);
+    min-height: 0;
+  }
+  {% comment %}
+  `min-width: 0` on a flex item, for the same reason the settings
+  layout's content track is `minmax(0, 1fr)`: a flex item's automatic
+  minimum size is its content, so one wide `<pre>` in a turn would
+  otherwise push the column past the row and take the page sideways.
+  {% endcomment %}
+  .chat-wrap { flex: 1 1 auto; min-width: 0;
+               max-width: var(--chat-pane-width); margin: 0 auto; }
+  {% comment %}
+  APP-SHELL COLUMN (owner-requested chat layout fix), and gated to the
+  SAME width as `.chat-layout`'s own `height` above rather than folded
+  into `.chat-wrap`'s always-on rule just above -- on purpose, not for
+  symmetry with the `nav.chat-nav:has(...)` override below (which keeps
+  `.chat-menu-body`'s own overlay ruling intact rather than touching
+  it). `display:
+  flex; flex-direction: column` does NOT behave identically to a plain
+  block column for THIS box the way it does for `nav.chat-nav` (already
+  flex before this fix): flex items never collapse margins with each
+  other the way block siblings do, so making this unconditional would
+  have opened a gap wherever two direct children here lean on collapsing
+  today (an `<h1>` followed by a `<p class="muted">`, say) -- on every
+  page under this base, at every width, for a page like `index.html`
+  that has no fixed-height content to lay out and gains nothing from
+  becoming a flex column. Scoping it to the width where the shell is
+  actually active keeps that spacing exactly as it always has been below
+  it, which is what UX point 5 asks for anyway.
+
+  `height: 100%` fills the row's now-capped height; `min-height: 0` is
+  the same flex undo `.chat-layout` needed, one level down, so THIS
+  column can in turn hand a capped height to whatever it lays out inside
+  it. `overflow-y: auto` is the generic case (UX point 4: "their main
+  content columns may simply scroll internally") -- the one page that
+  needs something more precise, `conversation.html`, cancels this back
+  to `visible` in its own `chat_style` block and manages its own
+  transcript/composer split instead; see that file for why.
+  {% endcomment %}
+  @media (min-width: 1000.01px) {
+    .chat-wrap {
+      height: 100%;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+    }
+  }
+  {% comment %}
+  ONE SIDEBAR COLUMN, NOT TWO (owner feedback, chat layout fix round 2:
+  "workstream needs to be stacked over chats... this takes up too much
+  space" -- their screenshot showed the two side-by-side columns eating
+  roughly half the page). `_sidebar.html` used to render THREE top-level
+  siblings -- `nav.workstreams`, a bare "Chats" heading, and `nav.chat-
+  nav` -- each pinned to its own `--chat-nav-width` flex column by the
+  walk-fix batch's own F1/F3 rules (a real stream name had squeezed one
+  word per line in an unconstrained flex item, confirmed against the
+  running page at the time). That fixed the squeeze but never revisited
+  the two-column SHAPE it fixed it into.
+
+  `_sidebar.html` now renders exactly ONE `<nav class="chat-nav">`, with
+  the Workstreams section -- a native `<details open>` accordion, UX
+  point 2 below -- stacked ABOVE the "Chats" heading and the
+  conversation list, all as children of this SAME element. There is
+  nothing left for a second `--chat-nav-width` column to squeeze, so the
+  walk-fix batch's own F1/F3 rules are REMOVED rather than left dead:
+  both named `nav.workstreams`, an element that no longer exists at all.
+  {% endcomment %}
+  {% comment %}
+  TIGHTENING ROUND (owner pixel feedback: "it needs to be tighter/
+  cleaner than this" -- the accordion's first pass read as loose page
+  prose: an oversized "Chats" `<h2>`, an orphaned "+ New" line with a
+  gap under it, default disc bullets and `<ul>` indent on the workstream
+  list, and multi-rem voids between groups). Four things fixed together
+  here and just below: ONE type scale for every rail label (this rule,
+  and `.chat-nav-label` further down, both matching `.nav-group-label`'s
+  existing small-caps treatment from `_shell.html` -- the SAME look
+  "CONVERSATIONS"/"Archived" already have, so there are not two label
+  styles on one column); "+ New" moved onto summary's own row (below);
+  the workstream list rebuilt on `.chat-nav-row`/`.chat-nav-group`, the
+  conversation list's OWN row markup, in `_sidebar.html` (no bullets, no
+  indent, because there is no `<ul>` left to carry either); and the
+  rail's group-to-group gap shrunk (`nav.chat-nav`'s own rule, below).
+
+  THE ACCORDION ITSELF (owner feedback: "like an accordian and show the
+  5 most recent ones and the ability to see more or collapse") is
+  otherwise UNCHANGED from the first pass: zero JS, `<details open>` in
+  `_sidebar.html` is the entire mechanism, and the browser's OWN default
+  disclosure marker stays on (unlike `.chat-menu`/`.delete-disclosure`'s
+  `list-style: none`, which dress their `<summary>` up as a plain
+  button/link instead) -- this really is a content disclosure a reader
+  toggles to see more or less, the same reasoning `.tool-output`/
+  `.tool-args-all`'s summaries above already apply.
+
+  MATCHING `.nav-group-label` BY VALUE, NOT BY SHARING ITS CLASS: this
+  summary keeps a STRONGER weight than a plain label (`700`, not `600`)
+  because it is interactive, per the owner's own allowance ("Workstreams'
+  summary may keep slightly stronger weight since it's interactive"),
+  plus a hover/open colour shift (`.chat-menu > summary`'s own pattern,
+  above) as the toggle's affordance -- two small, deliberate departures
+  from an otherwise identical look, not a shared selector.
+  {% endcomment %}
+  {% comment %}
+  GROUPING ROUND (owner feedback: "can we do a better job at visually
+  grouping distinct segments" -- the tightened rail read as one
+  undifferentiated run: three near-identical labels with no visual
+  containment, "+ New" floating detached at the far right, and "Chats"
+  plus "Conversations" double-labelling one list). `.chat-nav-section` is
+  the ONE bounded-card recipe this fix adds, shared by BOTH groups the
+  rail now renders (`_sidebar.html`'s own top comment has the full
+  "exactly two groups, never three" shape): the SAME background/border/
+  radius family `.tool-card`/`.composer-card`/`.banner`/`.chat-menu-body`
+  already use elsewhere on this box (`padding` matched to `.chat-menu-
+  body`'s own `0.5rem 0.6rem`, chosen there for this SAME 240px column),
+  kept intentionally subtle -- a soft panel and a hairline, not a heavy
+  card -- since the rail is narrow and a full-weight card per group would
+  fight its own contents for attention. `.chat-workstreams` carries this
+  class ALONGSIDE its own (`class="chat-workstreams chat-nav-section"`
+  in `_sidebar.html`), so the accordion IS one of the two bounded groups
+  rather than sitting beside a separate card.
+
+  "+ NEW" NO LONGER FLOATS DETACHED: `.chat-workstreams-new`'s `top: 0;
+  right: 0` (above) was previously measured against the RAW column edge
+  (no padding on `.chat-workstreams` at all); it is unchanged CSS, but
+  now resolves against the padding edge `.chat-nav-section`'s own
+  `padding` establishes, landing the link inset from the border exactly
+  the way `<summary>`'s own text already sits inset on the opposite
+  side -- this is what "stops floating in space" without touching the
+  positioning rule itself.
+
+  `.chat-nav-section-head` is the OTHER group's own header row (Chats,
+  or the scoped stream's own name) -- a plain flex row, no positioning
+  trick needed, because there is no `<summary>` constraint on that side:
+  its action (`.chat-new`, reused outright) sits at the row's end via
+  ordinary `justify-content: space-between`, never needing to escape
+  flow the way Workstreams' action does.
+  {% endcomment %}
+  .chat-nav-section {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.5rem 0.6rem;
+  }
+  .chat-nav-section-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.3rem;
+  }
+  {% comment %}
+  GROUPING ROUND FIX (review finding: a stream's own name is unbounded
+  user input, and the header row shipped with no truncation guard at
+  all -- a long one wraps to a second small-caps line and squeezes the
+  action into wrapping too, "All" / "chats"). `.chat-nav-row > a`, below,
+  already solved this exact problem for a conversation title; this is
+  the SAME idiom, not a new one: `min-width: 0` overrides a flex item's
+  default `auto` minimum (its own content width), which is what actually
+  lets `text-overflow: ellipsis` fire -- without it the label would just
+  keep its full width and force the row to overflow or wrap regardless
+  of `overflow: hidden` being set. The action link gets the opposite
+  treatment, `flex-shrink: 0`, so 100% of the squeeze lands on the label
+  and the action ("All chats" / "+ New") is never the thing that
+  truncates or wraps.
+  {% endcomment %}
+  .chat-nav-section-head .chat-nav-label {
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .chat-nav-section-head a {
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .chat-workstreams > summary {
+    cursor: pointer;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    color: var(--muted);
+    margin-bottom: 0.3rem;
+  }
+  .chat-workstreams[open] > summary, .chat-workstreams > summary:hover {
+    color: var(--text);
+  }
+  {% comment %}
+  "+ NEW" ON SUMMARY'S OWN ROW, WITHOUT BEING INSIDE IT (owner pixel
+  feedback point 2). A `<summary>`'s activation behaviour toggles its
+  `<details>` on ANY click that reaches it, nested `<a>` included, with
+  no script here able to call `stopPropagation()` first -- the same
+  hazard `_sidebar.html`'s own note on this link already names -- so it
+  cannot be a child of `<summary>`. `<summary>` must also stay
+  `<details>`'s literal first child for the browser to recognise it as
+  the disclosure widget at all, so it cannot be wrapped alongside the
+  link in a shared flex row either. `position: relative` on `.chat-
+  workstreams` plus `position: absolute; top: 0; right: 0` on the link
+  is what reaches "same row, right-aligned, outside `<summary>`" within
+  those two constraints: the link overlays summary's own row instead of
+  sharing flex space with it, which needs no space reserved in the flow
+  below (the workstream list starts right after `<summary>`'s own
+  height, not after a phantom second row). `.chat-new` is reused
+  outright, not merely matched -- the owner's own words ("match its
+  visual treatment to 'New chat'... consider unifying both to the same
+  compact style") are satisfied by there being ONE class for both,
+  never two rules that could drift.
+  {% endcomment %}
+  .chat-workstreams { position: relative; }
+  .chat-workstreams-new { position: absolute; top: 0; right: 0; }
+  {% comment %}
+  OWN SCROLL FOR THE WHOLE SIDEBAR COLUMN (owner-requested chat layout
+  fix, UX point 3) -- named for what the owner's original complaint
+  actually called out ("the left sidebar scrolls away"), and now
+  literally true of the WHOLE column: the accordion above and the
+  conversation list below share this ONE scrolling box, not two.
+  `SIDEBAR_LIMIT = 30` conversation rows plus `WORKSTREAM_SIDEBAR_LIMIT =
+  5` workstream rows (`agents/chat/sidebar.py`) is easily taller than the
+  shell on a short window, and with the row around it height-capped
+  instead of letting the page grow, this column needs a scrollbar of its
+  own or its own tail becomes unreachable -- the exact fate this whole
+  fix exists to prevent. `min-height: 0` here is doing actual work, not
+  just consistency with its siblings: this is a `flex-direction: column`
+  container, so `overflow-y: auto` on it is fighting that SAME flex-item
+  default on itself (its own intrinsic content height wants to win over
+  the `height: 100%` above) as much as it was on `.chat-layout` and
+  `.chat-wrap`.
+  {% endcomment %}
+  {% comment %}
+  0.85rem, DOWN FROM 1.25rem (tightening round, owner: "consistent small
+  gaps between rail groups (on the order of 0.75-1rem)... kill the
+  current multi-rem voids"). This ONE number governs the space between
+  `nav.chat-nav`'s top-level children -- ROUND 14 GROWS THAT COUNT FROM
+  TWO TO SIX (brand, the primary "+ New chat" row, the app-nav rows, the
+  Workstreams card, the Chats card, the account block -- `_sidebar.html`
+  has the full structure) -- the number itself did not need to move
+  again: it was always "the gap between whatever top-level pieces this
+  nav has", never tied to there being exactly two.
+
+  `overflow-y: auto` USED TO LIVE HERE, ON THE WHOLE RAIL -- ROUND 14
+  (OWNER AMENDMENT) MOVES IT ONTO `.chat-nav-chats` ALONE, BELOW. The
+  brief's own words: "rail scrolls independently, chats section takes
+  the flexible space, account block always visible". A single scrolling
+  `nav.chat-nav` could not deliver the LAST clause -- account, brand and
+  the nav rows would scroll out of view along with a long chat list --
+  so this element now stays `height: 100%` with NO overflow of its own,
+  and `.chat-nav-chats` is `flex: 1 1 auto; min-height: 0; overflow-y:
+  auto` -- the ONE item that absorbs any deficit, all the way to its own
+  internal scrollbar, before anything else on the rail gives up a pixel
+  -- the identical `.composer-block`/`.thread-scroll` discipline round
+  9c already established for the THREAD page, applied here to the RAIL.
+
+  CORRECTED (round-20-confirm R7): this comment used to claim "every
+  child keeps it in bounds through `flex-shrink: 0` EXCEPT `.chat-nav-
+  chats`" -- true of NEITHER sibling in practice. `.chat-nav-section`
+  itself (above) sets no `flex-shrink` at all, and neither `chat-
+  workstreams` nor (round 20) `.chat-nav-pinned` ever had one; the
+  claim was already wrong before round 20 and is corrected here rather
+  than left to mislead a reader into trusting a guarantee that was
+  never written. Workstreams stayed safe anyway, by a DIFFERENT
+  mechanism -- its own row cap (`WORKSTREAM_SIDEBAR_LIMIT`, `agents/
+  chat/sidebar.py`) bounds its CONTENT height directly, so it never
+  needed a flex rule to stay in bounds. Pinned (round 20) had no such
+  cap -- deliberately (`sidebar.py`'s own "a pin is the operator's own
+  deliberate, small curated set" reasoning) -- which meant an operator
+  who pinned MANY conversations could grow it past the rail's own
+  height with nothing to absorb the deficit but `.chat-nav-chats`
+  shrinking to zero, and past that, spilling content off the bottom of
+  `nav.chat-nav` with no scrollbar anywhere to reach it. `.chat-nav-
+  pinned`, below, now gets the SAME two-part discipline `.chat-nav-
+  chats` already has -- `flex-shrink: 0` so it is never squeezed by the
+  flex algorithm, PLUS its own bounded `max-height`/`overflow-y: auto`
+  so its OWN content can never grow past that bound either -- rather
+  than relying on a row cap the "no cap" design decision deliberately
+  does not want.
+  {% endcomment %}
+  nav.chat-nav {
+    flex: 0 0 var(--chat-nav-width);
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+    font-size: 0.9rem;
+    min-width: 0;
+    height: 100%;
+    min-height: 0;
+  }
+  .chat-nav-chats { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+  {% comment %}
+  ROUND-20-CONFIRM R7 (real defect: an uncapped Pinned section could
+  collapse `.chat-nav-chats` to zero and spill past `nav.chat-nav` with
+  no scrollbar anywhere). `flex-shrink: 0` matches `.chat-workstreams`'
+  own (implicit, via its row cap) behaviour: Pinned never gives up space
+  to its neighbours. `max-height`/`overflow-y: auto` on its OWN row
+  group -- not on `.chat-nav-pinned` itself, so the section's own header
+  ("Pinned") always stays visible above the scrolling list, the
+  identical shape `.chat-nav-chats`'s own header/list split already
+  uses one level up. `14rem` is roughly `WORKSTREAM_SIDEBAR_LIMIT`'s
+  own 5 rows' worth of `.chat-nav-row` height plus this card's own
+  padding -- large enough that the common case (a handful of pins)
+  never shows a scrollbar at all, small enough that no plausible pin
+  count can push `.chat-nav-chats` or the "Archived (N)" foot off
+  screen.
+  {% endcomment %}
+  .chat-nav-pinned { flex-shrink: 0; }
+  .chat-nav-pinned .chat-nav-group { max-height: 14rem; overflow-y: auto; }
+  {% comment %}
+  ROUND 15 (OWNER FEEDBACK) REMOVED `.chat-rail-brand`/`.chat-rail-
+  navlinks`/`.chat-rail-account` FROM THIS FILE -- the rail slimmed to
+  chat-domain content only (`chat/_sidebar.html`'s own comment has the
+  full reasoning), and all three classes' own elements moved back to
+  the restored `header.app-bar` (`foundation/templates/_shell.html`),
+  which already owns the identical brand/nav-link/account markup and
+  needed no new rules to keep rendering it. `.chat-rail-primary`, below,
+  is the ONE round-14 rail addition round 15 KEPT: the primary "+ New
+  chat" row was never a duplicate of anything the top bar rendered.
+  {% endcomment %}
+  {% comment %}
+  "VISUALLY DISTINCT" (owner amendment's own words) -- a filled row,
+  the one place on this rail that is not a quiet text link, matching
+  the reference anatomy's own "the primary + New row... filled/
+  outlined". `--accent`/`--accent-text` is the SAME solid-fill recipe
+  `.thread-actions .chat-menu-body button[type="submit"]` already uses
+  for this box's own "a real button, not a quiet link" moments --
+  reused here on an `<a>` rather than invented fresh, since a filled
+  BUTTON look applied to a NAVIGATION link is exactly what this row is.
+  {% endcomment %}
+  .chat-rail-primary {
+    display: block;
+    text-align: center;
+    font-weight: 600;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    background: var(--accent);
+    color: var(--accent-text) !important;
+    text-decoration: none !important;
+  }
+  .chat-rail-primary:hover { opacity: 0.9; }
+  {% comment %}
+  THE STREAM CHIP (Part 1). `.chip-queued`'s own neutral tone, reused --
+  see `_sidebar.html`'s own comment on this class for the full
+  reasoning. `overflow: hidden`/`text-overflow: ellipsis`/a `max-width`
+  keep a long workstream name from pushing the row's own title out of
+  its `text-overflow` budget; `flex-shrink: 0` keeps the CHIP itself
+  from being the thing that shrinks first (the title link already claims
+  that role via `.chat-nav-row > a`'s own `flex: 1 1 auto`).
+  {% endcomment %}
+  .stream-chip {
+    flex: 0 0 auto;
+    max-width: 6rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  {% comment %}
+  ONE LABEL STYLE FOR THE RAIL (tightening round, owner: "Workstreams"
+  and "Chats" drop to the same small uppercase treatment as the existing
+  `CONVERSATIONS` label). Matches `_shell.html`'s `.nav-group-label`
+  (`--muted`, `0.7rem`, `600`, uppercase, `0.09em` tracking) exactly,
+  rather than sharing its class: `.chat-nav-label` is an `<h2>` in
+  `_sidebar.html`, kept as a real heading for the outline, one that
+  reads one of two ways depending on state -- "Chats" or "Archived"
+  (the grouping round's own answer to the double-label the CONVERSATIONS
+  sub-label used to be, see below) -- while losing every visual trace of
+  looking like a heading. ROUND 14 DROPS THE THIRD, SCOPED-STREAM
+  READING this comment used to name: the stream-scoped CHATS variant is
+  retired (`_sidebar.html`'s own module comment has the full reasoning),
+  so this heading never again reads a workstream's own name. `margin: 0`
+  is the other half of "kill the multi-rem voids": a bare `<h2>` carries
+  a UA default block margin on both sides that `nav.chat-nav`'s own `gap`
+  above would otherwise stack ON TOP OF, not replace.
+  {% endcomment %}
+  .chat-nav-label {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+  }
+  {% comment %}
+  THE SAME VOID, ON EVERY OTHER STRAY BLOCK THIS COLUMN CAN RENDER: a
+  bare `<p>` (the workstream/conversation empty states, either "…N more"
+  line) carries the identical UA default margin `.chat-nav-label` above
+  just lost, and `.chat-nav-group`'s own `gap: 0.15rem` below is exactly
+  as blind to it. Zeroed here, once, rather than on each individual
+  `<p class="muted">` -- the same reasoning `.chat-nav-label`'s `margin:
+  0` already uses.
+  {% endcomment %}
+  nav.chat-nav p { margin: 0; }
+  .chat-nav-group { display: flex; flex-direction: column; gap: 0.15rem; }
+  nav.chat-nav a { color: var(--accent); text-decoration: none; }
+  nav.chat-nav a:hover { text-decoration: underline; }
+  .chat-new { font-weight: 600; padding: 0.3rem 0; }
+  {% comment %}
+  One row: the link takes the space and the menu sits at its end. The
+  title is ONE LINE, ellipsized BY CSS -- never re-truncated in Python,
+  because `Conversation.title` is already word-boundary-truncated at
+  write time (`service.truncate_title`) and a second cut would be a
+  second rule to keep in step. `min-width: 0` is what lets
+  `text-overflow` actually fire inside a flex row.
+  {% endcomment %}
+  .chat-nav-row { display: flex; align-items: baseline; gap: 0.35rem; }
+  .chat-nav-row > a {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 0.25rem 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  {% comment %}
+  The `.current` treatment the settings sidebar uses, with one
+  deliberate difference: NO `pointer-events: none`. A settings entry
+  that is already open is a dead link; a conversation you are reading
+  is still a link worth having -- clicking it drops the `?connection=`
+  / `?pending=` query string, which is a real thing an operator does.
+  {% endcomment %}
+  .chat-nav-row.current > a { color: var(--text); font-weight: 600; }
+  {% comment %}
+  TIGHTENING ROUND: the workstream list's own trailing marker (a
+  dormant recipient's row, `_sidebar.html`) is the first `.chat-nav-row`
+  content that is not the link ITSELF and not `.chat-menu` (which
+  already pins its own `flex: 0 0 auto`, above) -- without a matching
+  rule it inherits the flex default (`0 1 auto`), a SHRINKABLE item the
+  row's `> a` truncation would otherwise be squeezing space from instead
+  of yielding to.
+
+  `color: var(--danger)` (workstream composition pass): the SAME marker
+  reads as a warning on `chat/workstream.html`'s own Shared-with list too
+  now, and a warning that is neutral-coloured on one page and unstyled on
+  another is not one look -- this is the ONE rule both pages share.
+  {% endcomment %}
+  .dormant { flex: 0 0 auto; color: var(--danger); }
+  .chat-nav-foot { padding-top: 0.4rem; }
+  {% comment %}
+  The per-conversation menu: a native `<details>`, the same dropdown
+  idiom the setup page's platform disclosures and this surface's own
+  delete confirm already use. THE MARKUP CARRIES NO SCRIPT AND NO
+  HANDLER -- the marker is hidden and the summary IS the button, and
+  every action inside is a plain CSRF POST. Opening, closing and
+  keyboard reach are the platform's, not ours. One-open-at-a-time and
+  outside-click/Escape dismissal ARE enforced, by the one progressive-
+  enhancement script `chat/_sidebar.html` includes after the `</nav>`
+  (`chat/_menu_exclusive.html`, round 21) -- read that file for the
+  mechanism. With JS off the menus fall back to exactly the behaviour
+  described above: two open at once are untidy, not broken.
+  {% endcomment %}
+  {% comment %}
+  `position: relative` IS THE PANEL'S ANCHOR (round 2). It was removed
+  as dead in fix round 1 -- correctly, while the panel was in flow --
+  and comes back with a job now that the panel is an overlay: it makes
+  this `<details>` the containing block the absolute panel below
+  positions against, so the menu hangs off ITS OWN row rather than off
+  the page.
+  {% endcomment %}
+  .chat-menu { position: relative; flex: 0 0 auto; }
+  .chat-menu > summary {
+    cursor: pointer;
+    color: var(--muted);
+    list-style: none;
+    padding: 0 0.25rem;
+    line-height: 1;
+  }
+  .chat-menu > summary::-webkit-details-marker { display: none; }
+  .chat-menu[open] > summary, .chat-menu > summary:hover { color: var(--text); }
+  {% comment %}
+  THE PANEL IS AN OVERLAY (round 2, owner's ruling: "a menu that is
+  above, not something that pushes all the other html down"). It was in
+  flow before, which pushed every row below it down the list; it now
+  floats over them and closing the menu removes it with no layout shift
+  at all.
+
+  NOTHING CLIPS IT TODAY, and that was checked rather than assumed --
+  it is the question the in-flow version was originally chosen to dodge.
+  The full ancestor chain is `html > body > .chat-layout >
+  nav.chat-nav > .chat-nav-group > .chat-nav-row > details.chat-menu`
+  (`_shell.html` renders `{% templatetag openblock %} block content
+  {% templatetag closeblock %}` bare, with no wrapper element), and NOT
+  ONE of those sets `overflow`, `transform`, `filter`, `contain` or
+  `perspective` -- so nothing establishes a clipping context and nothing
+  steals the containing block from `.chat-menu` above. The one
+  `overflow: hidden` in this file is on `.chat-nav-row > a`, the title
+  link that needs it for `text-overflow: ellipsis`; that is a SIBLING of
+  this `<details>`, not an ancestor of it (the `>` in that selector is
+  what makes it so). The page scrolls as a whole and the 30-row cap
+  means the sidebar never grows its own scrollbar, so plain absolute
+  positioning is safe here.
+
+  THE WARNING FOR WHOEVER CHANGES THAT -- AND HOW IT WAS ACTUALLY
+  RESOLVED, TWICE. The warning stood: the day an ancestor of this panel
+  gets `overflow-y: auto`, it becomes a clipping context and every menu
+  opened near its bottom edge is cut off. It has now happened twice --
+  `.chat-nav-chats` (the owner-requested chat layout fix, narrowed by
+  round 14) and `.chat-nav-pinned .chat-nav-group` (round-20-confirm
+  R7's bounded Pinned section, whose menus the owner then could not see
+  at all, round 21 item C).
+
+  NEITHER WAS RESOLVED BY ANY OF THE THREE OPTIONS THIS COMMENT
+  ORIGINALLY LISTED -- not (a) unscrolled-and-paginate, not (b)
+  `position: fixed` with script-computed coordinates, not (c) the
+  in-flow panel, which would reverse the standing owner ruling that a
+  menu is "above, not something that pushes all the other html down".
+  There is a FOURTH answer, and it is the one this file uses: leave the
+  panel exactly as it is and lift the CLIP on the offending ancestor,
+  scoped by `:has(.chat-menu[open])` to the moment a menu is actually
+  open. `max-height` on that ancestor survives untouched, so whatever
+  bound it was given for is still enforced; only the cutting stops, and
+  only while something needs not to be cut. Both rules are written out
+  below `.chat-menu-body`, each with its own trade stated.
+
+  SO THE STANDING GUIDANCE IS: bound an ancestor freely, and add the
+  matching `:has(.chat-menu[open]) { overflow-y: visible; }` beside the
+  two that are already there. What is NOT free is the trade each one
+  carries -- for as long as a menu is open, that ancestor stops
+  scrolling and its overflowing rows paint over their neighbours -- so
+  the bound should stay generous enough that the common case never
+  scrolls at all.
+
+  Anchored `top: 100%; right: 0` -- under the summary, right edges
+  aligned, so a ~12rem panel stays inside the 240px column instead of
+  hanging into the thread. `z-index: 5` matches the one other floating
+  panel on this box (`tools/vision/templates/vision/create.html`'s
+  `.tip`), whose token recipe -- `background: var(--panel)`, a
+  `--border` hairline, a radius -- is exactly what a floating card
+  already looks like here.
+  {% endcomment %}
+  .chat-menu-body {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    z-index: 5;
+    min-width: 12rem;
+    {% comment %}
+    CAPPED TO THE COLUMN (round 2 review, nit 1). `right: 0` anchors the
+    panel's RIGHT edge, so it grows LEFTWARD -- and without a ceiling a
+    long unbreakable menu string would push its left edge out past the
+    sidebar and over the page's left margin. Nothing today is wider than
+    the 12rem floor above, so this changes no pixels now; it is the
+    guard that keeps that true. `box-sizing: border-box` is global
+    (`_shell.html`), so this width INCLUDES the padding and the hairline
+    and the panel lands exactly inside the column rather than 1.2rem
+    past it.
+    {% endcomment %}
+    max-width: var(--chat-nav-width);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.25rem;
+    margin-top: 0.2rem;
+    padding: 0.5rem 0.6rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    {% comment %}
+    THE ONE NEW VISUAL PRIMITIVE IN THIS ROUND, and it is token-derived
+    on purpose: this repository had no `box-shadow` anywhere and no raw
+    `rgb()`/`rgba()` in the shell, so a hard-coded shade would have been
+    the first hex-adjacent colour in a file whose rule is tokens only.
+    `color-mix` over `--text` follows the theme instead -- a soft dark
+    shadow on the light palette, a soft halo on the dark one, both
+    reading as "this sits above the list", and neither needing a token
+    the shell does not have.
+    {% endcomment %}
+    box-shadow: 0 4px 14px color-mix(in srgb, var(--text) 18%, transparent);
+    font-size: 0.85rem;
+  }
+  {% comment %}
+  THE LANDMINE THE COMMENT ABOVE NAMED, ARRIVED (owner-requested chat
+  layout fix): the rail's own scrolling region gains `overflow-y: auto`
+  above -- a long conversation list now needs its own scrollbar, UX
+  point 3 -- which makes it a clipping context for this absolutely-
+  positioned panel, same as that comment predicted almost verbatim.
+  ROUND 14 NARROWS WHICH ELEMENT THAT IS: `overflow-y: auto` moved from
+  `nav.chat-nav` (the whole rail) onto `.chat-nav-chats` alone (the
+  brief's own "chats section takes the flexible space") -- a HAPPY
+  SIMPLIFICATION for this exact rule, not a complication: `.chat-menu`
+  only ever renders inside the Chats section (the Workstreams section
+  has no per-row menu at all), so the clipping container this rule has
+  to reach INTO was always going to be this element specifically, once
+  it existed as its own thing to select.
+
+  THIS DOES NOT REOPEN OPTION (c) THAT COMMENT NAMED. A first pass here
+  DID drop `.chat-menu-body` to `position: static` above this width --
+  review caught that this reverses the STANDING OWNER RULING two
+  sections up ("a menu that is above, not something that pushes all the
+  other html down"), which governs until the owner changes it, not
+  until a later fix finds it inconvenient. `.chat-menu-body` above is
+  therefore UNCHANGED: still `position: absolute; top: 100%; right: 0;
+  z-index: 5`, the overlay the ruling describes, at every width, with
+  zero row shift.
+
+  THE FIX IS ON THE CLIPPING CONTAINER INSTEAD -- `.chat-nav-chats` gets
+  out of the panel's way rather than the panel changing shape -- gated
+  by `:has()` to the one moment it matters: while ANY menu in the list
+  is open, `.chat-nav-chats` itself drops its OWN `overflow-y` to
+  `visible`, lifting the clip that would otherwise cut the open panel
+  off near the list's bottom edge. Closing the menu (the native
+  `<details>` toggle, same as always -- `:has()` re-evaluates live, no
+  script anywhere) restores the clip immediately. `:has()` is Baseline
+  across every engine this box targets, the same standing this file's
+  `color-mix()` two rules up (`.chat-menu-body`'s own `box-shadow`)
+  already has -- this is a second modern selector/function in this
+  file, not a first.
+
+  THE TRADE, SAID OUT LOUD: `overflow-y: visible` does not merely
+  unclip the panel -- for as long as ANY menu stays open, it stops the
+  CHATS SECTION from scrolling (never the brand/nav-rows/Workstreams/
+  account regions above and below it, which do not scroll at all, round
+  14's own point), so on a list taller than the shell, rows outside the
+  current viewport can spill past `.chat-nav-chats`'s own edges too.
+  That is judged the more faithful reading of the standing ruling (the
+  menu is not supposed to move anything, and this is what keeps it from
+  moving) over letting the panel itself go in-flow, and it is TRANSIENT
+  and OPEN-MENU-ONLY: closing the menu puts the scrollbar back exactly
+  where it was, with nothing to undo by hand. Below `1000px` the rail
+  stays unscrolled document flow (`@media (max-width: 1000px)` below)
+  regardless, so this rule has nothing to do there and is gated to the
+  same width as the app-shell itself.
+  {% endcomment %}
+  {% comment %}
+  ROUND 21, ITEM C (owner, verbatim: "Also when i click the ... on
+  pinned, it expands but it's hidden and I'm not able to see the ...
+  clicked"). THE SAME LANDMINE, ARRIVED A SECOND TIME, on a second
+  ancestor: round-20-confirm R7 bounded the PINNED section's own row
+  group (`max-height`/`overflow-y: auto`, above) to fix a real spill
+  defect -- and in doing so made it a clipping context for exactly the
+  menus it contains, which is why the owner could open a pinned row's
+  ⋯ and not see what opened.
+
+  BOTH PROPERTIES SURVIVE, which is the whole requirement. The bound
+  stays: `max-height` still caps the BOX, so no number of pins can
+  crush `.chat-nav-chats` or push the "Archived (N)" foot off screen,
+  and `flex-shrink: 0` still keeps the flex algorithm out of it. Only
+  the CLIP lifts, and only while a menu inside this group is actually
+  open -- `max-height` with `overflow-y: visible` is a box that is
+  still exactly as tall as it was, whose content is simply no longer
+  cut at the edge.
+
+  THE SAME IDIOM AS THE RULE ABOVE, deliberately, rather than a third
+  mechanism: the alternatives the older warning named (`position:
+  fixed` with computed coordinates; moving the bound somewhere it
+  cannot clip; the in-flow panel) each cost either a real script doing
+  layout arithmetic or a reversal of the standing overlay ruling, and
+  this box already had a proven, script-free answer to this exact
+  question one rule up. `.chat-wrap:has(.search-checklist[open])`
+  further down is the same idiom a third time -- it is the house
+  convention now, not a one-off.
+
+  THE TRADE, SAID OUT LOUD, as the rule above says it for its own
+  ancestor -- AND IT HAS TWO HALVES, not one. Both only bite once there
+  are more pins than the bound shows; below that the group never
+  scrolled and neither half exists.
+
+  (1) PAINT-OVER. While a pinned menu is open this group stops
+  scrolling, so rows below the bound paint over the Chats card instead
+  of being clipped. The MENU itself stays legible regardless --
+  `.chat-menu-body` is positioned with `z-index: 5`, so it paints above
+  a sibling section's background either way.
+
+  (2) THE SCROLL OFFSET IS DISCARDED, and this is the half an operator
+  notices first. Switching a scrolled element from `overflow-y: auto` to
+  `visible` throws its scroll position away: if they had scrolled the
+  Pinned list down and then click a row's `⋯`, the group snaps back to
+  the top the instant the menu opens, and the row they clicked -- and
+  the menu they just opened with it -- jump out from under the cursor.
+  Closing the menu does not restore the offset either; the list is
+  simply back at the top. The pre-existing `.chat-nav-chats` rule above
+  has the identical behaviour and has carried it since the chat layout
+  fix, but that ancestor is the full-height list, whereas this bound is
+  14rem (~5 rows) -- which makes "already scrolled when you click" the
+  COMMON case here for anyone with a real pin set, not an edge one. It
+  is the reason `14rem` should be read as a floor to revisit if pin sets
+  get bigger, not a number to shave.
+
+  Both halves are TRANSIENT AND OPEN-MENU-ONLY in the sense that
+  matters: nothing is left broken, nothing needs undoing by hand, and
+  closing the menu restores the clip and the scrollbar. Round 21's own
+  item B (`chat/_menu_exclusive.html`) additionally means at most ONE
+  menu on the rail is ever open, so at most one of these unclips is ever
+  live.
+
+  GATED TO THE SAME WIDTH as its neighbour, for the same reason: below
+  `1000px` the pinned group's `max-height`/`overflow-y` are already
+  reset outright (`@media (max-width: 1000px)`, far below), so there is
+  no clip down there to lift.
+  {% endcomment %}
+  @media (min-width: 1000.01px) {
+    .chat-nav-chats:has(.chat-menu[open]) { overflow-y: visible; }
+    .chat-nav-pinned .chat-nav-group:has(.chat-menu[open]) { overflow-y: visible; }
+  }
+  .chat-menu-body form { margin: 0; }
+  {% comment %}
+  A DESCENDANT SELECTOR, NOT A CHILD ONE. This used to read
+  `.chat-menu-body > form > button`, which missed the rename form's own
+  Save -- that button lives one level deeper, inside the Rename
+  disclosure (`.chat-menu-body > details > form > button`) -- so Save
+  alone fell through to the shell's solid accent `button` styling in a
+  240px column whose every other control is a quiet text link.
+  {% endcomment %}
+  .chat-menu-body button, .chat-menu-body summary {
+    background: transparent;
+    border: none;
+    padding: 0.15rem 0;
+    color: var(--accent);
+    font: inherit;
+    font-size: 0.85rem;
+    cursor: pointer;
+    text-align: left;
+  }
+  .chat-menu-body summary { list-style: none; }
+  .chat-menu-body summary::-webkit-details-marker { display: none; }
+  .chat-menu-body button.danger {
+    color: var(--danger);
+    border: none;
+    background: transparent;
+    font-weight: 600;
+  }
+  {% comment %}
+  The delete confirm is a wrapping ROW on the thread page, where it has
+  the width for one; inside a 240px menu it is a column.
+  {% endcomment %}
+  .chat-menu-body .delete-confirm { flex-direction: column; align-items: flex-start;
+                                    gap: 0.3rem; }
+  {% comment %}
+  ROUND 22: THE PINNED CARD'S ⓘ EXPLAINER, which is a `.chat-menu`
+  (`chat/_sidebar.html`'s own comment has the full reasoning: reusing
+  the class is what buys it the overlay, the outside-click/Escape
+  dismissal and the one-open-at-a-time rule with the row menus, all
+  with no carve-out in `chat/_menu_exclusive.html`). Three deltas from
+  a row menu, and only three -- everything else it inherits:
+
+  * THE PANEL HOLDS PROSE, NOT A COLUMN OF ACTIONS. A row menu's items
+    are short; this is a sentence, and at `.chat-menu-body`'s own 12rem
+    floor it sets as an eight-line ribbon. Widened to THE CARD'S OWN
+    CONTENT WIDTH, derived rather than guessed: `right: 0` anchors the
+    panel to the `<details>`, whose right edge is `.chat-nav-section`'s
+    CONTENT-box edge -- inset from the rail by that card's own
+    `0.6rem` padding and `1px` border on each side. So the width that
+    makes the panel's left edge land exactly on the card's left content
+    edge is `--chat-nav-width` minus both paddings and both borders,
+    which is what the `calc()` below says in those terms.
+
+    A FIRST CUT USED `min-width: var(--chat-nav-width)` and a comment
+    claiming it "lands inside the column exactly as a row menu does"
+    (round-22 confirm, MINOR 2). It did not: at the full 240px the
+    panel overhung the PINNED card's own left border by ~10.6px, which
+    is cosmetic (the shell's own `body` padding guarantees room, so it
+    could never clip or scroll) but was not what the sentence said.
+    The inherited `max-width: var(--chat-nav-width)` stays as the
+    ceiling it always was; this `min-width` no longer reaches it.
+  * `<p>` NEEDS ITS MARGIN KILLED, the same one line `.chat-menu-body
+    form` above already needed for the identical reason: the panel
+    supplies its own padding, and a UA default margin on the only child
+    reads as a lopsided gap.
+  * THE SUMMARY IS A ONE-CHARACTER TARGET, so it needs a hit area a
+    text trigger gets for free. WCAG 2.2 AA 2.5.8 wants 24x24 CSS px,
+    and `min-width`/`min-height` state that directly rather than
+    leaving it to be re-derived from a font size and two paddings.
+    `inline-flex` + centring is what keeps the glyph in the middle of
+    that box once the box is bigger than the glyph.
+
+    THIS IS A CORRECTION, NOT A TUNE (round-22 confirm, MINOR 1). The
+    first cut wrote `padding: 0 0.15rem`, which OVERRODE `.chat-menu >
+    summary`'s own `0 0.25rem` with LESS -- so the icon shipped a
+    SMALLER target (~20x15px) than the `...` row menus it borrows
+    from, while its comment claimed it had gained "a little horizontal
+    room". It had lost some. The owner's old control was a full text
+    line ("What's this?"), a comfortable target by accident of being
+    text; replacing it with a glyph is exactly the change that has to
+    put the target size back deliberately.
+
+  BASELINE, NOT CENTRE, is what aligns it with the "Pinned" label:
+  `.chat-nav-section-head` is `align-items: baseline`, and the ⓘ glyph's
+  own baseline is what the eye reads against the small-caps label --
+  the same alignment "All chats"/"+ New" already get in that slot on
+  the sibling cards. An `inline-flex` summary still has a baseline (its
+  own single line box's), so the 24px box did not cost that alignment.
+  {% endcomment %}
+  .chat-info > .chat-menu-body { min-width: calc(var(--chat-nav-width) - 1.2rem - 2px); }
+  .chat-info .chat-menu-body p { margin: 0; }
+  .chat-info > summary {
+    font-size: 0.95rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 24px;
+    min-height: 24px;
+    padding: 0;
+  }
+  .chat-rename-form { display: flex; flex-direction: column; gap: 0.3rem;
+                      margin-top: 0.3rem; }
+  {% comment %}
+  `, .chat-rename-form textarea` (workstream composition pass): the SAME
+  disclosure idiom now holds a Description field too (`chat/workstream.
+  html`'s own "Manage" menu), a `<textarea>` rather than a single-line
+  `<input>` -- broadened here, on the ONE existing rule, rather than
+  duplicating it for one more field.
+  {% endcomment %}
+  .chat-rename-form input, .chat-rename-form textarea {
+    width: 100%;
+    padding: 0.3rem 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: 0.85rem;
+  }
+  {% comment %}
+  THE SEARCHABLE-CHECKLIST DROPDOWN (`chat/_search_checklist.html`),
+  PROMOTED HERE THE SAME WAY `.ws-list`/`.ws-item`/`.btn-compact` WERE
+  (`chat/workstream.html`'s own docstring: "promoted into `chat/base.
+  html` once a SECOND page needed the identical idiom" -- the identical
+  test this rule passes). Round 16 (owner feedback: "tags for this page
+  should have a drop down with checkboxes and search, not a shown list
+  that is selected") built it once, page-scoped, for `/chat/all/`'s own
+  tag filter; round 17's "Pin a document" chooser (owner feedback: "many
+  documents will make this cumbersome") needs the identical idiom, so
+  this is REUSE -- one component, two consumers -- not a second copy.
+  `.chat-menu`/`.chat-menu-body` above is the overlay MECHANISM every
+  per-row menu on this box already shares; `.search-checklist` is the
+  LOOK+WIDTH this one idiom needs on top of it, and it is the ONLY class
+  this promotion adds -- the checklist ROWS/BUTTON already inherit
+  `.chat-menu-body button, .chat-menu-body summary` above for free (the
+  quiet text-link look every menu control on this box already has), so
+  nothing about THAT rule needed to change for a second consumer either.
+  {% endcomment %}
+  {% comment %}
+  CONSOLIDATION WAVE (audit A, F8): `.filter-chip` (`/chat/all/`'s own
+  filter-row pill -- workstream links, the archived toggle, and this
+  SAME dropdown's own closed summary, `all.html` passes `sc_summary_
+  class="filter-chip"`) and `.search-checklist > summary` (this
+  component's shared default look, its OTHER consumer -- the pin
+  chooser -- renders unstyled by any page-local class at all) were
+  byte-identical on six properties, discovered only because both land
+  on the SAME `<summary>` element for the tags dropdown specifically.
+  Promoted here, together: `.filter-chip` moves out of `all.html`
+  entirely (its only page), `.search-checklist > summary` keeps only
+  what is genuinely its own (`cursor`, `line-height` -- a `<summary>`,
+  unlike an `<a>`, needs the cursor stated and reads a touch tighter
+  without one).
+  {% endcomment %}
+  .filter-chip, .search-checklist > summary {
+    display: inline-block;
+    padding: 0.2rem 0.6rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    font-size: 0.85rem;
+  }
+  .filter-chip { color: var(--text) !important; text-decoration: none !important; }
+  .search-checklist > summary { cursor: pointer; color: var(--text); line-height: 1.4; }
+  .filter-chip.active { background: var(--accent); color: var(--accent-text) !important;
+                        border-color: var(--accent); }
+  .filter-chip:hover,
+  .search-checklist[open] > summary, .search-checklist > summary:hover {
+    border-color: var(--accent);
+  }
+  {% comment %}
+  WIDER THAN THE RAIL'S OWN MENU, on purpose: `.chat-menu-body`'s own
+  `max-width: var(--chat-nav-width)` above caps the rail's per-row menu
+  to the 240px sidebar COLUMN it lives inside -- a constraint that has
+  nothing to do with either consumer of THIS idiom, both of which sit in
+  a full-width filter row or panel with no column to stay inside.
+  {% endcomment %}
+  .search-checklist > .chat-menu-body { min-width: 16rem; max-width: 20rem; }
+  .checklist-list { display: flex; flex-direction: column; gap: 0.2rem; max-height: 14rem;
+                     overflow-y: auto; width: 100%; }
+  .checklist-row { display: flex; align-items: center; gap: 0.4rem; font-weight: normal; }
+  .checklist-actions { display: flex; justify-content: space-between; align-items: center;
+                        width: 100%; margin-top: 0.3rem; padding-top: 0.3rem;
+                        border-top: 1px solid var(--border); }
+  {% comment %}
+  CLIP-AUDIT, GENERIC (house convention: `.chat-nav-chats:has(.chat-menu
+  [open])` above has the full reasoning this restates for a different
+  ancestor). `.chat-wrap` -- `chat_content`'s own containing column,
+  every page under this base -- gets `overflow-y: auto` at `min-width:
+  1000.01px` (below) unless a page cancels it back to `visible` itself
+  (`conversation.html`'s own transcript/composer split does; neither
+  consumer of THIS idiom does), which makes it a clipping context for
+  any absolutely-positioned overlay inside it. GENERIC ON `.search-
+  checklist[open]`, not named per consumer, because it is SAFE that way:
+  a page with no `.search-checklist` inside `.chat-wrap` never matches
+  this `:has()` at all, so promoting it here costs a page that never
+  uses the idiom nothing.
+  {% endcomment %}
+  @media (min-width: 1000.01px) {
+    .chat-wrap:has(.search-checklist[open]) { overflow-y: visible; }
+  }
+  {% comment %}
+  `.composer-card-drop-target` (round 10, drag-and-drop staging): the
+  ONE class `chat/_attach_dragdrop.html`'s own script ever toggles -- a
+  dashed outline in the SAME `--accent` token `:focus-within` above
+  already uses, so "a file is being dragged over this card" reads as a
+  clear cousin of "this card is focused" rather than a second, unrelated
+  visual language.
+  {% endcomment %}
+  .composer-card-drop-target { border-style: dashed; border-color: var(--accent); }
+  {% comment %}
+  THE MODEL PICKER, disciplined the same way every other toolbar control
+  is: `appearance: none` clears the browser's own chrome so this select
+  can be built from the same tokens the rest of the toolbar uses. THE
+  CHEVRON is a plain CSS pseudo-element (`::after`), not a data-URI
+  background-image: an inline SVG baked into a URL cannot read `var(
+  --muted)`, so a data-URI chevron would need a second, hard-coded
+  colour per theme. THE LABEL is visually hidden, not removed --
+  `label.picker` (`chat/_picker.html`) already wraps both the caption
+  and the `<select>`, so the accessible name is identical either way; a
+  dense toolbar reads cleaner without a second, redundant "Model"
+  caption beside a control whose own selected option already names the
+  model. NO LONGER PAGE-SCOPED (round 18): every composer surface shares
+  this ONE toolbar, so a page-position qualifier that used to exclude
+  `/chat/`'s own start form (back when only the conversation page loaded
+  this rule) would now incorrectly exclude nothing -- there is no second
+  shape left for it to distinguish. The selector itself is still a
+  descendant one (`.composer-toolbar .picker`); what it lost was the
+  page, not the ancestor.
+  {% endcomment %}
+  {% comment %}
+  ONE RECIPE, TWO CONTROLS. The Model picker (`chat/_picker.html`,
+  `label.picker`) and the Agent picker (`chat/_composer.html`,
+  `label.agent-picker`) sit side by side inside the SAME
+  `align-items: end` toolbar row and are the same control wearing two
+  class names, so they are written once here as selector lists and each
+  keeps only its own genuine difference as a one-line rule below. They
+  arrived a round apart and were tuned separately in the same wave
+  (round-18-confirm R8b on one, R8c on the other), which is exactly the
+  drift two copies invite. Selectors in a list match at their OWN
+  specificity -- `.agent-picker select` (0,1,1) does not inherit
+  `.composer-toolbar .picker select`'s (0,2,1) -- so nothing moves.
+
+  ROUND-18-CONFIRM R8b, THE MODEL PICKER'S OWN DIFFERENCE: `min-width:
+  0` USED TO BE what let that control shrink to fit a ONE-control
+  toolbar row; on a TWO-control row (the start surfaces' Agent + Model)
+  it let the model select shrink to nothing rather than wrap -- a real
+  floor (`min-width: 12rem`) plus `text-overflow: ellipsis`/`overflow:
+  hidden`/`white-space: nowrap` on the select itself means a name that
+  still cannot fit truncates honestly instead of clipping to one
+  character. The Agent picker takes neither: its options are short
+  names, and it was never the control that starved.
+
+  ROUND-18-CONFIRM R8c: the Agent picker's own caption is visually
+  hidden too -- a captioned two-line stack next to an uncaptioned
+  one-line control read as mismatched (round 18's own first cut stacked
+  the caption above the select instead). `label.agent-picker` still
+  wraps both the caption and the `<select>`, so the accessible name is
+  unchanged; the start form's own `<select>`, not a second label, is
+  what a sighted reader sees naming "Agent" now.
+
+  THE VISUALLY-HIDDEN CLIP is written once, for all three elements that
+  want it -- both pickers' captions and (under `.js-attach` only) the
+  attach door's own file input, whose reasoning lives with the attach
+  door below. `clip`, never `display: none`, which would drop the
+  element from the tab order and from a screen reader's reach entirely.
+  {% endcomment %}
+  .composer-toolbar .picker, .agent-picker {
+    position: relative; display: inline-flex; align-items: center;
+  }
+  .composer-toolbar .picker { min-width: 12rem; }
+  .composer-toolbar .picker > span.muted, .agent-picker > span.muted,
+  .attach-block.js-attach .attach-input {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  }
+  .composer-toolbar .picker select, .agent-picker select {
+    appearance: none; -webkit-appearance: none;
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: calc(0.55rem - 1px) 1.75rem calc(0.55rem - 1px) 0.75rem;
+    background: var(--bg); color: var(--text);
+    font: inherit; line-height: 1.5; max-width: 100%;
+    cursor: pointer;
+  }
+  .composer-toolbar .picker select {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .composer-toolbar .picker::after, .agent-picker::after {
+    content: ""; position: absolute; right: 0.8rem; top: 50%;
+    width: 0.4em; height: 0.4em;
+    border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted);
+    transform: translateY(-65%) rotate(45deg);
+    pointer-events: none;
+  }
+  {% comment %}
+  THE ATTACH DOOR, round 18 addendum rewrite (owner feedback: "the box
+  that allows me to add it just stays hovered... there should be a
+  button to add a document and then it should stack"). NO POPUP ANY
+  MORE -- `.attach-block` is a plain, always-in-flow region, given
+  `width: 100%` so it claims its own line in `.composer-card`'s wrapping
+  flex row (the same trick the textarea's own `width: 100%` already
+  used to force itself onto a line below it) rather than trying to sit
+  beside the textarea/toolbar.
+
+  `.attach-label-button` matches the OLD attach trigger's own "secondary
+  button" look (bordered, panel-filled, real weight -- reads as a button
+  at a glance) -- it is a plain `<label for>` now, not a `<summary>`, so
+  it opens the OS file picker with zero script. `.attach-input` is
+  NEVER `display: none` IN THE MARKUP (unchanged) -- it sits compact
+  beside the label by default, so its own native "N file(s)" text is
+  the JS-off fallback.
+
+  ROUND-18-CONFIRM R8a (owner-visible pixel finding: the JS-ON state
+  showed "Choose Files — No file chosen" beside a chip stack already
+  naming the same files -- the same fact stated twice). `.js-attach` is
+  a class `chat/_attach_dragdrop.html`'s own script adds at init -- the
+  script RUNNING is itself the proof JS is on -- and ONLY under it does
+  `.attach-input` clip down to a focusable 1px box. That clip rule is
+  not written here: `.attach-block.js-attach .attach-input` rides the
+  ONE visually-hidden selector list up beside the two pickers' captions
+  (search `clip: rect`), because it is the same technique and there is
+  only one copy of it in this file. A JS-off reader never gets
+  `.js-attach` added, so `.attach-input` keeps rendering at its normal,
+  visible size on that path -- the JS-off fallback this whole door
+  leans on is unchanged.
+
+  `.staged-files` reuses the `.turn-attachment-row`/`.turn-attachment-
+  remove` chip recipe (below) -- the SAME chip a SENT message's own
+  attachments render with (`chat/_attachment_chip.html`), so "staged"
+  and "sent" read as one visual language rather than two.
+
+  `.attach-scope.is-empty` is the ONE class `chat/_attach_dragdrop.
+  html`'s own script ever toggles on the scope fieldset -- hidden once
+  it is added (zero files staged), never authored in the markup itself,
+  so a JS-off reader (who never gets it added at all) sees the fieldset
+  from the first paint.
+  {% endcomment %}
+  .attach-block { width: 100%; }
+  .attach-row { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.4rem; }
+  .attach-label-button {
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: calc(0.4rem - 1px) 0.9rem;
+    background: var(--panel); color: var(--text);
+    font-weight: 600; font-size: 0.85rem; line-height: 1.5;
+    cursor: pointer;
+  }
+  .attach-input { font-size: 0.78rem; max-width: 14rem; color: var(--muted); }
+  .staged-files { list-style: none; margin: 0 0 0.4rem; padding: 0;
+                  display: flex; flex-direction: column; gap: 0.3rem; }
+  .attach-scope.is-empty { display: none; }
+  {% comment %}
+  THE WORKSTREAM PAGES' SHARED RECIPE (settings-page split): promoted
+  here from `chat/workstream.html`'s own `chat_style` the moment a
+  SECOND page (`chat/workstream_settings.html`) needed the identical
+  header row and card/row/button idioms -- the same "a second page
+  needing it is what earns a rule its promotion" test `.composer-card`'s own
+  comment just above already passed. `chat/workstream.html`'s own
+  `chat_style` keeps only what remains genuinely single-page: `.ws-
+  subhead` and `.placement`/`.ws-upload-form` (the Documents panel's own
+  Upload form, never rendered on the settings page).
+
+  `.ws-head`: title (plus its muted description, when set) on the left,
+  ONE action on the right where the old four-control cluster used to
+  sit -- "Settings" on the working page, nothing at all on the settings
+  page's own header (there is nothing further to drill into from there).
+
+  `.ws-card`/`.ws-card-head`: the one bounded-card recipe both pages
+  share, matching `.chat-nav-section` (the rail's own card) BY VALUE,
+  not by shared class -- these cards are full content-column width, not
+  a 240px rail. `.ws-card-actions` puts a card's own submit button on
+  its own row, right-aligned ("regular for form submits," never shrunk
+  to match a row's own compact action). `.ws-card summary` is what makes
+  a bare disclosure inside a card read as a quiet, genuine "open to see
+  more controls" control -- the browser's own default marker stays on
+  (unlike `.chat-menu`/`.delete-disclosure`, which hide it to look like a
+  plain button), the same reasoning `.chat-workstreams`' own summary
+  keeps it. `.ws-textarea` is Instructions' own full-card-width
+  textarea, now on the settings page.
+
+  `.ws-list`/`.ws-item`/`.ws-item-title`/`.ws-item-meta`/`.ws-inline-
+  form`: one flex-row idiom for EVERY list either page renders
+  (Conversations and the Documents panel's Contained/Pinned on the
+  working page; Shared-with on the settings page) -- no bullets, no
+  indent, `.ws-item-title` truncating exactly the way `chat/base.html`'s
+  own `.chat-nav-row > a` does. Deliberately NOT `.chat-nav-row` itself:
+  that class also renders in the SAME PAGE's own sidebar (the scoped
+  conversation list), and sharing it here would make "how many rows does
+  this page have" ambiguous between the sidebar's copy and the page's
+  own. `.btn-compact` (`.tool-action`'s own recipe, `chat/conversation.
+  html`, adapted for a real `<button>` since these all post CSRF-
+  protected forms) is the one compact row-action size -- Consolidate,
+  Re-consolidate, Unpin, Remove -- point 9's "one consistent size scale."
+  CONSOLIDATION WAVE (audit A, F7): `.tool-action`/`.btn-compact` are
+  now the SAME shared block plus each one's own two-or-three-property
+  difference, not two full copies of the six shared properties this
+  comment already said they shared -- see that shared rule, below,
+  beside `.tool-action` itself (moved here from `chat/conversation.
+  html` by S1, the identical live-rendering-defect fix this promotion
+  belongs to).
+  {% endcomment %}
+  .ws-head { display: flex; align-items: flex-start; justify-content: space-between;
+             gap: 1rem; margin-bottom: 1.5rem; }
+  .ws-head h1 { margin: 0 0 0.3rem; }
+  .ws-card { background: var(--panel); border: 1px solid var(--border);
+             border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 1.25rem; }
+  .ws-card-head { margin: 0 0 0.75rem; color: var(--muted); font-size: 0.7rem;
+                  font-weight: 700; text-transform: uppercase; letter-spacing: 0.09em; }
+  .ws-card-actions { display: flex; justify-content: flex-end; margin-top: 0.6rem; }
+  .ws-card summary { cursor: pointer; color: var(--accent); font-weight: 500; }
+  .ws-textarea { width: 100%; min-height: 7rem; }
+  .ws-list { display: flex; flex-direction: column; gap: 0.15rem; }
+  .ws-item { display: flex; align-items: center; justify-content: space-between;
+             gap: 0.75rem; padding: 0.25rem 0; }
+  .ws-item-title { flex: 1 1 auto; min-width: 0; overflow: hidden;
+                    text-overflow: ellipsis; white-space: nowrap; }
+  .ws-item-meta { display: flex; align-items: center; gap: 0.5rem; flex: 0 0 auto; }
+  .ws-inline-form { display: inline; margin: 0; }
+  {% comment %}
+  THE "WHAT'S THIS" INFO DISCLOSURE (round 17 addendum, owner: "I have
+  no idea what Pinned is, we should have an info icon for it"). A
+  zero-JS `<details>`, the SAME trigger recipe `.ws-card summary`
+  already gives the Manage card's own Rename/Description/Archive/
+  Delete rows, margin-tightened (`margin: -0.25rem 0 0.5rem`) so it
+  reads as a small aside directly under the heading it follows rather
+  than a fifth row with its own full card-row spacing.
+
+  ITS ONE REMAINING CONSUMER IS `rag/panels/documents.html` (the
+  Contained/Pinned pair), rendered inside `chat/workstream.html`, which
+  is why this rule stays HERE rather than moving. The RAIL's own Pinned
+  card used to be the second consumer and is not any more: round 22
+  replaced it with an icon-only `.chat-info` popup on the header row
+  (owner: "an entire line wasted on what is this"), deliberately
+  WITHOUT touching the panel's pair -- a wasted line costs a fifth of a
+  240px rail and very little on a full-width panel, so the asymmetry is
+  known and scoped, not an oversight. A later round can align them if
+  the owner asks; if it does, this rule loses its last consumer and
+  goes with them.
+  {% endcomment %}
+  .ws-info { margin: -0.25rem 0 0.5rem; }
+  .ws-info summary { cursor: pointer; color: var(--accent); font-size: 0.8rem; }
+  .ws-info p { margin: 0.25rem 0 0; }
+  {% comment %}
+  CONSOLIDATION WAVE (audit A, F7): `.tool-action` (a link, the tool
+  card's own "view full output"-style action) and `.btn-compact` (a
+  real `<button>`, every OTHER compact row action on this box) are one
+  recipe written twice -- six shared properties, `.tool-action`'s own
+  `text-decoration: none` and `.btn-compact`'s own `background`/`font`/
+  `cursor` the only real differences. Moved here, merged, as part of
+  S1's own promotion of `.tool-action` and its neighbours out of `chat/
+  conversation.html` (the live rendering defect that promotion fixes).
+  {% endcomment %}
+  .tool-action, .btn-compact {
+    display: inline-block; padding: 0.2rem 0.55rem; border-radius: 6px;
+    border: 1px solid var(--border); color: var(--accent); font-size: 0.85rem;
+  }
+  .tool-action { text-decoration: none; }
+  .btn-compact { background: transparent; font: inherit; cursor: pointer; }
+  .tool-action:hover, .btn-compact:hover { border-color: var(--accent); }
+  {% comment %}
+  THE PLACEMENT FIELDSET (`rag/_placement_choice.html`, the shared
+  fragment owner-feedback: "browser-default fieldset border... radio
+  labels wrapping mid-label... the remember-checkbox label runs inline
+  into the radios"). PROMOTED HERE (CONSOLIDATION WAVE, audit A F4 /
+  audit B S26a): `chat/workstream.html` and `chat/conversation.html`
+  each used to carry their OWN copy of these exact six rules, page-
+  scoped, even though both pages extend THIS shared base -- one fewer
+  place the fragment's own look can drift between its two chat-column
+  consumers.
+
+  "KEEPS ITS OWN COPY STILL" CORRECTED, PRECISELY THIS TIME (found while
+  touching this comment for the round-20 addendum fix, below; the
+  underlying gap itself is PRE-EXISTING and OUT OF SCOPE here, not fixed
+  by this round -- an earlier draft of this correction over-corrected
+  and claimed the page was entirely unstyled, which round-20-confirm's
+  own re-check caught): `rag/documents.html` (extends `rag/base.html`)
+  kept exactly ONE of these six rules, not all of them and not none --
+  `.placement .hint { color: var(--muted); font-size: 0.85rem; }`, in
+  that page's own style block (`rag/documents.html:268`, review-fix
+  commentary just above it) -- so its hint paragraph IS styled; only the
+  fieldset chrome and the radio labels are not (browser-default border,
+  no spacing, no `.placement-options` wrap below). O5's own scoping call
+  -- that page is a genuinely different base and this promotion did not
+  reach it -- is still correct; "keeps its own copy still" was
+  IMPRECISE (one of six rules, stated as if it were all of them), not
+  false outright.
+
+  ROUND 20 ADDENDUM (owner, verbatim: "can we make this boolean on a
+  single line and only go to two lines if there isn't enough space to
+  have them both on the same line, this wastes real estate by showing
+  on two lines"). `.placement-options` (new) wraps ONLY the radio
+  labels -- `chat/_attach_files.html`/`rag/_placement_choice.html` both
+  add that one `<div>` around their own two-or-three `<label>` radios,
+  never around `.remember`'s own checkbox row or the `.hint` paragraph
+  below it, which stay their own lines exactly as before. `flex-wrap:
+  wrap` is the whole mechanism: one row while width allows it (the
+  Documents panel at full width, easily; the composer's staged block at
+  chat width, usually, even for the three-option in-stream case), and
+  an honest wrap to a second line only once it genuinely does not,
+  rather than a `white-space: nowrap` that would let a label run off
+  the edge instead.
+  {% endcomment %}
+  .placement { border: 1px solid var(--border); border-radius: 6px;
+               padding: 0.6rem 0.75rem; margin: 0.5rem 0 0; }
+  .placement legend { padding: 0 0.3rem; font-size: 0.85rem; color: var(--muted); }
+  .placement-options { display: flex; flex-wrap: wrap; gap: 0.3rem 1.25rem; }
+  .placement-options label {
+    display: inline-flex; align-items: center; gap: 0.35rem;
+    white-space: nowrap; margin: 0.3rem 0;
+  }
+  .placement .remember { display: block; margin-top: 0.5rem; }
+  .placement-default { margin: 0.5rem 0 0; }
+  .placement .hint { color: var(--muted); font-size: 0.85rem; margin: 0.4rem 0 0; }
+  {% comment %}
+  `.pill-link` PROMOTED HERE (setup-screen round): the settings-page
+  split first gave the working page's own "Settings" link this bordered-
+  pill recipe under the page-local name `.ws-settings-link`, scoped to
+  `.ws-head` there. The stream LIST page needed the identical "one
+  discoverable navigating link, not a form" look for its own "New
+  workstream" affordance -- the exact "a second page needing it" test
+  that already promoted `.composer-card` and the whole `.ws-card` family --
+  so this promotes the recipe under a name that says what it IS rather
+  than what its first caller happened to link to, and `chat/workstream.
+  html` was updated to use this class instead of keeping its own
+  now-redundant copy.
+  {% endcomment %}
+  .pill-link { border: 1px solid var(--border); border-radius: 6px;
+               padding: 0.25rem 0.7rem; color: var(--accent); font-size: 0.85rem;
+               text-decoration: none; display: inline-block; }
+  .pill-link:hover { border-color: var(--accent); }
+  {% comment %}
+  The shell's own breakpoint, and the settings layout's own behaviour
+  at it: the sidebar stops being a column beside the pane and becomes a
+  wrapped block above it. Still zero JS -- the same markup, read
+  differently.
+  {% endcomment %}
+  @media (max-width: 1000px) {
+    .chat-layout { flex-direction: column; gap: 1.5rem;
+                    {% comment %}
+                    THE GATE UX POINT 5 ASKS FOR: below this width the
+                    row's own height cap above is fully undone, back to
+                    `height: auto` and today's plain document flow -- the
+                    page scrolls as a whole again, exactly as it always
+                    has at this breakpoint. `overflow-y: visible` on
+                    `nav.chat-nav` AND `.chat-nav-chats` below (round 14
+                    adds the second reset now that the rail's own scroll
+                    region moved from the former to the latter -- see
+                    that rule's own comment) is what makes their
+                    `overflow-y: auto`/`flex: 1 1 auto` above a no-op
+                    here rather than a second, competing scrollbar.
+                    `.chat-wrap` and the `.chat-nav-chats:has(.chat-menu
+                    [open])` override above need no matching reset here:
+                    both are ALREADY gated to `@media (min-width:
+                    1000.01px)` rather than unconditional-then-reset, so
+                    there is nothing to undo below it for either one --
+                    see each rule's own comment for why. `conversation.
+                    html`'s own `chat_style` explains why `.thread-
+                    scroll` needs no reset either, for the same
+                    underlying reason.
+                    {% endcomment %}
+                    height: auto; }
+    nav.chat-nav { flex: 1 1 auto; width: 100%; height: auto; }
+    .chat-nav-chats { flex: 0 0 auto; min-height: auto; overflow-y: visible; }
+    {% comment %}
+    ROUND-20-CONFIRM R7: `.chat-nav-pinned .chat-nav-group`'s own
+    `max-height`/`overflow-y: auto` (above) exists ONLY to solve a
+    flexbox squeeze that is specific to the desktop layout's `height:
+    100%` column -- below this width the whole rail is back to plain
+    document flow (`nav.chat-nav`'s own `height: auto`, just above), so
+    there is no squeeze left to guard against, the identical reasoning
+    `.chat-nav-chats`'s own reset one line up already gives. Left
+    un-reset, Pinned would gain an arbitrary, unwanted second scrollbar
+    on a layout that does not need one.
+    {% endcomment %}
+    .chat-nav-pinned .chat-nav-group { max-height: none; overflow-y: visible; }
+    .chat-wrap { width: 100%; }
+  }
+  .banner.warn { border-color: var(--accent); }
+  {% comment %}
+  `_form_errors.html`'s own paragraph -- matching
+  `tools/vision/templates/vision/base.html:85`'s identical rule.
+
+  A DJANGO COMMENT: a `/* ... */` in an inline `<style>` is plain text
+  that RENDERS, so any phrase inside one can turn up in a page a test
+  says must not contain it -- the trap `_shell.html`'s own note records
+  learning three times. This was the last CSS comment left in this
+  file; there is no counter-example here now either.
+  {% endcomment %}
+  .job-error { color: var(--danger); }
+  {% comment %}
+  The share panel's own controls. They live HERE, not in
+  `_share_panel.html`, for the reason every other fragment rule on this
+  base does: a fragment cannot own rules the page has to load.
+
+  The two `<select>`s were browser defaults sitting beside this box's own
+  rounded, tokenised inputs -- the one unfinished-looking corner of the
+  conversation page. Same padding, radius, border and background as every
+  other select on the box; the subject picker gains a visible label, and
+  the level picker an `aria-label`, since "Can view" names its own
+  meaning already.
+  {% endcomment %}
+  .share-panel select {
+    padding: 0.4rem 0.55rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: 0.88rem;
+  }
+  .share-form {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  .share-label { color: var(--muted); font-size: 0.85rem; }
+  {% comment %}
+  The delete disclosure and its confirm row, originally copied onto
+  `chat/conversation.html` from `tools/vision/templates/vision/
+  base.html:112-117` with a note that the thread page was the only page
+  under /chat/ that needed it. UI-3b makes that false: the sidebar's
+  per-conversation menu nests the SAME confirm, and the sidebar renders
+  on the index too -- so the rules move up here, where a fragment two
+  pages render can rely on them.
+  {% endcomment %}
+  .delete-disclosure > summary { cursor: pointer; color: var(--accent); font-weight: 500;
+                                 list-style: none; }
+  .delete-disclosure > summary::-webkit-details-marker { display: none; }
+  .delete-confirm { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+                    margin-top: 0.4rem; }
+  .delete-confirm form { display: flex; align-items: center; gap: 0.5rem; margin: 0; }
+  button.danger { background: transparent; color: var(--danger); padding: 0.3rem 0.6rem;
+                  font-weight: 600; border-color: var(--danger); }
+  button.secondary { background: transparent; color: var(--accent); padding: 0.3rem 0;
+                     font-weight: 500; }
+  .share-form button { padding: 0.4rem 0.85rem; font-size: 0.85rem; }
+  {% comment %}
+  The `django.contrib.messages` flash's own rules USED to live here (C1
+  consolidation): `chat/_messages.html` is included from the index, the
+  thread page, and the workstream page, each of which can redirect back
+  to itself with something to say (delete/rename/duplicate/archive/
+  unarchive, a share/revoke, a pin/unpin or an edit/scope action) --
+  and, ROUND 14, from `/chat/all/` too, which posts no actions of its
+  own but can still be the page a redirect lands back on
+  (`chat/index.html`'s own `?archived=1` redirect is a GET, carrying
+  nothing, but a future action reached FROM this list should not have
+  to remember to add the include). A fragment cannot own rules the page
+  has to load, same reason `.share-panel`'s own controls live here
+  rather than in `_share_panel.html`.
+
+  C-21/C-52 MOVED `.messages`/`.msg` THEMSELVES ON: `jobs/base.html`,
+  `rag/base.html` and `vision/base.html` extend bare `_shell.html` too
+  and had each grown the identical copy for the identical reason, so
+  the shared recipe now lives at `_shell.html`, the deepest ancestor of
+  all four -- in the shell's own `<style>` tag, OUTSIDE `{% templatetag
+  openblock %} block extra_style {% templatetag closeblock %}`, so this
+  template's override above renders underneath it with no `{{ block.
+  super }}` needed.
+  {% endcomment %}
+  {% comment %}
+  ✕-SCALE REVIEW FIX (post-delta): the `.turn-attachment*` chip family
+  used to live in `chat/conversation.html`'s own `{% templatetag
+  openblock %} block chat_style {% templatetag closeblock %}` -- which
+  `chat/all.html` overrides with ITS OWN body (Django blocks do not
+  merge), so `chat/_attachment_chip.html` -- shared, ROUND-13 REVIEW
+  FIX MINOR 4, by `_turn_card.html` and included by `/chat/all/`'s own
+  preview pane -- rendered as unstyled default-browser buttons there,
+  with no flex layout at all. HERE now, the same reasoning the comment
+  just above states for the identical class of bug (`.messages`/`.msg`,
+  before C-21/C-52 moved them on to `_shell.html`): a fragment cannot
+  own rules more than one page has to load, so the rule lives where
+  every page that includes the fragment shares it, never in one page's
+  own override block.
+
+  ROUND 13 REPLACED ROUND 11'S OWN CONVERSATION-LEVEL ATTACHMENTS STRIP
+  with per-turn chips rendered INSIDE `chat/_turn_card.html`
+  (`card.attachments`) -- house tokens throughout, unchanged: `.chip`/
+  `.chip-done`/`.chip-failed`/`.chip-running` are ALREADY global
+  (`foundation/templates/_shell.html`'s own "one status pill this
+  project has"), so this needs no new colour vocabulary, only layout.
+  NO `max-height`/`overflow-y` HERE (round 12 whole-branch review B-3's
+  own fix, which this class replaces): that bound existed only because
+  the strip was the FIRST CHILD of `.composer-block { flex-shrink: 0 }`
+  -- an unbounded sibling of a block guaranteed to never lose the
+  shrink contest against `.thread-scroll` could squeeze the transcript
+  toward zero. A turn card's own chips carry no such risk: they live
+  INSIDE `.thread-scroll`, which already scrolls the whole transcript,
+  so a message with many attachments simply makes THAT card taller, the
+  same as a long answer already does. (`.legacy-attachments` USED TO
+  keep its own `max-height`/`overflow-y` for the one case that WAS
+  still that first-child risk -- the whole renderer it styled was
+  removed, consolidation wave, S10 ruling: no migration on `origin/
+  main` ever let the `NULL turn_id` row it existed for occur outside
+  this branch's own history.)
+  {% endcomment %}
+  .turn-attachments { display: flex; flex-direction: column; gap: 0.3rem;
+                      margin-top: 0.4rem; font-size: 0.85rem; }
+  .turn-attachment-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+  .turn-attachment-detail { margin: -0.15rem 0 0; }
+  {% comment %}
+  CHAT IMAGE ARTIFACTS (2026-09-16): an attached image's own thumbnail,
+  inside its chip (`chat/_attachment_chip.html`). HERE, not in
+  `conversation.html`'s own style block, because the rule's consumer is
+  a FRAGMENT and a fragment's rules belong in the nearest common
+  ancestor of every page that could render it -- the CSS-ownership gate
+  (`foundation/ops/tests/test_css_ownership.py`), and the same reason
+  `.turn-attachment-row` just above it sits here.
+
+  A FIXED BOX with `object-fit: cover`: an attachment list is a list, and
+  a portrait screenshot beside a landscape photo must not make one chip
+  four times the height of its neighbour. `line-height: 0` on the
+  wrapper kills the inline-image descender gap that would otherwise
+  push the chip's own baseline out of line with the rows above it.
+  {% endcomment %}
+  .turn-attachment-thumb { display: inline-flex; line-height: 0; flex: none; }
+  .turn-attachment-thumb img {
+    width: 2.5rem; height: 2.5rem; object-fit: cover;
+    border-radius: 6px; border: 1px solid var(--border);
+  }
+  {% comment %}
+  ROUND 13, REQUIREMENT E's POST-SEND REMOVE: the ✕ is a plain
+  `<button type="submit">` inside its own one-field `<form>` (`chat/
+  _attachment_chip.html`) -- `all: unset` strips the browser's own
+  button chrome down to the bare glyph (the SAME reset every other
+  icon-only control on this box already needs, no different in kind
+  from `conversation.html`'s own `.thread-actions button.secondary`
+  restyle), `cursor: pointer` restores the one affordance that matters,
+  and `color: var(--muted)` keeps it visually quiet until hovered/
+  focused -- a removal control earns a LOUDER treatment than a status
+  chip, never a QUIETER one, so `:hover`/`:focus-visible` switch to the
+  platform's own error tone rather than the accent one a neutral
+  control would get.
+  {% endcomment %}
+  .turn-attachment-remove { all: unset; cursor: pointer; color: var(--muted);
+                            font-size: 0.85rem; line-height: 1; padding: 0 0.2rem; }
+  .turn-attachment-remove:hover, .turn-attachment-remove:focus-visible {
+    color: var(--danger);
+  }
+  {% comment %}
+  CONSOLIDATION WAVE (audit B, S1) -- THE LIVE RENDERING DEFECT THIS
+  REPORT NAMES. `.turn`/`.turn-user`/`.turn-assistant`/`.turn-tool`/
+  `.turn-system`/`.turn-pending`/`.turn-error`/`.turn-text` (and its own
+  descendant rules)/`.turn-nested`/`.tool-card`/`.tool-head`/`.tool-
+  args`/`.tool-images`/`.tool-citations`/`.tool-output`/`.tool-args-
+  all`/`.tool-actions` USED TO live in `chat/conversation.html`'s own
+  `{% templatetag openblock %} block chat_style {% templatetag
+  closeblock %}` -- and Django template blocks do not cascade sideways:
+  `chat/all.html` overrides that SAME block with its own body and
+  inherits none of `conversation.html`'s. `chat/_turn_block.html` is
+  included by BOTH pages (`chat/all.html`'s own preview pane reuses it
+  verbatim, by that page's own docstring, specifically so a preview
+  "can never drift from what opening the thread in full would show"),
+  so the preview pane rendered turn cards and tool cards completely
+  UNSTYLED -- no bubble border or background, no left/right alignment,
+  no `white-space: pre-wrap` on user text (every newline in a quoted
+  message collapsed), no tool-card frame at all. `chat/base.html`
+  states the correct rule in its own words elsewhere on this box -- a
+  page cannot own rules a fragment two views render -- and the largest
+  fragment family in the app was the one violating it.
+
+  MOVED HERE VERBATIM (a contiguous region with no page-specific
+  selector in it), except `.tool-action`/`.tool-action:hover`, which
+  MERGED into the shared `.tool-action, .btn-compact` rule above
+  instead of moving unchanged (F7, the identical wave's own second
+  finding on this same block).
+  {% endcomment %}
+  .turn { border: 1px solid var(--border); border-radius: 8px; background: var(--panel);
+          padding: 0.75rem 1rem; margin-bottom: 0.75rem; max-width: 85%; }
+  .turn-user { margin-left: auto; }
+  .turn-assistant, .turn-tool, .turn-system { margin-right: auto; }
+  .turn-pending { opacity: 0.7; }
+  .turn-error { color: var(--danger); }
+  .turn-text { white-space: pre-wrap; }
+  {% comment %}
+  U2: `render_answer` (`rendering.py`) emits real `<p>`/`<ul>`/`<ol>`/
+  `<blockquote>`/`<pre><code>` tags for an assistant turn, so
+  `.turn-text`'s own `pre-wrap` is only relevant to a USER turn's
+  plain `linebreaks` text now -- these rules are for the elements
+  `render_answer` itself can produce.
+  {% endcomment %}
+  .turn-text p { margin: 0 0 0.6rem; white-space: normal; }
+  .turn-text p:last-child { margin-bottom: 0; }
+  .turn-text ul, .turn-text ol { margin: 0 0 0.6rem; padding-left: 1.4rem; }
+  .turn-text blockquote { margin: 0 0 0.6rem; padding-left: 0.75rem;
+                            border-left: 2px solid var(--border); color: var(--muted); }
+  .turn-text pre { background: var(--panel); border: 1px solid var(--border);
+                     border-radius: 6px; padding: 0.5rem 0.75rem; overflow-x: auto;
+                     white-space: pre; margin: 0 0 0.6rem; }
+  .turn-text code { font-family: monospace; }
+  {% comment %}
+  EVERY IMAGE INSIDE A TURN IS CAPPED TO ITS CARD (round 2, from the
+  owner's live proof: an image in an assistant reply painted straight
+  out through the card's right edge).
+
+  THE CAUSE WAS A MISSING WRAPPER, not a missing markdown rule.
+  `_tool_card.html` wraps its `_artifact_images.html` include in
+  `<div class="tool-images">` and picks up the `max-width` on the rule
+  below; `_turn_card.html` includes the SAME fragment for an ANSWER
+  card's own images with no wrapper at all, so those `<img>`s
+  inherited no constraint from anywhere and rendered at their intrinsic
+  pixel size -- which for a generated image is far wider than the
+  pane. (`render_answer` never emits an `<img>`: it escapes first and
+  recognises only bold/em/code/quote/list/fence, so literal markdown
+  image syntax in a reply stays literal text. The images an assistant
+  turn really shows are its artifacts.)
+
+  SCOPED TO `.turn`, NOT TO A WRAPPER CLASS, deliberately: that is
+  what makes it hold for the answer card, the tool card, a nested
+  delegated turn, and any future include that forgets a wrapper -- the
+  exact mistake that caused this. `height: auto` keeps the aspect
+  ratio when the width is what gets clamped. It sets no `max-height`,
+  so `.tool-images img`'s own 360px ceiling below still governs the
+  thumbnail grid it was written for.
+  {% endcomment %}
+  .turn img { max-width: 100%; height: auto; }
+  .tool-card { border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.75rem;
+               margin-top: 0.4rem; background: var(--panel); }
+  .tool-head { display: flex; justify-content: space-between; gap: 0.75rem;
+               font-size: 0.85rem; color: var(--muted); }
+  .tool-args { display: grid; grid-template-columns: auto minmax(0, 1fr);
+               gap: 0.15rem 0.75rem; margin: 0.35rem 0 0; font-size: 0.85rem; }
+  .tool-args dt { color: var(--muted); }
+  .tool-images img { max-width: 100%; max-height: 360px; display: block; margin-top: 0.4rem; }
+  .tool-citations { list-style: none; padding: 0; margin: 0.4rem 0 0; font-size: 0.85rem; }
+  .tool-output, .tool-args-all { margin-top: 0.4rem; font-size: 0.85rem; }
+  {% comment %}
+  UI-3c's link-button, sized and coloured like the card's own
+  controls rather than like a page button: it sits inside a tool card,
+  which is already a small, quiet block. Border and colour from the
+  shell's tokens, so it follows the theme with everything else.
+  {% endcomment %}
+  .tool-actions { margin: 0.5rem 0 0; }
+  .tool-output summary, .tool-args-all summary { cursor: pointer; color: var(--muted); }
+  .tool-output .tool-message { margin: 0.3rem 0 0; }
+  .turn-nested { margin-top: 0.5rem; font-size: 0.9rem; }
+  {% block chat_style %}{% endblock %}
+{% endblock %}
+{% block content %}
+<div class="chat-layout">
+  {% block chat_sidebar %}{% endblock %}
+  <div class="chat-wrap">
+    {% block chat_content %}{% endblock %}
+  </div>
+</div>
+{% endblock %}

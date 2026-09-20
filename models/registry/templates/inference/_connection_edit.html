@@ -1,0 +1,119 @@
+{% comment %}
+Inline edit form for one registered `ModelConnection` — the connection's one editing
+home, rendered once per connection inside "Registered connections"
+(`_registered_connection.html`, bound to `item.connection`, inside a closed-by-default
+`<details class="conn-edit-details">` "Edit" disclosure). The role-row and installed-row
+disclosures are read-only reflections that link here instead (`#conn-<pk>`) rather than
+each carrying their own copy of this form.
+
+Posts to `connection_add` with a `connection_id` field, which switches that view into
+update mode (same validation as create; CI-unique name excludes self). The confirm
+checkbox renders for embeddings-capable connections — the server requires it only when
+the edit actually alters the fingerprint of a connection bound to an embeddings role.
+`capabilities` and `endpoint_override` come from the surrounding context (plain include);
+`form_scope` keeps the confirm checkbox id namespaced (kept as a parameter rather than
+hardcoded in case this is ever rendered from more than one place again).
+
+Engine (labeled "Model server" for the operator): a `<select>` over `supported_engines`
+(every registered `models.contracts.engines.ENGINES` entry, plain include from context)
+instead of a free-text field -- the support boundary is the engine ADAPTER, so the form
+can only ever submit one that actually exists. Each option's `title` carries the
+implementing module's file path, so the PY file behind the API is visible right in the
+picker. `data-endpoint` (the adapter's usual address) rides along per registered option
+for the console's progressive-enhancement endpoint autofill -- the stored endpoint value
+below is what renders and posts; switching the model server before touching the field
+offers the new server's usual address (visible and editable before saving), while a field
+the operator has typed in is never clobbered.
+
+`connection.engine` may name NO registered adapter at all (legacy data, a
+renamed/deregistered engine) -- if the `<select>` only ever listed registered names,
+nothing would be `selected`, the browser would silently default to the first option, and
+an utterly unrelated edit (e.g. renaming the connection) would silently reassign its
+engine. So an unregistered stored value gets its OWN selected option here too, labeled
+"(not registered)" -- it still POSTS that exact value (nothing disabled), and
+`connection_add`'s registry check (views.py) only rejects a CHANGE to an unregistered
+engine, never an unrelated save that reposts the same already-unregistered one unchanged.
+
+Context window: an optional positive-integer field, blank when unset. Blank posts as ""
+-- `connection_add` treats that as "no opinion" and the engine adapter's own bounded
+default applies; a set value caps the KV cache this connection's requests ask the engine
+to allocate.
+
+Descriptor and rank: `descriptor` is a free-text line in the OPERATOR'S OWN words -- the
+platform never auto-fills, suggests, or derives it, so the label alone is the only
+guidance given, no placeholder implying a taxonomy. `rank` is a plain positive integer;
+lower sorts first everywhere a picker orders connections
+(`ModelConnection.objects.picker_order()`). Both are blank-valid (unset); `connection_add`
+form-validates length/positivity but never coerces or guesses either one.
+
+Memory footprint override (`footprint_gb`, T2b): same restraint as descriptor -- no
+placeholder, no suggested value, since the label already says the measured value applies
+when blank. Prefilled from `connection.footprint_override_gb` (GB, one decimal) rather than
+the raw bytes field, so what an operator sees here is what they'd type; `connection_add`
+stores it back as `round(gb * 1024**3)`, the same 1024 base `_human_size` renders with, so
+the round trip is exact.
+
+Capability (T9, multi-capability registration): a CHECKBOX GROUP, not a single-select --
+a model can honestly hold more than one platform capability (a vision-capable chat model
+is both "chat" and "vision"), and the old `<select>` silently dropped every capability but one
+on save, THE bug this task fixes. Every box whose value is in `connection.capabilities`
+starts checked, so editing an unrelated field (e.g. the descriptor) and saving round-trips
+every capability the connection already had -- nothing is lost. `connection_add` reads the
+checked set with `request.POST.getlist("capability")` and stores the whole list; an edit
+that leaves every box unchecked is refused (never a capability-less connection).
+
+Family + variant + companions (final-review B1, T13/ADR 0012 D-EDIT-6/8): the SAME
+`inference/_family_fields.html` partial the Add form renders (ADR 0012 D-EDIT-2/3) -- reused,
+not copied, so the option lists and the markup can never drift between "declare a family at
+registration" and "declare or change it later". `id_prefix` is namespaced per connection
+(`edit-{{ connection.id }}-`) since this form renders once per row in "Registered
+connections" -- several can be open at once. Preselected from `connection.config`, which is
+`None` for a plain checkpoint (every `{{ }}` below reads as blank, same as the Add form's
+fresh state). `connection_add`'s own `family_declared` check (views.py) is what makes this
+safe to add here: this form always POSTs `family` (blank or not) once these fields exist, so
+an edit that changes only, say, the descriptor still round-trips whatever family/variant the
+connection already had -- exactly the capability checkboxes' own round-trip guarantee,
+extended to these four fields.
+{% endcomment %}
+<form class="inline-form conn-edit" method="post" action="{% url 'inference-connection-add' %}{{ assistant.open_query }}">
+  {% csrf_token %}
+  {% if endpoint_override %}<input type="hidden" name="endpoint_override" value="{{ endpoint_override }}">{% endif %}
+  <input type="hidden" name="connection_id" value="{{ connection.id }}">
+  <label>Name<input type="text" name="name" value="{{ connection.name }}" required></label>
+  <label>Model server
+    <select name="engine">
+      {% for eng in supported_engines %}
+      <option value="{{ eng.name }}" title="{{ eng.source_path }}" data-endpoint="{{ eng.default_endpoint }}"{% if eng.name == connection.engine %} selected{% endif %}>{{ eng.name }}</option>
+      {% endfor %}
+      {% if connection.engine not in supported_engine_names %}
+      <option value="{{ connection.engine }}" selected>{{ connection.engine }} (not registered)</option>
+      {% endif %}
+    </select>
+  </label>
+  <label>Endpoint<input type="text" name="endpoint" value="{{ connection.endpoint }}" required></label>
+  <label>Model ID<input type="text" name="model_id" value="{{ connection.model_id }}" required></label>
+  <fieldset class="capability-group">
+    <legend>Capability</legend>
+    {% for cap in capabilities %}
+    <label class="capability-option">
+      <input type="checkbox" name="capability" value="{{ cap }}"{% if cap in connection.capabilities %} checked{% endif %}>
+      {{ cap }}
+    </label>
+    {% endfor %}
+  </fieldset>
+  {% with connection_id_str=connection.id|stringformat:"s" %}
+  {% include "inference/_family_fields.html" with id_prefix="edit-"|add:connection_id_str|add:"-" selected_family=connection.config.family selected_variant=connection.config.variant selected_text_encoder=connection.config.text_encoder selected_vae=connection.config.vae %}
+  {% endwith %}
+  <label>Embed dim (embeddings only)<input type="number" name="embed_dim" min="1" value="{{ connection.embed_dim|default_if_none:'' }}"></label>
+  <label>Context window (tokens, optional — chat models only)<input type="number" name="context_window" min="1" value="{{ connection.context_window|default_if_none:'' }}"></label>
+  <label>Memory footprint override (GB, optional — the measured value is used when blank)<input type="number" name="footprint_gb" min="0.1" step="0.1" value="{{ connection.footprint_override_gb }}"></label>
+  <label>Descriptor (optional)<input type="text" name="descriptor" maxlength="80" value="{{ connection.descriptor }}"></label>
+  <label>Rank (optional)<input type="number" name="rank" min="1" value="{{ connection.rank|default_if_none:'' }}"></label>
+  {% if "embeddings" in connection.capabilities %}
+  <span class="confirm-row">
+    <input type="checkbox" name="confirm" value="yes" id="confirm-edit-{{ form_scope }}-{{ connection.id }}">
+    <label for="confirm-edit-{{ form_scope }}-{{ connection.id }}">Confirm rebind</label>
+  </span>
+  {% endif %}
+  <button type="submit">Save changes</button>
+</form>

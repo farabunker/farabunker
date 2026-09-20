@@ -1,0 +1,130 @@
+{% comment %}
+ONE CONVERSATION ROW, shared by the rail's PINNED and CHATS sections
+alike (round 20, owner: "pin chats so it's always shown in its own
+se[c]tion... between Workstreams and Chats" -- pinned rows "use the
+same row component as CHATS"). Extracted here rather than left typed
+out twice: `chat/_sidebar.html`'s own two loops (`sidebar_pinned_rows`,
+`sidebar_rows`) both `{% templatetag openblock %} include "chat/
+_sidebar_row.html" with row=row {% templatetag closeblock %} ` this one
+fragment per row instead.
+
+Expects `row` (one of `sidebar_pinned_rows`/`sidebar_rows`'s own dict
+shape -- `conversation`, `may_manage`, `current`) `with`-passed by the
+include site.
+
+ARCHIVE/UNARCHIVE AND PIN/UNPIN ARE DECIDED FROM THE ROW ITSELF
+(`row.conversation.archived_at`/`.pinned_at`), NEVER FROM THE PAGE-LEVEL
+`sidebar_archived` FLAG this file's own predecessor used for the
+archive toggle. That flag agrees with every row in `sidebar_rows`
+(`agents/chat/sidebar.py` filters that whole list to one archived state
+at a time), so reading it there was never wrong -- but a row in
+`sidebar_pinned_rows` is UNCONDITIONALLY non-archived regardless of
+which page is rendering it (`sidebar_context`'s own `archived_at__
+isnull=True` filter on that list), so a page-level flag would show
+"Unarchive" on a pinned row while viewing `/chat/?archived=1`, which is
+never true of that row. Reading the row's own column is correct in
+both places, and changes nothing for `sidebar_rows`, whose rows already
+all agree with the page-level flag anyway.
+{% endcomment %}
+<div class="chat-nav-row{% if row.current %} current{% endif %}">
+  <a href="{% url 'chat-conversation' row.conversation.id %}"
+     title="{{ row.conversation.title|default:'Untitled conversation' }}">{{ row.conversation.title|default:"Untitled conversation" }}</a>
+  {% if row.conversation.workstream_id %}
+  {% comment %}
+  THE STREAM CHIP (Part 1's own requirement: "each with a small
+  stream chip naming its workstream"). `row.conversation.
+  workstream` is the SAME `select_related("workstream")` join
+  `may_manage_conversation`'s own stream-owner branch already
+  pays for -- this reads it a second time, for a second reason,
+  at no extra query cost (`agents/chat/sidebar.py::sidebar_
+  context`'s own docstring has the full accounting). `.chip-
+  queued`'s neutral tone -- the SAME class `chat/_turn_card.html`
+  already uses for its own "This chat only"/"Not retrievable
+  here" SCOPE chips -- since this is a scope/context fact, not a
+  status.
+  {% endcomment %}
+  <span class="chip chip-queued stream-chip" title="{{ row.conversation.workstream.name }}">{{ row.conversation.workstream.name }}</span>
+  {% endif %}
+  {% if row.may_manage %}
+  <details class="chat-menu">
+    <summary aria-label="Actions for {{ row.conversation.title|default:'this conversation' }}">&hellip;</summary>
+    <div class="chat-menu-body">
+      {% comment %}
+      Rename reveals its form rather than opening a page: the input
+      is prefilled with the title as it stands, and the server
+      re-truncates it through the same `truncate_title` an
+      auto-derived title goes through.
+      {% endcomment %}
+      <details>
+        <summary>Rename</summary>
+        <form class="chat-rename-form" method="post"
+              action="{% url 'chat-conversation-rename' row.conversation.id %}">
+          {% csrf_token %}
+          <input type="hidden" name="next" value="{{ request.get_full_path }}">
+          <input type="text" name="title" maxlength="255" required
+                 aria-label="Conversation title"
+                 value="{{ row.conversation.title }}">
+          <button type="submit">Save</button>
+        </form>
+      </details>
+
+      <form method="post"
+            action="{% url 'chat-conversation-duplicate' row.conversation.id %}">
+        {% csrf_token %}
+        <button type="submit">Duplicate</button>
+      </form>
+
+      {% if row.conversation.pinned_at %}
+      <form method="post"
+            action="{% url 'chat-conversation-unpin' row.conversation.id %}">
+        {% csrf_token %}
+        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+        <button type="submit">Unpin</button>
+      </form>
+      {% else %}
+      <form method="post"
+            action="{% url 'chat-conversation-pin' row.conversation.id %}">
+        {% csrf_token %}
+        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+        <button type="submit">Pin</button>
+      </form>
+      {% endif %}
+
+      {% if row.conversation.archived_at %}
+      <form method="post"
+            action="{% url 'chat-conversation-unarchive' row.conversation.id %}">
+        {% csrf_token %}
+        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+        <button type="submit">Unarchive</button>
+      </form>
+      {% else %}
+      <form method="post"
+            action="{% url 'chat-conversation-archive' row.conversation.id %}">
+        {% csrf_token %}
+        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+        <button type="submit">Archive</button>
+      </form>
+      {% endif %}
+
+      {% comment %}
+      The EXISTING delete route and the existing details-reveal
+      confirm, nested one level deeper. No Cancel button: the one on
+      the thread page carries an inline `onclick`, and this fragment
+      adds no script of any kind -- closing the menu is the cancel.
+      {% endcomment %}
+      <details>
+        <summary>Delete</summary>
+        <div class="delete-confirm">
+          <span class="muted">Delete this conversation and every turn in it?
+            Its tool-call audit trail is kept.</span>
+          <form method="post"
+                action="{% url 'chat-conversation-delete' row.conversation.id %}">
+            {% csrf_token %}
+            <button type="submit" class="danger">Yes, delete</button>
+          </form>
+        </div>
+      </details>
+    </div>
+  </details>
+  {% endif %}
+</div>

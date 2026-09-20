@@ -1,0 +1,13 @@
+# Dev overrides — auto-merged by `docker compose` (no -f needed).
+#
+# Runs the web app with Django's auto-reloader so edits under the ./:/app bind
+# mount take effect immediately, with no image rebuild for code changes. The
+# base compose.yaml runs uvicorn (the production-style server) instead.
+#
+# For a production/appliance run that should NOT auto-reload, use the base file
+# only:  docker compose -f compose.yaml up -d
+services:
+  web:
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py runserver 0.0.0.0:8000"

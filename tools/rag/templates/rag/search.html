@@ -1,0 +1,180 @@
+{% extends "rag/base.html" %}
+{% comment %}
+Retrieval-only search page (W6, ADR 0014 §18): the score floor's visible
+surface. Zero JS -- the form re-submits as a plain GET (a search is a
+bookmarkable/shareable URL, matching documents.html's own search form), and
+every result renders directly from the view's context. Shared shell
+(tokens, body, nav, button base) lives in rag/base.html; only search-specific
+styles/markup are here.
+{% endcomment %}
+{% block title %}Search — farabunker{% endblock %}
+
+{% block extra_style %}
+  main {
+    max-width: var(--page-max-width);
+    margin: 0 auto;
+  }
+  form.search-form {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    flex-wrap: wrap;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+  }
+  form.search-form input[type="search"] {
+    flex: 1;
+    min-width: 12rem;
+    padding: 0.55rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+  }
+  form.search-form select {
+    padding: 0.55rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+  }
+  {% comment %}
+  `.messages`/`.msg` moved to `_shell.html` (C-21/C-52), which renders
+  them unconditionally from its own `<style>` tag -- no `{{ block.super
+  }}` needed here. This page's own `.msg` stays regardless: it never
+  rendered `{% templatetag openblock %} for message in messages {%
+  templatetag closeblock %}` in the first place (its `.msg`/`.msg.error`
+  are this page's own error display, not the `django.contrib.messages`
+  flash), and its spelling genuinely differs from the shared recipe --
+  its own `margin-top` instead of `margin-bottom`, its own padding, and
+  the `var(--shelf-active-bg, var(--panel))` fallback, a default for a
+  custom property only `documents.html` defines. The shell's `border`
+  still lands underneath this rule (same specificity, earlier in the
+  cascade), layered under this page's own properties.
+  {% endcomment %}
+  .msg {
+    margin-top: 1rem;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    background: var(--shelf-active-bg, var(--panel));
+    color: var(--text);
+    font-size: 0.9rem;
+  }
+  .msg.error {
+    background: var(--error-bg);
+    color: var(--error-text);
+  }
+  .empty {
+    margin-top: 1.5rem;
+    color: var(--muted);
+    font-size: 0.9rem;
+    {% comment %}
+    `padding: 0` is NOT a no-op default here (review round 2, task 32):
+    the shell's own `.empty` (C-22/C-23/C-24) sits at the SAME
+    specificity, earlier in source order, and a same-selector rule does
+    not replace it wholesale -- the cascade unions the two per property.
+    Without this line, this page's empty-results box would silently pick
+    up the shell's `padding: 1rem 0.25rem 1.25rem`, which it never had.
+    {% endcomment %}
+    padding: 0;
+  }
+  ul.search-results {
+    list-style: none;
+    margin: 1.5rem 0 0;
+    padding: 0;
+  }
+  ul.search-results li {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.9rem 1.1rem;
+    margin-bottom: 0.75rem;
+  }
+  .result-title {
+    font-weight: 600;
+  }
+  .result-title a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .result-title a:hover {
+    text-decoration: underline;
+  }
+  .result-locator {
+    font-weight: 400;
+    color: var(--muted);
+  }
+  .result-score {
+    margin-top: 0.25rem;
+    color: var(--muted);
+    font-size: 0.85rem;
+    font-family: var(--mono);
+  }
+  .result-snippet {
+    margin-top: 0.5rem;
+    color: var(--text);
+    font-size: 0.92rem;
+    white-space: pre-wrap;
+  }
+{% endblock %}
+
+{% block nav_current_search %}current{% endblock %}
+
+{% block content %}
+<main>
+  <h1>Search</h1>
+  <p class="tagline">The passages themselves, ranked — retrieval with no answer written over it.</p>
+
+  <form class="search-form" method="get" action="{% url 'rag-search' %}">
+    <input
+      type="search"
+      name="q"
+      value="{{ query }}"
+      placeholder="Search your ingested documents…"
+      aria-label="Search query"
+    >
+    <select name="category" aria-label="Category">
+      <option value="">All categories</option>
+      {% for category in categories %}
+      <option value="{{ category.name }}"{% if category.name == category_param %} selected{% endif %}>{{ category.name }}</option>
+      {% endfor %}
+      <option value="Uncategorized"{% if category_param == "Uncategorized" %} selected{% endif %}>Uncategorized</option>
+    </select>
+    <button type="submit">Search</button>
+  </form>
+
+  {% if error %}
+  <div class="msg error">{{ error }}</div>
+  {% elif model_unavailable %}
+  <div class="msg error">
+    {{ model_unavailable }}
+    <a href="{% url 'inference-console' %}">Open the model console</a>
+  </div>
+  {% elif results is not None %}
+    {% if results %}
+    <ul class="search-results">
+      {% for result in results %}
+      <li>
+        <div class="result-title">
+          {% if result.document_url %}
+          <a href="{{ result.document_url }}" target="_blank" rel="noopener">{{ result.title }}</a>
+          {% else %}
+          {{ result.title }}
+          {% endif %}
+          {% if result.locator_text %}<span class="result-locator">{{ result.locator_text }}</span>{% endif %}
+        </div>
+        <div class="result-score">{{ result.score_display }} — {{ result.score_label }}</div>
+        <div class="result-snippet">{{ result.snippet }}</div>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <div class="empty">{{ empty_message }}</div>
+    {% endif %}
+  {% endif %}
+</main>
+{% endblock %}

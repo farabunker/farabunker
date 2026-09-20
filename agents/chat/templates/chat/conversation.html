@@ -1,0 +1,900 @@
+{% extends "chat/base.html" %}
+{% comment %}
+One thread: the agent it belongs to, every turn in order, and the
+message form that keeps it going.
+
+Works with no JavaScript at all: `#turn-form` is a plain
+`method="post"` form and the answer, without a script running, is a
+full page reload. `{% block scripts %}` at the bottom is progressive
+enhancement over that -- every rule in it exists because the page
+above already works without it.
+
+The card loop lives in `chat/_turn_block.html`, included below, so this
+page's inline render and `turn_status`'s poll body come out
+of the SAME loop over the SAME fragment.
+
+`#turn-errors` is an EMPTY slot, never the thread itself: a rejected
+submission's error lands there, and a non-XHR POST's re-render
+writes `turn_error` server-side into the SAME slot -- exactly as
+`tools/vision/templates/vision/create.html`'s `#form-errors` does, so a
+rejected message can never be mistaken for a sent one. The submit
+handler's XHR body is NOT one shape: `turn_create` answers a
+400 with the `_form_errors.html` fragment (`text/html`) and every other
+refusal (409/503) with `{"error": ...}` (`application/json`), so the
+handler reads `Content-Type` and either sets `#turn-errors.innerHTML`
+to the fragment or `.textContent` to the JSON's `error` string -- never
+`response.json()` unconditionally, which would throw on the fragment
+and be caught as a fabricated "could not reach farabunker".
+
+`data-pending-turn`/`data-pending-status-url` on the wrapper document
+the no-JS redirect's contract server-side -- the `?pending=<turn_id>`
+answer to "where did my message go", with the status URL reversed here
+in Python rather than built in the script. The bootstrap itself no
+longer branches on them (chat-poller-cleanup): it scans every rendered
+`.turn-pending[data-status-url]` card, which covers the redirect's own
+turn identically to a plain refresh's, so these attributes stay only
+as the documented contract `thread.py` still supplies.
+{% endcomment %}
+{% comment %}
+U5: the browser tab names the CONVERSATION, not just its agent, when
+there is one -- `conversation.title` is already word-boundary-truncated
+with a trailing "…" at write time (`service.truncate_title`), so this
+tag needs no truncation logic of its own.
+{% endcomment %}
+{% block title %}{{ conversation.title|default:agent.name }} — Chat — farabunker{% endblock %}
+{% block chat_style %}
+    {% comment %}
+    CONSOLIDATION WAVE (audit B, S1 -- THE ONE LIVE RENDERING DEFECT
+    this report names): the turn/tool card visual language (`.turn*`/
+    `.tool*`, twenty selectors) used to live here, page-scoped, even
+    though `chat/_turn_block.html` -- which renders it -- is included
+    by BOTH this page AND `chat/all.html`'s own preview pane. Django
+    blocks do not cascade sideways, so `all.html`'s own `chat_style`
+    override shadowed all of it entirely, and the preview pane rendered
+    every turn/tool card completely unstyled. MOVED to `chat/base.html`
+    (immediately before this block's own insertion point), the shared
+    ancestor both pages already extend -- see that file's own comment
+    for the full defect and the fix. `.tool-action` also MERGED into
+    the shared `.btn-compact` recipe there (F7, the same wave).
+    {% endcomment %}
+    #turn-errors:empty { display: none; }
+    #turn-errors { color: var(--danger); margin-bottom: 0.75rem; }
+    {% comment %}
+    ROUND 18 MOVES THE COMPOSER'S OWN CSS (`.composer-card`/`.composer-
+    textarea`/`.composer-toolbar*`/`.attach-*`) to `chat/base.html` --
+    `chat/_composer.html` is now a THIRD consumer of it (this page was
+    the second; `chat/index.html`'s own composer was the first to need
+    the shared `.composer-card` recipe, moved there in the workstream
+    composition pass), and a shared fragment's CSS belongs to the
+    shared ancestor from birth (`foundation/ops/tests/test_css_
+    ownership.py`'s own placement rule). The `<details>`-based attach
+    popup (`.attach-trigger`, `.attach-form`, `.attach-label`, and the
+    `.composer-card .attach-trigger .chat-menu-body` half of the two
+    merged selectors just below) is RETIRED entirely, not merely moved
+    -- round 18's own addendum (owner feedback: "the box that allows me
+    to add it just stays hovered... when I submit... the add attachment
+    box remains") replaces it with a plain, always-in-flow chip stack
+    and a `<label for>` (`chat/_attach_files.html`'s own module comment
+    has the full rewrite).
+    {% endcomment %}
+    {% comment %}
+    QUIET ACTIONS ROW (owner feedback round 9, verbatim: "when I'm on
+    the chat screen the share shouldn't be a main feature. it should be
+    a suble side feature ... if i click on it I get more options (via a
+    popup)"). `Share…` and `Delete this conversation` render here, in
+    one small row below the composer -- not inside `.thread-scroll` any
+    more (that block's own comment below is updated to say so) and not
+    as a mid-page section either, which is what the owner's own
+    screenshot showed dominating the page.
+
+    THE MARKUP LIVES IN `chat/_thread_actions.html` NOW (audit 2, S2),
+    and these rules stay here on purpose: that fragment has exactly ONE
+    consumer, this page, so this page is still the deepest template
+    that is an ancestor of every template using them. A second
+    consumer is what would move them to `chat/base.html`, and
+    `foundation/ops/tests/test_css_ownership.py` is what will say so.
+    {% endcomment %}
+    .thread-actions { display: flex; align-items: flex-start; flex-wrap: wrap;
+                       gap: 1rem; margin-top: 0.6rem; font-size: 0.85rem; }
+    {% comment %}
+    REUSING `.chat-menu`/`.chat-menu-body` (`chat/base.html`) -- THE
+    SAME OVERLAY THE SIDEBAR'S PER-CONVERSATION MENU USES -- rather
+    than a new popup recipe. `Delete this conversation` gets the SAME
+    `chat-menu` class for its muted, no-marker summary (owner's ruling:
+    "not a primary button"), but never `chat-menu-body` on its confirm
+    -- that stays IN-FLOW.
+
+    ROUND 18 RETIRES THE ATTACH DOOR'S OWN COPY of everything below
+    (`.composer-card .attach-trigger .chat-menu-body` and its submit-
+    button rule, CONSOLIDATION WAVE audit A F6's own merge) along with
+    the popup it styled -- `Share…` is the only `chat-menu-body`-
+    carrying item left in this row, so the two merged selectors below
+    are solo again. WIDTH/PADDING/OPEN-DIRECTION/ANCHOR are UNCHANGED
+    from the reasoning that originally set them (round 9b's own
+    composition pass): 22rem, card-consistent `1rem 1.25rem` padding,
+    upward-opening (`bottom: 100%`) since this row sits near the bottom
+    of `.chat-wrap`'s own flex column, anchored `left: 0` so the panel
+    grows rightward into the column rather than off its own left edge.
+    {% endcomment %}
+    .thread-actions .chat-menu-body {
+      width: 22rem;
+      max-width: calc(100vw - 2rem);
+      top: auto;
+      bottom: 100%;
+      margin-top: 0;
+      margin-bottom: 0.3rem;
+      padding: 1rem 1.25rem;
+      align-items: stretch;
+      left: 0;
+      right: auto;
+    }
+    {% comment %}
+    THE SUBMIT BUTTON, A REAL BUTTON (owner: "the submit is a bare text
+    link... a real click missed it"). `.chat-menu-body button` (`chat/
+    base.html`) flattens every button inside ANY overlay panel to a
+    quiet text link -- exactly right for the sidebar's own Rename/Save,
+    exactly wrong for Share now that its panel reads as a small card.
+    {% endcomment %}
+    .thread-actions .chat-menu-body button[type="submit"] {
+      background: var(--accent);
+      color: var(--accent-text);
+      border: none;
+      border-radius: 6px;
+      padding: 0.55rem 1.25rem;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    {% comment %}
+    OWNER-REQUESTED CHAT LAYOUT FIX: this page owns the ONE consumer of
+    `chat/base.html`'s `.chat-wrap` that does NOT want its generic
+    "whole column scrolls" treatment -- a long thread must not carry the
+    composer out of view with it, so this page needs a scroll boundary
+    that sits BETWEEN the transcript and the composer, not around the
+    whole column. `overflow-y: visible` cancels the base rule's
+    `overflow-y: auto` (same selector, later in the cascade, so it wins
+    outright); `.thread-scroll` below is the region that actually
+    scrolls instead.
+
+    `.thread-scroll` wraps the transcript (`.thread`, untouched -- see
+    its own note below for why) and NOTHING ELSE any more (owner
+    feedback round 9): the share panel and the delete disclosure used
+    to live inside it too (UX point 4's "reachable by scrolling past
+    the transcript"), but both moved out to `.thread-actions` below the
+    composer once sharing stopped being in-flow content at all -- a
+    popup and a muted row below the ALWAYS-VISIBLE composer needs no
+    scrolling to reach, which is a step further in the SAME direction
+    UX point 4 was already pointing. `flex: 1 1 auto` is what lets it claim exactly the
+    space `.chat-wrap`'s fixed-height header content (H1, banners,
+    notes) does not use; `min-height: 0` is the same flex-item override
+    every ancestor in this chain already needed, for the same reason --
+    without it this region's own `auto` minimum (its content's height)
+    would fight the `flex: 1 1 auto` sizing and the scrollbar would
+    never actually appear.
+    {% endcomment %}
+    .chat-wrap { overflow-y: visible; }
+    {% comment %}
+    `position: relative` makes `.thread-scroll` the `offsetParent` of
+    `.thread`, its first child -- the scroll script's `threadBottomOffset
+    ()` (`{% templatetag openblock %} block scripts {% templatetag
+    closeblock %}` below) relies on that to read `.thread`'s own
+    position as a plain 0 rather than walking up to whatever OTHER
+    positioned ancestor it would otherwise resolve against. It changes
+    no pixels on its own -- nothing here is anchored off it the way
+    `chat/base.html`'s `.chat-menu` uses the same declaration for its
+    dropdown panel.
+    {% endcomment %}
+    .thread-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; position: relative; }
+    {% comment %}
+    `.composer-block` (round 9c, owner: "I don't see how I can add an
+    attachment to the chat..?" -- the actions row landed below the
+    fold on a normal-height window). `flex-shrink: 0` is the one
+    property this whole fix is: without it, this block defaults to
+    `flex-shrink: 1` same as `.thread-scroll` above, and the two
+    compete for the SAME squeeze whenever the flex column's fixed
+    height (`.chat-layout`'s own `calc(100vh - 10rem)`, round 15's own
+    restored top-bar arithmetic) can't fit
+    everything -- a squeeze `.thread-scroll`'s own `min-height: 0`
+    then loses on `overflow-y: visible` (this page cancels the base
+    rule's `auto`), rendering below the box with no scrollbar to
+    reach it. `flex-shrink: 0` here removes this block from THAT
+    contest: whenever `.composer-block`'s own natural height fits
+    inside the column's cap at all, `.thread-scroll` is the ONLY item
+    flexbox may shrink, all the way to zero if it must, before the
+    composer or the actions row give up a single pixel.
+
+    TRUTH-SWEEP (round 9c scoped review, Important 1): that guarantee
+    is conditional, not absolute, and an earlier draft of this comment
+    overstated it. `flex-shrink: 0` protects `.composer-block` from
+    losing the SHRINK CONTEST against `.thread-scroll` -- it cannot
+    make the column taller than `.chat-layout`'s own fixed cap. On an
+    EXTREMELY short window -- shorter than the composer's own header
+    content plus `.composer-block`'s full natural height combined,
+    i.e. shorter than everything this page needs even with the
+    transcript at 0px -- `.chat-wrap` still has nowhere left to put the
+    excess, and `overflow-y: visible` still lets it spill past the
+    box's bottom edge with no scrollbar to reach it, same failure mode
+    as before this fix, just needing a FAR shorter window to trigger
+    than round 9's own regression did. Accepted, not solved: this fix
+    raises the floor from "the actions row alone" to "the actions row
+    AND everything else non-scrolling on the page", which is the
+    realistic threshold every browser chrome this box is tested against
+    clears; a window shorter than that is a residual, disclosed gap,
+    not a claim this comment makes falsely. See `.composer-block`'s
+    own markup comment (`chat_content` below) for the full diagnosis.
+    {% endcomment %}
+    .composer-block { flex-shrink: 0; }
+    {% comment %}
+    NARROW SCREENS NEED NO EXPLICIT UNDO HERE (unlike `chat/base.html`'s
+    own `@media (max-width: 1000px)` block, which resets several
+    properties by name). Below that width `chat/base.html` already sets
+    `.chat-wrap { height: auto; }`, which starves `flex: 1 1 auto` above
+    of any extra space to grow into -- a `flex-direction: column`
+    container with an `auto` cross size sizes every child to its own
+    content, never stretches one to fill leftover room that does not
+    exist. `.thread-scroll`'s `overflow-y: auto` is therefore already
+    inert there: a box sized to its own content never has anything to
+    scroll. Today's plain document flow (UX point 5) falls out of that
+    for free, the same way it does for `.chat-wrap`'s own `overflow-y`
+    one level up.
+    {% endcomment %}
+{% endblock %}
+{% comment %}
+UI-3b: the same sidebar the index renders, from the same context
+builder -- so every thread page is one click from every other thread
+and never goes back through a landing screen. Pure server-rendered
+HTML; the `{% templatetag openblock %} block scripts {% templatetag
+closeblock %}` below is untouched by it.
+{% endcomment %}
+{% block chat_sidebar %}{% include "chat/_sidebar.html" %}{% endblock %}
+{% block chat_content %}
+<p class="muted"><a href="{% url 'chat-index' %}">Chat</a></p>
+<h1>{{ agent.name }}</h1>
+{% if agent.description %}<p class="muted">{{ agent.description }}</p>{% endif %}
+
+{% include "chat/_messages.html" %}
+
+{% if unavailable %}
+{% comment %}
+A BANNER, NOT A STATUS CODE (`views/thread.py::thread_context`'s own
+comment) -- this page is a 200 either way. Names the role, not a
+model.
+{% endcomment %}
+{% include "chat/_unavailable.html" with message=unavailable %}
+{% endif %}
+{% for note in notes %}
+<p class="muted">{{ note }}</p>
+{% endfor %}
+
+{% comment %}
+OWNER-REQUESTED CHAT LAYOUT FIX: `.thread-scroll` is the ONE region on
+this page that scrolls -- `chat_style` above makes it `flex: 1 1 auto;
+overflow-y: auto`, the fill for whatever height `.chat-wrap`'s own
+fixed-height header content (everything above this point) leaves
+behind. `.thread` itself is UNCHANGED -- no new class, no new wrapper
+around IT -- because the poller script below finds it with
+`document.querySelector(".thread")` and both `insertBlock` and
+`swapBlock` call `thread.appendChild` / `thread.querySelector` assuming
+it holds turn cards ONLY. `.thread` is ALSO `.thread-scroll`'s ONLY
+child now (owner feedback round 9 moved the share panel and the delete
+disclosure out to `.thread-actions`, below the composer) -- kept a
+`<div>` wrapper of its own regardless, rather than folding it into
+`.thread-scroll` directly, since a future section that genuinely needs
+to scroll alongside the transcript (unlike the two that just left)
+still has somewhere to be added as a sibling without touching the
+poller's own append target.
+{% endcomment %}
+<div class="thread-scroll">
+  <div class="thread" data-pending-turn="{{ pending_turn_id }}"
+       {% if pending_status_url %}data-pending-status-url="{{ pending_status_url }}"{% endif %}>
+    {% include "chat/_turn_block.html" %}
+  </div>
+</div>
+
+{% comment %}
+THE COMPOSER + ACTIONS BLOCK (UX point 2, extended round 9c). ROUND 9c
+ROOT CAUSE (owner: "I don't see how I can add an attachment to the
+chat..?" -- a stream conversation with NO actions row visible at all).
+Verified against the actual height rules, not assumed: `.chat-wrap`
+(`chat/base.html`, gated `@media (min-width: 1000.01px)`) is `display:
+flex; flex-direction: column; height: 100%` inside `.chat-layout`'s own
+`height: calc(100vh - 10rem)` (round 15's own restored top bar returned
+the subtracted number to its pre-round-14 figure) -- a HARD CAP, not a
+scroll container on
+this page (`overflow-y: visible` above cancels the base rule's own
+`auto`). Round 9's `.thread-actions` landed as a FOURTH flex item after
+`.thread-scroll`/`#turn-errors`/`#turn-form`, with no `flex-shrink: 0`
+of its own -- exactly like `#turn-errors` and `#turn-form` before it,
+which is the point: nothing outside `.thread-scroll` had ever needed an
+explicit shrink guard, because `.thread-scroll`'s own `min-height: 0`
+(one comment block up) was ALWAYS the item flexbox squeezes toward zero
+first, protecting everything after it in PRACTICE -- but never in a
+way any rule here actually GUARANTEED. Adding a fourth item after the
+composer grew the total non-scrolling content past what a merely
+practical margin covered on a shorter-than-round-8's-test-window
+viewport: with no floor of its own, `.thread-actions` was the item that
+lost the squeeze, and `overflow-y: visible` means a squeezed-out item
+renders below the box with no scrollbar to reach it -- invisible, not
+merely "requires scrolling", on any viewport where the composer already
+took up the practical margin `.thread-actions` also needed.
+
+THE FIX: `.composer-block` (below) wraps `#turn-errors`, `#turn-form`/
+its no-`may_post` paragraph, AND `.thread-actions` -- the ENTIRE
+"always visible" region -- as ONE flex item, given `flex-shrink: 0`
+explicitly (`chat_style` above). That turns "practically protected
+because nothing else needs the room" into a guarantee CONDITIONAL on
+`.composer-block` fitting the column's cap at all: `.thread-scroll`
+(`flex-shrink: 1`, `min-height: 0`) is now the ONLY item flexbox is
+allowed to shrink, so it absorbs the deficit first, all the way to
+zero height if it must, before `.composer-block` gives up a single
+pixel. TRUTH-SWEEP (round 9c scoped review, Important 1): an earlier
+draft claimed this unconditionally ("never can [lose a pixel]") --
+`.chat_style`'s own `.composer-block` comment, two blocks up, now
+states the residual case honestly: an extremely short window, shorter
+than the composer and actions row's OWN combined natural height, still
+overflows past `.chat-wrap`'s edge via `overflow-y: visible`, same
+failure shape as before this fix, just needing a far shorter window to
+reach. `#turn-errors` stays inside this SAME block (not a fifth item)
+so it still sits directly above the form it reports on, exactly as
+before.
+
+BELOW THE 1000px APP-SHELL FLOOR, checked explicitly: the same media
+query that makes `.chat-wrap` a height-capped flex column at all is
+gated `min-width: 1000.01px` -- below it, `.chat-wrap` is `height:
+auto` in plain document flow (no `display: flex` at all), so `flex-
+shrink` on `.composer-block` is inert there by definition (the
+property only means anything inside a flex container) and the WHOLE
+PAGE scrolls normally to reach anything below the fold, the same
+"today's plain document flow" guarantee `chat_style`'s own narrow-
+screen comment already documents for `.thread-scroll`.
+{% endcomment %}
+<div class="composer-block">
+  {% comment %}
+  ROUND 11'S OWN CONVERSATION-LEVEL ATTACHMENTS STRIP LIVED HERE, AS
+  THE FIRST CHILD OF `.composer-block` -- RETIRED, round 13 (message-
+  bound attachments; owner feedback: "After submitting the document
+  wasn't attached to that message (at least not visually)... it says
+  its still processing" after a grounded answer, because nothing ever
+  refreshed this strip after page load). Its two symptoms -- no visual
+  tie to the message that attached a file, and a status that could go
+  stale forever once the poller stopped touching anything outside a
+  turn card -- are both fixed by moving the SAME chip markup onto the
+  USER TURN BUBBLE that carried the file instead (`chat/_turn_card.
+  html`, `card.attachments`) -- LIVE, because that card is exactly what
+  the poller already re-renders on every tick (`agents.chat.rendering.
+  turn_card`'s own docstring). Nothing here replaces the prompt block's
+  OWN attachments enumeration (`agents/runtime/prompt.py`), which reads
+  through the identical provider and is unchanged by this move.
+
+  ROUND-13 REVIEW FIX, I-5 REOCCUPIED THIS EXACT SPOT for one category
+  of attachment the per-turn-chip move above could never reach: a row
+  predating the `turn_id` column entirely. REMOVED by the consolidation
+  wave's own S10 ruling -- no migration on `origin/main` ever let a
+  `DocumentAttachment` row with a `NULL turn_id` exist outside this
+  branch's own dev/preview history, so the whole renderer (`chat/
+  _legacy_attachments.html`), its context key on this page and on
+  `/chat/all/`, and the `None`-keyed bucket that fed it were all
+  production-unreachable. See `agents/attachments.py::attachments_for`'s
+  own docstring for the full ruling.
+  {% endcomment %}
+  <div id="turn-errors">{{ turn_error }}</div>
+
+  {% if may_post %}
+  {% url 'chat-turn' conversation.id as composer_action_url %}
+  {% include "chat/_composer.html" with composer_mode="turn" composer_action=composer_action_url composer_form_id="turn-form" composer_placeholder=composer_placeholder composer_button="Send" composer_show_model_picker=True composer_workstream=None %}
+  {% else %}
+  <p class="muted">This conversation was shared with you to read. Ask its owner for
+    &ldquo;can view and post&rdquo; access to reply in it.</p>
+  {% endif %}
+
+  {% include "chat/_thread_actions.html" %}
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+// Progressive enhancement ONLY. The form is a plain POST and the answer
+// is a redirect carrying `?pending=<turn_id>`; everything below just
+// spares the operator the refresh. No external assets.
+//
+// Tuning copied from tools/rag/templates/rag/ask.html:355-359, which is
+// the poller this one mirrors: 2000 ms, three TRANSPORT retries (fetch
+// itself rejecting -- a reachable non-200 is handled inline), and a
+// ten-minute ceiling so a stuck poll can never run forever in a
+// background tab. Declared ONCE, in Python (`agents/chat/service.py`),
+// and handed to this page by `thread_context` -- never a second copy
+// typed into this template.
+(function () {
+  var POLL_INTERVAL_MS = {{ poll_interval_ms }};
+  var MAX_TRANSPORT_RETRIES = {{ max_transport_retries }};
+  var MAX_POLL_DURATION_MS = {{ max_poll_duration_ms }};
+  // Derived, never retyped: `tick()`'s give-up note (below) reads this
+  // rather than a hardcoded "10 minutes", so a future change to
+  // `agents.chat.service.MAX_POLL_DURATION_MS` updates the sentence the
+  // operator reads without a second edit here.
+  var POLL_DURATION_MINUTES = Math.round(MAX_POLL_DURATION_MS / 60000);
+  // `showCardError`'s own setupUrl link points an operator at the
+  // model console; the give-up note below points one at Settings for
+  // the same reason -- a poll ceiling tripping is exactly the kind of
+  // thing an admin, not this reader, can actually do something about.
+  var SETTINGS_URL = "{% url 'settings-index' %}";
+
+  var thread = document.querySelector(".thread");
+  var form = document.getElementById("turn-form");
+  var turnErrors = document.getElementById("turn-errors");
+
+  // Owner-requested chat layout fix: `.thread-scroll` (`chat_style`
+  // above) is the ONE scrolling region on this page now, and `.thread`
+  // is its first child with nothing above it -- see NEAR_BOTTOM_PX
+  // below for why that placement is what lets the two functions after
+  // it treat "bottom of `.thread`" as a plain arithmetic offset rather
+  // than needing to walk the DOM for it on every call.
+  var threadScroll = document.querySelector(".thread-scroll");
+
+  // NEAR_BOTTOM_PX: how close to "the last message is fully in view"
+  // still counts as "at the bottom" for the stay-pinned guard below --
+  // a reader whose own scroll position is off by a few px of rounding
+  // (subpixel scroll offsets are real; `scrollTop` is not always an
+  // integer) must not be treated as having scrolled up to read history
+  // when they have not.
+  var NEAR_BOTTOM_PX = 40;
+
+  // threadBottomOffset(): the `scrollTop` value that puts the BOTTOM OF
+  // `.thread` -- the last message -- flush with the bottom of the
+  // visible `.thread-scroll` viewport. `.thread` is `.thread-scroll`'s
+  // ONLY child now (owner feedback round 9 moved the share panel and
+  // the delete disclosure out to `.thread-actions`, below the
+  // composer) -- `threadScroll.scrollHeight` would read the same as
+  // this expression today, but computing off `.thread` itself rather
+  // than the region around it keeps this working unchanged the day a
+  // THIRD section that genuinely belongs inside `.thread-scroll` shows
+  // up and `scrollHeight` would once again include more than the
+  // transcript. `.thread` is `.thread-scroll`'s first
+  // child with no margin above it, so `thread.offsetTop` is 0 relative
+  // to it -- but that relies on `.thread-scroll` being `.thread`'s
+  // `offsetParent`, which only holds if `.thread-scroll` is itself
+  // positioned (`position: relative` below is for exactly this, not
+  // for anchoring anything visual). A negative result is a real value,
+  // not a bug: `.thread` shorter than the viewport gives one, and
+  // assigning it to `scrollTop` clamps to 0 the same as it always does.
+  function threadBottomOffset() {
+    return thread.offsetTop + thread.offsetHeight - threadScroll.clientHeight;
+  }
+
+  // scrollThreadToBottom(): UX point 1's "on load it shows the newest
+  // content (scrolled to bottom)", and also what the stay-pinned guard
+  // below re-runs after an append. A no-op if either element is
+  // missing (a shared conversation with `may_post` false still renders
+  // `.thread-scroll`, so this should always find both, but neither
+  // selector above is asserted non-null anywhere else in this script
+  // either).
+  function scrollThreadToBottom() {
+    if (!threadScroll || !thread) { return; }
+    threadScroll.scrollTop = threadBottomOffset();
+  }
+
+  // isNearThreadBottom(): UX point 1's other half -- "never yank the
+  // view if they've scrolled up to read history". Read BEFORE a swap or
+  // append changes `.thread`'s height, never after: `threadBottomOffset
+  // ()` itself moves once new content lands, so the comparison has to
+  // happen against the position the reader was ACTUALLY looking at.
+  // Missing either element counts as "at the bottom" (matches
+  // `scrollThreadToBottom`'s own no-op default, and there is no
+  // scrollable region to have scrolled up in one) rather than
+  // silently skipping the pin.
+  function isNearThreadBottom() {
+    if (!threadScroll || !thread) { return true; }
+    return (threadBottomOffset() - threadScroll.scrollTop) <= NEAR_BOTTOM_PX;
+  }
+
+  // U4 (light): disable Send and the textarea while a turn is running
+  // in the JS path -- a started job can't be stopped (`/queue/`'s own
+  // rule), so there is no cancel button, only this. Re-enabled by
+  // `showCardError` (every path that stops polling with something to
+  // show for it) and by a successful "done" swap; the 10-minute
+  // ceiling and a lost-contact give-up leave it disabled, since the
+  // turn may genuinely still be running server-side and a reload is
+  // the honest next step either way.
+  function setFormBusy(busy) {
+    if (!form) { return; }
+    var textarea = form.querySelector("textarea");
+    var button = form.querySelector('button[type="submit"]');
+    if (textarea) { textarea.disabled = busy; }
+    if (button) { button.disabled = busy; }
+  }
+
+  // `opts.pulse` adds a CSS-only pulsing dot (U4, light) beside the
+  // text -- built as a real child node, never `innerHTML`, so a
+  // server-supplied `label` (already escaped server-side, but this is
+  // client-built text regardless) can never be interpreted as markup.
+  function updateNote(card, text, opts) {
+    opts = opts || {};
+    var note = card.querySelector(".no-js-note");
+    if (!note) {
+      note = document.createElement("p");
+      note.className = "muted no-js-note";
+      card.appendChild(note);
+    }
+    while (note.firstChild) { note.removeChild(note.firstChild); }
+    if (opts.pulse) {
+      var dot = document.createElement("span");
+      dot.className = "pulse-dot";
+      dot.setAttribute("aria-hidden", "true");
+      note.appendChild(dot);
+    }
+    note.appendChild(document.createTextNode(text));
+  }
+
+  function showCardError(card, message, setupUrl) {
+    setFormBusy(false);
+    card.classList.remove("turn-pending");
+    while (card.firstChild) { card.removeChild(card.firstChild); }
+    var p = document.createElement("p");
+    p.className = "turn-error";
+    p.textContent = message;
+    card.appendChild(p);
+    if (setupUrl) {
+      var linkP = document.createElement("p");
+      linkP.className = "muted";
+      var a = document.createElement("a");
+      a.href = setupUrl;
+      a.textContent = "Models";
+      linkP.appendChild(a);
+      card.appendChild(linkP);
+    }
+  }
+
+  // D1 (chat-polish P3.1). `html` is a server-rendered `chat/
+  // _turn_block.html` fragment -- `rendering.turn_group_cards`'s own
+  // group, the user's own message included -- parsed into real nodes
+  // and appended to the thread whole. Returns the node matching
+  // `turnId` (the ASSISTANT placeholder the poller is about to watch),
+  // or `null` if the fragment parsed to nothing.
+  function insertBlock(html, turnId) {
+    var holder = document.createElement("div");
+    holder.innerHTML = (html || "").trim();
+    var nodes = Array.prototype.slice.call(holder.children);
+    if (!nodes.length) { return null; }
+    nodes.forEach(function (node) { thread.appendChild(node); });
+    return thread.querySelector('[data-turn-id="' + turnId + '"]');
+  }
+
+  // IDEMPOTENT SWAP (extended by D1 to every
+  // poll tick, not just the final "done" one). `html` is the WHOLE
+  // group this turn's job wrote -- the user's own bubble plus every
+  // card sharing its `queue_job_id` -- not just the one placeholder
+  // `card` being polled. A tool call that finished while this turn was
+  // still queued/running, or the user's own card from an EARLIER swap
+  // this same poll loop already inserted, would otherwise sit in the
+  // DOM beside the fresh copy this swap just inserted -- a real
+  // duplicate a browser test caught. `data-poll-block` (from
+  // `card.poll_block` -- `_turn_card.html`) is the SAME value on every
+  // card this job wrote, including the user's own (`rendering.
+  // turn_group_cards` stamps it there too, even though that row's real
+  // `queue_job_id` column is always `NULL`); every element sharing it
+  // is removed first and the fresh group is inserted at the earliest
+  // one's position, so a polled thread and a reloaded one never
+  // disagree by a duplicate. Returns the fresh node matching `turnId`,
+  // or `null` if the fragment parsed to nothing.
+  function swapBlock(card, html, turnId) {
+    var holder = document.createElement("div");
+    holder.innerHTML = (html || "").trim();
+    var nodes = Array.prototype.slice.call(holder.children);
+    if (!nodes.length) { return null; }
+    var blockId = card.getAttribute("data-poll-block");
+    var anchor = card;
+    if (blockId && thread) {
+      var stale = thread.querySelectorAll('[data-poll-block="' + blockId + '"]');
+      if (stale.length) {
+        anchor = stale[0];
+        Array.prototype.forEach.call(stale, function (node) {
+          if (node !== anchor) { node.remove(); }
+        });
+      }
+    }
+    anchor.replaceWith.apply(anchor, nodes);
+    return thread.querySelector('[data-turn-id="' + turnId + '"]');
+  }
+
+  // poll(statusUrl, card, turnId). `statusUrl` is ALWAYS a URL the
+  // server handed over -- `data.status_url` on submit, the wrapper's
+  // own `data-pending-status-url` on bootstrap (still supplied for the
+  // no-JS redirect's turn, though the scan below no longer needs it),
+  // or -- the common case -- a pending card's own `data-status-url`
+  // when the bootstrap scan starts it -- never one this script builds,
+  // so a route rename never has to be mirrored here. `turnId` is the
+  // placeholder's own id, needed on every swap
+  // (`swapBlock` above) because the group `data.html` carries can
+  // contain more than one node.
+  //
+  // On "queued"/"running" the whole group is RE-SWAPPED, not just the
+  // note updated (D1) -- both bodies carry the same `html` key
+  // `"done"` does, so the user's own message (and any tool call that
+  // finishes early) shows up without waiting for the turn to finish.
+  // On "done" the group is swapped a final time and the form
+  // re-enabled. On "failed"/"cancelled" the card shows `data.error`
+  // plus a link to `data.setup_url` when one is given. On 404 the card
+  // says the turn is gone. On 503 the card says the queue is not ready
+  // and polling stops. An UNRECOGNIZED state keeps polling rather than
+  // stranding the page -- ask.html's own rule for a forward-compatible
+  // state added later.
+  function poll(statusUrl, card, turnId) {
+    var transportFailures = 0;
+    var startedAt = Date.now();
+    // chat-poller-cleanup: every 2s tick on a still-queued/running turn
+    // returns the SAME group `html` until something actually changes
+    // (a tool call finishing, a label updating) -- re-swapping it
+    // anyway snapped every open disclosure in the group shut and
+    // re-created every image element in it from scratch, each tick,
+    // for as long as the turn ran. Tracked per `poll()` call (per
+    // card), reset to null on each fresh loop, so a real change is
+    // never mistaken for a repeat.
+    var lastHtml = null;
+
+    function tick() {
+      if (Date.now() - startedAt > MAX_POLL_DURATION_MS) {
+        updateNote(card, "Still working after " + POLL_DURATION_MINUTES +
+          " minutes — reload this page to check.");
+        // Same shape `showCardError`'s setupUrl branch appends (a bare
+        // `<p class="muted"><a>...</a></p>` below the note) -- built as
+        // real nodes, never `innerHTML`, for the identical reason that
+        // function gives.
+        var hintP = document.createElement("p");
+        hintP.className = "muted";
+        var hintA = document.createElement("a");
+        hintA.href = SETTINGS_URL;
+        hintA.textContent = "Settings";
+        hintP.appendChild(hintA);
+        card.appendChild(hintP);
+        return;
+      }
+      fetch(statusUrl)
+        .then(function (response) {
+          if (response.status === 404) {
+            showCardError(card, "This turn is no longer in the queue.", "");
+            return null;
+          }
+          return response.json().then(function (data) {
+            return { status: response.status, data: data };
+          });
+        })
+        .then(function (result) {
+          if (result === null) { return; }
+          transportFailures = 0;
+          var data = result.data;
+          if (result.status === 503) {
+            showCardError(card, data.error || "The queue isn't ready yet.", data.setup_url);
+            return;
+          }
+          if (data.state === "queued" || data.state === "running") {
+            if (data.html && data.html !== lastHtml) {
+              lastHtml = data.html;
+              // Owner-requested chat layout fix: read BEFORE the swap
+              // (see `isNearThreadBottom`'s own note on why), re-pin
+              // AFTER it -- a tool call finishing mid-turn re-swaps this
+              // SAME card (D1's own doc comment above `swapBlock`), and
+              // each of those must stay pinned too if the reader was
+              // already at the bottom, not just the final "done" swap.
+              var wasNearBottom = isNearThreadBottom();
+              var refreshed = swapBlock(card, data.html, turnId);
+              if (refreshed) { card = refreshed; }
+              if (wasNearBottom) { scrollThreadToBottom(); }
+            }
+            updateNote(
+              card,
+              data.state === "running"
+                ? (data.label ? "Working — " + data.label + "…" : "Working…")
+                : (data.position === 1
+                    ? "Queued — waiting…"
+                    : (typeof data.position === "number"
+                        ? "Position " + data.position + " of the queue…"
+                        : "Queued…")),
+              { pulse: data.state === "running" }
+            );
+            setTimeout(tick, POLL_INTERVAL_MS);
+          } else if (data.state === "done") {
+            // Same before/after ordering as the queued/running branch
+            // above, for the same reason.
+            var wasNearBottom = isNearThreadBottom();
+            var refreshed = swapBlock(card, data.html, turnId);
+            if (refreshed) {
+              card = refreshed;
+              setFormBusy(false);
+              if (wasNearBottom) { scrollThreadToBottom(); }
+              // ROUND 13, REQUIREMENT D: the ANSWER is ready, but a FILE
+              // this turn carried might not be -- ingestion is
+              // deliberately never waited on (timing semantics F), so it
+              // can still be running after the model has already
+              // answered ("it says its still processing" was the owner's
+              // own complaint about exactly this gap, before this fix).
+              // `data.attachments_pending` (`agents.chat.views.turns.
+              // _done_body`) says whether the carrying turn's own chips
+              // are still non-terminal; if so, this SAME poll loop keeps
+              // ticking -- re-swapping this now-finished group again each
+              // time, harmlessly idempotent -- until the chip settles or
+              // `MAX_POLL_DURATION_MS` gives up. Never a second script
+              // loop: the existing one simply does not treat "done" as
+              // "stop" while a chip on it is still live.
+              if (data.attachments_pending) {
+                setTimeout(tick, POLL_INTERVAL_MS);
+              }
+            } else {
+              // `data.html` parsed to nothing -- never silently leave
+              // the pending card sitting there with no further update.
+              showCardError(
+                card, "This turn finished, but nothing came back to show it — reload this page.", ""
+              );
+            }
+          } else if (data.state === "failed") {
+            showCardError(card, data.error || "This turn did not finish.", data.setup_url);
+          } else if (data.state === "cancelled") {
+            showCardError(card, data.error || "This turn was cancelled.", "");
+          } else {
+            setTimeout(tick, POLL_INTERVAL_MS);
+          }
+        })
+        .catch(function () {
+          transportFailures += 1;
+          if (transportFailures > MAX_TRANSPORT_RETRIES) {
+            showCardError(card, "Lost contact with the server — reload this page.", "");
+            return;
+          }
+          setTimeout(tick, POLL_INTERVAL_MS);
+        });
+    }
+
+    tick();
+  }
+
+  // Submit handler: preventDefault, fetch(form.action) with
+  // `new FormData(form)` (which carries csrfmiddlewaretoken, so no
+  // X-CSRFToken header is needed -- vision/create.html:257-260 does
+  // exactly this) and X-Requested-With; on 202 append a pending card
+  // and poll `data.status_url` -- NEVER a URL built here.
+  //
+  // THE BODY IS NOT ONE SHAPE. A 400 (a blank message) is
+  // `chat/_form_errors.html`, an HTML fragment -- the same reason
+  // `tools/vision/templates/vision/create.html:268-288` reads
+  // `response.text()` rather than assuming JSON. Every other refusal
+  // (409/503) is `{"error": ...}` JSON, same as a 202's success body.
+  // Branching on the response's own `Content-Type` (never on the
+  // status code alone -- a future refusal could change shape and this
+  // still reads it correctly) is what keeps `response.json()` from
+  // throwing on the fragment and landing in `.catch()` as a fabricated
+  // "could not reach farabunker" -- which is worse than the honest
+  // message the server already sent. Either way the result lands in
+  // `#turn-errors` and NEVER in the thread, so a rejected message can
+  // never be mistaken for a sent one.
+  if (form) {
+    form.addEventListener("submit", function (event) {
+      event.preventDefault();
+      turnErrors.textContent = "";
+      fetch(form.action, {
+        method: "POST",
+        body: new FormData(form),
+        headers: { "X-Requested-With": "XMLHttpRequest" }
+      })
+        .then(function (response) {
+          var contentType = response.headers.get("Content-Type") || "";
+          if (contentType.indexOf("application/json") !== -1) {
+            return response.json().then(function (data) {
+              return { kind: "json", status: response.status, data: data };
+            });
+          }
+          return response.text().then(function (html) {
+            return { kind: "html", status: response.status, html: html };
+          });
+        })
+        .then(function (result) {
+          if (result.kind === "json" && result.status === 202) {
+            // D1: `result.data.html` is the same server-rendered group
+            // `turn_status`'s own bodies carry -- the user's own
+            // message included -- so this inserts real markup instead
+            // of a hand-built, assistant-only placeholder that never
+            // showed the message that was just sent.
+            var card = insertBlock(result.data.html, result.data.turn_id);
+            if (card) {
+              form.reset();
+              // ROUND-13 REVIEW FIX, MINOR 1, UPDATED FOR ROUND 18:
+              // `form.reset()` clears the visible fields, but round 18's
+              // own accumulate-on-pick staging (`chat/_attach_dragdrop.
+              // html`) keeps its OWN memory of what is staged that a
+              // plain reset cannot touch -- a stale `stagedFiles` array
+              // would silently resend whatever was just sent, the exact
+              // UI lie this fix originally existed to close. `chat/
+              // _attach_dragdrop.html` hangs `_clearStagedAttachments`
+              // off the form element itself for exactly this call --
+              // the ONE integration point between this page-specific
+              // submit handler and that shared script (its own module
+              // comment has the full reasoning); a page rendered with
+              // no attach door at all never defines it, so this is
+              // guarded the same way every other optional DOM lookup
+              // on this page already is.
+              if (form._clearStagedAttachments) { form._clearStagedAttachments(); }
+              setFormBusy(true);
+              // Owner-requested chat layout fix: sending a message is
+              // itself the reader saying "I'm at the bottom" -- pin
+              // unconditionally, no `isNearThreadBottom()` check needed,
+              // so the message just sent is never scrolled out of view
+              // by its own placeholder landing below the fold.
+              scrollThreadToBottom();
+              poll(result.data.status_url, card, result.data.turn_id);
+              // ROUND-13 REVIEW FIX, MINOR 2 (owner-family complaint:
+              // "my file silently didn't attach"): a rejected/oversized/
+              // failed attachment used to sit as a session-flash message
+              // nobody would see until some LATER full page load, on
+              // this exact JS-stays-on-the-page path. `turnErrors` was
+              // already cleared for THIS submit (top of the handler) and
+              // the message itself sent successfully -- this is not an
+              // error about the SEND, only about one of its files, so it
+              // is set AFTER the successful insert above, never in place
+              // of it.
+              if (result.data.attachment_problems && result.data.attachment_problems.length) {
+                turnErrors.textContent = result.data.attachment_problems.join(" ");
+              }
+            } else {
+              // The group parsed to nothing -- the turn is queued
+              // either way (the server already committed it), so this
+              // says so rather than pretending nothing happened.
+              turnErrors.textContent =
+                "Sent, but nothing came back to show it — reload this page.";
+            }
+          } else if (result.kind === "json") {
+            turnErrors.textContent = result.data.error || "Could not send that message.";
+          } else {
+            // The 400 fragment -- already a styled banner, so it is
+            // inserted as markup, not text.
+            turnErrors.innerHTML = result.html;
+          }
+        })
+        .catch(function () {
+          turnErrors.textContent =
+            "Could not reach farabunker — check the connection and try again.";
+        });
+    });
+
+    // ROUND 18 RETIRES THIS BLOCK'S OWN FORMER DUPLICATE Enter-to-send
+    // handler. `chat/_composer.html` now gives every composer surface
+    // (this page included) the SAME `chat/_enter_to_send.html` include,
+    // selecting `form[data-enter-submits]` -- the generic hook this
+    // block's own former comment (CONSOLIDATION WAVE, audit A, O1)
+    // already named as the one thing that would let the two copies
+    // merge with no fragment reaching into another's internals. The
+    // "sanctioned-script BUDGET" that same comment gave for keeping two
+    // copies is retired along with the duplicate it was budgeting for:
+    // this page's own composer-related scripts are ALL shared includes
+    // now (`_enter_to_send.html`, `_attach_dragdrop.html`), counted once
+    // each, not typed out a second time per page.
+  }
+
+  // UX point 1, the other half of the owner-requested chat layout fix:
+  // on load, the transcript shows the newest content -- scrolled to the
+  // bottom -- rather than opening on whatever the CSS-only, unscrolled
+  // page used to show (its own top). Unconditional, not gated by
+  // `isNearThreadBottom()`: there is no earlier reader position on a
+  // fresh load to preserve.
+  scrollThreadToBottom();
+
+  // Bootstrap (chat-poller-cleanup: one path, not two): scan every
+  // already-rendered `.turn-pending[data-status-url]` card and start a
+  // poll loop on each (setFormBusy + poll). This ONE scan subsumes the
+  // no-JS redirect's own turn -- its card renders `.turn-pending` AND
+  // carries `data-status-url` from `_turn_card.html`'s SAME
+  // `card.pending` guard as every other pending card, so there is
+  // nothing left for a separate `data-pending-turn` branch to catch
+  // that this scan does not already catch identically. The wrapper's
+  // `data-pending-turn`/`data-pending-status-url` attributes (above,
+  // on `.thread`) stay in the markup regardless: they are the
+  // documented server-side contract for the redirect (`thread.py`
+  // still supplies them), kept deliberately even though no script here
+  // reads them anymore.
+  if (thread) {
+    var pendingCards = thread.querySelectorAll(".turn-pending[data-status-url]");
+    Array.prototype.forEach.call(pendingCards, function (card) {
+      var turnId = card.getAttribute("data-turn-id");
+      setFormBusy(true);
+      poll(card.getAttribute("data-status-url"), card, turnId);
+    });
+  }
+})();
+</script>
+{% endblock %}

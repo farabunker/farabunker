@@ -1,0 +1,89 @@
+{% extends "_settings.html" %}
+{% comment %}
+"Chat" -- the settings area's page for how a conversation's prompt is
+built (round 21).
+
+EXTENDS `_settings.html`, NOT `chat/base.html`. This is a settings-area
+page: it wants the settings shell's sidebar and two-column layout, not
+the chat rail, exactly as `rag/settings.html` (the one RAG page that
+does the same) already does.
+
+WHAT THE BLOCK BELOW OWNS, HONESTLY. Two of its rules are this page's
+own -- `form.chat-settings-form` (the card) and `.checkbox-field`'s
+label weight. The rest is the SETTINGS AREA's recipe, not this page's:
+`main`'s narrow left-aligned measure, `.checkbox-field`,
+`.helptext` and `.form-row` are byte-identical with
+`identity/settings.html`'s, deliberately -- the card mirrors that
+page's field/helptext/form-row shape rather than inventing a third
+settings layout for one checkbox. Their real home is the common
+ancestor, `foundation/templates/_settings.html`, which already owns the
+shared five plus (audit-2 B10) `.messages`/`.msg`; promoting these four
+as well is an open item (audit 2 lens B, B1) parked only because it
+crosses three columns. `{{ block.super }}` below is what inherits what
+has already moved.
+
+The CSS-ownership gate (`foundation/ops/tests/test_css_ownership.py`)
+scans `chat/base.html` against the `chat/_*.html` fragments and the
+pages that render them. This page extends `_settings.html` and includes
+no chat fragment, so it is out of that gate's frame; the gate that DOES
+cover it is the same file's
+`test_no_settings_page_retypes_a_rule_settings_html_already_owns`.
+{% endcomment %}
+{% block title %}Chat — farabunker{% endblock %}
+{% block side_current_chat %}current{% endblock %}
+{% block extra_style %}{{ block.super }}
+  :root { --page-max-width: 640px; }
+  {% comment %}
+  Left-aligned in its column, never centred -- `identity/settings.html`
+  carries the full reasoning: `--settings-nav-width` exists so the
+  content column's left edge never moves between one settings page and
+  the next, and centring a narrow `main` inside a wider column defeats
+  it.
+  {% endcomment %}
+  main { max-width: var(--page-max-width); margin: 0 auto 0 0; }
+  form.chat-settings-form {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem;
+  }
+  .checkbox-field { display: flex; align-items: center; gap: 0.5rem; }
+  .checkbox-field label { font-weight: 600; }
+  .helptext { color: var(--muted); font-size: 0.82rem; margin-top: 0.35rem; }
+  .form-row { display: flex; justify-content: flex-end; margin-top: 1.25rem; }
+{% endblock %}
+{% block settings_content %}
+<main>
+  <h1>Chat</h1>
+  <p class="tagline">What every conversation on this box tells the model before it answers.</p>
+
+  {% include "_messages.html" %}
+
+  {% comment %}mirrors the class-S gate on the route itself{% endcomment %}
+  {% if identity_is_admin %}
+  <form class="chat-settings-form" method="post" action="{% url 'chat-settings' %}{{ assistant.open_query }}">
+    {% csrf_token %}
+    <div class="checkbox-field" id="time-aware">
+      {{ form.time_aware }}
+      <label for="{{ form.time_aware.id_for_label }}">Tell the model the date and time</label>
+    </div>
+    {% comment %}
+    WHAT THE TOGGLE ACTUALLY DOES, both halves of it, in the operator's
+    terms -- not "time awareness" as a word that could mean anything.
+    The zone is this box's own configured zone, stated so nobody has to
+    guess whose clock the model is being handed.
+    {% endcomment %}
+    <p class="helptext">On by default. Adds one line to every conversation's prompt naming the current
+      day, date, time and UTC offset from this box's own clock, and stamps each earlier message
+      in the conversation with when it was sent. Without it a model falls back on whatever its
+      training implies "now" is, and can report the current year as a set of future dates. Turning
+      it off removes both the date line and the message stamps. Delegated agents get the date line
+      too. The clock reads in this box's configured time zone — <code>UTC</code> unless
+      <code>FARABUNKER_TIME_ZONE</code> is set in the environment.</p>
+    <div class="form-row">
+      <button type="submit">Save</button>
+    </div>
+  </form>
+  {% endif %}
+</main>
+{% endblock %}

@@ -1,0 +1,197 @@
+{% extends "_settings.html" %}
+{% comment %}
+Entitlements: the named permissions everything else is granted against.
+Create here; grant, rename and delete on one entitlement's own page.
+{% endcomment %}
+{% block title %}Entitlements — farabunker{% endblock %}
+{% block side_current_entitlements %}current{% endblock %}
+{% block extra_style %}{{ block.super }}
+  :root { --page-max-width: 820px; }
+  {% comment %}
+  A CENTERED COLUMN, which this page did not have -- see
+  `identity/templates/identity/groups.html` for the fault (a
+  `main { max-width: … }` rule with no `<main>` to match) and why the
+  same two lines appear on five pages this round.
+  {% endcomment %}
+  main { max-width: var(--page-max-width); margin: 0 auto; }
+  {% comment %}
+  NO LOCAL `.msg.error` (Coherence Wave D, C3) -- `_settings.html` now
+  owns it; see `identity/templates/identity/groups.html` for the
+  reasoning.
+  {% endcomment %}
+  section { background: var(--panel); border: 1px solid var(--border);
+            border-radius: 8px; padding: 1rem; margin-bottom: 1.25rem; }
+  section h2 { font-size: 1rem; margin: 0 0 .75rem; }
+  .field { display: flex; flex-direction: column; gap: .3rem; }
+  .field label { font-weight: 600; font-size: .85rem; }
+  .form-row { display: flex; align-items: flex-end; gap: .6rem; flex-wrap: wrap; }
+  input[type="text"], textarea {
+    padding: .45rem .6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: .9rem;
+  }
+  textarea { min-width: 22rem; min-height: 2.4rem; }
+  .errorlist { list-style: none; margin: .25rem 0 0; padding: 0;
+               color: var(--danger); font-size: .8rem; }
+  .table-wrap { background: var(--panel); border: 1px solid var(--border);
+                border-radius: 8px; padding: .25rem 1rem; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+  thead th {
+    text-align: left;
+    font-size: .72rem;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: .75rem .5rem .5rem;
+    border-bottom: 1px solid var(--border);
+  }
+  td { padding: .6rem .5rem; border-top: 1px solid var(--border); vertical-align: top; }
+  tbody tr:first-child td { border-top: none; }
+  {% comment %}
+  SIZED TO CONTENT, with the description taking what is left -- the same
+  `width: 100%` / `width: 1%` idiom the document library uses, and for
+  the same reason: the one cell holding a sentence should not be the one
+  the browser starves.
+  {% endcomment %}
+  td.description, th.description { width: 100%; }
+  td.name, th.name, td.reach, th.reach { width: 1%; white-space: nowrap; }
+  td.name a { color: var(--accent); text-decoration: none; font-weight: 600; }
+  td.name a:hover { text-decoration: underline; }
+  {% comment %}
+  ONE NUMERIC COLUMN CLASS for every reach count and for the holder
+  count -- they are the same kind of cell, and the reach columns are
+  generated from the axis registry, so a per-kind class would have to be
+  invented by the template for a kind it has never heard of. Right
+  aligned and tabular so a column of fifty numbers reads as a column.
+  {% endcomment %}
+  td.reach, th.reach { text-align: right; font-variant-numeric: tabular-nums; }
+  .search-row { display: flex; align-items: flex-end; gap: .6rem; flex-wrap: wrap; }
+  .search-row a { color: var(--muted); font-size: .85rem; }
+  {% comment %}
+  THE LOOK IS `_settings.html`'s `.filter-input` (fix round 1, N1) --
+  shared with the transfer panel's own pane filters, which are the same
+  control. What is this page's alone is the WIDTH: this box filters a
+  wide table and wants room for a phrase, where a pane filter sits in a
+  15rem column.
+  {% endcomment %}
+  #entitlement-q { min-width: 16rem; }
+{% endblock %}
+{% block settings_content %}
+<main>
+  <h1>Entitlements</h1>
+  <p class="tagline">A document or a tool carrying no label is open to everyone signed in
+    (or, on a locked library, to nobody but an administrator with content access).
+    Labelling one with an entitlement narrows it to the people who hold that entitlement.</p>
+
+  {% include "_messages.html" %}
+
+  <section id="new-entitlement">
+    {% comment %}
+    The form's own fields, for the reason `groups.html` gives: a
+    hand-written input loses every per-field error the view flashes.
+    {% endcomment %}
+    <h2>New entitlement</h2>
+    <form method="post" action="{% url 'identity-entitlements' %}{{ assistant.open_query }}">
+      {% csrf_token %}
+      {% comment %}
+      THE SEARCH RIDES THE POST BODY. Every POST form on a settings page
+      must carry `action="...?assistant=1"` and end with exactly that
+      (`identity/tests/test_route_matrix.py`'s sweep), so a second query
+      parameter cannot go on the action -- and a create that dumped the
+      operator back to an unfiltered list would lose the search they
+      were working in. `identity/views.py::_entitlements_redirect` reads
+      it back.
+      {% endcomment %}
+      <input type="hidden" name="q" value="{{ q }}">
+      <div class="form-row">
+        <div class="field">
+          <label for="{{ form.name.id_for_label }}">Name</label>
+          {{ form.name }}
+        </div>
+        <div class="field">
+          <label for="{{ form.description.id_for_label }}">Description</label>
+          {{ form.description }}
+        </div>
+        <button type="submit">Create</button>
+      </div>
+      {% if form.name.errors %}<ul class="errorlist">{% for error in form.name.errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
+    </form>
+  </section>
+
+  <section id="find-entitlement">
+    {% comment %}
+    A PLAIN GET FORM, so a filtered list is one shareable URL and the
+    back button works -- the same "no JavaScript is required" rule
+    `chat/all.html`'s own filter row states, and the reason there is no
+    live-filter script on this page at all.
+
+    THE ASSISTANT FLAG RIDES A HIDDEN FIELD, not the action: a browser
+    DISCARDS the query string of a GET form's action and rebuilds it
+    from the fields, so `?assistant=1` written there would vanish on the
+    first search and shut the panel. `assistant.open` is the same key
+    `{{ assistant.open_query }}` is derived from, read once in Python
+    (`agents/chat/context_processors.py`).
+    {% endcomment %}
+    <h2>Find</h2>
+    <form method="get" action="{% url 'identity-entitlements' %}">
+      {% if assistant.open %}<input type="hidden" name="assistant" value="1">{% endif %}
+      <div class="search-row">
+        <div class="field">
+          <label for="entitlement-q">Name or description</label>
+          <input type="search" class="filter-input" name="q" id="entitlement-q"
+                 value="{{ q }}" placeholder="Filter the list below">
+        </div>
+        <button type="submit">Search</button>
+        {% if q %}<a href="{% url 'identity-entitlements' %}{{ assistant.open_query }}">Clear</a>{% endif %}
+      </div>
+    </form>
+  </section>
+
+  <div class="table-wrap" id="entitlement-list">
+    {% comment %}
+    ONE REACH COLUMN PER REGISTERED AXIS, headings and cells both driven
+    by `identity.contracts.axes` in the same display order -- a sixth
+    labelled kind later is a registration in its own column, not a
+    column added here and a cell added below it. `row.reach` is a plain
+    list in that same order (`identity/views.py` zips it), which is what
+    keeps the two loops from drifting apart.
+
+    THE QUERY COUNT IS FLAT IN THE NUMBER OF ROWS: every number in this
+    table comes from one aggregate per axis over the whole join table,
+    plus the grant annotate -- never a count per row. `identity/axes.py
+    ::reach_by_entitlement` has the reasoning, and an equality test at
+    one row versus thirty holds it.
+    {% endcomment %}
+    <table>
+      <thead><tr>
+        <th class="name">Name</th>
+        <th class="description">Description</th>
+        {% for label in axis_labels %}<th class="reach">{{ label }}</th>{% endfor %}
+        <th class="reach">Holders</th>
+      </tr></thead>
+      <tbody>
+      {% for row in rows %}
+        <tr>
+          <td class="name"><a href="{% url 'identity-entitlement-edit' row.entitlement.pk %}">{{ row.entitlement.name }}</a></td>
+          <td class="description">{{ row.entitlement.description }}</td>
+          {% for count in row.reach %}<td class="reach">{{ count }}</td>{% endfor %}
+          <td class="reach">{{ row.entitlement.grant_count }}</td>
+        </tr>
+      {% empty %}
+        {% comment %}
+        `|add:3` -- Name, Description and Holders, the three columns the
+        axis registry does not generate. Derived rather than typed, so a
+        new axis does not leave this cell one short.
+        {% endcomment %}
+        <tr><td colspan="{{ axis_labels|length|add:3 }}" class="muted">{% if q %}No entitlement matches that.{% else %}No entitlements yet.{% endif %}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</main>
+{% endblock %}

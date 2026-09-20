@@ -1,0 +1,101 @@
+{% comment %}
+THE ONE POLL LOOP (C-16). Three pages grew their own `fetch` +
+`setTimeout` retry loop with three sets of hand-synchronised timing
+constants -- `chat/conversation.html`'s own comment admitted it was
+copied from `rag/ask.html` "by hand". This is that loop, once.
+
+AN INCLUDE, NOT A STATIC ASSET, and not a script in `_shell.html`. The
+standing doctrine is "no static JS/CSS pipeline -- the single inline
+`<style>`/`<script>` shell stays", which this obeys: an inline
+`<script>` in a template, included by the pages that need it.
+`chat/_menu_exclusive.html` is the same shape. A script placed in
+`_shell.html` itself would render on every page in the box (or on every
+page that does not override `{% templatetag openblock %} block scripts
+{% templatetag closeblock %}`), which is a poller shipped to pages that
+never poll and a `<script>` count changed on pages that count them.
+
+WHAT THIS OWNS: WHEN to poll -- the interval, the transport-retry
+ceiling, the give-up ceiling, and the scheduling. WHAT IT NEVER OWNS:
+what a response MEANS. `onResponse` gets the raw `Response`; whether the
+job is finished, whether to swap a fragment or render JSON, and what to
+show the operator are the page's, because the three pages genuinely
+differ there (JSON+state on Ask, an HTML fragment swap on Images).
+
+TUNING: `window.POLL_DEFAULTS` holds the three numbers. A caller
+overrides any of them per call; a template may overwrite the object
+before the first call, which is how `agents/chat/service.py`'s
+`POLL_INTERVAL_MS`/`MAX_TRANSPORT_RETRIES`/`MAX_POLL_DURATION_MS` reach
+the chat page's copy through `thread_context`'s existing template
+variables when that page is repointed (held for PR #88).
+{% endcomment %}
+<script>
+(function () {
+  window.POLL_DEFAULTS = {
+    intervalMs: 2000,
+    maxTransportRetries: 3,
+    maxDurationMs: 10 * 60 * 1000
+  };
+
+  // Poll `url` until `onResponse` says to stop, a run of transport
+  // failures exceeds the retry ceiling, or the whole poll outlives the
+  // give-up ceiling -- so a stuck poll can never run forever in a
+  // background tab.
+  //
+  // `onResponse(response)` returns (or resolves to):
+  //   a falsy value, or {done: true}  -> stop
+  //   {retry: true, url, delayMs}     -> poll again; `url` and
+  //                                      `delayMs` are both optional
+  // Anything it throws counts as a transport failure, which is the same
+  // shape the hand-written loops had: a JSON parse error and a dropped
+  // connection were both caught by one `.catch`.
+  window.pollUntilTerminal = function (url, opts) {
+    var o = opts || {};
+    // The three TUNING numbers are read from POLL_DEFAULTS only -- there
+    // is deliberately no per-call override for them. That object IS the
+    // tuning seam (it is what the held chat page will assign to when it
+    // is repointed), and a second way to set the same number, with no
+    // caller, would be a knob nothing reads. The per-call options are
+    // the two SCHEDULING quirks that genuinely differ between the two
+    // pages, plus the two callbacks.
+    var d = window.POLL_DEFAULTS;
+    var intervalMs = d.intervalMs;
+    var maxRetries = d.maxTransportRetries;
+    var maxDurationMs = d.maxDurationMs;
+    var retryDelayMs = o.retryDelayMs === undefined ? intervalMs : o.retryDelayMs;
+    var startDelayMs = o.startDelayMs === undefined ? 0 : o.startDelayMs;
+    var onResponse = o.onResponse;
+    var onGiveUp = o.onGiveUp || function () {};
+
+    var nextUrl = url;
+    var failures = 0;
+    var startedAt = Date.now();
+
+    function schedule(delayMs) { setTimeout(tick, delayMs); }
+
+    function tick() {
+      if (Date.now() - startedAt > maxDurationMs) { onGiveUp("duration"); return; }
+      fetch(nextUrl, { headers: { "X-Requested-With": "XMLHttpRequest" } })
+        .then(function (response) { return onResponse(response); })
+        .then(function (outcome) {
+          // Reset AFTER onResponse resolves, not before it runs: a
+          // server answering a 500 HTML page rejects inside
+          // `response.json()`, and that must still count as a transport
+          // failure. Resetting earlier would make the counter
+          // unreachable and turn a broken server into a ten-minute
+          // silent poll. This is ask.html's own placement.
+          failures = 0;
+          if (!outcome || !outcome.retry) { return; }
+          if (outcome.url) { nextUrl = outcome.url; }
+          schedule(outcome.delayMs === undefined ? intervalMs : outcome.delayMs);
+        })
+        .catch(function () {
+          failures += 1;
+          if (failures > maxRetries) { onGiveUp("transport"); return; }
+          schedule(retryDelayMs);
+        });
+    }
+
+    schedule(startDelayMs);
+  };
+})();
+</script>

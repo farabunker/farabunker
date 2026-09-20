@@ -1,0 +1,25 @@
+{% comment %}
+The ONE two-step delete confirm, shared by the job card and the gallery
+figure (it was duplicated verbatim, inline `onclick` included).
+
+Dialog-free by design: a native <details> reveals the real form with no JS
+at all -- click "Delete" to open it, click the summary again (or the Cancel
+button, wired up by a one-line onclick that is inert without JS) to close
+it. Nothing here ever calls confirm()/alert()/prompt().
+
+`job` comes from the including context. `next_url` is optional: the gallery
+passes its own URL so a non-XHR delete returns there instead of the create
+page, and `job_delete` re-validates it same-origin server-side.
+{% endcomment %}
+<details class="delete-disclosure">
+  <summary>Delete</summary>
+  <div class="delete-confirm">
+    <span class="muted">Delete this generation and its files?</span>
+    <form method="post" action="{% url 'vision-job-delete' job.id %}">
+      {% csrf_token %}
+      {% if next_url %}<input type="hidden" name="next" value="{{ next_url }}">{% endif %}
+      <button type="submit" class="danger">Yes, delete</button>
+    </form>
+    <button type="button" class="secondary" onclick="this.closest('details').removeAttribute('open')">Cancel</button>
+  </div>
+</details>

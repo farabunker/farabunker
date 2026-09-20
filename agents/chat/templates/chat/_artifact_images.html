@@ -1,0 +1,17 @@
+{% comment %}
+Every image in `images` (a `rendering.artifact_links` list), as a link
+when its `url` resolved and an honest "not available on this install"
+span when it did not (vision turned off on this box). Included by BOTH
+`_turn_card.html` (`images=card.images`) and `_tool_card.html`
+(`images=tool.images`), which is what `_turn_block.html`'s own comment
+already argues for the card loop one level up: two copies of this same
+`{% for %}` is exactly how they would come to disagree about the
+empty-url fallback (CQ-12).
+{% endcomment %}
+{% for image in images %}
+  {% if image.url %}
+  <a href="{{ image.url }}"><img src="{{ image.url }}" alt="{{ image.reference }}"></a>
+  {% else %}
+  <span class="muted">{{ image.reference }} (not available on this install)</span>
+  {% endif %}
+{% endfor %}

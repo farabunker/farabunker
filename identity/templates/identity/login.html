@@ -1,0 +1,95 @@
+{% extends "_shell.html" %}
+{% comment %}
+Sign in. A signed-out visitor's ONLY reachable page besides Setup, so it
+overrides the nav block to render nothing rather than a row of links that
+all redirect back here.
+
+WHICH MEANS IT ALSO LOSES THE BRAND, and the brand is the one thing a
+door should say (UI-1 work item E). So it renders the wordmark itself,
+above the heading -- not a link (there is nowhere signed-out to go) and
+not the H1 (the page's heading is what the page is FOR, which is signing
+in).
+{% endcomment %}
+{% block title %}Sign in — farabunker{% endblock %}
+{% block nav %}{% endblock %}
+{% block extra_style %}
+  :root { --page-max-width: 420px; }
+  main { max-width: var(--page-max-width); margin: 3rem auto 0; }
+  form {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem;
+  }
+  label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 0.35rem;
+  }
+  input[type="text"], input[type="password"] {
+    width: 100%;
+    padding: 0.55rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+  }
+  .field { margin-top: 0.9rem; }
+  .field:first-child { margin-top: 0; }
+  .form-row {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 1rem;
+  }
+  .errorlist {
+    list-style: none;
+    margin: 0.35rem 0 0;
+    padding: 0;
+    color: var(--danger);
+    font-size: 0.85rem;
+  }
+  .brand-mark {
+    margin: 0 0 0.15rem;
+    font-size: 1.35rem;
+    font-weight: 700;
+    letter-spacing: -0.015em;
+  }
+  h1 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--muted);
+    margin: 0 0 1.25rem;
+  }
+  .muted { margin-top: 1.25rem; }
+{% endblock %}
+{% block content %}
+<main>
+  <p class="brand-mark">farabunker</p>
+  <h1>Sign in</h1>
+  <form method="post">
+    {% csrf_token %}
+    {% if form.non_field_errors %}
+      <ul class="errorlist">{% for error in form.non_field_errors %}<li>{{ error }}</li>{% endfor %}</ul>
+    {% endif %}
+    <div class="field">
+      <label for="{{ form.username.id_for_label }}">Username</label>
+      {{ form.username }}
+      {% if form.username.errors %}<ul class="errorlist">{% for error in form.username.errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
+    </div>
+    <div class="field">
+      <label for="{{ form.password.id_for_label }}">Password</label>
+      {{ form.password }}
+      {% if form.password.errors %}<ul class="errorlist">{% for error in form.password.errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
+    </div>
+    <input type="hidden" name="next" value="{{ next }}">
+    <div class="form-row">
+      <button type="submit">Sign in</button>
+    </div>
+  </form>
+  <p class="muted">
+    There is no password-reset email on this box. If you have forgotten your
+    password, ask an administrator to reset it for you.
+  </p>
+</main>
+{% endblock %}

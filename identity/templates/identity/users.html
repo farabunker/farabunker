@@ -1,0 +1,322 @@
+{% extends "_settings.html" %}
+{% comment %}
+The users page (T9). EVERY mutation on this page -- create, deactivate,
+reactivate, promote, demote, reset password -- posts to a plain form and
+is handled by `identity/views.py`, which calls straight into
+`identity.services`: the last-admin guard, the three posture refusals
+and every audit row live there, and this template never bypasses them.
+
+Zero JS, like every other identity page: no `onsubmit`, no confirm()
+dialog -- a POST button is the whole interaction.
+
+In the `personal` posture every account IS an administrator (the
+owner's decision, spec section 3.2), so the superuser checkbox on the
+create form and the promote/demote buttons on each row are not
+rendered at all -- the page does not offer a choice it does not have.
+{% endcomment %}
+{% block title %}Accounts — farabunker{% endblock %}
+{% block side_current_accounts %}current{% endblock %}
+{% block extra_style %}{{ block.super }}
+  :root { --page-max-width: 900px; }
+  main { max-width: var(--page-max-width); margin: 0 auto; }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  {% comment %}
+  NO LOCAL `.msg.error`, `section.create`, `section.create h2`
+  (Coherence Wave D, C3/C4) -- the create-account card used its own
+  name for the same box style Library/Job execution's `section.settings`
+  already defined byte-for-byte; markup below renamed `create` to
+  `settings` to match, and `_settings.html`'s own `extra_style` block
+  now owns the rule for all three. `.create-row` (the field-row layout
+  inside the card) is UNRELATED and stays -- see `identity/templates/
+  identity/groups.html` for the `.msg.error` reasoning.
+  {% endcomment %}
+  .create-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .create-row .field { display: flex; flex-direction: column; gap: 0.35rem; }
+  .create-row label { font-weight: 600; font-size: 0.85rem; }
+  .create-row input[type="text"],
+  .create-row input[type="password"] {
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+  }
+  .create-row .checkbox-field {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .personal-note {
+    margin: 0.75rem 0 0;
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  .errorlist {
+    list-style: none;
+    margin: 0.25rem 0 0;
+    padding: 0;
+    color: var(--danger);
+    font-size: 0.8rem;
+  }
+  .table-wrap {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.25rem 1rem;
+    overflow-x: auto;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    text-align: left;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 0.75rem 0.25rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+  table td {
+    padding: 0.7rem 0.5rem;
+    border-top: 1px solid var(--border);
+    vertical-align: top;
+  }
+  thead th { padding: 0.75rem 0.5rem 0.5rem; }
+  tbody tr:first-child td { border-top: none; }
+  {% comment %}
+  SIZED TO CONTENT, with the surplus going to Effective access -- the one
+  cell that holds a stacked list rather than a word. The same
+  `width: 100%` / `width: 1%` idiom the document library uses. Without
+  it, four short columns and one long one split the table five ways and
+  the access list wrapped into a ribbon.
+  {% endcomment %}
+  th.col-access, td.col-access { width: 100%; }
+  th.col-tight, td.col-tight { width: 1%; white-space: nowrap; }
+  {% comment %}
+  The actions cell reserves a real width instead of leaving the browser
+  to guess from a flex box it could not see into. `white-space: normal`
+  because the controls inside it wrap on purpose; the `col-tight` above
+  still holds it to its content.
+  {% endcomment %}
+  td.col-actions { white-space: normal; min-width: 19rem; vertical-align: top; }
+  {% comment %}
+  TWO GROUPS, NOT FOUR BUTTONS IN A ROW. Deactivate/Reactivate and
+  Promote/Demote act on WHAT THE ACCOUNT IS; resetting a password is a
+  different kind of act with a field of its own, and jamming an unlabelled
+  input between two verbs is what made this cell unreadable.
+  {% endcomment %}
+  {% comment %}
+  A `<td>` MUST STAY A TABLE CELL. `display: flex` on one takes it out of
+  the table layout algorithm entirely -- the row's remaining cells are
+  re-wrapped in anonymous boxes and stop reserving their own width, which
+  is why the pixel pass found the buttons painted over the effective-access
+  text and the password field colliding with the row above. The cell keeps
+  its default `display: table-cell`; the flex column lives in a `<div>`
+  inside it.
+  {% endcomment %}
+  .row-actions { display: flex; flex-direction: column; gap: 0.6rem; align-items: flex-end; }
+  .state-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; justify-content: flex-end; }
+  .row-actions form { margin: 0; }
+  .password-form {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    padding-top: 0.6rem;
+    border-top: 1px solid var(--border);
+    width: 100%;
+  }
+  .password-label { color: var(--muted); font-size: 0.8rem; }
+  .row-actions input[type="password"] {
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: 0.85rem;
+    width: 9rem;
+  }
+  .row-actions button {
+    padding: 0.35rem 0.7rem;
+    font-size: 0.82rem;
+  }
+  {% comment %}
+  A QUIET STACKED LIST. Each entitlement is one line naming how it is
+  held, with what it unlocks underneath in the muted voice -- lines
+  separated by space rather than by rules, so the column reads as a list
+  and not as a second table crammed into a cell.
+  {% endcomment %}
+  .access-panel {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    font-size: 0.85rem;
+  }
+  .access-panel li { padding: 0 0 0.5rem; }
+  .access-panel li:last-child { padding-bottom: 0; }
+  .access-name { font-weight: 600; }
+  .access-via {
+    color: var(--muted);
+  }
+  .access-reach {
+    color: var(--muted);
+    font-size: 0.78rem;
+    margin-top: 0.1rem;
+  }
+  .access-none {
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+{% endblock %}
+{% block settings_content %}
+<main>
+  <h1>Accounts</h1>
+  <p class="tagline">Every account on this box -- create one, deactivate one, promote or demote an administrator, or reset a password.</p>
+
+  {% include "_messages.html" %}
+
+  <section class="settings" id="create-account">
+    <h2>Create an account</h2>
+    <form method="post" action="{% url 'identity-user-create' %}{{ assistant.open_query }}">
+      {% csrf_token %}
+      <div class="create-row">
+        <div class="field">
+          <label for="{{ form.username.id_for_label }}">Username</label>
+          {{ form.username }}
+          {% if form.username.errors %}<ul class="errorlist">{% for error in form.username.errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
+        </div>
+        <div class="field">
+          <label for="{{ form.password.id_for_label }}">Password</label>
+          {{ form.password }}
+          {% if form.password.errors %}<ul class="errorlist">{% for error in form.password.errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
+        </div>
+        {% if posture != "personal" %}
+        <div class="field checkbox-field">
+          {{ form.is_superuser }}
+          <label for="{{ form.is_superuser.id_for_label }}">Administrator</label>
+        </div>
+        {% endif %}
+        <button type="submit">Create account</button>
+      </div>
+    </form>
+    {% if posture == "personal" %}
+    <p class="personal-note">
+      Every account on this box is an administrator: the personal posture has no
+      other kind of account, so there is no choice to offer here.
+    </p>
+    {% endif %}
+  </section>
+
+  <div class="table-wrap" id="account-list">
+    <table>
+      <thead>
+        <tr>
+          <th>Username</th>
+          <th class="col-tight">Status</th>
+          {% if posture != "personal" %}<th class="col-tight">Role</th>{% endif %}
+          <th class="col-access">Effective access</th>
+          <th class="col-tight"><span class="sr-only">Actions</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}{% with account=row.user %}
+        <tr>
+          <td class="col-tight">{{ account.username }}</td>
+          <td class="col-tight">{% if account.is_active %}Active{% else %}Deactivated{% endif %}</td>
+          {% if posture != "personal" %}
+          <td class="col-tight">{% if account.is_superuser %}Administrator{% else %}Member{% endif %}</td>
+          {% endif %}
+          <td class="col-access">
+            {% comment %}
+            READ-ONLY (spec section 22.34): each entitlement this
+            account effectively holds -- direct, or via which group --
+            and what holding it unlocks, sourced from the same
+            cascade-registry counts the entitlement page's own reach
+            panel uses (`identity.services.entitlement_reach`). No form,
+            no button: a view over data this column already owns.
+            {% endcomment %}
+            {% if row.entitlements %}
+            <ul class="access-panel">
+              {% for entitlement in row.entitlements %}
+              <li>
+                <span class="access-name">{{ entitlement.name }}</span>
+                {% if entitlement.via %}<span class="access-via">(via {{ entitlement.via }})</span>
+                {% else %}<span class="access-via">(direct)</span>{% endif %}
+                {% if entitlement.role == "owner" %}<span class="access-via">, owner</span>{% endif %}
+                <div class="access-reach">{% for label, count in entitlement.reach.items %}{{ label }}: {{ count }}{% if not forloop.last %}, {% endif %}{% endfor %}</div>
+              </li>
+              {% endfor %}
+            </ul>
+            {% else %}
+            <span class="access-none">Nothing granted.</span>
+            {% endif %}
+          </td>
+          <td class="col-tight col-actions">
+            <div class="row-actions">
+              <div class="state-actions">
+                {% if account.is_active %}
+                <form method="post" action="{% url 'identity-user-edit' account.pk %}{{ assistant.open_query }}">
+                  {% csrf_token %}
+                  <input type="hidden" name="action" value="deactivate">
+                  <button type="submit">Deactivate</button>
+                </form>
+                {% else %}
+                <form method="post" action="{% url 'identity-user-edit' account.pk %}{{ assistant.open_query }}">
+                  {% csrf_token %}
+                  <input type="hidden" name="action" value="reactivate">
+                  <button type="submit">Reactivate</button>
+                </form>
+                {% endif %}
+                {% if posture != "personal" %}
+                  {% if account.is_superuser %}
+                  <form method="post" action="{% url 'identity-user-edit' account.pk %}{{ assistant.open_query }}">
+                    {% csrf_token %}
+                    <input type="hidden" name="action" value="demote">
+                    <button type="submit">Demote</button>
+                  </form>
+                  {% else %}
+                  <form method="post" action="{% url 'identity-user-edit' account.pk %}{{ assistant.open_query }}">
+                    {% csrf_token %}
+                    <input type="hidden" name="action" value="promote">
+                    <button type="submit">Promote</button>
+                  </form>
+                  {% endif %}
+                {% endif %}
+              </div>
+              {% comment %}
+              A VISIBLE LABEL, not a placeholder. A placeholder disappears
+              the moment somebody types, is not an accessible name in every
+              reader, and left this field looking like an unexplained box
+              between two verbs.
+              {% endcomment %}
+              <form class="password-form" method="post" action="{% url 'identity-user-edit' account.pk %}{{ assistant.open_query }}">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="set_password">
+                <label class="password-label" for="new-password-{{ account.pk }}">New password</label>
+                <input type="password" id="new-password-{{ account.pk }}" name="password" required>
+                <button type="submit">Reset</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        {% endwith %}{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</main>
+{% endblock %}

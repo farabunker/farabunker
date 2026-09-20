@@ -1,0 +1,34 @@
+{% comment %}
+The "Add the default X" offers -- ruling 2's page half. Included only
+when `offers` is non-empty (`index.html`'s own `{% if offers %}`).
+
+Each shipped default not yet installed gets its own POST form, never a
+link: a GET must never install, and a `<button>` inside a
+`method="post"` `<form>` is the only control that still works with
+JavaScript off and cannot be prefetched into a write. `install_default`
+is create-if-absent, so a double-click here is a no-op, not a
+duplicate.
+
+Disjoint from the picker by construction: `offers` is computed FROM the
+installed slugs (`missing_defaults`), so a default can never appear as
+both a thing you can talk to and a thing you can add.
+{% endcomment %}
+<section id="offers">
+  <h2>Available</h2>
+  <ul class="offers-list">
+    {% for offer in offers %}
+    <li class="offer">
+      <form method="post" action="{% url 'chat-default-install' %}">
+        {% csrf_token %}
+        <input type="hidden" name="kind" value="agent">
+        <input type="hidden" name="slug" value="{{ offer.slug }}">
+        <div class="offer-text">
+          <strong>{{ offer.name }}</strong>
+          <p class="muted">{{ offer.description }}</p>
+        </div>
+        <button type="submit">Add the default {{ offer.name }}</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+</section>

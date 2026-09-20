@@ -1,0 +1,83 @@
+{% comment %}
+THE SHARED SEARCHABLE-CHECKLIST DROPDOWN (round 16's tags filter,
+round 17's "Pin a document" chooser -- "REUSE round 16's tag-dropdown
+fragment/script as one component with two consumers" rather than a
+second copy, the round-17 brief's own words). `chat/base.html`'s own
+`.search-checklist` comment has the CSS half of this reuse; `foundation/templates/
+_filter_rows_script.html` has the JS half.
+
+MUST BE `{% templatetag openblock %} include %}`d INSIDE the caller's
+own surrounding `<form method="get">` or `<form method="post">` --
+nested `<form>` elements are illegal HTML (`chat/all.html`'s own
+comment on this, round 16, has the full reasoning) and this fragment
+never renders one of its own; its Apply/Pin `<button type="submit">`
+submits whatever form it is physically inside.
+
+PARAMETERS, every one required unless marked optional:
+
+  sc_summary_text     -- the closed `<summary>`'s own text,
+                         PRE-FORMATTED by the caller (a plain label, or
+                         one with its own count already appended --
+                         "Tags &middot; 2" -- since the counting rule
+                         differs per consumer and this fragment has no
+                         opinion on it)
+  sc_summary_class    -- OPTIONAL, "": extra class(es) for the
+                         `<summary>` (round 16's own page passes
+                         "filter-chip" so its Tags control matches the
+                         other filter-row chips beside it; round 17's
+                         pin chooser passes nothing and gets the shared
+                         default look alone)
+  sc_active           -- OPTIONAL, falsy: when truthy, appends "active"
+                         to the summary's own class list (round 16's own
+                         "something is selected" highlight; meaningless
+                         without a caller-supplied "active" rule of its
+                         own to key off, e.g. `.filter-chip.active`)
+  sc_input_type       -- "checkbox" (round 16: multi-select, OR-matched
+                         at the server) or "radio" (round 17: exactly
+                         one document per Pin submit, unchanged from the
+                         `<select>` this replaces)
+  sc_input_name       -- the form field every row's own `<input>` shares
+  sc_rows             -- iterable of `{"id", "name", "checked"}` dicts
+  sc_search_placeholder / sc_search_title -- the filter input's own
+                         copy; `sc_search_title` is the JS-OFF HONESTY
+                         pin (round 16's own reasoning, unchanged):
+                         VISIBLE either way, but its own `title=` says
+                         plainly that live filtering needs JavaScript
+  sc_clear_url         -- OPTIONAL, "": renders a "Clear" link when
+                         given (round 16's own "uncheck everything" --
+                         round 17's single-select chooser has no
+                         equivalent state to clear and omits it)
+  sc_submit_label      -- the submit button's own text ("Apply"/"Pin")
+{% endcomment %}
+<details class="chat-menu search-checklist">
+  <summary class="{{ sc_summary_class }}{% if sc_active %} active{% endif %}">{{ sc_summary_text }}</summary>
+  <div class="chat-menu-body">
+    {% comment %}
+    THE TWO SELECTORS THE SHARED FILTER SCRIPT READS (`_filter_rows_
+    script.html`, which moved out of this directory when a third
+    consumer -- the entitlement page's transfer panels -- needed the
+    identical idiom). They are DECLARED HERE, on the input, rather than
+    hardcoded in the script: this component's `.chat-menu-body`/
+    `.checklist-row` vocabulary is its own, and a component with a
+    different look must be able to reuse the behaviour without adopting
+    the CSS that goes with those names.
+    {% endcomment %}
+    <input type="search" class="checklist-search"
+           data-filter-scope=".chat-menu-body" data-filter-rows=".checklist-row"
+           placeholder="{{ sc_search_placeholder }}"
+           title="{{ sc_search_title }}"
+           aria-label="{{ sc_search_title }}">
+    <div class="checklist-list">
+      {% for entry in sc_rows %}
+      <label class="checklist-row">
+        <input type="{{ sc_input_type }}" name="{{ sc_input_name }}" value="{{ entry.id }}"{% if entry.checked %} checked{% endif %}>
+        {{ entry.name }}
+      </label>
+      {% endfor %}
+    </div>
+    <div class="checklist-actions">
+      {% if sc_clear_url %}<a href="{{ sc_clear_url }}">Clear</a>{% else %}<span></span>{% endif %}
+      <button type="submit">{{ sc_submit_label }}</button>
+    </div>
+  </div>
+</details>
