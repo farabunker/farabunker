@@ -960,7 +960,11 @@ feature`, `foundation/templates/_settings.html`).
 A ticketed generation (spec: deletion semantics) is excluded from
 `visible_jobs` the moment its ticket exists — see "Visibility" above —
 and its rows and files are destroyed when the ticket's date arrives, or
-on an explicit "Delete permanently".
+on an explicit "Delete permanently". The two file-serving routes are
+refused the same way: even reached by its direct URL, a ticketed job's
+stored image or stored input answers the same 404 as one this principal
+could never read in the first place, so a deleted picture cannot be
+fetched by a link that was copied or bookmarked before it was deleted.
 
 `tools/vision/retention.py::purge_artifacts` is this column's registered
 answer to `agents.contracts.artifacts.register_artifact_purge`

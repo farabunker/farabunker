@@ -71,9 +71,13 @@ def purge_artifacts(refs, generation_ids) -> int:
         try:
             kind, pk = parse_artifact(reference)
         except ValueError:
+            # THE RAW REFERENCE NEVER REACHES THE LOG: this path runs
+            # inside a deletion, and a deletion must not write what it
+            # is destroying somewhere new. The fact that one reference
+            # failed to parse and was dropped is the whole of what a
+            # reader needs.
             logger.warning(
-                "tools.vision.retention: unusable artifact reference %r; ignored.",
-                reference)
+                "tools.vision.retention: one artifact reference failed to parse; ignored.")
             continue
         if kind == "output":
             output_pks.append(pk)
@@ -90,8 +94,11 @@ def purge_artifacts(refs, generation_ids) -> int:
         try:
             job_ids.add(uuid.UUID(str(raw)))
         except (ValueError, AttributeError, TypeError):
+            # SAME RULE AS THE REFERENCE BRANCH ABOVE: no raw value in
+            # the log, only the fact that one generation id could not
+            # be parsed and was dropped.
             logger.warning(
-                "tools.vision.retention: unusable generation id %r; ignored.", raw)
+                "tools.vision.retention: one generation id failed to parse; ignored.")
 
     if not job_ids:
         return 0

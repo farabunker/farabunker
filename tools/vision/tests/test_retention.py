@@ -78,6 +78,17 @@ class TestMappingReferencesToJobs:
         assert purge_artifacts([], [str(job.pk)]) == 1
         assert not GenerationJob.objects.filter(pk=job.pk).exists()
 
+    def test_a_failed_job_with_no_output_is_reached_only_through_its_generation_id(self):
+        """The docstring's own claim: a job that reached the engine and
+        FAILED mints no output at all, so the reference channel above
+        finds nothing for it -- the generation-id channel is the only
+        way this column's purge reaches it."""
+        job = _generation(status=GenerationJob.Status.FAILED,
+                          error="the engine could not be reached")
+        assert not GeneratedOutput.objects.filter(job=job).exists()
+        assert purge_artifacts([], [str(job.pk)]) == 1
+        assert not GenerationJob.objects.filter(pk=job.pk).exists()
+
     def test_a_reference_and_an_id_naming_one_job_are_one_delete(self):
         job = _generation()
         output = _output(job=job)
@@ -113,6 +124,24 @@ class TestMappingReferencesToJobs:
         job = _generation()
         purge_artifacts([], [str(job.pk)])
         assert calls == [job.pk]
+
+
+class TestAFailedParseIsLoggedWithoutWhatItFailedToParse:
+    """A deletion path must not write what it is destroying into a log:
+    the log records that one reference, or one generation id, failed to
+    parse and was ignored -- never the raw value itself."""
+
+    def test_an_unparseable_reference_names_no_raw_value(self, caplog):
+        raw = "not-a-reference-xyz789"
+        with caplog.at_level("WARNING"):
+            purge_artifacts([raw], [])
+        assert not any(raw in record.getMessage() for record in caplog.records)
+
+    def test_an_unusable_generation_id_names_no_raw_value(self, caplog):
+        raw = "not-a-uuid-xyz789"
+        with caplog.at_level("WARNING"):
+            purge_artifacts([], [raw])
+        assert not any(raw in record.getMessage() for record in caplog.records)
 
 
 class TestEmptyInputCostsNothing:

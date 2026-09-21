@@ -39,7 +39,24 @@ def may_read_job(principal, job) -> bool:
     """Whether one already-loaded job may be read. `job_status`,
     `job_delete`, `output_file` and `input_file` resolve through this and
     answer 404 when it is False -- 404 rather than 403, because a 403 on
-    a row-addressed URL confirms the row exists."""
+    a row-addressed URL confirms the row exists.
+
+    A TICKETED JOB IS REFUSED HERE TOO, before the `sees_all_content`
+    branch below. `output_file` and `input_file` load their
+    `GeneratedOutput`/`JobInput` row by primary key and reach this
+    function directly -- they never go through `visible_jobs`, so the
+    base-queryset exclusion that hides a deleted generation from the
+    gallery and the Recent list never runs for them. Without a matching
+    check here, a deleted image would stay fetchable forever by anybody
+    who already had its direct URL. Placed before `sees_all_content` for
+    the same reason `visible_jobs`'s own exclusion comes first: that
+    branch answers True for every principal on an open box, so a check
+    on the restricted leg alone would leave a deleted image servable
+    exactly where it matters most. Costs one extra ticket read per file
+    fetch.
+    """
+    if str(job.pk) in ticketed_keys(KIND_VISION_JOB):
+        return False
     if sees_all_content(principal):
         return True
     return may_read_owned_row(principal, job)
