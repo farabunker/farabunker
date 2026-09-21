@@ -14,6 +14,10 @@ from datetime import datetime, timezone as dt_timezone
 
 import pytest
 
+from models.registry.bindings import (
+    FOOTPRINT_DIP_WARNING_RATIO, record_engine_reported_footprint,
+    record_measured_footprint,
+)
 from models.registry.models import ModelConnection
 
 
@@ -89,3 +93,128 @@ class TestTheFourRungLadder:
         connection.refresh_from_db()
 
         assert connection.engine_reported_footprint_at == at
+
+
+@pytest.mark.django_db
+class TestTheRecorderKeepsTheMaximum:
+    """Live evidence, twice: a measurement taken while another model was
+    resident, and one taken after a restart lost the residency memo, each
+    LOWERED a standing footprint (26.4 -> 6.4 GB; 15.2 -> 11.1 GB). The
+    next admission planned against the lowered number, evicted nothing,
+    and the machine went down.
+
+    No tolerance band, deliberately (spec §3.2): a percentage band
+    against the STANDING value ratchets geometrically, and the condition
+    is recurring rather than adversarial -- that model under-measures
+    every time it is warm. Keeping the maximum makes the standing value a
+    high-water mark by construction, with no extra column and no constant
+    to tune."""
+
+    def _conn(self, **kwargs) -> ModelConnection:
+        return ModelConnection.objects.create(
+            name="c", engine="ollama", endpoint="http://e:1/", model_id="m", **kwargs,
+        )
+
+    def test_a_first_reading_is_written(self):
+        connection = self._conn()
+
+        record_measured_footprint("ollama", "http://e:1", "m", 100)
+
+        connection.refresh_from_db()
+        assert connection.measured_footprint_bytes == 100
+        assert connection.measured_footprint_at is not None
+
+    def test_a_larger_reading_is_believed(self):
+        connection = self._conn(measured_footprint_bytes=100)
+
+        record_measured_footprint("ollama", "http://e:1", "m", 250)
+
+        connection.refresh_from_db()
+        assert connection.measured_footprint_bytes == 250
+
+    def test_an_equal_reading_is_written_and_refreshes_the_timestamp(self):
+        connection = self._conn(measured_footprint_bytes=100)
+
+        record_measured_footprint("ollama", "http://e:1", "m", 100)
+
+        connection.refresh_from_db()
+        assert connection.measured_footprint_bytes == 100
+        assert connection.measured_footprint_at is not None
+
+    def test_a_lower_reading_writes_nothing_at_all(self):
+        """Not the bytes, and not the timestamp: a refused reading must
+        not leave a fresher date standing beside an older number, which
+        would read on the console as "we measured this recently"."""
+        at = datetime(2026, 3, 4, tzinfo=dt_timezone.utc)
+        connection = self._conn(measured_footprint_bytes=100, measured_footprint_at=at)
+
+        record_measured_footprint("ollama", "http://e:1", "m", 40)
+
+        connection.refresh_from_db()
+        assert connection.measured_footprint_bytes == 100
+        assert connection.measured_footprint_at == at
+
+    def test_three_successive_08x_readings_do_not_walk_the_standing_value_down(self):
+        """The review's own pinned test (round 1, M5), adopted verbatim:
+        this is the exact shape a tolerance band would have permitted."""
+        connection = self._conn(measured_footprint_bytes=1000)
+
+        for reading in (800, 640, 512):
+            record_measured_footprint("ollama", "http://e:1", "m", reading)
+
+        connection.refresh_from_db()
+        assert connection.measured_footprint_bytes == 1000
+
+    def test_a_badly_lower_reading_warns_and_names_the_override(self, caplog):
+        connection = self._conn(measured_footprint_bytes=1000)
+
+        with caplog.at_level("INFO", logger="models.registry.bindings"):
+            record_measured_footprint("ollama", "http://e:1", "m", 100)
+
+        line = "".join(record.getMessage() for record in caplog.records)
+        assert "1000" in line and "100" in line
+        assert str(connection.pk) in line
+        assert "override" in line
+        assert any(record.levelname == "WARNING" for record in caplog.records)
+
+    def test_a_small_dip_is_informational_not_a_warning(self, caplog):
+        self._conn(measured_footprint_bytes=1000)
+        just_above = int(1000 * FOOTPRINT_DIP_WARNING_RATIO) + 1
+
+        with caplog.at_level("INFO", logger="models.registry.bindings"):
+            record_measured_footprint("ollama", "http://e:1", "m", just_above)
+
+        assert caplog.records
+        assert all(record.levelname == "INFO" for record in caplog.records)
+
+    def test_the_engine_reported_column_obeys_the_same_rule(self):
+        connection = self._conn(engine_reported_footprint_bytes=1000)
+
+        record_engine_reported_footprint("ollama", "http://e:1", "m", 400)
+        record_engine_reported_footprint("ollama", "http://e:1", "m", 1500)
+
+        connection.refresh_from_db()
+        assert connection.engine_reported_footprint_bytes == 1500
+
+    def test_the_two_columns_do_not_compare_against_each_other(self):
+        """A rung-3 reading is measured against rung 3's own standing
+        value, never against rung 2's -- they are facts of different
+        quality and a cross-rung comparison would refuse honest writes."""
+        connection = self._conn(measured_footprint_bytes=1000)
+
+        record_engine_reported_footprint("ollama", "http://e:1", "m", 40)
+
+        connection.refresh_from_db()
+        assert connection.engine_reported_footprint_bytes == 40
+        assert connection.measured_footprint_bytes == 1000
+
+    def test_an_ambiguous_ref_is_still_a_silent_no_op(self):
+        self._conn()
+        ModelConnection.objects.create(
+            name="twin", engine="ollama", endpoint="http://e:1", model_id="m",
+        )
+
+        record_measured_footprint("ollama", "http://e:1", "m", 500)
+
+        assert not ModelConnection.objects.filter(
+            measured_footprint_bytes__isnull=False).exists()

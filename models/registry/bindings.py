@@ -66,7 +66,14 @@ the worker's post-execution measurement writes `measured_footprint_bytes`/
 (engine exact, endpoint `norm_endpoint`-normalized on both sides, model_id
 exact) so a measurement can only ever land on the one row `footprint_for`
 would itself have resolved for that same ref -- never a different row an
-independently-written match rule might disagree with.
+independently-written match rule might disagree with. Both it and its
+rung-3 twin `record_engine_reported_footprint()` (spec §3.1) now go
+through one shared writer, `_record_footprint`, which KEEPS THE MAXIMUM
+(spec §3.2): a reading below the column's own standing value is refused
+outright -- neither the bytes nor the timestamp are written -- rather
+than tolerated within a band, because two live incidents show a
+percentage band ratchets a standing value down over repeated warm runs
+instead of preventing exactly that.
 
 Imports are lazy and local to each function on purpose: Django's app
 registry / DB access must not happen at import time (this keeps
@@ -75,7 +82,24 @@ registry / DB access must not happen at import time (this keeps
 """
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
+
+# Below this ratio, a refused lowering is an OPERATOR-ACTIONABLE event
+# (WARNING) rather than a note (INFO): a reading under three quarters of
+# the standing value is the shape both live incidents took (26.4 -> 6.4
+# GB, 15.2 -> 11.1 GB), and the operator's remedy -- set
+# `footprint_override_bytes` -- is named in the line itself. A smaller dip
+# is ordinary measurement noise and is recorded at INFO, so the refusal is
+# still visible without teaching an operator to ignore warnings.
+#
+# A THRESHOLD FOR LOG LEVEL ONLY. No reading below the standing value is
+# ever written, at any ratio: a tolerance band measured against the
+# standing value ratchets geometrically and reproduces the exact incident
+# this rule exists to refuse (spec §3.2).
+FOOTPRINT_DIP_WARNING_RATIO = 0.75
 
 # RE-EXPORTED, not re-implemented. `bindings` is the one submodule of this
 # package every other column may import (the import-law gate names it by
@@ -413,23 +437,68 @@ def footprint_for(engine: str, endpoint: str, model_id: str) -> int | None:
 
 
 def record_measured_footprint(engine: str, endpoint: str, model_id: str, size_bytes: int) -> None:
-    """Persist `size_bytes` as the measured footprint for the ONE
+    """Persist `size_bytes` as the MEASURED footprint (rung 2) for the ONE
     `ModelConnection` matching `(engine, endpoint, model_id)` -- see the
-    module docstring for why this uses `footprint_for`'s exact match rule.
+    module docstring for why this uses `footprint_for`'s exact match rule,
+    and `_record_footprint` below for the keep-the-maximum rule every
+    write now obeys.
+    """
+    _record_footprint(
+        engine, endpoint, model_id, size_bytes,
+        bytes_field="measured_footprint_bytes", at_field="measured_footprint_at",
+    )
 
-    A silent no-op -- never a raise -- for every case that isn't "exactly
-    one match": no matching row, more than one (an ambiguous ref must never
-    guess which row to overwrite, same as `footprint_for` refuses to guess
-    which row to read), or a `ProgrammingError`/`OperationalError` from
-    EITHER the initial SELECT or the write itself (the table can just as
-    easily disappear/become unreachable between the two as before the
-    first query -- guarding only the SELECT would leave the write able to
-    raise back into a caller, e.g. the worker's post-execution measurement,
-    that this function's whole contract promises never to). This is an
-    OPPORTUNISTIC write -- the worker calls it after every job execution,
-    win or lose -- never an operation any job's own outcome depends on; a
-    caller that needs to know whether the write actually landed has no
-    business asking this function, which deliberately doesn't say.
+
+def record_engine_reported_footprint(
+    engine: str, endpoint: str, model_id: str, size_bytes: int,
+) -> None:
+    """Persist `size_bytes` as the ENGINE-REPORTED footprint (rung 3, spec
+    §3.1) for the ONE matching `ModelConnection`.
+
+    Called by the queue worker from inside the residency snapshot it is
+    taking anyway (`models.queue.worker.Worker._residency_snapshot`) --
+    never from a call made for this purpose. Obeys exactly the same
+    opportunistic contract and the same keep-the-maximum rule as its
+    rung-2 twin above, measured against rung 3's OWN standing value: the
+    two columns are facts of different quality and never compare against
+    each other.
+    """
+    _record_footprint(
+        engine, endpoint, model_id, size_bytes,
+        bytes_field="engine_reported_footprint_bytes",
+        at_field="engine_reported_footprint_at",
+    )
+
+
+def _record_footprint(
+    engine: str, endpoint: str, model_id: str, size_bytes: int, *,
+    bytes_field: str, at_field: str,
+) -> None:
+    """THE ONE WRITER behind both recorders above.
+
+    KEEP THE MAXIMUM (Q9, spec §3.2). No standing value -> write. A
+    reading GREATER THAN OR EQUAL to the standing value -> write (a
+    footprint going up is always believed; under-counting is the
+    direction that crashes hosts). A reading BELOW it -> refuse
+    entirely: not the bytes, not the timestamp, and one line records the
+    connection, the standing value and the refused value.
+
+    There is deliberately NO tolerance band. A percentage tolerance
+    measured against the standing value ratchets geometrically -- five
+    successive "within tolerance" 0.75x writes walk 26.4 GB down to 6.2
+    GB and reproduce the exact shape this rule exists to refuse -- and
+    the Q9 condition is RECURRING (a model that under-measures whenever
+    it is warm), so repeated warm runs are the normal path, not an
+    adversarial one. Keeping the maximum makes the standing value a
+    high-water mark by construction, with no extra column and no constant
+    to tune. The accepted cost -- a genuinely shrunk model stays high
+    until an operator sets an override -- is the safe direction and is
+    already the documented correction path.
+
+    Opportunistic and silent-on-ambiguity in every other respect, exactly
+    as before: never raises, no-ops on no match or an ambiguous match,
+    tolerates a `ProgrammingError`/`OperationalError` from either the
+    SELECT or the write, and tells no caller whether the write landed.
     """
     from django.db import OperationalError, ProgrammingError
     from django.utils import timezone
@@ -448,9 +517,24 @@ def record_measured_footprint(engine: str, endpoint: str, model_id: str, size_by
         return
 
     connection = matches[0]
-    connection.measured_footprint_bytes = size_bytes
-    connection.measured_footprint_at = timezone.now()
+    standing = getattr(connection, bytes_field)
+    if standing is not None and size_bytes < standing:
+        ratio = size_bytes / standing if standing else 1.0
+        message = (
+            "registry: refused to lower %s on connection %s (%r): standing %s bytes, "
+            "refused reading %s bytes. A footprint is kept at its high-water mark; set "
+            "footprint_override_bytes on this connection if the model really did get smaller"
+        )
+        args = (bytes_field, connection.pk, connection.name, standing, size_bytes)
+        if ratio < FOOTPRINT_DIP_WARNING_RATIO:
+            logger.warning(message, *args)
+        else:
+            logger.info(message, *args)
+        return
+
+    setattr(connection, bytes_field, size_bytes)
+    setattr(connection, at_field, timezone.now())
     try:
-        connection.save(update_fields=["measured_footprint_bytes", "measured_footprint_at"])
+        connection.save(update_fields=[bytes_field, at_field])
     except (ProgrammingError, OperationalError):
         return
