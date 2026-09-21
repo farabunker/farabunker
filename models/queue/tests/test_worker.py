@@ -41,6 +41,10 @@ from models.contracts.jobkinds import JobKind, register_job_kind
 MODULE = "models.queue.tests.test_worker"
 GB = 1024**3
 
+# The endpoint every eviction test already uses as a literal. Named once
+# here, because the eviction suite below now refers to it a few dozen times.
+ENDPOINT = "http://fake:1"
+
 
 # --- test job kinds' planner/handler/summarizer -----------------------------
 
@@ -177,6 +181,53 @@ def _set_budget(*, memory_budget_bytes=None, max_concurrent_jobs=4):
     settings.save()
 
 
+def _installed(model_id: str, *, loaded: bool = False, loaded_size: int | None = None):
+    """One `InstalledModel`, the shape `list_installed` returns. The
+    existing tests build these inline; the eviction suite needs too many
+    of them for that to stay readable."""
+    return InstalledModel(model_id=model_id, loaded=loaded, loaded_size=loaded_size)
+
+
+def _running_job_holding(engine: str, endpoint: str, model_id: str) -> InferenceJob:
+    """One RUNNING row holding exactly that model, which is what puts its
+    key in `_protected_keys`' first half."""
+    return _job(state=RUNNING, model_refs=[
+        _ref(engine=engine, endpoint=endpoint, model_id=model_id),
+    ])
+
+
+def _admitted_exclusive(engine: str, endpoint: str, model_id: str) -> dict:
+    """One claim descriptor of the shape `claim_and_admit` returns, for a
+    job this tick admitted AS EXCLUSIVE -- the input `_evict_to_match_plan`
+    takes. The row is created RUNNING too, because by the time the pass
+    runs the claim has committed (which is why one RUNNING query covers
+    "running union admitted")."""
+    row = _running_job_holding(engine, endpoint, model_id)
+    InferenceJob.objects.filter(pk=row.pk).update(exclusive=True)
+    return {
+        "id": row.pk, "kind": row.kind, "payload": {},
+        "model_refs": [_ref(engine=engine, endpoint=endpoint, model_id=model_id)],
+        "claim_token": uuid.uuid4(), "exclusive": True,
+        "checkpoint": None, "attempts": 0,
+    }
+
+
+@pytest.fixture(autouse=True)
+def hermetic_engine_endpoints(settings):
+    """No CONFIGURED engine endpoints, unless a test declares its own.
+
+    The eviction pass's widened sweep (spec §3.3e) unions the running
+    jobs' endpoints with `registered_endpoints()`, which reads
+    `settings.INFERENCE_DEFAULT_ENDPOINTS` -- whose real values point at
+    whatever engines happen to be listening on the developer's own
+    machine. Left alone, a test that admits an exclusive job would probe
+    those addresses for real and, worse, call `unload()` against them.
+    Autouse and module-wide, so no future eviction test has to remember;
+    a test about the sweep sets the map it wants and that assignment
+    wins."""
+    settings.INFERENCE_DEFAULT_ENDPOINTS = {}
+
+
 @pytest.fixture
 def worker():
     w = Worker(worker_id="test-worker")
@@ -188,9 +239,24 @@ class FakeEngine:
     """Minimal `InferenceEngine` stub implementing the FULL optional seam
     (`loaded_footprint`/`unload`) -- registered directly into
     `models.contracts.engines.ENGINES`, restored by the `register_engine`
-    fixture."""
+    fixture.
+
+    DECLARES `unload_scope = "model"` and `residency_authority =
+    "endpoint"` (queue memory governance, 2026-09-21). "model" is chosen
+    deliberately: every SHIPPED assertion in `TestEviction` counts
+    PER-MODEL unload calls -- `test_unneeded_resident_model_is_unloaded_
+    when_over_budget` expects one call for `unneeded-model` while
+    `needed-model` is protected at the SAME endpoint, and two tests assert
+    `len(engine.unload_calls) == MAX_UNLOADS_PER_TICK`. Declaring this stub
+    endpoint-scope would invert all of them (an endpoint-scope endpoint
+    holding a protected key is skipped WHOLE). The endpoint-scope cases get
+    their own stub below, so neither semantic is tested through a fixture
+    that also has to keep the other one's assertions true."""
 
     well_known_ports: tuple[int, ...] = ()
+
+    unload_scope = "model"
+    residency_authority = "endpoint"
 
     def __init__(self, name: str, installed: list | None = None, footprints: dict | None = None):
         self.name = name
@@ -198,6 +264,7 @@ class FakeEngine:
         self._footprints = footprints or {}
         self.unload_calls: list[tuple[str, str]] = []
         self.unload_returns = True
+        self.list_installed_calls = 0
         # Optional test hook, called with (endpoint, model_id) after every
         # unload() -- lets a test observe worker-side state (e.g. a
         # heartbeat write) that happens BETWEEN successive unload calls,
@@ -208,6 +275,7 @@ class FakeEngine:
         return True
 
     def list_installed(self, endpoint):
+        self.list_installed_calls += 1
         return self._installed
 
     def build_llm(self, model_id, endpoint, **cfg):  # pragma: no cover - unused here
@@ -224,6 +292,15 @@ class FakeEngine:
         if self.on_unload is not None:
             self.on_unload(endpoint, model_id)
         return self.unload_returns
+
+
+class FakeEndpointScopeEngine(FakeEngine):
+    """The other half of the seam: one call frees everything here, and the
+    residency report is a process-local memo rather than a live endpoint.
+    Same recording surface as `FakeEngine`."""
+
+    unload_scope = "endpoint"
+    residency_authority = "memo"
 
 
 class FakeEngineNoOptionalMethods:
@@ -2391,6 +2468,335 @@ class TestEviction:
         # because it was deemed needed but because it was never weighed
         # at all.
         assert engine.unload_calls == []
+
+    # --- the two optional declarations ---------------------------------
+
+    def test_an_undeclared_engine_is_assumed_endpoint_scope_and_memo_backed(
+            self, worker, register_engine):
+        """The safe assumptions: a wrong 'endpoint' guess costs a needless
+        reload, a wrong 'model' guess destroys a live cold load; a wrong
+        'memo' guess costs one precautionary call, a wrong 'endpoint'
+        guess trusts an empty answer that may only mean this process
+        forgot."""
+        engine = register_engine(FakeEngineNoOptionalMethods("plain"))
+
+        assert worker._unload_scope(engine) == "endpoint"
+        assert worker._residency_authority(engine) == "memo"
+
+    def test_a_nonsense_declaration_degrades_to_the_safe_default(self, worker, register_engine):
+        engine = register_engine(FakeEngine("odd"))
+        engine.unload_scope = "per-shard"
+        engine.residency_authority = "vibes"
+
+        assert worker._unload_scope(engine) == "endpoint"
+        assert worker._residency_authority(engine) == "memo"
+
+    # --- protection, per scope -----------------------------------------
+
+    def test_a_model_scope_endpoint_skips_only_the_protected_key(self, worker, register_engine):
+        engine = register_engine(FakeEngine("e", installed=[
+            _installed("needed", loaded=True), _installed("spare", loaded=True),
+        ]))
+        _running_job_holding("e", ENDPOINT, "needed")
+        claimed = [_admitted_exclusive("e", ENDPOINT, "needed")]
+
+        worker._evict_to_match_plan(claimed)
+
+        assert engine.unload_calls == [(ENDPOINT, "spare")]
+
+    def test_an_endpoint_scope_endpoint_is_skipped_whole_for_a_foreign_protected_key(
+            self, worker, register_engine, caplog):
+        """One call would take the protected model with it, so no call is
+        made at all -- and the skip is a WARNING naming what protected it,
+        because a human would otherwise have to infer it.
+
+        The admitted job runs on its OWN engine stub rather than sharing
+        `e`'s: `FakeEngine.list_installed` answers the same list at every
+        endpoint it is asked about, so reusing one stub for both
+        endpoints would report `e`'s models as resident at the admitted
+        job's foreign endpoint too -- where nothing protects them, and
+        where unloading them is exactly the right behaviour. Two stubs
+        keep this test about the protected endpoint alone."""
+        engine = register_engine(FakeEndpointScopeEngine("e", installed=[
+            _installed("someone-elses", loaded=True), _installed("spare", loaded=True),
+        ]))
+        register_engine(FakeEndpointScopeEngine("other", installed=[]))
+        _running_job_holding("e", ENDPOINT, "someone-elses")
+        claimed = [_admitted_exclusive("other", "http://other:2", "mine")]
+
+        with caplog.at_level("WARNING", logger="models.queue.worker"):
+            worker._evict_to_match_plan(claimed)
+
+        assert engine.unload_calls == []
+        assert any("protected" in r.getMessage() for r in caplog.records)
+
+    def test_a_live_in_flight_attempts_model_protects_its_endpoint(
+            self, worker, register_engine, settings):
+        """Q11: an orphaned-but-not-yet-readmitted attempt whose row is
+        briefly back at `queued` while its handler is genuinely still
+        mid-cold-load is invisible to a RUNNING-derived set. The cold load
+        measured in minutes IS that window.
+
+        The in-flight attempt's endpoint has to be IN the swept set for
+        the protection to be reachable at all -- `_inflight_refs` feeds
+        the protected set, never the endpoint set -- so it is declared as
+        a configured endpoint here, which is what an exclusive
+        admission's widened sweep visits. The admitted job gets its own
+        stub for the reason the test above gives."""
+        settings.INFERENCE_DEFAULT_ENDPOINTS = {"e": ENDPOINT}
+        engine = register_engine(FakeEndpointScopeEngine("e", installed=[
+            _installed("loading", loaded=True),
+        ]))
+        register_engine(FakeEndpointScopeEngine("other", installed=[]))
+        key = (99, uuid.uuid4())
+        future = concurrent.futures.Future()
+        worker._futures[key] = future
+        worker._inflight_refs[key] = [
+            {"engine": "e", "endpoint": ENDPOINT, "model_id": "loading"},
+        ]
+
+        worker._evict_to_match_plan([_admitted_exclusive("other", "http://other:2", "mine")])
+
+        assert engine.unload_calls == []
+        future.set_result(None)
+
+    def test_the_admitted_batch_is_protected_at_a_model_scope_endpoint(
+            self, worker, register_engine):
+        """Shipped behaviour, kept: today's `needed_keys` already covers
+        "running union admitted", because the claim committed before this
+        pass runs. An agent turn is planned EXCLUSIVE, so every chat turn
+        runs this pass -- an unprotected definition would unload that
+        turn's own warm chat model and cold-load it again on every single
+        message, on hardware whose cold loads are measured in minutes."""
+        engine = register_engine(FakeEngine("e", installed=[
+            _installed("the-admitted-model", loaded=True), _installed("spare", loaded=True),
+        ]))
+        claimed = [_admitted_exclusive("e", ENDPOINT, "the-admitted-model")]
+
+        worker._evict_to_match_plan(claimed)
+
+        assert (ENDPOINT, "the-admitted-model") not in engine.unload_calls
+        assert (ENDPOINT, "spare") in engine.unload_calls
+
+    def test_the_admitted_jobs_own_endpoint_scope_endpoint_is_freed_anyway(
+            self, worker, register_engine):
+        """The ONE sanctioned exception (§3.3c), pinned as a PAIR with the
+        test above so neither can drift: freeing that endpoint unavoidably
+        takes the job's own model with it and there is no per-model call to
+        make instead -- at worst one reload."""
+        engine = register_engine(FakeEndpointScopeEngine("e", installed=[
+            _installed("the-admitted-model", loaded=True),
+        ]))
+        claimed = [_admitted_exclusive("e", ENDPOINT, "the-admitted-model")]
+
+        worker._evict_to_match_plan(claimed)
+
+        assert engine.unload_calls == [(ENDPOINT, "the-admitted-model")]
+
+    def test_another_jobs_key_at_that_same_endpoint_still_protects_it(
+            self, worker, register_engine):
+        """The exception has a named boundary: the admitted job's OWN keys
+        at its OWN endpoint, never another job's and never a live
+        attempt's."""
+        engine = register_engine(FakeEndpointScopeEngine("e", installed=[
+            _installed("the-admitted-model", loaded=True),
+            _installed("someone-elses", loaded=True),
+        ]))
+        _running_job_holding("e", ENDPOINT, "someone-elses")
+        claimed = [_admitted_exclusive("e", ENDPOINT, "the-admitted-model")]
+
+        worker._evict_to_match_plan(claimed)
+
+        assert engine.unload_calls == []
+
+    # --- reach ----------------------------------------------------------
+
+    def test_an_exclusive_admission_sweeps_every_registered_endpoint(
+            self, worker, register_engine, settings):
+        """Q4: a model left warm on an IDLE engine was never visited,
+        because the endpoint set came from the running jobs' own refs."""
+        settings.INFERENCE_DEFAULT_ENDPOINTS = {"idle": "http://idle:1"}
+        idle = register_engine(FakeEngine("idle", installed=[_installed("warm", loaded=True)]))
+        register_engine(FakeEngine("e", installed=[_installed("mine", loaded=True)]))
+        _set_budget(memory_budget_bytes=None)
+        claimed = [_admitted_exclusive("e", ENDPOINT, "mine")]
+
+        worker._evict_to_match_plan(claimed)
+
+        assert idle.unload_calls == [("http://idle:1", "warm")]
+
+    def test_a_non_exclusive_admission_does_not_pay_the_wide_probe(
+            self, worker, register_engine, settings):
+        """The bound on the added HTTP: only the admission entitled to the
+        whole machine gets the whole machine probed."""
+        settings.INFERENCE_DEFAULT_ENDPOINTS = {"idle": "http://idle:1"}
+        idle = register_engine(FakeEngine("idle", installed=[_installed("warm", loaded=True)]))
+        register_engine(FakeEngine("e", installed=[_installed("mine", loaded=True)]))
+        _set_budget(memory_budget_bytes=None)
+        _running_job_holding("e", ENDPOINT, "mine")
+
+        worker._evict_to_match_plan([])
+
+        assert idle.list_installed_calls == 0
+
+    # --- the budget gate, moved ------------------------------------------
+
+    def test_the_pass_runs_with_no_budget_set(self, worker, register_engine):
+        """The posture the field actually ran in ("nothing offloaded at all
+        until a budget was finally set"). Before the gate moved, every
+        mechanism in this pass was dead code there -- which is also why
+        this commit moves the gate rather than leaving it to a later
+        one."""
+        _set_budget(memory_budget_bytes=None)
+        engine = register_engine(FakeEngine("e", installed=[
+            _installed("mine", loaded=True), _installed("spare", loaded=True),
+        ]))
+
+        worker._evict_to_match_plan([_admitted_exclusive("e", ENDPOINT, "mine")])
+
+        assert engine.unload_calls
+
+    def test_the_capped_budget_pass_still_needs_a_budget(self, worker, register_engine):
+        """It is the ONE mechanism whose decision is arithmetic against a
+        number that does not exist."""
+        _set_budget(memory_budget_bytes=None)
+        engine = register_engine(FakeEngine("e", installed=[
+            _installed("needed", loaded=True, loaded_size=9 * GB),
+            _installed("spare", loaded=True, loaded_size=9 * GB),
+        ]))
+        row = _running_job_holding("e", ENDPOINT, "needed")
+
+        worker._evict_to_match_plan([{
+            "id": row.pk, "kind": row.kind, "payload": {},
+            "model_refs": [_ref(engine="e", endpoint=ENDPOINT, model_id="needed")],
+            "claim_token": uuid.uuid4(), "exclusive": False,
+            "checkpoint": None, "attempts": 0,
+        }])
+
+        assert engine.unload_calls == []
+
+    # --- rung 3, harvested from a snapshot already on the wire ------------
+
+    def test_a_loaded_size_fills_the_third_footprint_rung(self, worker, register_engine):
+        """No new HTTP: the snapshot is already on the wire and its numbers
+        were being discarded."""
+        connection = ModelConnection.objects.create(
+            name="c", engine="e", endpoint=ENDPOINT, model_id="warm", capabilities=["chat"],
+        )
+        register_engine(FakeEngine("e", installed=[
+            _installed("warm", loaded=True, loaded_size=4096),
+        ]))
+        _running_job_holding("e", ENDPOINT, "warm")
+
+        worker._evict_to_match_plan([])
+
+        connection.refresh_from_db()
+        assert connection.engine_reported_footprint_bytes == 4096
+
+    def test_a_missing_loaded_size_writes_nothing_not_a_zero(self, worker, register_engine):
+        connection = ModelConnection.objects.create(
+            name="c", engine="e", endpoint=ENDPOINT, model_id="warm", capabilities=["chat"],
+        )
+        register_engine(FakeEngine("e", installed=[_installed("warm", loaded=True)]))
+        _running_job_holding("e", ENDPOINT, "warm")
+
+        worker._evict_to_match_plan([])
+
+        connection.refresh_from_db()
+        assert connection.engine_reported_footprint_bytes is None
+
+    # --- the affinity snapshot (spec §3.6) --------------------------------
+
+    def test_the_affinity_cache_is_the_belief_minus_what_this_pass_unloaded(
+            self, worker, register_engine):
+        """Spec §3.6 requires the subtraction in words: caching a key this
+        same pass then unloaded would make the ordering preference
+        systematically wrong.
+
+        The cached keys carry the NORMALIZED model tag (`norm_tag`), the
+        same spelling every other set in this pass is built with -- so a
+        bare `kept` is cached as `kept:latest`, and the assertions below
+        say so rather than hiding it behind a helper."""
+        engine = register_engine(FakeEngine("e", installed=[
+            _installed("kept", loaded=True), _installed("spare", loaded=True),
+        ]))
+        _running_job_holding("e", ENDPOINT, "kept")
+
+        worker._evict_to_match_plan([_admitted_exclusive("e", ENDPOINT, "kept")])
+
+        assert engine.unload_calls == [(ENDPOINT, "spare")]
+        assert ("e", ENDPOINT, "kept:latest") in worker._resident_keys
+        assert ("e", ENDPOINT, "spare:latest") not in worker._resident_keys
+
+    def test_an_endpoint_scope_unload_releases_every_believed_key_there(
+            self, worker, register_engine):
+        """`_unload_endpoint` returns the keys RELEASED, not the key it
+        addressed: at endpoint scope one call frees everything believed
+        resident there, and the affinity cache has to know that."""
+        engine = register_engine(FakeEndpointScopeEngine("e", installed=[
+            _installed("mine", loaded=True), _installed("spare", loaded=True),
+        ]))
+
+        worker._evict_to_match_plan([_admitted_exclusive("e", ENDPOINT, "mine")])
+
+        assert len(engine.unload_calls) == 1
+        assert worker._resident_keys == frozenset()
+
+
+@pytest.mark.django_db(transaction=True)
+class TestTheInFlightRefsMapNeverLeaks:
+    """`_inflight_refs` feeds `_protected_keys`, so an entry that outlives
+    its attempt does not merely waste memory -- it PERMANENTLY protects a
+    key and blocks eviction at that endpoint for the life of the process.
+    That is exactly the leak class this whole track exists to close."""
+
+    def test_a_refused_duplicate_submit_adds_to_neither_map(self, worker):
+        job = _job(state=RUNNING)
+        live_token = uuid.uuid4()
+        future = concurrent.futures.Future()
+        worker._futures[(job.pk, live_token)] = future
+        worker._inflight_refs[(job.pk, live_token)] = [{"engine": "e", "endpoint": ENDPOINT,
+                                                        "model_id": "loading"}]
+        superseding = uuid.uuid4()
+        InferenceJob.objects.filter(pk=job.pk).update(claim_token=superseding)
+
+        worker._launch({"id": job.pk, "kind": job.kind, "payload": {},
+                        "model_refs": [{"engine": "e", "endpoint": ENDPOINT, "model_id": "x"}],
+                        "claim_token": superseding, "exclusive": False,
+                        "checkpoint": None, "attempts": 0})
+
+        assert (job.pk, superseding) not in worker._futures
+        assert (job.pk, superseding) not in worker._inflight_refs
+        future.set_result(None)
+
+    def test_pruning_drops_both_maps_by_the_same_key(self, worker):
+        key = (7, uuid.uuid4())
+        done = concurrent.futures.Future()
+        done.set_result(None)
+        worker._futures[key] = done
+        worker._inflight_refs[key] = [{"engine": "e", "endpoint": ENDPOINT, "model_id": "x"}]
+
+        worker._prune_finished_futures()
+
+        assert key not in worker._futures
+        assert key not in worker._inflight_refs
+
+    def test_a_pruned_attempt_stops_protecting_its_key(self, worker):
+        """The protected key carries the NORMALIZED model tag, like every
+        other set in the eviction pass -- asserted in that spelling, both
+        before and after, so the "not in" half cannot pass merely because
+        the literal never matched anything."""
+        key = (7, uuid.uuid4())
+        done = concurrent.futures.Future()
+        done.set_result(None)
+        worker._futures[key] = done
+        worker._inflight_refs[key] = [{"engine": "e", "endpoint": ENDPOINT, "model_id": "x"}]
+        assert ("e", ENDPOINT, "x:latest") in worker._protected_keys()
+
+        worker._prune_finished_futures()
+
+        assert ("e", ENDPOINT, "x:latest") not in worker._protected_keys()
+
 
 # --- S6: one settings read per tick ------------------------------------------
 

@@ -57,7 +57,11 @@ from django.db import transaction
 from django.db import OperationalError, ProgrammingError
 from django.utils import timezone
 
-from models.registry.bindings import record_measured_footprint
+from models.registry.bindings import (
+    record_engine_reported_footprint,
+    record_measured_footprint,
+    registered_endpoints,
+)
 from models.registry.discovery import norm_endpoint, norm_tag
 from models.queue.claim import claim_and_admit
 from models.queue.models import FAILED, QUEUED, RUNNING, SUCCEEDED, InferenceJob, JobSettings
@@ -184,6 +188,14 @@ SLEEP_GRACE_SECONDS = 30
 BOOT_SCHEMA_WAIT_ATTEMPTS = 10
 BOOT_SCHEMA_WAIT_SECONDS = 3.0
 
+# The two values each optional engine declaration may carry (see
+# `models.contracts.engines.base.InferenceEngine`'s own seam comment).
+# Anything else -- absent, misspelled, a value invented by a future
+# adapter this worker predates -- reads as the SAFE member of its pair,
+# which is the LAST element of each tuple here.
+_UNLOAD_SCOPES = ("model", "endpoint")
+_RESIDENCY_AUTHORITIES = ("endpoint", "memo")
+
 
 class Worker:
     """One worker process: claims admitted jobs and runs them in a thread
@@ -269,6 +281,43 @@ class Worker:
         # `self._active_tokens`, which stays job_id-keyed and genuinely
         # needs the token-conditional pop documented above).
         self._futures: dict[tuple[int, uuid.UUID], Future] = {}
+
+        # Model refs per IN-FLIGHT ATTEMPT, keyed IDENTICALLY to
+        # `self._futures`. Eviction's protected set needs the KEYS a live
+        # attempt holds, and a `Future` does not carry them; the claim
+        # descriptor does. The only query-free alternative -- re-reading
+        # `InferenceJob.model_refs` for the live job ids -- would put a
+        # query on the 0.5s tick path.
+        #
+        # WRITTEN AND DROPPED IN LOCKSTEP WITH `self._futures`, on EVERY
+        # path, and that is not a nicety: an entry here that outlives its
+        # attempt PERMANENTLY protects a key and blocks eviction at that
+        # endpoint for the life of the process. So the write sits in the
+        # SAME statement block as the `_futures` insert at the bottom of
+        # `_launch` -- BELOW the duplicate-submit refusal's early return,
+        # never at the top of the method -- and `_prune_finished_futures`
+        # drops from both maps by the same key.
+        #
+        # Tick-thread-only, exactly like `_futures` (see
+        # `_prune_finished_futures`'s own docstring): no lock, because
+        # there is no second writer.
+        self._inflight_refs: dict[tuple[int, uuid.UUID], list[dict]] = {}
+
+        # THE AFFINITY SNAPSHOT (spec §3.6): what the last eviction pass
+        # believed was resident once its own unloads had been subtracted,
+        # cached for the NEXT claim round's ordering preference. Written
+        # and read on the tick thread alone, wholesale-replaced every
+        # admitting tick, bounded by the resident set -- so no lock and no
+        # pruning contract.
+        self._resident_keys: frozenset[tuple[str, str, str]] = frozenset()
+
+        # How many `unload()` calls the LAST `_unload_endpoint` invocation
+        # issued -- the companion of that method's key-set return, which
+        # cannot answer the question (at endpoint scope one call releases
+        # every key there). Read by the capped budget pass immediately
+        # after each call, on the tick thread alone.
+        self._last_unload_calls = 0
+
         self._last_heartbeat_monotonic: float | None = None
 
         # Sleep detection (spec §3.4c, Task 7): the wall-clock/monotonic
@@ -550,7 +599,13 @@ class Worker:
         orphan sweep eventually requeues it, with no explanation of why.
         `timeout=0` is non-blocking -- every future checked here is
         already `done()`, so `.result()` returns (or re-raises) instantly;
-        this never waits on anything."""
+        this never waits on anything.
+
+        DROPS `self._inflight_refs` BY THE SAME SURVIVING KEY SET, and
+        forgetting that second map is not a mere leak: eviction's
+        protected set reads it, so an entry left behind here protects its
+        key -- and blocks eviction at that endpoint -- for the life of the
+        process."""
         remaining: dict[tuple[int, uuid.UUID], Future] = {}
         for key, future in self._futures.items():
             job_id, _claim_token = key
@@ -576,6 +631,9 @@ class Worker:
                     job_id,
                 )
         self._futures = remaining
+        self._inflight_refs = {
+            key: refs for key, refs in self._inflight_refs.items() if key in remaining
+        }
 
     # --- heartbeat -------------------------------------------------------
 
@@ -753,7 +811,10 @@ class Worker:
                 self._requeue_unlaunched([descriptor])
             return
 
+        # ONE statement block, so the two maps can never disagree about
+        # which attempts are live (see `_inflight_refs`'s declaration).
         self._futures[(job_id, claim_token)] = self._executor.submit(self._execute, descriptor)
+        self._inflight_refs[(job_id, claim_token)] = descriptor["model_refs"]
 
     def _live_attempt_token(self, job_id: int, exclude: uuid.UUID) -> uuid.UUID | None:
         """The claim token of an attempt for `job_id` this process still
@@ -1134,68 +1195,194 @@ class Worker:
 
     # --- pre-launch eviction -----------------------------------------------
 
-    def _eviction_targets(
-        self, claimed: list[dict]
-    ) -> tuple[set[tuple[str, str, str]], set[tuple[str, str]], set[tuple[str, str]]] | None:
+    @staticmethod
+    def _unload_scope(engine_obj) -> str:
+        """`"model"` or `"endpoint"` -- what ONE `unload()` call frees at
+        this engine, read from its OPTIONAL `unload_scope` declaration
+        (`models.contracts.engines.base.InferenceEngine`'s seam).
+
+        ANYTHING ABSENT OR UNRECOGNISED READS AS `"endpoint"`, the safe
+        value: assuming the call frees the whole endpoint costs at worst a
+        needless reload, while wrongly assuming per-model granularity
+        destroys a live cold load that is measured in minutes on this
+        hardware.
+        """
+        declared = getattr(engine_obj, "unload_scope", None)
+        return declared if declared in _UNLOAD_SCOPES else "endpoint"
+
+    @staticmethod
+    def _residency_authority(engine_obj) -> str:
+        """`"endpoint"` or `"memo"` -- how much this engine's residency
+        report is worth, read from its OPTIONAL `residency_authority`
+        declaration the same defensive way.
+
+        ANYTHING ABSENT OR UNRECOGNISED READS AS `"memo"`, the safe
+        value: treating an empty residency answer as merely "this process
+        does not remember anything" costs one precautionary barrier call,
+        while trusting it as fact launches an exclusive job on top of
+        memory nobody ever released.
+        """
+        declared = getattr(engine_obj, "residency_authority", None)
+        return declared if declared in _RESIDENCY_AUTHORITIES else "memo"
+
+    @staticmethod
+    def _key(engine_name: str, endpoint: str, model_id: str) -> tuple[str, str, str]:
+        """The ONE spelling of an eviction key: engine name, NORMALIZED
+        endpoint, NORMALIZED model tag. Every set in this pass is built
+        through here, so a trailing slash or a bare-vs-tagged model id
+        can never make two spellings of the same model look like two
+        different models (the mismatch `models.registry.discovery`'s
+        module docstring describes for `discover()`'s own merge)."""
+        return (engine_name, norm_endpoint(endpoint), norm_tag(model_id))
+
+    @staticmethod
+    def _own_keys_by_job(claimed: list[dict]) -> dict[int, set[tuple[str, str, str]]]:
+        """Each admitted-EXCLUSIVE job's OWN keys, by job id. A
+        non-exclusive admission contributes nothing: the §3.3(c)
+        exception, and the barrier, are both written for the job that was
+        entitled to the whole machine, never for an ordinary peer."""
+        return {
+            descriptor["id"]: {
+                Worker._key(ref["engine"], ref["endpoint"], ref["model_id"])
+                for ref in descriptor["model_refs"]
+            }
+            for descriptor in claimed
+            if descriptor.get("exclusive")
+        }
+
+    def _protected_keys(self) -> set[tuple[str, str, str]]:
+        """THE ONE SAFETY SET (spec §3.3c): every model key this process
+        must not take out from under live work. Two halves, and each
+        covers a case the other cannot see.
+
+        FIRST HALF, every RUNNING job's keys. `claim_and_admit` has
+        already persisted THIS tick's admissions as `running` by the time
+        any of this runs, so one query covers "running union admitted"
+        without merging two collections -- which matters concretely
+        because an agent turn is planned EXCLUSIVE, so every chat turn
+        runs this pass, and an unprotected definition would unload that
+        turn's own warm chat model and cold-load it again on every single
+        message.
+
+        SECOND HALF, every attempt still IN FLIGHT in this process
+        (`self._inflight_refs`). An attempt the orphan sweep requeued
+        while its handler is genuinely still mid-cold-load has a row back
+        at `queued` -- invisible to the RUNNING query above -- for exactly
+        as long as that cold load takes, which is the window this half
+        exists for (Q11).
+
+        No `claimed` parameter, deliberately: everything here comes from
+        the RUNNING query and from this process's own map. Both maps are
+        read without a lock, because both are tick-thread-only (see
+        `_prune_finished_futures`'s docstring).
+        """
+        keys: set[tuple[str, str, str]] = set()
+        for model_refs in InferenceJob.objects.filter(state=RUNNING).values_list(
+            "model_refs", flat=True
+        ):
+            for ref in model_refs:
+                keys.add(self._key(ref["engine"], ref["endpoint"], ref["model_id"]))
+        for refs in list(self._inflight_refs.values()):
+            for ref in refs:
+                keys.add(self._key(ref["engine"], ref["endpoint"], ref["model_id"]))
+        return keys
+
+    def _eviction_targets(self, claimed: list[dict]) -> tuple[
+        set[tuple[str, str]],
+        set[tuple[str, str]],
+        dict[tuple[str, str], tuple[str, ...]],
+    ] | None:
         """PHASE 1 of `_evict_to_match_plan` (which see for the whole
         argument): what the machine is supposed to be holding.
 
-        `(needed_keys, endpoints, exclusive_endpoints)`, or `None` when
-        no job is RUNNING -- the caller returns immediately on `None`,
-        which is what stops the engine being probed for nothing.
+        `(endpoints, own_endpoints, model_ids_by_endpoint)`, or `None`
+        when no job is RUNNING -- the caller returns immediately on
+        `None`, which is what stops the engine being probed for nothing.
 
-        `needed_keys`/`endpoints` come from RUNNING jobs' `model_refs`.
-        By the time this runs, `claim_and_admit` has already persisted
-        THIS tick's admissions as `running`, so one query covers
-        "running union admitted" without merging two collections.
-        `exclusive_endpoints` comes from `claimed` instead -- an
-        admitted-and-exclusive job's own endpoints, derived from THIS
-        tick's batch and never recomputed later."""
+        `endpoints` is the set to SWEEP this tick. It starts as the
+        RUNNING jobs' own endpoints and is unioned with
+        `models.registry.bindings.registered_endpoints()` -- the one
+        notion of "every engine endpoint this box knows about" -- ONLY ON
+        A TICK THAT ADMITS AN EXCLUSIVE JOB (spec §3.3e). That bound is
+        the whole cost control: only the admission entitled to the whole
+        machine pays for the whole machine to be probed, and a
+        non-exclusive tick keeps exactly today's reach. A model left warm
+        on an IDLE engine was never visited before, which is the literal
+        host-crash shape this widening exists for (Q4).
+
+        The widening also makes `over_budget` mean something WIDER on
+        those ticks -- more endpoints counted means more resident bytes
+        counted. Deliberate: under-counting resident memory is the
+        direction that crashes hosts.
+
+        `own_endpoints` is the admitted exclusive job's OWN endpoints,
+        derived from THIS tick's batch and never recomputed later.
+
+        `model_ids_by_endpoint` is what each endpoint can be ADDRESSED by,
+        from the same `registered_endpoints()` call -- the unload seam
+        takes a `model_id`, so a foreign endpoint with no connection row
+        yields an empty tuple and cannot be addressed at all (a named
+        residual, spec §11, never papered over with a synthetic id).
+        """
         running_refs = list(
             InferenceJob.objects.filter(state=RUNNING).values_list("model_refs", flat=True)
         )
         if not running_refs:
             return None
 
-        needed_keys: set[tuple[str, str, str]] = set()
         endpoints: set[tuple[str, str]] = set()
         for model_refs in running_refs:
             for ref in model_refs:
-                key = (ref["engine"], norm_endpoint(ref["endpoint"]), norm_tag(ref["model_id"]))
-                needed_keys.add(key)
-                endpoints.add((key[0], key[1]))
+                endpoints.add((ref["engine"], norm_endpoint(ref["endpoint"])))
 
-        exclusive_endpoints: set[tuple[str, str]] = {
+        own_endpoints: set[tuple[str, str]] = {
             (ref["engine"], norm_endpoint(ref["endpoint"]))
             for descriptor in claimed
             if descriptor.get("exclusive")
             for ref in descriptor["model_refs"]
         }
-        return needed_keys, endpoints, exclusive_endpoints
+
+        model_ids_by_endpoint: dict[tuple[str, str], tuple[str, ...]] = {}
+        if any(descriptor.get("exclusive") for descriptor in claimed):
+            for engine_name, endpoint, model_ids in registered_endpoints():
+                endpoints.add((engine_name, endpoint))
+                model_ids_by_endpoint[(engine_name, endpoint)] = model_ids
+
+        return endpoints, own_endpoints, model_ids_by_endpoint
 
     def _residency_snapshot(
         self,
         endpoints: set[tuple[str, str]],
         claimed: list[dict],
-        budget_bytes: int,
-    ) -> tuple[dict[tuple[str, str], list], bool]:
+        budget_bytes: int | None,
+    ) -> tuple[dict[tuple[str, str], list], set[tuple[str, str, str]], bool]:
         """PHASE 2 of `_evict_to_match_plan` (which see): what the
         machine is ACTUALLY holding, and whether that plus what is about
         to load exceeds the budget.
 
-        `(installed_by_endpoint, over_budget)`. An endpoint is in the
-        dict ONLY if its engine resolved, offered `list_installed`, and
-        that call returned -- so an engine that lacks the method (warned
-        once, per engine+method) or whose call raised (logged; eviction
-        must never block a launch) is absent from the dict and is
-        therefore untouched by both eviction passes.
+        `(installed_by_endpoint, believed_resident, over_budget)`. An
+        endpoint is in the dict ONLY if its engine resolved, offered
+        `list_installed`, and that call returned -- so an engine that
+        lacks the method (warned once, per engine+method) or whose call
+        raised (logged; eviction must never block a launch) is absent from
+        the dict and is therefore untouched by both eviction passes. The
+        barrier reads that same absence as "the belief here is worth
+        nothing" (§3.3d(3)).
+
+        `believed_resident` is every key this snapshot says is loaded --
+        the pre-eviction belief spec §3.6's affinity cache subtracts this
+        pass's own releases from.
 
         `over_budget` is `actual_resident_bytes + admitted_marginal >
-        budget_bytes`. Both halves keep their exact prior arithmetic --
-        see the two inline comments below, which are the reasoning for
-        the deliberate under-count and for the MAX fold, and are the
-        parts of this function most likely to be 'tidied' into a bug."""
+        budget_bytes`, and is `False` WHENEVER `budget_bytes` is `None`:
+        it is the one verdict in this pass that is arithmetic against a
+        number that may not exist. Both halves keep their exact prior
+        arithmetic -- see the two inline comments below, which are the
+        reasoning for the deliberate under-count and for the MAX fold, and
+        are the parts of this function most likely to be 'tidied' into a
+        bug."""
         installed_by_endpoint: dict[tuple[str, str], list] = {}
+        believed_resident: set[tuple[str, str, str]] = set()
         resident_sizes: dict[tuple[str, str, str], int | None] = {}
         for engine_name, endpoint in endpoints:
             engine_obj = self._get_engine_or_none(engine_name)
@@ -1217,8 +1404,19 @@ class Worker:
             for model in installed:
                 if not model.loaded:
                     continue
-                key = (engine_name, norm_endpoint(endpoint), norm_tag(model.model_id))
+                key = self._key(engine_name, endpoint, model.model_id)
+                believed_resident.add(key)
                 resident_sizes[key] = getattr(model, "loaded_size", None)
+
+                if getattr(model, "loaded_size", None):
+                    # RUNG 3 (spec §3.1), from a snapshot already on the
+                    # wire -- never a call made for this purpose. Only a
+                    # POSITIVE reading is written: a `None` or zero size
+                    # writes nothing, never a zero, because a zero would
+                    # read back as a real "this model is free" answer.
+                    record_engine_reported_footprint(
+                        engine_name, endpoint, model.model_id, model.loaded_size,
+                    )
 
         # `resident_sizes[key]` is `None` for a model `list_installed`
         # reports as loaded but with no size attached (an adapter/engine
@@ -1247,132 +1445,241 @@ class Worker:
         admitted_new_keys: dict[tuple[str, str, str], int] = {}
         for descriptor in claimed:
             for ref in descriptor["model_refs"]:
-                key = (ref["engine"], norm_endpoint(ref["endpoint"]), norm_tag(ref["model_id"]))
+                key = self._key(ref["engine"], ref["endpoint"], ref["model_id"])
                 if key in resident_sizes:
                     continue
                 size = ref.get("footprint_bytes") or 0
                 admitted_new_keys[key] = max(admitted_new_keys.get(key, 0), size)
         admitted_marginal = sum(admitted_new_keys.values())
-        over_budget = actual_resident_bytes + admitted_marginal > budget_bytes
-        return installed_by_endpoint, over_budget
+
+        over_budget = (
+            budget_bytes is not None
+            and actual_resident_bytes + admitted_marginal > budget_bytes
+        )
+        return installed_by_endpoint, believed_resident, over_budget
+
+    def _unload_endpoint(
+        self, engine_name: str, endpoint: str, installed: list, *,
+        protected_keys: set[tuple[str, str, str]],
+        own_keys: set[tuple[str, str, str]],
+        reason: str,
+        limit: int | None = None,
+    ) -> set[tuple[str, str, str]]:
+        """Unload what may be unloaded at ONE endpoint, and return the set
+        of keys that were actually RELEASED.
+
+        THE RETURN IS A KEY SET, NOT A COUNT, for one concrete reason: at
+        `"endpoint"` scope a single call frees EVERY believed-resident
+        model there, so "what was released" is not "the key that was
+        addressed", and spec §3.6's affinity cache has to subtract the
+        real set.
+
+        THE PROTECTION RULE, applied per scope (spec §3.3c):
+
+        - `"model"` scope -- skip protected keys one by one; everything
+          else at the endpoint is unloaded individually.
+        - `"endpoint"` scope -- ONE call frees everything here, so the
+          WHOLE endpoint is skipped if any protected key lives at it...
+        - ...UNLESS every protected key here belongs to `own_keys`: the
+          admitted exclusive job's OWN keys at its OWN endpoint. Freeing
+          that endpoint unavoidably takes its own model with it and there
+          is no per-model call to make instead, so the barrier proceeds and
+          the job pays at worst one reload. `own_keys` is EMPTY for every
+          other caller, which is what keeps this exception to the one case
+          it is written for.
+
+        `reason` is the log vocabulary's "why" (`not needed at an exclusive
+        endpoint` / `over budget` / `precautionary barrier`). DECLARED HERE
+        IN COMMIT 1 AND FIRST READ IN COMMIT 3, deliberately: the signature
+        is final from the start so no later commit revises it.
+
+        `limit` caps the calls issued here, for the budget-driven pass's
+        share of `MAX_UNLOADS_PER_TICK`; `None` is uncapped. How many
+        calls were actually issued is reported in
+        `self._last_unload_calls`, reset at the top of every invocation
+        and read by the capped pass immediately afterwards -- it cannot
+        be read off the return value, because a released key is not a
+        call (at endpoint scope ONE call releases every key there).
+
+        `self._maybe_heartbeat()` is called after EVERY unload call, not
+        once around the loop -- that is what makes an uncapped exclusive
+        pass safe, and hoisting it out reintroduces the stale-row window
+        this pass was fixed to close.
+        """
+        self._last_unload_calls = 0
+        engine_obj = self._get_engine_or_none(engine_name)
+        if engine_obj is None:
+            return set()
+        unload = getattr(engine_obj, "unload", None)
+        if unload is None:
+            self._warn_missing_method_once(engine_name, "unload")
+            return set()
+
+        resident = [model for model in installed if model.loaded]
+        if not resident:
+            return set()
+
+        if self._unload_scope(engine_obj) == "endpoint":
+            return self._unload_whole_endpoint(
+                unload, engine_name, endpoint, resident,
+                protected_keys=protected_keys, own_keys=own_keys, reason=reason, limit=limit,
+            )
+
+        released: set[tuple[str, str, str]] = set()
+        issued = 0
+        for model in resident:
+            if limit is not None and issued >= limit:
+                break
+            key = self._key(engine_name, endpoint, model.model_id)
+            if key in protected_keys:
+                continue
+            issued += 1
+            self._last_unload_calls += 1
+            if unload(endpoint, model.model_id):
+                released.add(key)
+            else:
+                logger.warning(
+                    "worker: eviction unload refused for %s at %s (%s)",
+                    model.model_id, endpoint, engine_name,
+                )
+            # After EVERY call, never once around the loop -- see this
+            # method's docstring. `_maybe_heartbeat`'s own
+            # `HEARTBEAT_SECONDS` throttle bounds this to at most one
+            # actual UPDATE every 10s however many times it is called.
+            self._maybe_heartbeat()
+        return released
+
+    def _unload_whole_endpoint(
+        self, unload, engine_name: str, endpoint: str, resident: list, *,
+        protected_keys: set[tuple[str, str, str]],
+        own_keys: set[tuple[str, str, str]],
+        reason: str,
+        limit: int | None,
+    ) -> set[tuple[str, str, str]]:
+        """`_unload_endpoint`'s `"endpoint"`-scope half, split out only so
+        neither branch has to be read through the other. ONE call, which
+        frees everything believed resident here -- so the decision is
+        all-or-nothing and `model_id` is addressing, not selection."""
+        keys = {self._key(engine_name, endpoint, model.model_id) for model in resident}
+        protected_here = keys & protected_keys
+        if protected_here and not protected_here <= own_keys:
+            logger.warning(
+                "worker: eviction skipped the whole endpoint %s (%s) -- one unload there "
+                "frees everything, and %s is protected by live work (%s)",
+                endpoint, engine_name,
+                ", ".join(sorted(key[2] for key in protected_here)),
+                reason,
+            )
+            return set()
+        if limit is not None and limit < 1:
+            return set()
+
+        addressed = resident[0].model_id
+        self._last_unload_calls += 1
+        accepted = unload(endpoint, addressed)
+        self._maybe_heartbeat()
+        if not accepted:
+            logger.warning(
+                "worker: eviction unload refused for %s at %s (%s)",
+                addressed, endpoint, engine_name,
+            )
+            return set()
+        return keys
 
     def _evict_exclusive_endpoints(
         self,
-        exclusive_endpoints: set[tuple[str, str]],
+        endpoints: set[tuple[str, str]],
         installed_by_endpoint: dict[tuple[str, str], list],
-        needed_keys: set[tuple[str, str, str]],
-    ) -> None:
+        protected_keys: set[tuple[str, str, str]],
+        own_keys: set[tuple[str, str, str]],
+    ) -> set[tuple[str, str, str]]:
         """PASS 1 of `_evict_to_match_plan` (which see for the full
-        argument): every non-needed resident model at an endpoint an
-        admitted-EXCLUSIVE job owns is unloaded, full stop.
+        argument): on a tick that admits an EXCLUSIVE job, every
+        non-protected resident model at every endpoint in the swept set is
+        unloaded, full stop. Returns the union of released keys.
+
+        THE SWEPT SET, NOT ONLY THE JOB'S OWN ENDPOINTS (spec §3.3e): a
+        model left warm on an idle FOREIGN engine occupies the same
+        memory as one at the job's own address, and it was the endpoint
+        this pass never visited.
 
         UNCAPPED, deliberately -- NOT subject to `MAX_UNLOADS_PER_TICK`.
         The safety mechanism is not the cap: `tick()` registers this
-        batch's tokens in `self._active_tokens` BEFORE calling the
-        caller at all, so `self._maybe_heartbeat()` -- called after every
-        unload attempt in the loop below, not once around it --
-        genuinely refreshes the exclusive job's row DURING this pass.
-        Removing that call, or hoisting it out of the loop, reintroduces
-        the stale-row window this pass was fixed to close."""
-        # Pass 1: exclusive-endpoint eviction -- UNCAPPED (see this
-        # function's docstring for why). Every non-needed resident model
-        # at an endpoint an admitted-exclusive job owns is unloaded,
-        # full stop.
-        for engine_name, endpoint in exclusive_endpoints:
-            installed = installed_by_endpoint.get((engine_name, endpoint))
+        batch's tokens in `self._active_tokens` BEFORE calling the caller
+        at all, so `self._maybe_heartbeat()` -- called after every unload
+        attempt inside `_unload_endpoint`, not once around it -- genuinely
+        refreshes the exclusive job's row DURING this pass. Removing that
+        call, or hoisting it out of the loop, reintroduces the stale-row
+        window this pass was fixed to close."""
+        released: set[tuple[str, str, str]] = set()
+        for key in sorted(endpoints):
+            installed = installed_by_endpoint.get(key)
             if installed is None:
                 continue
-            engine_obj = self._get_engine_or_none(engine_name)
-            if engine_obj is None:
-                continue
-            unload = getattr(engine_obj, "unload", None)
-            if unload is None:
-                self._warn_missing_method_once(engine_name, "unload")
-                continue
-
-            for model in installed:
-                if not model.loaded:
-                    continue
-                key = (engine_name, endpoint, norm_tag(model.model_id))
-                if key in needed_keys:
-                    continue
-                if not unload(endpoint, model.model_id):
-                    logger.warning(
-                        "worker: eviction unload refused for %s at %s (%s)",
-                        model.model_id, endpoint, engine_name,
-                    )
-                # Uncapped pass -- refresh the heartbeat after every
-                # unload attempt, not just once before/after the whole
-                # pass. `_maybe_heartbeat`'s own `HEARTBEAT_SECONDS`
-                # throttle bounds this to at most one actual UPDATE every
-                # 10s regardless of how many times it's called here (still
-                # single-writer, still this same tick thread) -- this is
-                # what makes an uncapped exclusive pass of any length safe
-                # (see this function's docstring, point (c)).
-                self._maybe_heartbeat()
+            engine_name, endpoint = key
+            released |= self._unload_endpoint(
+                engine_name, endpoint, installed,
+                protected_keys=protected_keys, own_keys=own_keys,
+                reason="not needed at an exclusive endpoint",
+            )
+        return released
 
     def _evict_for_budget(
         self,
         installed_by_endpoint: dict[tuple[str, str], list],
-        exclusive_endpoints: set[tuple[str, str]],
-        needed_keys: set[tuple[str, str, str]],
-    ) -> None:
+        already_swept: set[tuple[str, str]],
+        protected_keys: set[tuple[str, str, str]],
+    ) -> set[tuple[str, str, str]]:
         """PASS 2 of `_evict_to_match_plan` (which see): non-exclusive,
         budget-driven eviction, CAPPED at `MAX_UNLOADS_PER_TICK` unload
-        calls per call.
+        calls per call. Returns the union of released keys.
 
-        Called only when phase 2 said `over_budget` -- the caller makes
-        that decision, so this method's own loop no longer re-checks a
-        flag that cannot change inside it.
+        Called only when phase 2 said `over_budget` -- which is itself
+        only ever true when a budget exists, so this is the ONE mechanism
+        in the pass that still needs one. The caller makes that decision,
+        so this method's own loop no longer re-checks a flag that cannot
+        change inside it.
 
-        `unloads_this_tick` is ONE counter across the endpoint loop and
-        the model loop, with a `break` in each: the cap bounds total
-        unload calls, not calls per endpoint. This runs on the heartbeat
-        thread, and an unbounded run of slow `unload()` calls would eat
-        the margin `STALE_AFTER_SECONDS` assumes. Whatever this cap
-        leaves undone is picked up on a later tick that itself admits
-        something -- not necessarily the next one."""
-        # Pass 2: non-exclusive, budget-driven eviction -- capped at
-        # MAX_UNLOADS_PER_TICK (see that constant's comment). Exclusive
-        # endpoints are skipped here -- pass 1 above already handled them,
-        # uncapped.
-        unloads_this_tick = 0
-        for (engine_name, endpoint), installed in installed_by_endpoint.items():
-            if (engine_name, endpoint) in exclusive_endpoints:
-                continue
-            if unloads_this_tick >= MAX_UNLOADS_PER_TICK:
+        `remaining` is ONE allowance across the endpoint loop: the cap
+        bounds total unload calls, not calls per endpoint. This runs on
+        the tick thread, and an unbounded run of slow `unload()` calls
+        would eat the margin `STALE_AFTER_SECONDS` assumes. Whatever this
+        cap leaves undone is picked up on a later tick that itself admits
+        something -- not necessarily the next one.
+
+        `already_swept` is whatever pass 1 covered, skipped here so an
+        endpoint it emptied uncapped is not nibbled at again under the
+        cap."""
+        released: set[tuple[str, str, str]] = set()
+        remaining = MAX_UNLOADS_PER_TICK
+        for key in sorted(installed_by_endpoint):
+            if remaining < 1:
                 break
-            engine_obj = self._get_engine_or_none(engine_name)
-            if engine_obj is None:
+            if key in already_swept:
                 continue
-            unload = getattr(engine_obj, "unload", None)
-            if unload is None:
-                self._warn_missing_method_once(engine_name, "unload")
-                continue
-
-            for model in installed:
-                if unloads_this_tick >= MAX_UNLOADS_PER_TICK:
-                    break
-                if not model.loaded:
-                    continue
-                key = (engine_name, endpoint, norm_tag(model.model_id))
-                if key in needed_keys:
-                    continue
-                unloads_this_tick += 1
-                if not unload(endpoint, model.model_id):
-                    logger.warning(
-                        "worker: eviction unload refused for %s at %s (%s)",
-                        model.model_id, endpoint, engine_name,
-                    )
+            engine_name, endpoint = key
+            released |= self._unload_endpoint(
+                engine_name, endpoint, installed_by_endpoint[key],
+                protected_keys=protected_keys, own_keys=set(),
+                reason="over budget", limit=remaining,
+            )
+            # The allowance is spent per CALL ISSUED, which is what the
+            # cap bounds -- not per key RELEASED, which at endpoint scope
+            # would charge one call several times over. That is why the
+            # count comes back beside the key set rather than in it.
+            remaining -= self._last_unload_calls
+        return released
 
     def _evict_to_match_plan(
         self, claimed: list[dict], *, settings_row: JobSettings | None = None,
-    ) -> None:
+    ) -> set[int]:
         """Admission (`models.queue.claim.claim_and_admit`) plans against
         RUNNING jobs' declared footprints; this function makes the
         machine's ACTUAL resident memory match that plan before any newly
         admitted job's handler starts -- called once per tick, right
         after `claim_and_admit`, before any of `claimed` is launched.
+        Returns the set of job ids this tick REFUSED to launch (empty
+        until the barrier lands).
 
         `settings_row` (S6) is `tick()`'s own already-fetched row,
         threaded in so the tick pays ONE `JobSettings` read rather than
@@ -1384,71 +1691,57 @@ class Worker:
         directly throughout) and eviction and admission still read the
         same budget when they are called separately.
 
-        A no-op in sequential mode (`memory_budget_bytes is None`): with no
-        budget, admission never runs more than one job at a time, so there
-        is nothing to evict for. Otherwise:
+        THE BUDGET GATES ONE PASS, NOT THE WHOLE FUNCTION. Phases 1 and 2,
+        the protected set, and the exclusive pass all run regardless of
+        `memory_budget_bytes`; only the capped, budget-driven pass checks
+        it, because it is the one mechanism whose decision is arithmetic
+        against a number that may not exist. This is not a tidy-up: "no
+        budget set" is the posture the field actually ran in, and a
+        whole-function early return there made every mechanism below dead
+        code exactly where it was needed.
 
-        1. `needed_keys`/`endpoints` -- every model key (and its engine,
-           endpoint) belonging to a currently-`running` job. By the time
-           this runs, `claim_and_admit` has already persisted this tick's
-           admissions as `running`, so one query covers "running ∪
-           admitted" without needing to merge two separate collections.
-        2. For each needed endpoint, read ACTUAL residency via the
-           engine's OPTIONAL `list_installed` (loaded flags) -- ground
-           truth, never a job row's merely-declared footprint.
-        3. Any RESIDENT model at a needed endpoint whose key is NOT in
-           `needed_keys` is a candidate for eviction. It is evicted
-           unconditionally if it sits at an endpoint an admitted-and-
-           EXCLUSIVE job owns (that job needs the machine, at its
-           endpoints, to itself); otherwise only if keeping it around
-           would exceed budget: `actual_resident_bytes + admitted_marginal
-           > budget_bytes`, where `admitted_marginal` is this tick's
-           admitted jobs' own footprint total for keys not already
-           actually resident (the memory they are ABOUT to consume once
-           their handler starts, which `list_installed` cannot see yet),
-           dedup'd/MAX-folded by key the same way `models.queue.scheduler`
-           dedups a resident set (rule 4).
+        1. `_eviction_targets` -- the endpoints to sweep, the admitted
+           exclusive job's own endpoints, and what each endpoint can be
+           addressed by. On an exclusive-admitting tick the swept set is
+           unioned with every registered engine endpoint (spec §3.3e).
+        2. `_protected_keys` -- every RUNNING job's keys (this tick's
+           admitted batch included, since the claim committed before this
+           pass runs) plus every attempt still in flight in this process.
+        3. `_residency_snapshot` -- ACTUAL residency at each swept
+           endpoint via the engine's OPTIONAL `list_installed` (loaded
+           flags), ground truth, never a job row's merely-declared
+           footprint; plus the rung-3 footprint harvest and the budget
+           verdict.
+        4. Pass 1, the exclusive pass, uncapped; then pass 2, the capped
+           budget-driven pass, only when the budget says so.
 
-        Exclusive-endpoint eviction (an admitted-EXCLUSIVE job's own
-        endpoints) is UNCAPPED -- deliberately NOT subject to
-        `MAX_UNLOADS_PER_TICK` (review finding, T4 round 3). Reasoning:
-        (a) this function is only ever called from `tick()`'s
+        Exclusive-endpoint eviction is UNCAPPED -- deliberately NOT
+        subject to `MAX_UNLOADS_PER_TICK` (review finding, T4 round 3).
+        Reasoning: (a) this function is only ever called from `tick()`'s
         `if not claimed: return` branch, so it never runs at all on a
         tick that admits nothing; (b) once an exclusive job IS admitted,
         `models.queue.scheduler` rule 3 blocks every other admission for
         as long as it runs, so there is no future ADMITTING tick for a
-        capped leftover to be "picked up" on; and (c) `exclusive_endpoints`
-        is derived from THIS tick's own `claimed` batch, never
-        recomputed later, so a capped eviction here would leave unneeded
-        models permanently resident alongside a job that is supposed to
-        have its endpoints entirely to itself, for the rest of that job's
-        run. This is safe to leave uncapped for the REAL reason (an earlier
-        version of this docstring claimed the row's "freshly stamped"
-        heartbeat alone was protection enough, which was never actually
-        true on its own): `tick()`
-        registers this batch's tokens in `self._active_tokens` BEFORE
-        calling this function at all (moved there specifically for this),
-        so `self._maybe_heartbeat()`, called again inside this pass's own
-        model loop below, genuinely refreshes the exclusive job's row
-        DURING an uncapped, potentially long-running pass -- not just once,
-        before or after it. The loop is additionally bounded in practice by
-        however many models can physically be loaded at one endpoint (a
-        handful, not an adversarial N), but that is a secondary comfort,
-        not the actual safety mechanism.
+        capped leftover to be "picked up" on; and (c) the swept set is
+        derived from THIS tick's own `claimed` batch, never recomputed
+        later, so a capped eviction here would leave unneeded models
+        permanently resident alongside a job that is supposed to have the
+        machine to itself, for the rest of that job's run. It is safe to
+        leave uncapped because `tick()` registers this batch's tokens in
+        `self._active_tokens` BEFORE calling this function at all, so
+        `self._maybe_heartbeat()`, called inside `_unload_endpoint` after
+        every unload attempt, genuinely refreshes the exclusive job's row
+        DURING an uncapped, potentially long-running pass.
 
-        Non-exclusive, BUDGET-DRIVEN eviction (every other endpoint) IS
-        capped at `MAX_UNLOADS_PER_TICK` `unload()` calls per call to this
-        function -- this runs synchronously on the SAME thread `tick()`
-        calls it from (the heartbeat thread), and an unbounded loop of
-        slow/wedged `unload()` calls would eat directly into the margin
-        `STALE_AFTER_SECONDS` assumes (see that constant's comment);
-        `tick()` also writes a fresh heartbeat again immediately after
-        this function returns, before launching anything, precisely to
-        bound how much of that margin this function's own wall-clock time
-        can consume. Whatever budget-driven eviction this cap leaves
-        undone is picked up on a LATER tick -- but only one that itself
-        admits something (see `MAX_UNLOADS_PER_TICK`'s own comment); it is
-        not guaranteed to be the very next one.
+        Non-exclusive, BUDGET-DRIVEN eviction IS capped at
+        `MAX_UNLOADS_PER_TICK` `unload()` calls per call to this function
+        -- this runs synchronously on the SAME thread `tick()` calls it
+        from, and an unbounded loop of slow/wedged `unload()` calls would
+        eat directly into the margin `STALE_AFTER_SECONDS` assumes (see
+        that constant's comment); `tick()` also writes a fresh heartbeat
+        again immediately after this function returns, before launching
+        anything, precisely to bound how much of that margin this
+        function's own wall-clock time can consume.
 
         Every step degrades, never raises: an engine lacking
         `list_installed`/`unload` (read via `getattr`, per the engine
@@ -1458,32 +1751,48 @@ class Worker:
 
         The guiding principle, in one line: admission plans against
         running jobs; eviction makes the machine match the plan.
-
-        FOUR PHASES, FOUR METHODS (C-48a). This function is the ORDER; each
-        phase's own reasoning lives on its own method's docstring. Nothing
-        about the sequence is optional: phase 1 answering `None` is what stops
-        phase 2 probing an engine for nothing, phase 2's `over_budget` is what
-        gates pass 2 and nothing else, and pass 1 must run before pass 2 so an
-        exclusive endpoint is emptied uncapped rather than nibbled at under
-        the cap.
         """
         row = settings_row if settings_row is not None else JobSettings.get_solo()
         budget_bytes = row.memory_budget_bytes
-        if budget_bytes is None:
-            return
 
         targets = self._eviction_targets(claimed)
         if targets is None:
-            return
-        needed_keys, endpoints, exclusive_endpoints = targets
+            return set()
+        endpoints, own_endpoints, _model_ids_by_endpoint = targets
 
-        installed_by_endpoint, over_budget = self._residency_snapshot(
-            endpoints, claimed, budget_bytes)
+        protected_keys = self._protected_keys()
+        installed_by_endpoint, believed_resident, over_budget = self._residency_snapshot(
+            endpoints, claimed, budget_bytes,
+        )
 
-        self._evict_exclusive_endpoints(exclusive_endpoints, installed_by_endpoint, needed_keys)
+        released: set[tuple[str, str, str]] = set()
+        swept_exclusively: set[tuple[str, str]] = set()
+        if own_endpoints:
+            own_keys: set[tuple[str, str, str]] = set()
+            for keys in self._own_keys_by_job(claimed).values():
+                own_keys |= keys
+            swept_exclusively = endpoints
+            released |= self._evict_exclusive_endpoints(
+                endpoints, installed_by_endpoint, protected_keys, own_keys,
+            )
 
         if over_budget:
-            self._evict_for_budget(installed_by_endpoint, exclusive_endpoints, needed_keys)
+            released |= self._evict_for_budget(
+                installed_by_endpoint, swept_exclusively, protected_keys,
+            )
+
+        # The affinity snapshot (spec §3.6), cached for the NEXT claim
+        # round: the pre-eviction belief MINUS what this pass actually
+        # released. `believed_resident` comes from `_residency_snapshot`;
+        # `released` is the union of what each `_unload_endpoint` call
+        # returned. Naming a model this same pass then unloaded would make
+        # the ordering preference systematically wrong.
+        #
+        # Wholesale-replaced every admitting tick, bounded by the resident
+        # set, written and read on the tick thread alone: no lock and no
+        # pruning contract.
+        self._resident_keys = frozenset(believed_resident - released)
+        return set()
 
     _warned_missing_methods: set[tuple[str, str]] = set()
 
