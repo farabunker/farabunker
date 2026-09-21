@@ -244,6 +244,7 @@ class TestTheOverview:
         assert set(result.data) == {
             "content_hash", "posture", "library_posture", "admin_sees_content",
             "session_idle_minutes", "time_aware", "unreported_settings",
+            "retention_days", "queue_retention_days", "audit_detail",
         }
 
     def test_it_names_library_and_queue_as_not_reported_grouped_by_page(self):
@@ -267,6 +268,52 @@ class TestTheOverview:
         # live on the Queue page.
         assert "Job execution --" in result.text
         assert set(result.data["unreported_settings"]) == {"Library", "Job execution"}
+
+    def test_it_reports_the_retention_policy_in_plain_words(self):
+        """Task 8 review, controller addition: the three retention
+        columns Task 2 added to `IdentitySettings` (`retention_days`,
+        `queue_retention_days`, `audit_detail`) are operator-editable
+        and readable off the SAME `settings_row()` this tool already
+        fetches once -- so they are REPORTED, not named in `UNREPORTED_
+        SETTINGS_FIELDS`. The zero/blank edges get their own plain
+        words, the same way `retention_days = 0` and `queue_retention_
+        days = None` each mean something specific on the Retention
+        settings page itself."""
+        from identity.models import IdentitySettings
+
+        with posture(POSTURE_ENTERPRISE):
+            row = IdentitySettings.get_solo()
+            row.retention_days = 45
+            row.queue_retention_days = 3
+            row.audit_detail = True
+            row.save()
+            result = run_overview({}, make_tool_ctx(principal=user_principal(make_admin())))
+        assert result.data["retention_days"] == 45
+        assert result.data["queue_retention_days"] == 3
+        assert result.data["audit_detail"] is True
+        assert "45 days" in result.text
+        assert "3 days" in result.text
+        assert "shown" in result.text
+
+    def test_the_zero_and_blank_retention_edges_get_plain_words(self):
+        """`0` and `None` are both LEGAL values with specific meanings
+        (`identity/models.py`'s own field comments) -- "no grace period"
+        and "no age cliff at all" -- and a bare `0`/`None` in the text
+        would read as a missing value rather than a deliberate one."""
+        from identity.models import IdentitySettings
+
+        with posture(POSTURE_ENTERPRISE):
+            row = IdentitySettings.get_solo()
+            row.retention_days = 0
+            row.queue_retention_days = None
+            row.audit_detail = False
+            row.save()
+            result = run_overview({}, make_tool_ctx(principal=user_principal(make_admin())))
+        assert result.data["retention_days"] == 0
+        assert result.data["queue_retention_days"] is None
+        assert "deleted permanently at once" in result.text
+        assert "no age limit" in result.text
+        assert "hidden" in result.text
 
 
 class TestTheOverviewFieldCoverage:
@@ -315,11 +362,12 @@ class TestTheOverviewFieldCoverage:
             )
             assert overlap == set(), (model_name, overlap)
 
-    def test_the_eighteen_the_audit_counted_are_exactly_these_eighteen(self):
+    def test_the_twenty_one_the_audit_counted_are_exactly_these_twenty_one(self):
         """Pinned against the backend audit's own Dimension 1 count plus
-        round-3 hardening's one addition and the one-timeout task's own
-        (7 + 5 + 4 + 1 + 1 = 18 OPERATOR-EDITABLE fields, as of
-        2026-09-17), so a future field silently changes this number
+        round-3 hardening's one addition, the one-timeout task's own, and
+        the deletion-semantics task's three retention columns
+        (7 + 5 + 4 + 1 + 1 + 3 = 21 OPERATOR-EDITABLE fields, as of
+        2026-09-21), so a future field silently changes this number
         rather than the accounting above. The two `updated_at`
         bookkeeping timestamps are excluded from this count on purpose --
         they are not operator-editable settings at all -- but still
@@ -334,7 +382,14 @@ class TestTheOverviewFieldCoverage:
 
         SEVENTEEN BECAME EIGHTEEN when the one-timeout task (2026-09-17)
         added `JobSettings.response_timeout_seconds`, for the identical
-        reason -- import law, not a policy choice about this one field."""
+        reason -- import law, not a policy choice about this one field.
+
+        EIGHTEEN BECAME TWENTY-ONE (Task 8 review, controller addition)
+        when the deletion-semantics task's `IdentitySettings.
+        retention_days`/`queue_retention_days`/`audit_detail` joined the
+        REPORTED set instead -- unlike the Library/Job-execution fields,
+        these three are readable off the same `settings_row()` this tool
+        already fetches, so import law names no reason to exclude them."""
         from agents.settings_tools import REPORTED_SETTINGS_FIELDS, UNREPORTED_SETTINGS_FIELDS
 
         reported_count = sum(len(fields) for fields in REPORTED_SETTINGS_FIELDS.values())
@@ -342,9 +397,9 @@ class TestTheOverviewFieldCoverage:
             len(fields) for model, fields in UNREPORTED_SETTINGS_FIELDS.items()
             if model in ("RagSettings", "JobSettings")
         )
-        assert reported_count == 5
+        assert reported_count == 8
         assert import_law_unreported == 13
-        assert reported_count + import_law_unreported == 18
+        assert reported_count + import_law_unreported == 21
 
     def test_bookkeeping_fields_are_named_separately_from_import_law_fields(self):
         from agents.settings_tools import UNREPORTED_SETTINGS_FIELDS
