@@ -2491,7 +2491,7 @@ In `identity/templates/identity/settings.html`, add a Retention block after the 
 
 - [ ] **Step 6: Extend the Identity & security help card**
 
-In `foundation/settings_help.py`, add three `HelpField`s to the `route_name="identity-settings"` card, with anchors `retention`, `queue-retention` and `audit-detail` — matching the three `id=`s above, because `foundation/tests/test_settings_help.py::TestTheAnchors` renders the page and asserts every cited anchor exists. Their `meaning`/`effects` say what the fields do in plain words, and say that **the purge date is fixed at delete time so a changed setting governs future deletions only**, and that **backups are a separate layer that the deletion date does not reach**. They say nothing about holds or records obligations — none are built.
+In `foundation/settings_help.py`, add three `HelpField`s to the `route_name="identity-settings"` card, with anchors `retention`, `queue-retention` and `audit-detail` — matching the three `id=`s above, because `foundation/tests/test_settings_help.py::TestTheAnchors` renders the page and asserts every cited anchor exists. Their `meaning`/`effects` say what the fields do in plain words, and say that **the removal date is fixed at delete time so a changed setting governs future deletions only**, and that **backups are a separate layer that the deletion date does not reach**. They say nothing about holds or records obligations — none are built.
 
 - [ ] **Step 7: Re-pin the existing posture-form tests**
 
@@ -3128,20 +3128,28 @@ def _collect(conversation_id):
     An unparseable artifact reference is DROPPED AND LOGGED, never
     raised -- `agents.shares.shared_keys`' own posture for untrusted
     stored strings: a purge must not be stopped by one bad row.
+
+    THE LOG LINE NAMES NO CONTENT (Task 9 fix round 1, FIX M6): a
+    deletion path must not write the very bytes it is destroying into a
+    log a purge is supposed to make disappear, so this logs the TURN's
+    own id and the conversation id -- enough for an operator to find the
+    row by hand -- and the fact that its reference did not parse, never
+    the raw stored string itself.
     """
     refs: list[str] = []
     generation_ids: list[str] = []
     invocation_ids: list[int] = []
     rows = Turn.objects.filter(conversation_id=conversation_id).values_list(
-        "artifacts", "data", "invocation_id")
-    for artifacts, data, invocation_id in rows:
+        "id", "artifacts", "data", "invocation_id")
+    for turn_id, artifacts, data, invocation_id in rows:
         for reference in artifacts or ():
             try:
                 kind, _pk = parse_artifact(reference)
             except ValueError:
                 logger.warning(
-                    "agents.retention: conversation %s carries an unusable "
-                    "artifact reference %r; ignored.", conversation_id, reference)
+                    "agents.retention: turn %s (conversation %s) carries an "
+                    "artifact reference that failed to parse; ignored.",
+                    turn_id, conversation_id)
                 continue
             if kind in _IMAGE_KINDS:
                 refs.append(reference)
@@ -3181,6 +3189,17 @@ def scrub_tool_records(invocation_ids) -> int:
 
     Idempotent by construction: a second run matches the same rows and
     writes the same three empty values.
+
+    A KNOWN, ACCEPTED RESIDUE (Task 9 fix round 1, FIX M7/I4): this only
+    reaches invocations a SURVIVING `Turn` points at, because `_collect`
+    above finds them by walking the conversation's own turns. A tool
+    call whose job died between its `ToolInvocation` row being written
+    (`agents/runtime/invoke.py`) and its tool `Turn` being written
+    (`agents/runtime/loop.py`) has no turn and therefore no conversation
+    link at all -- its `args`/`text` are not reachable by ANY
+    conversation's purge, on this or any other kind. That is a known,
+    accepted gap with no reaper today, not a bug this function is
+    expected to close.
     """
     ids = list(invocation_ids)
     if not ids:
@@ -3191,7 +3210,7 @@ def scrub_tool_records(invocation_ids) -> int:
 
 def purge_conversation(key: str) -> int:
     """Destroy one conversation's agents-side content. Returns how many
-    rows and images it removed.
+    rows were removed and records scrubbed.
 
     IDEMPOTENT: every step is a filtered delete or update, so a re-run
     after a partial failure removes zero rows and returns zero rather
@@ -3199,18 +3218,26 @@ def purge_conversation(key: str) -> int:
     is not a UUID at all -- is not an error: the item may have been hard
     -deleted by an older path while its ticket stood.
 
-    ORDER, and every step's reason:
+    ORDER, and every step's reason -- BYTES LAST (Task 9 fix round 1,
+    FIX I2: the registered artifact-purge slot used to run SECOND, right
+    after collect, which meant a later step raising -- the attachment
+    cleanup, say -- rolled the ROW deletes back while the files that
+    slot had already removed from disk stayed gone; a filesystem delete
+    has no rollback):
       1. collect (see `_collect`) -- nothing is deleted yet;
-      2. hand the references and ids to the registered artifact purge,
-         which maps them to jobs, dedupes by job, and deletes each job
-         with its files and its queue row;
-      3. the row deletes: this conversation's `Share` rows, then
+      2. the row deletes: this conversation's `Share` rows, then
          `agents.attachments.delete_attachments_for` (which reaches
          `tools.rag.access.delete_attachments` through the registered
          cleanup seam -- chat-scoped documents die there, universal and
-         stream-contained ones lose only their claim), then
+         stream-contained ones lose only their claim; a failure here now
+         PROPAGATES -- FIX C1 -- rather than degrading to zero), then
          `conversation.delete()`, with `Turn` going by CASCADE;
-      4. the tool-record scrub, on the ids from step 1.
+      3. the tool-record scrub, on the ids from step 1;
+      4. LAST: hand the references and ids to the registered artifact
+         purge, which maps them to jobs, dedupes by job, and deletes
+         each job with its files and its queue row. If step 2 or 3
+         raises, this step never runs at all -- every ROW this function
+         owns is already gone before a single FILE on disk is touched.
     """
     try:
         conversation_id = uuid.UUID(str(key))
@@ -3220,10 +3247,6 @@ def purge_conversation(key: str) -> int:
     refs, generation_ids, invocation_ids = _collect(conversation_id)
 
     removed = 0
-    purge = artifact_purge()
-    if purge is not None and (refs or generation_ids):
-        from django.utils.module_loading import import_string
-        removed += import_string(purge)(refs, generation_ids)
 
     removed += Share.objects.filter(
         target_type=Share.Target.CONVERSATION,
@@ -3237,6 +3260,12 @@ def purge_conversation(key: str) -> int:
     removed += deleted
 
     removed += scrub_tool_records(invocation_ids)
+
+    purge = artifact_purge()
+    if purge is not None:
+        from django.utils.module_loading import import_string
+        removed += import_string(purge)(refs, generation_ids)
+
     return removed
 ```
 
@@ -3268,7 +3297,9 @@ Inside `ready()`, after the three `register_entitlement_cascade` calls:
 
 - [ ] **Step 6: Move the held tests that belong here**
 
-Bring the four moved classes from `agents/chat/tests/test_delete.py` (Task 8's list) into `agents/tests/test_retention.py`, rewritten against `purge_conversation` rather than the view: the attachment rows go, a different conversation's attachment row is untouched, a chat-scoped document's `delete_document` is called, a universal document survives with its claim removed, the shares go, and **a database error inside the cleanup provider does not poison the outer transaction** (`TestTheCleanupSavepoint`, unchanged in substance — the savepoint is still `delete_attachments_for`'s own).
+Bring the four moved classes from `agents/chat/tests/test_delete.py` (Task 8's list) into `agents/tests/test_retention.py`, rewritten against `purge_conversation` rather than the view: the attachment rows go, a different conversation's attachment row is untouched, a chat-scoped document's `delete_document` is called, a universal document survives with its claim removed, the shares go, and **a database error inside the cleanup provider does not poison the outer transaction** (`TestTheCleanupSavepoint`; the savepoint is still `delete_attachments_for`'s own).
+
+**Fix round 1 (Task 9 review), amended here:** `TestTheCleanupSavepoint`'s OUTCOME flipped, not its mechanism (FIX C1). `delete_attachments_for`'s only production caller is this module's own `purge_conversation`, running at purge time inside `identity.cascades.run_retention`'s never-swallows runner — so a broken cleanup provider must no longer be swallowed into a completed purge; it must propagate, taking the purge down so the ticket survives for the next sweep. The savepoint (`transaction.atomic()`, nested) stays exactly as before — it is still what keeps a DATABASE-level error from poisoning the outer transaction before the now-ordinary Python exception re-raises — only the `except` clause's outcome changed, from `return 0` to `logger.exception(...); raise`. Two tests now cover it: one driving a real database error directly through `purge_conversation` and asserting it raises, and one driving the same error through `identity.retention.purge_ticket` end to end and asserting the Conversation row, its turns, its attachment rows and the DeletionTicket itself all survive, no `content.purged` event is written, and the connection is left usable (proven with one ORM write inside the same outer `transaction.atomic()` the failure happened in). A third new class, `TestBytesGoLast` (FIX I2), asserts that when the attachment cleanup raises, the registered artifact-purge slot is never called at all — see Step 4's reordered code below.
 
 - [ ] **Step 7: Run the tests**
 
@@ -4513,7 +4544,7 @@ Every value the template reads is a field on a dict the view built — no dict i
     </div>
 ```
 
-`foundation/settings_help.py`, one `HelpCard` with `route_name="identity-deleted"`, `title="Deleted"`, `gate=EVERYONE`, a `purpose` saying what the page is for, and fields whose anchors exist on the rendered page. It says what Restore and Delete permanently do, **that the purge date is fixed at delete time so a changed setting governs future deletions only**, and **that backups are a separate layer the date does not reach**. It says nothing about holds.
+`foundation/settings_help.py`, one `HelpCard` with `route_name="identity-deleted"`, `title="Deleted"`, `gate=EVERYONE`, a `purpose` saying what the page is for, and fields whose anchors exist on the rendered page. It says what Restore and Delete permanently do, **that the removal date is fixed at delete time so a changed setting governs future deletions only**, and **that backups are a separate layer the date does not reach**. It says nothing about holds.
 
 `foundation/tests/test_page_names.py::_NAMES` — `"identity-deleted": "Deleted"`.
 
@@ -6819,3 +6850,4 @@ Checked end to end: `ticketed_keys` / `visible_tickets` / `may_purge` / `delete_
 - **Execution amendment (Task 6 review), 2026-09-21:** Task 6: the `_overdue` helper re-shaped to create-all-then-backdate for the same reason as Task 5's limit test; command code unchanged from the brief.
 - **Execution amendment (Task 5 review, round 2), 2026-09-21:** three Minor findings, all in `identity/retention.py` with tests in `identity/tests/test_retention_service.py`: already-gone purge is a no-op (`purge_ticket` re-reads the row under `select_for_update()` inside its transaction and returns `{}` with nothing run and nothing written when it is already gone); restore logs only what it removed (`restore_content` deletes by queryset and writes `content.restored` only when a row was actually removed); refusals are warnings (`sweep` catches `RetentionRefused` before the generic `except Exception` and logs it at `logger.warning` with no traceback, leaving `logger.exception` for every other failure). Reflected in Task 5's code and test blocks above.
 - **Execution amendment (Task 8 review), 2026-09-21:** confirm copy no longer says purge; zero-day notice; soft-delete document pin restored; four tests renamed.
+- **Execution amendment (Task 9 fix round 1), 2026-09-21:** Task 9 review: `agents.attachments.delete_attachments_for` no longer swallows a broken cleanup provider (FIX C1) — its only production caller is `agents.retention.purge_conversation` at purge time, so a failure now logs and re-raises through the runner's own never-swallows contract, re-pinning `TestTheCleanupSavepoint` to expect propagation (and full survival, driven through `identity.retention.purge_ticket`) instead of a completed purge; `purge_conversation` now hands refs/generation ids to the registered artifact-purge slot LAST, after every row delete and the tool-record scrub, so a failure upstream never deletes a file whose row then survives (FIX I2, `TestBytesGoLast`); the collect step's parse-failure log line names the turn and conversation id only, never the raw stored reference (FIX M6); and two residues are now stated as docstring sentences rather than left implicit — `WorkstreamTaint.first_conversation` keeps a purged conversation's id by value, content-free and deliberately left, and `scrub_tool_records` cannot reach a tool call whose invocation was written but whose turn never was (FIX M7/I4), mirrored into `agents/README.md`. Task 7 fix round 1: the rendered Retention help copy said "purge date"/"cliff", both banned by this plan's own copy rule (`identity/contracts/retention.py`'s docstring) — reworded to "removal date"/"that date" and "no age limit"; the queue-jobs effects sentence was also factually wrong (a finished job carries no stamped purge date) and is now "applies ... the next time the queue tidies up, which happens whenever a new job is added"; the deletion-log effects sentence now says "permanent-deletion entries" rather than "purge entries". Both fixes reflected in the code/test/doc blocks above and in `foundation/settings_help.py`/`agents/attachments.py`/`agents/retention.py`/`agents/README.md`/`tools/rag/README.md` directly.
