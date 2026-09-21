@@ -206,7 +206,10 @@ class TestStartWithFiles:
     ):
         owner = make_user()
         stream = _workstream(user_principal(owner))
-        agent = make_agent(resident=True)
+        # `box_wide=True` (task 5, chat cluster feature B): `resident`
+        # alone no longer reaches a non-owning principal -- see
+        # `agents/visibility.py::visible_agents`.
+        agent = make_agent(resident=True, box_wide=True)
         with posture(POSTURE_ENTERPRISE):
             sign_in(client, owner)
             response = client.post(reverse("chat-start"), {

@@ -73,6 +73,25 @@ reference to it. `Conversation.agent`'s `PROTECT` still refuses to
 delete an agent with conversations; that guard was never part of the
 resident lock and needed no change.
 
+### `box_wide` and `resident` are two different facts
+
+`resident` records **where a row came from** — it started life as a shipped
+default. It is an origin marker, not a lock (`Agent`'s own ruling 3), and it has
+a second reader: the tool-label page's shell-path warning
+(`agents/visibility.py::resident_agent_tool_keys`) names the shipped agents that
+declare a tool an operator is about to label.
+
+`box_wide` records **who may use it** — everybody on this box, or only the people
+its ownership and its entitlement labels reach. `visible_agents` AND-s the label
+clause onto its ownership OR, so a box-wide row narrowed to an entitlement
+reaches everybody on this box *who holds it*; the two controls compose rather
+than excluding each other.
+
+Migration `0012_agent_box_wide` set `box_wide = resident` for every existing row,
+so the swap changed nobody's access on the day it landed. `install_defaults`
+stamps `box_wide=True` unconditionally, including on `--reset`: a shipped default
+is the platform's offer, not the installing operator's private row.
+
 ## Flows
 
 **Ruling 1, deviation P3-D11.** A flow is a ROW, and rows cannot become
@@ -253,9 +272,13 @@ IA-1 makes the rule real without changing that.
 **Ownership is the base rule; IA-2's `Share` extends it.** `visible_
 conversations`/`visible_agents`/`visible_flows`/`installed_agent_slugs`
 filter on `identity.access.owned_rows_q(principal)` (own rows OR a
-service-owned one when `principal` is an admin) OR a `resident=True` row
-(the shipped defaults, visible to everybody — they are the platform's
-own offer, not somebody's private work) OR `Q(pk__in=agents.shares.
+service-owned one when `principal` is an admin) OR a box-wide row —
+`box_wide=True` for `visible_agents`/`installed_agent_slugs` (task 5,
+chat cluster feature B; `Agent`'s own audience column, distinct from the
+`resident` origin marker) but still `resident=True` for `visible_flows`
+(`Flow` has no `box_wide` column and needed none), because either way
+the shipped defaults are visible to everybody — they are the platform's
+own offer, not somebody's private work — OR `Q(pk__in=agents.shares.
 shared_keys(target_type, principal))` — a row's owner extended it,
 directly or through a group, at either level; `agents.visibility.
 may_post_to` is what then tells a `view` share apart from a `use` one.
@@ -302,10 +325,12 @@ alongside `tool_labels_cascade`.
 through — one clause to keep in agreement rather than three (unlabelled
 rows pass; a labelled row matches on holding ANY one of its
 entitlements, the same OR-within-AND documents and tools use).
-**It composes with the `resident=True` carve-out rather than being
-bypassed by it** (decision 35): the label clause is AND-ed onto the
-ownership-OR-resident clause, not OR-ed into it, so a shipped agent that
-has been labelled is restricted exactly like an operator-created one —
+**It composes with the box-wide carve-out rather than being bypassed by
+it** (decision 35): the label clause is AND-ed onto the
+ownership-OR-box-wide clause (`box_wide=True` for agents,
+`resident=True` for flows — see "`box_wide` and `resident` are two
+different facts" above), not OR-ed into it, so a shipped agent that has
+been labelled is restricted exactly like an operator-created one —
 labelling a default is not a case the rule quietly exempts.
 
 **`AGENT_NOT_PERMITTED`** (`agents/runtime/preflight.py`) is the second

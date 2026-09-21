@@ -274,18 +274,22 @@ class TestTwoLevelDelegationEnforcesTheRootAccess:
         register_tool(ToolSpec(key="stub.capture", label="C", description="d",
                                runner="agents.runtime.tests.test_acting_rule.runner_capture"))
         bind_chat_role(CHAT_CONVERSE_ROLE)
-        # `resident=True` on the two DELEGATE hops: `library` and
-        # `illustrator` are the platform's real shipped agent-as-tool
-        # slugs (`agent_tool_specs()`), which ship `resident=True` in
-        # production. Task 15's `run_agent_tool` resolves a delegate
-        # through `visible_agents(ctx.principal)`, which (like today's
-        # picker) requires OWNED, RESIDENT, or SHARED -- an unowned,
-        # non-resident row is invisible to a plain member regardless of
-        # any label, so leaving these `resident=False` would make this
+        # `resident=True, box_wide=True` on the two DELEGATE hops:
+        # `library` and `illustrator` are the platform's real shipped
+        # agent-as-tool slugs (`agent_tool_specs()`), which ship both
+        # flags together in production (`agents.defaults.install_
+        # default`'s `_fields()`). Task 15's `run_agent_tool` resolves a
+        # delegate through `visible_agents(ctx.principal)`, which (like
+        # today's picker) requires OWNED, BOX-WIDE (task 5, chat cluster
+        # feature B -- formerly RESIDENT), or SHARED -- an unowned,
+        # non-box-wide row is invisible to a plain member regardless of
+        # any label, so leaving these `box_wide=False` would make this
         # fixture fail closed for a reason that has nothing to do with
         # the entitlement this test class is actually about.
-        make_agent(slug="illustrator", tool_keys=["stub.capture"], resident=True)
-        make_agent(slug="library", tool_keys=["agent.illustrator"], resident=True)
+        make_agent(slug="illustrator", tool_keys=["stub.capture"],
+                   resident=True, box_wide=True)
+        make_agent(slug="library", tool_keys=["agent.illustrator"],
+                   resident=True, box_wide=True)
         general = make_agent(slug="general", tool_keys=["agent.library"], max_steps=10)
         conv = make_conversation(agent=general)
         make_turn(conversation=conv, index=0, role=Turn.Role.USER, text="ask")

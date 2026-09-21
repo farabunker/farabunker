@@ -129,6 +129,24 @@ class Agent(models.Model):
     # (`agents/resident.py`). RULING 3: an origin marker, not a lock --
     # see the class docstring.
     resident = models.BooleanField(default=False)
+    # THE AUDIENCE, distinct from `resident` the ORIGIN MARKER above.
+    # True means "everybody on this box may use this row"; False means
+    # "only the people its ownership and its labels reach".
+    #
+    # A SEPARATE COLUMN RATHER THAN AN OVERLOAD OF `resident` (spec
+    # decision 6, owner ruling flag 2). `resident` has a SECOND READER
+    # -- `agents.visibility.resident_agent_tool_keys`, which warns the
+    # tool-label page that labelling a tool a SHIPPED agent declares
+    # makes the shell path silently weaker -- and overloading it would
+    # make that warning fire for rows that were never shipped defaults,
+    # while making the agent form's own audience control lie about where
+    # a row came from.
+    #
+    # `visible_agents` AND-s the entitlement label clause onto its
+    # ownership OR, so `box_wide=True` is not a bypass: a box-wide row
+    # narrowed to an entitlement reaches everybody on this box WHO HOLDS
+    # IT, which is the useful fourth row of §4.3.1's truth table.
+    box_wide = models.BooleanField(default=False)
     enabled = models.BooleanField(default=True)
     # RULING 4b (2026-08-27 addendum / 2026-08-28 ruling): the principal
     # that owns this row, in the same shape as `Conversation`'s identical

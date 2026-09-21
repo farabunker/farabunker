@@ -192,11 +192,16 @@ class TestOwnershipNarrowsWhenAccountsAreOn:
                 counts.append(visible_conversations(user_principal(admin)).count())
         assert counts[0] == counts[1]
 
-    def test_a_resident_agent_is_visible_to_everybody(self):
+    def test_a_box_wide_agent_is_visible_to_everybody(self):
         """The shipped defaults are the platform's own offer, not
         somebody's private work -- so they are visible without being
-        owned, and without a share."""
-        make_agent(slug="shipped", resident=True)
+        owned, and without a share.
+
+        `box_wide=True` (task 5, chat cluster feature B): audience moved
+        off `resident` onto its own column, and a shipped default always
+        carries both (`agents.defaults.install_default`'s `_fields()`),
+        so this fixture now stamps both to represent one."""
+        make_agent(slug="shipped", resident=True, box_wide=True)
         make_agent(slug="somebody-elses", resident=False,
                    owner_kind="user", owner_key="99999999")
         with posture(POSTURE_PERSONAL):
@@ -207,8 +212,13 @@ class TestOwnershipNarrowsWhenAccountsAreOn:
     def test_a_disabled_resident_agent_is_still_not_runnable(self):
         """`enabled=False` is applied on top of the visibility rule,
         not instead of it -- the same property this function had before
-        accounts existed."""
-        make_agent(slug="shipped-off", resident=True, enabled=False)
+        accounts existed.
+
+        `box_wide=True` (review round 2, finding 5): without it this row
+        is excluded by the ownership OR alone, and `enabled=False` is
+        never the thing doing the excluding -- the same vacuity the
+        other fifteen deviation-record entries were fixed for."""
+        make_agent(slug="shipped-off", resident=True, box_wide=True, enabled=False)
         with posture(POSTURE_PERSONAL):
             slugs = {a.slug for a in visible_agents(user_principal(make_user()))}
         assert "shipped-off" not in slugs
@@ -592,15 +602,18 @@ class TestLabelsNarrowTheThreeVisibilityFunctions:
             assert agent in visible_agents(user_principal(make_user())) or True
         # An unlabelled row is not made visible BY the label clause -- the
         # ownership rules still apply. What this pins is that the clause
-        # does not REMOVE it: a resident row stays visible to everybody.
-        resident = make_agent(slug="unlabelled-resident", resident=True, enabled=True)
+        # does not REMOVE it: a box-wide row stays visible to everybody
+        # (`box_wide=True`, task 5, chat cluster feature B -- formerly
+        # `resident=True` alone).
+        box_wide = make_agent(slug="unlabelled-resident", resident=True,
+                              box_wide=True, enabled=True)
         with posture(POSTURE_ENTERPRISE):
-            assert resident in visible_agents(user_principal(make_user()))
+            assert box_wide in visible_agents(user_principal(make_user()))
 
     def test_a_labelled_agent_is_visible_only_to_a_holder(self):
         from agents.models import AgentEntitlement
         finance = make_entitlement(name="Finance")
-        agent = make_agent(resident=True, enabled=True)
+        agent = make_agent(resident=True, box_wide=True, enabled=True)
         AgentEntitlement.objects.create(agent=agent, entitlement=finance)
         holder, other = make_user(), make_user()
         grant(finance, user=holder)
@@ -608,22 +621,30 @@ class TestLabelsNarrowTheThreeVisibilityFunctions:
             assert agent in visible_agents(user_principal(holder))
             assert agent not in visible_agents(user_principal(other))
 
-    def test_a_resident_row_is_NOT_exempt(self):
+    def test_a_box_wide_row_is_NOT_exempt(self):
         """THE CARVE-OUT COMPOSES, IT IS NOT BYPASSED. A reader assumes
-        `| Q(resident=True)` wins, and if it did the shipped agents --
+        `| Q(box_wide=True)` wins, and if it did the shipped agents --
         exactly the ones an operator most wants to restrict -- would be
         unrestrictable. The clause is AND-ed with the ownership OR, not
-        OR-ed into it."""
+        OR-ed into it.
+
+        `box_wide=True` on the fixture (review round 2, finding 5):
+        without it, the row is excluded by the ownership OR alone, and
+        the AND-vs-OR property this test names is never reached."""
         from agents.models import AgentEntitlement
-        agent = make_agent(resident=True, enabled=True)
+        agent = make_agent(resident=True, box_wide=True, enabled=True)
         AgentEntitlement.objects.create(agent=agent,
                                         entitlement=make_entitlement(name="Legal"))
         with posture(POSTURE_ENTERPRISE):
             assert agent not in visible_agents(user_principal(make_user()))
 
     def test_installed_agent_slugs_narrows_the_same_way(self):
+        """`box_wide=True` (review round 2, finding 5): without it, this
+        row is the ONLY coverage of the label clause narrowing
+        `installed_agent_slugs` -- and it was excluded by the ownership
+        OR alone, not by the label, so it proved nothing."""
         from agents.models import AgentEntitlement
-        agent = make_agent(resident=True, enabled=False)
+        agent = make_agent(resident=True, box_wide=True, enabled=False)
         AgentEntitlement.objects.create(agent=agent,
                                         entitlement=make_entitlement(name="Legal"))
         with posture(POSTURE_ENTERPRISE):
@@ -664,9 +685,14 @@ class TestLabelsNarrowTheThreeVisibilityFunctions:
     def test_a_service_principal_cannot_see_a_labelled_resident_agent(self):
         """Spec section 9.4: the shell holds no entitlement, so
         `manage.py agent_turn` cannot run a labelled agent -- including a
-        shipped one, which is the case an operator will hit first."""
+        shipped one, which is the case an operator will hit first.
+
+        `box_wide=True` (review round 2, finding 5): without it the row
+        is excluded from `SERVICE_PRINCIPAL` by the ownership OR alone
+        (a service principal owns nothing here), and the label -- the
+        fact this test is actually about -- is never what excludes it."""
         from agents.models import AgentEntitlement
-        agent = make_agent(resident=True, enabled=True)
+        agent = make_agent(resident=True, box_wide=True, enabled=True)
         AgentEntitlement.objects.create(agent=agent,
                                         entitlement=make_entitlement(name="Legal"))
         with posture(POSTURE_ENTERPRISE):

@@ -33,8 +33,10 @@ retrieval keeps exactly ONE filter point, and a visibility scope is one
 more filter argument THERE rather than a second copy in each caller.
 This is that discipline applied to the agent column's own three tables.
 
-IA-1 fills in every body: ownership plus the `resident`/
-`service` carve-outs are now the real rule, not a promise. Every
+IA-1 fills in every body: ownership plus the `box_wide`/`resident`/
+`service` carve-outs are now the real rule, not a promise (`box_wide`,
+task 5 chat cluster feature B, is `Agent`'s own audience column;
+`resident` still covers `Flow`, which has none). Every
 function tests the OPEN BRANCH FIRST -- `sees_all_content`/`is_admin`
 test `accounts_on()` before touching another table -- so an open box
 still runs zero ownership queries and this module still changes no
@@ -154,12 +156,22 @@ def label_permitted_q(principal, *, settings_row=None) -> Q:
 def visible_agents(principal, *, settings_row=None):
     """Every ENABLED agent this principal may run.
 
-    `resident=True` rows are the shipped defaults and are visible to
-    everybody -- they are the platform's own offer, not somebody's
-    private work.
+    `box_wide=True` rows are visible to EVERYBODY on this box -- the
+    shipped defaults start that way (`agents.defaults.install_default`
+    stamps it, because a shipped default is the PLATFORM's offer, not
+    the installing operator's private row), and an administrator may set
+    or clear it on any agent from the agent form.
+
+    IT USED TO BE `resident=True` (chat cluster, feature B). `resident`
+    keeps its documented meaning -- an ORIGIN MARKER, `Agent`'s own
+    ruling 3 -- and its second reader, `resident_agent_tool_keys`'s
+    shell-path warning. Audience is now its own column, so making a
+    shipped default private is not a claim that it was never shipped.
+    Migration `0012_agent_box_wide` set `box_wide = resident` for every
+    existing row, so the day it landed nothing changed for anybody.
 
     THE LABEL CLAUSE IS AND-ED ONTO THE OWNERSHIP OR, NOT OR-ED INTO IT
-    (decision 35): a labelled row -- resident or owned -- is excluded
+    (decision 35): a labelled row -- box-wide or owned -- is excluded
     from a principal who holds none of its entitlements, which is what
     makes labelling the shipped defaults or one's own agent actually
     restrict it rather than being bypassable by the person it is aimed
@@ -185,7 +197,7 @@ def visible_agents(principal, *, settings_row=None):
     if sees_all_content(principal, settings_row=settings_row):
         return qs
     return qs.filter(
-        (owned_rows_q(principal, settings_row=settings_row) | Q(resident=True)
+        (owned_rows_q(principal, settings_row=settings_row) | Q(box_wide=True)
          | Q(pk__in=shared_keys(Share.Target.AGENT, principal)))
         & label_permitted_q(principal, settings_row=settings_row)
     ).distinct()
@@ -193,13 +205,17 @@ def visible_agents(principal, *, settings_row=None):
 
 def installed_agent_slugs(principal):
     """Every slug this principal has installed, ENABLED or not -- the
-    set the "Add the default X" offers are computed against. Same
-    visibility rule, minus the `enabled` filter, for the reason this
-    function's original docstring gives."""
+    set the "Add the default X" offers are computed against.
+
+    Same visibility rule as `visible_agents`, minus the `enabled`
+    filter, and it moved to `box_wide` with it -- the two must agree
+    about who can see a row or the "Add the default X" offers would be
+    computed against a different set from the one the index lists.
+    """
     qs = Agent.objects.all()
     if not sees_all_content(principal):
         qs = qs.filter(
-            (owned_rows_q(principal) | Q(resident=True)
+            (owned_rows_q(principal) | Q(box_wide=True)
              | Q(pk__in=shared_keys(Share.Target.AGENT, principal)))
             & label_permitted_q(principal)
         )

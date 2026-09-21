@@ -94,9 +94,12 @@ like every other surface — in open posture it still is; under accounts
 - **The visibility functions in `agents/visibility.py` are where a real
   filter went once auth landed** — an edit to those functions, never a
   new listing view and never a migration. `visible_conversations`'s own
-  filter (ownership, `resident=True`, `Share`) and the label clause
-  `visible_agents`/`installed_agent_slugs`/`visible_flows` now carry are
-  both covered below and in [`agents/README.md`](../README.md).
+  filter (ownership, `Share`) and the sibling functions' box-wide/
+  resident carve-out (`box_wide=True` for `visible_agents`/
+  `installed_agent_slugs` since task 5, chat cluster feature B;
+  `resident=True` still for `visible_flows`) plus the label clause those
+  three now carry are both covered below and in
+  [`agents/README.md`](../README.md).
 
 ## The three auth seams (ruling 4)
 
@@ -1883,8 +1886,10 @@ agents and flows, one page for both (`agents/chat/views/access.py`),
 also class `S`. Labelling an agent or flow here is enforced through
 `agents.visibility`'s label clause (see [`agents/README.md`](../README.md)
 "Agents and flows carry their own labels"), which composes with the
-`resident=True` carve-out rather than being bypassed by it — a shipped
-default is not exempt from being labelled.
+box-wide carve-out (`box_wide=True` for an agent, `resident=True` for a
+flow — see "`box_wide` and `resident` are two different facts" in
+[`agents/README.md`](../README.md)) rather than being bypassed by it —
+a shipped default is not exempt from being labelled.
 
 **The share panel** (`_share_panel.html`, rendered inside
 `conversation.html`) is `chat-conversation-share`'s UI, not a page of
