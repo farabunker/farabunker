@@ -30,6 +30,7 @@ from models.contracts.engines.base import (
     TranscriptResult,
     TranscriptSegment,
 )
+from models.contracts.engines.comfyui import ComfyUIEngine
 from models.contracts.engines.ollama import OllamaEngine
 
 
@@ -233,3 +234,17 @@ class TestBuildTranscriberIsOptional:
 
     def test_inference_engine_declares_build_transcriber(self):
         assert hasattr(InferenceEngine, "build_transcriber")
+
+
+class TestTheImageAdapterDeclaresItsEvictionSemantics:
+    """Two one-line declarations, pre-cleared by the engine steward
+    (spec §13 steward amendment, S-1). Both match what the queue would
+    have ASSUMED, so this changes no behaviour -- it replaces a guess
+    with a fact, which is what lets the queue tell this engine apart from
+    one that really does free a single named model."""
+
+    def test_its_unload_frees_the_whole_endpoint(self):
+        assert ComfyUIEngine.unload_scope == "endpoint"
+
+    def test_its_residency_report_is_a_process_local_memo(self):
+        assert ComfyUIEngine.residency_authority == "memo"
