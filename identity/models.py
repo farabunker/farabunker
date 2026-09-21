@@ -24,6 +24,9 @@ from identity.contracts.postures import (
     LIBRARY_CHOICES, LIBRARY_OPEN, POSTURE_CHOICES, POSTURE_OPEN,
     SESSION_IDLE_MINUTES_DEFAULT,
 )
+from identity.contracts.retention import (
+    QUEUE_RETENTION_DAYS_DEFAULT, RETENTION_DAYS_DEFAULT, RETENTION_KINDS,
+)
 
 
 class User(AbstractUser):
@@ -94,6 +97,37 @@ class IdentitySettings(models.Model):
     # column covers both behaviours.
     session_idle_minutes = models.PositiveIntegerField(
         default=SESSION_IDLE_MINUTES_DEFAULT)
+    # THE WHOLE RETENTION POLICY, ON THE ROW THAT ALREADY CARRIES THE
+    # POSTURE (owner ruling, 2026-09-21). One retention policy belongs in
+    # one place: two settings pages would mean two places to look, two
+    # writers to validate, and a real chance the content cliff is changed
+    # while the queue silently keeps its own. `models.queue.models.
+    # JobSettings` gains NOTHING -- the queue READS `queue_retention_days`
+    # across the `identity.access` seam at prune time, it does not own it.
+    #
+    # EVERY ONE IS OPTIONAL AND EVERY ONE HAS A WORKING DEFAULT, so a
+    # maintainer who never opens this page still gets correct behaviour.
+    # Range limits live in the WRITER (`identity.services.set_posture`),
+    # never as a database constraint -- `foundation/settings_bounds.py`.
+    #
+    # How long a deleted item stays restorable. `0` is legal and means
+    # "no grace period": the sweep the same request runs picks the ticket
+    # up and the content is gone before the response returns.
+    retention_days = models.PositiveIntegerField(default=RETENTION_DAYS_DEFAULT)
+    # How long a FINISHED queue row survives. NULL means no age cliff at
+    # all (the FIFO `retention_limit` alone) -- the same "honestly
+    # unknown, never silently assumed" convention `JobSettings.
+    # memory_budget_bytes` documents. `0` is NOT legal here; blank is how
+    # "no cliff" is said, which is why the writer refuses it.
+    queue_retention_days = models.PositiveIntegerField(
+        null=True, blank=True, default=QUEUE_RETENTION_DAYS_DEFAULT)
+    # Whether a deletion event carries the item's own title. OFF: the
+    # event says a conversation with this id was deleted by this actor at
+    # this time -- written and rendered regardless. ON: `target_label`
+    # carries the title. NO EVENT IS SUPPRESSED BY THIS TOGGLE in either
+    # direction: an audit trail with a switch that turns rows off is not
+    # an audit trail.
+    audit_detail = models.BooleanField(default=False)
     updated_at = models.DateTimeField(auto_now=True)
 
     @classmethod
@@ -173,6 +207,105 @@ class AuditEvent(models.Model):
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         return f"AuditEvent({self.at:%Y-%m-%d %H:%M} · {self.action})"
+
+
+class DeletionTicket(models.Model):
+    """One deleted item, and the date its content will be destroyed.
+
+    A TICKET EXISTS EXACTLY WHILE THE ITEM IS RESTORABLE. There is no
+    purged-but-pending state, no second cliff and no ticket that outlives
+    its content: `identity.retention.purge_ticket` destroys the row in
+    the same transaction that destroys the content, so the two can never
+    disagree. That single invariant is what lets restore be "delete the
+    ticket" and nothing else -- the item was never modified, so there is
+    nothing to put back.
+
+    ONE TABLE RATHER THAN A `deleted_at` COLUMN ON FOUR MODELS IN THREE
+    COLUMNS, for three reasons. (a) Four tables means four migrations and
+    four places to forget an exclusion. (b) A cliff, an actor, a label
+    and a hold are facts about the DELETION, not about the conversation.
+    (c) The Deleted page is one query over one table; with per-model
+    columns it is a union over four querysets in three columns that
+    `identity/` may not import.
+
+    `key` IS THE ITEM'S PRIMARY KEY AS TEXT. The four kinds have three pk
+    types (UUID, UUID, int, int); one text column is the
+    `agents.models.Share.target_key` precedent, and
+    `identity.retention.ticketed_keys` handles the join the same way
+    `agents.shares.shared_keys` does -- a materialised list, never a
+    `Subquery` that would need a per-type cast.
+
+    NO FOREIGN KEY TO `User` for either principal: a principal is two
+    strings, for `AuditEvent`'s own recorded reason.
+
+    THE THREE HOLD COLUMNS SHIP EMPTY AND ARE WRITTEN BY NOTHING. The
+    control that would set them is the deferred enterprise slice (spec
+    section 10.10); the sweep's due-condition already excludes a held
+    ticket. They are created by this migration anyway because the
+    alternative is a second migration later against a table that by then
+    holds live deletion bookkeeping -- three blank columns cost nothing,
+    that migration is a risk with a maintenance window attached. This is
+    the one place in this feature where something is built before it is
+    used, and it is said here rather than discovered in a field list.
+    """
+
+    kind = models.CharField(max_length=32)
+    key = models.CharField(max_length=200)
+    # The ITEM's owner, stamped at create from the item's own owner
+    # columns -- same two names, same widths, same blank default as the
+    # seven owned tables that already carry them.
+    owner_kind = models.CharField(max_length=32, blank=True, default="")
+    owner_key = models.CharField(max_length=200, blank=True, default="")
+    # The ACTOR, which is not always the owner: an administrator deletes
+    # somebody's row, and the cliff acts as the service principal.
+    deleted_by_kind = models.CharField(max_length=32, blank=True, default="")
+    deleted_by_key = models.CharField(max_length=200, blank=True, default="")
+    # The item's title AT DELETE TIME, for the Deleted page only. It is
+    # CONTENT and is treated as such: never copied into an audit event
+    # unless `audit_detail` is on, and destroyed with the ticket.
+    label = models.CharField(max_length=255, blank=True, default="")
+    deleted_at = models.DateTimeField(auto_now_add=True)
+    # A DATE, not a datetime: "Purge on 21 October 2026" is the promise
+    # the page prints, and a date is what a person can check. Computed
+    # once at create and NEVER recomputed -- a changed setting governs
+    # future deletes only, because moving this date earlier would destroy
+    # content sooner than the person was told.
+    purge_on = models.DateField(db_index=True)
+    hold_by_kind = models.CharField(max_length=32, blank=True, default="")
+    hold_by_key = models.CharField(max_length=200, blank=True, default="")
+    hold_note = models.TextField(blank=True, default="")
+
+    class Meta:
+        ordering = ["-deleted_at"]
+        constraints = [
+            # ONE TICKET PER ITEM, so a second delete of the same item is
+            # a no-op rather than a duplicate row -- `get_or_create` is
+            # the writer. It is also the index `ticketed_keys` reads.
+            models.UniqueConstraint(fields=["kind", "key"],
+                                    name="uniq_deletion_ticket"),
+        ]
+        indexes = [
+            models.Index(fields=["owner_kind", "owner_key"],
+                         name="identity_ticket_owner"),
+        ]
+
+    def save(self, *args, **kwargs):
+        """A closed kind vocabulary, exactly as `AuditEvent.save()`
+        validates its action.
+
+        `ValueError`, not a `ValidationError`: a typo'd kind is a
+        programming error at the call site, not a form an operator can
+        correct -- and a kind that silently stored would split the
+        Deleted page in two.
+        """
+        if self.kind not in RETENTION_KINDS:
+            raise ValueError(
+                f"Unknown deletion kind {self.kind!r}. Add it to "
+                f"identity/contracts/retention.py::RETENTION_KINDS first.")
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return f"DeletionTicket({self.kind}:{self.key} -> {self.purge_on})"
 
 
 class Entitlement(models.Model):
