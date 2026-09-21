@@ -355,6 +355,9 @@ _FIELD_ANCHORS: dict[str, dict[str, str]] = {
         "library_posture": "library-posture",
         "admin_sees_content": "admin-sees-content",
         "session_idle_minutes": "session-idle",
+        "retention_days": "retention",
+        "queue_retention_days": "queue-retention",
+        "audit_detail": "audit-detail",
     },
     "ChatSettings": {
         "time_aware": "time-aware",
@@ -479,13 +482,14 @@ class TestTheModelFieldCoverage:
             excluded = {f for (m, f) in _NAMED_EXCLUSIONS if m == model_name}
             assert set(field_anchors) & excluded == set(), model_name
 
-    def test_the_eighteen_the_audit_counted_are_exactly_these_eighteen(self):
+    def test_the_twentyone_the_audit_counted_are_exactly_these_twentyone(self):
         """Pinned against the backend audit's own Dimension 1 count, plus
-        round-3 hardening's one addition and the one-timeout task's own
-        (7 + 4 + 6 + 1 = 18 operator-editable fields, as of 2026-09-17) --
-        the two `updated_at` bookkeeping timestamps are excluded from
-        THIS count on purpose, same as `agents/settings_tools.py`'s own
-        sibling test.
+        round-3 hardening's one addition, the one-timeout task's own, and
+        the deletion-semantics task's three
+        (7 + 4 + 6 + 1 + 3 = 21 operator-editable fields, as of
+        2026-09-21) -- the two `updated_at` bookkeeping timestamps are
+        excluded from THIS count on purpose, same as
+        `agents/settings_tools.py`'s own sibling test.
 
         F1 (Coherence Wave C): all of them are MAPPED. The `JobSettings`
         fields used to make up the count as named exclusions ("no card
@@ -505,9 +509,14 @@ class TestTheModelFieldCoverage:
         SEVENTEEN BECAME EIGHTEEN when the one-timeout task (2026-09-17)
         added `JobSettings.response_timeout_seconds`, the turn's own
         response timeout -- mapped the identical way, on its own section
-        of the same page, for the same reason."""
+        of the same page, for the same reason.
+
+        EIGHTEEN BECAME TWENTY-ONE when the deletion-semantics task
+        (2026-09-21) added `IdentitySettings.retention_days`,
+        `.queue_retention_days` and `.audit_detail` -- the Retention
+        section on Identity & security -- mapped the identical way."""
         mapped_count = sum(len(v) for v in _FIELD_ANCHORS.values())
         queue_excluded = sum(1 for (m, _f) in _NAMED_EXCLUSIONS if m == "JobSettings")
-        # 4 IdentitySettings + 1 ChatSettings + 7 RagSettings + 6 JobSettings
-        assert mapped_count == 18
+        # 7 IdentitySettings + 1 ChatSettings + 7 RagSettings + 6 JobSettings
+        assert mapped_count == 21
         assert queue_excluded == 0

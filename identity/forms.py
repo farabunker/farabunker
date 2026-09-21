@@ -12,6 +12,11 @@ from django import forms
 from django.contrib.auth.password_validation import validate_password
 
 from identity.contracts.postures import LIBRARY_CHOICES, POSTURE_CHOICES
+from identity.contracts.retention import (
+    LABEL_AUDIT_DETAIL, LABEL_QUEUE_RETENTION_DAYS, LABEL_RETENTION_DAYS,
+    QUEUE_RETENTION_DAYS_MAX, QUEUE_RETENTION_DAYS_MIN, RETENTION_DAYS_MAX,
+    RETENTION_DAYS_MIN,
+)
 from identity.models import User
 
 
@@ -47,6 +52,24 @@ class PostureForm(forms.Form):
     library_posture = forms.ChoiceField(choices=LIBRARY_CHOICES)
     admin_sees_content = forms.BooleanField(required=False)
     session_idle_minutes = forms.IntegerField(min_value=0, max_value=60 * 24 * 30)
+    # THE RETENTION SECTION (spec section 4). The LABELS come from
+    # `identity.contracts.retention`, not from a string typed here: they
+    # are user-facing sentences, so they are declared once in Python and
+    # read by the form, the page and the help card alike.
+    #
+    # The form's own `min_value`/`max_value` are a convenience, not the
+    # guard: the real refusals live in `identity.services.set_posture`,
+    # where every other write on this row is refused, because a
+    # `ModelForm`-free column keeps its guards in one place.
+    retention_days = forms.IntegerField(
+        label=LABEL_RETENTION_DAYS,
+        min_value=RETENTION_DAYS_MIN, max_value=RETENTION_DAYS_MAX)
+    # `required=False` AND blank means NULL, which is the only way to
+    # say "no age cliff" -- so this field can never be spelled `0`.
+    queue_retention_days = forms.IntegerField(
+        label=LABEL_QUEUE_RETENTION_DAYS, required=False,
+        min_value=QUEUE_RETENTION_DAYS_MIN, max_value=QUEUE_RETENTION_DAYS_MAX)
+    audit_detail = forms.BooleanField(label=LABEL_AUDIT_DETAIL, required=False)
 
 
 class NameForm(forms.Form):

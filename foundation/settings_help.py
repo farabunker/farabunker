@@ -787,6 +787,49 @@ CARDS: tuple[HelpCard, ...] = (
                     "the next request; it does not sign anybody out retroactively."
                 ),
             ),
+            HelpField(
+                name="Keep deleted items for",
+                anchor="retention",
+                meaning=(
+                    "How many days a deleted conversation, document, Ask record or generated "
+                    "image stays on the Deleted page before it is permanently removed. Zero "
+                    "removes it straight away, with no grace period."
+                ),
+                effects=(
+                    "The purge date is fixed at the moment something is deleted, so changing "
+                    "this setting governs future deletions only -- anything already deleted "
+                    "keeps the date it was given. Backups are a separate layer this setting "
+                    "does not reach: a deleted item can still exist in an earlier backup after "
+                    "its purge date has passed."
+                ),
+            ),
+            HelpField(
+                name="Keep finished queue jobs for",
+                anchor="queue-retention",
+                meaning=(
+                    "How many days a finished job record stays on the Queue page. Left BLANK, "
+                    "there is no age cliff and only the queue's own row limit (Job execution's "
+                    "\"Keep the most recent\") bounds how many finished jobs are kept."
+                ),
+                effects=(
+                    "The purge date is fixed when a job finishes, so changing this setting "
+                    "governs future completions only. It never touches a job that is still "
+                    "running or waiting."
+                ),
+            ),
+            HelpField(
+                name="Show item names in the deletion log",
+                anchor="audit-detail",
+                meaning=(
+                    "Whether the deletion log names the actual item -- its title or content -- "
+                    "rather than just its kind and who acted on it."
+                ),
+                effects=(
+                    "Off by default: the deletion log stays content-free. Turning it on adds "
+                    "the item's own label to future deletion, restore and purge entries; it "
+                    "does not rewrite entries already written."
+                ),
+            ),
         ),
     ),
 )

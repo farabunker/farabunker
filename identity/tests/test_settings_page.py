@@ -47,7 +47,9 @@ class TestAccess:
                                    {"posture": POSTURE_ENTERPRISE,
                                     "admin_sees_content": "on",
                                     "library_posture": "open",
-                                    "session_idle_minutes": "720"})
+                                    "session_idle_minutes": "720",
+                                    "retention_days": "30",
+                                    "queue_retention_days": "1"})
         assert response.status_code == 403
         assert IdentitySettings.get_solo().admin_sees_content is False
 
@@ -167,7 +169,9 @@ class TestTheLibraryPostureControl:
             response = client.post(reverse("identity-settings"),
                                    {"posture": POSTURE_ENTERPRISE,
                                     "library_posture": LIBRARY_LOCKED,
-                                    "session_idle_minutes": "720"}, follow=True)
+                                    "session_idle_minutes": "720",
+                                    "retention_days": "30",
+                                    "queue_retention_days": "1"}, follow=True)
             assert response.status_code == 200
             assert IdentitySettings.get_solo().library_posture == LIBRARY_LOCKED
 
@@ -180,7 +184,9 @@ class TestTheLibraryPostureControl:
             response = client.post(reverse("identity-settings"),
                                    {"posture": POSTURE_PERSONAL,
                                     "library_posture": "open",
-                                    "session_idle_minutes": "720"}, follow=True)
+                                    "session_idle_minutes": "720",
+                                    "retention_days": "30",
+                                    "queue_retention_days": "1"}, follow=True)
         assert response.status_code == 200
         assert IdentitySettings.get_solo().library_posture == "open"
 
@@ -211,7 +217,8 @@ class TestTheContentToggle:
             sign_in(client, admin)
             client.post(reverse("identity-settings"),
                         {"posture": POSTURE_ENTERPRISE, "admin_sees_content": "on",
-                         "library_posture": "open", "session_idle_minutes": "720"})
+                         "library_posture": "open", "session_idle_minutes": "720",
+                         "retention_days": "30", "queue_retention_days": "1"})
             assert IdentitySettings.get_solo().admin_sees_content is True
         assert AuditEvent.objects.filter(
             action=actions.ADMIN_CONTENT_ACCESS_CHANGED).count() == 1
@@ -230,7 +237,9 @@ class TestTheThreeRefusals:
             response = client.post(reverse("identity-settings"),
                                    {"posture": POSTURE_PERSONAL,
                                     "library_posture": "open",
-                                    "session_idle_minutes": "720"},
+                                    "session_idle_minutes": "720",
+                                    "retention_days": "30",
+                                    "queue_retention_days": "1"},
                                    follow=True)
             assert "superuser" in response.content.decode().lower()
             assert IdentitySettings.get_solo().posture == POSTURE_OPEN
@@ -242,7 +251,9 @@ class TestTheThreeRefusals:
             response = client.post(reverse("identity-settings"),
                                    {"posture": POSTURE_PERSONAL,
                                     "library_posture": "open",
-                                    "session_idle_minutes": "720"},
+                                    "session_idle_minutes": "720",
+                                    "retention_days": "30",
+                                    "queue_retention_days": "1"},
                                    follow=True)
         assert "debug" in response.content.decode().lower()
 
@@ -254,7 +265,9 @@ class TestTheThreeRefusals:
             response = client.post(reverse("identity-settings"),
                                    {"posture": POSTURE_PERSONAL,
                                     "library_posture": "open",
-                                    "session_idle_minutes": "720"},
+                                    "session_idle_minutes": "720",
+                                    "retention_days": "30",
+                                    "queue_retention_days": "1"},
                                    follow=True)
         assert "key" in response.content.decode().lower()
 
@@ -263,7 +276,9 @@ class TestTheThreeRefusals:
             response = client.post(reverse("identity-settings"),
                                    {"posture": POSTURE_PERSONAL,
                                     "library_posture": "open",
-                                    "session_idle_minutes": "720"})
+                                    "session_idle_minutes": "720",
+                                    "retention_days": "30",
+                                    "queue_retention_days": "1"})
         assert response.status_code in (200, 302)
         assert "Traceback" not in response.content.decode(errors="replace")
 
@@ -288,7 +303,9 @@ class TestAnInvalidPostIsNeverSilent:
             response = client.post(reverse("identity-settings"),
                                    {"posture": POSTURE_ENTERPRISE,
                                     "library_posture": "open",
-                                    "session_idle_minutes": "not-a-number"},
+                                    "session_idle_minutes": "not-a-number",
+                                    "retention_days": "30",
+                                    "queue_retention_days": "1"},
                                    follow=True)
         assert response.status_code == 200
         body = response.content.decode()
@@ -308,6 +325,8 @@ class TestAnInvalidPostIsNeverSilent:
             response = client.post(reverse("identity-settings"),
                                    {"posture": POSTURE_ENTERPRISE,
                                     "library_posture": "open",
-                                    "session_idle_minutes": "not-a-number"})
+                                    "session_idle_minutes": "not-a-number",
+                                    "retention_days": "30",
+                                    "queue_retention_days": "1"})
         assert response.status_code == 302
         assert response.url == reverse("identity-settings")

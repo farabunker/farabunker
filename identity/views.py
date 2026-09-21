@@ -470,6 +470,9 @@ def settings_page(request):
             "library_posture": row.library_posture,
             "admin_sees_content": row.admin_sees_content,
             "session_idle_minutes": row.session_idle_minutes,
+            "retention_days": row.retention_days,
+            "queue_retention_days": row.queue_retention_days,
+            "audit_detail": row.audit_detail,
         })
     return render(request, "identity/settings.html", {
         "form": form, "posture": row.posture, "debug": settings.DEBUG,
