@@ -1,14 +1,26 @@
 """Unit tests for models/queue/claim.py -- the claim transaction (T4).
 
 `InferenceJob` rows are created directly here (not through `models.queue.
-backend.enqueue`) -- claim code has no dependency on the job-kind registry
-at all, so exercising it through `backend`/`models.contracts.jobkinds` would
-only add unrelated setup. `@pytest.mark.django_db` (regular, not
-`transaction=True`) everywhere except `TestConcurrency`, which needs real,
-separately-committed transactions across threads -- Django's default
-per-test transaction wrapper would make a second thread's connection block
-forever waiting on the first thread's own uncommitted work, which is
-exactly what `transaction=True` (`TransactionTestCase` semantics) avoids.
+backend.enqueue`) -- most of this module's tests need nothing from the
+job-kind registry beyond what app startup already registered, so building
+through `backend`/`models.contracts.jobkinds` would only add unrelated
+setup. `claim.py` itself DOES read the registry now, in two places
+(`_kind_stale_thresholds` for the orphan sweep's per-kind staleness,
+`invoke_on_terminal` for the permanent-fail hook) -- `TestOrphanSweep`'s
+`rag.ingest` test exercises both against the REAL app-registered kind
+(never cleared: see `reset_registry` below), and `TestKindAwareStaleness`
+registers its own fake kinds into a registry it explicitly clears first.
+`reset_registry` (`models.contracts.testing.registry_reset_fixture`) is
+bound `autouse=False` here, unlike its sibling modules -- only a test that
+names it as a parameter gets the clear/restore; every other test in this
+file sees the job-kind registry exactly as app startup left it, `rag.
+ingest`'s real `on_terminal` hook included. `@pytest.mark.django_db`
+(regular, not `transaction=True`) everywhere except `TestConcurrency`,
+which needs real, separately-committed transactions across threads --
+Django's default per-test transaction wrapper would make a second
+thread's connection block forever waiting on the first thread's own
+uncommitted work, which is exactly what `transaction=True`
+(`TransactionTestCase` semantics) avoids.
 """
 from __future__ import annotations
 
@@ -32,7 +44,7 @@ STALE_AFTER = 120  # arbitrary for tests that don't exercise the sweep itself
 
 MODULE = "models.queue.tests.test_claim"
 
-reset_registry = registry_reset_fixture(jobkinds, "_JOB_KINDS")
+reset_registry = registry_reset_fixture(jobkinds, "_JOB_KINDS", autouse=False)
 
 
 # --- test job kinds' planner/handler/summarizer -----------------------------
@@ -307,30 +319,17 @@ class TestOrphanSweep:
         docstring for why it must never run inside the advisory-lock
         window itself) -- this fires it without needing a real DB commit.
 
-        Registers `rag.ingest` explicitly, with the exact fields
-        `tools/rag/apps.py` registers it with at startup, rather than
-        relying on that app-ready registration surviving into the test
-        body: `TestKindAwareStaleness` (below) needs this module's own
-        `reset_registry` fixture, and that fixture -- shared with
-        `test_worker.py`/`test_backend.py` (`models.contracts.testing.
-        registry_reset_fixture`) -- is autouse for every test in this
-        file, real kinds included, the moment this module defines it.
+        Does not request `reset_registry` (this module's own fixture is
+        bound `autouse=False`, see the module docstring) -- this test's
+        whole point is that the REAL `rag.ingest` registration, `on_
+        terminal` hook included, is what fires here, not a fake test
+        kind standing in for it.
         """
         from datetime import timedelta
 
         from django.utils import timezone
 
         from tools.rag.models import Document
-
-        register_job_kind(JobKind(
-            key="rag.ingest",
-            label="Ingest a document",
-            planner="tools.rag.jobs.plan_ingest",
-            handler="tools.rag.jobs.run_ingest",
-            summarizer="tools.rag.jobs.summarize_ingest",
-            default_priority=200,
-            on_terminal="tools.rag.jobs.on_ingest_terminal",
-        ))
 
         doc = Document.objects.create(
             title="stranded.txt",
@@ -605,12 +604,20 @@ class TestKindAwareStaleness:
 
     @pytest.mark.django_db
     def test_sweep_orphans_false_skips_the_sweep_entirely(self, reset_registry):
+        # `max_concurrent_jobs=0` (see the comment on the sibling tests
+        # above): without it, "sweep ran, requeued, then re-admitted" and
+        # "sweep never ran" both leave the row RUNNING -- indistinguishable
+        # on `state` alone. With admission held to zero, a sweep that ran
+        # would leave the row QUEUED/attempts=1, so `attempts == 0` below
+        # is what actually proves the sweep never fired.
+        _set_budget(memory_budget_bytes=None, max_concurrent_jobs=0)
         job = _running_job(kind="test.plain", heartbeat_age_seconds=600)
 
         claim_and_admit("w", stale_after_seconds=120, sweep_orphans=False)
 
         job.refresh_from_db()
         assert job.state == RUNNING
+        assert job.attempts == 0  # the sweep never ran -- not "ran and re-admitted"
 
     @pytest.mark.django_db
     def test_the_sweep_reads_the_running_set_once_however_many_thresholds(

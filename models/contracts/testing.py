@@ -24,8 +24,8 @@ from __future__ import annotations
 import pytest
 
 
-def registry_reset_fixture(module, attribute: str):
-    """An autouse pytest fixture that empties `module.<attribute>` for the
+def registry_reset_fixture(module, attribute: str, *, autouse: bool = True):
+    """A pytest fixture that empties `module.<attribute>` for the
     duration of a test and restores exactly what was there before.
 
     Use it as::
@@ -40,8 +40,21 @@ def registry_reset_fixture(module, attribute: str):
     every later test in the run looking at an empty registry -- which is
     the class of order-dependent failure `docs/DEV.md`'s
     reversed-collection-order run exists to catch.
+
+    `autouse` defaults `True` (every existing call site passes only the
+    first two, positional, arguments, so their behaviour is unchanged).
+    Pass `autouse=False` for a module where only SOME tests want the
+    registry emptied and the rest must keep seeing the real app-ready
+    registrations -- `models/queue/tests/test_claim.py` is that case:
+    most of its tests exercise `claim_and_admit` against real,
+    production-registered job kinds (e.g. `rag.ingest`'s `on_terminal`
+    hook), while its `TestKindAwareStaleness` tests want a clean registry
+    to register their own fake kinds into. With `autouse=False`, only a
+    test that names `reset_registry` as an explicit parameter gets the
+    clear/restore; every other test in the module sees the registry
+    exactly as app startup left it.
     """
-    @pytest.fixture(autouse=True)
+    @pytest.fixture(autouse=autouse)
     def _reset():
         registry = getattr(module, attribute)
         original = dict(registry)
