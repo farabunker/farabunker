@@ -990,9 +990,11 @@ class TestHeartbeat:
         monkeypatch.setattr(worker_module, "close_old_connections", lambda: calls.append(1))
 
         worker._start_heartbeat_thread()
-        time.sleep(0.2)
-        worker._stopping.set()
-        worker._heartbeat_thread.join(timeout=5)
+        try:
+            time.sleep(0.2)
+        finally:
+            worker._stopping.set()
+            worker._heartbeat_thread.join(timeout=5)
 
         assert calls
 
@@ -1009,9 +1011,11 @@ class TestHeartbeat:
 
         with caplog.at_level("WARNING", logger="models.queue.worker"):
             worker._start_heartbeat_thread()
-            time.sleep(0.3)
-            worker._stopping.set()
-            worker._heartbeat_thread.join(timeout=5)
+            try:
+                time.sleep(0.3)
+            finally:
+                worker._stopping.set()
+                worker._heartbeat_thread.join(timeout=5)
 
         assert failures["count"] > 2, "the thread stopped at the first error"
         assert any("heartbeat" in r.getMessage() for r in caplog.records)
@@ -1021,9 +1025,11 @@ class TestHeartbeat:
 
         with caplog.at_level("INFO", logger="models.queue.worker"):
             worker._start_heartbeat_thread()
-            time.sleep(0.15)
-            worker._stopping.set()
-            worker._heartbeat_thread.join(timeout=5)
+            try:
+                time.sleep(0.15)
+            finally:
+                worker._stopping.set()
+                worker._heartbeat_thread.join(timeout=5)
 
         assert any("heartbeat thread" in r.getMessage() for r in caplog.records)
 

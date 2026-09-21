@@ -30,7 +30,9 @@ that shape puts on a worker specifically:
   each job-execution thread closes ITS OWN connection in a `finally` when
   the job finishes (Django's per-thread connection model means a thread
   that keeps running after its one job is done would otherwise leave that
-  connection open indefinitely too).
+  connection open indefinitely too), and the dedicated heartbeat thread
+  (`_heartbeat_forever`) calls `close_old_connections()` at the top of each
+  of its own iterations, for the same reason.
 
 Never-500 philosophy, worker edition: one job's handler raising must never
 take the worker process down or stop it claiming the next job -- every
