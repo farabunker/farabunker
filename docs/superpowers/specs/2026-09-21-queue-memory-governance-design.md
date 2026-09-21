@@ -1204,3 +1204,13 @@ round 4.
 Both are consistency-of-record rather than mechanism, and they close the same argument
 §3.6 already makes and Q14 already commits to: a delay the queue imposes deliberately is
 never left for an operator to infer. **The spec is closed at revision 4.**
+
+## Owner rulings (2026-09-21)
+
+All seven flagged decisions in §10 were ruled by the owner as one word — **"accept all
+recommendations"** — making the recommended option binding in each: loud unset budget with
+measured prefill (1), the engine-reported third rung with its columns (2), keep-the-maximum
+recorder with zero tolerance (3), affinity on by default with `MAX_PASSOVERS = 3` (4),
+per-kind wait ceilings editable on the settings page (5), refusal bound ends in an honest
+job failure (6), and idempotent stranded-turn auto-repair (7). Plan authors treat these as
+settled; none remains open.

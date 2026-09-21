@@ -1729,3 +1729,14 @@ adds it because the leak-free construction of §4.3.1 necessarily hides informat
 person who most needs it. The gate is right, the silence was not, and a count is the most that
 can be said without turning
 `test_no_route_other_than_the_dormant_share_page_names_an_entitlement_to_a_non_holder` red.
+
+## 16. Owner rulings (2026-09-21)
+
+All eight flags in §13 were ruled by the owner as one word — **"accept all recommendations"**
+— making the spec's stated position binding in each: the meter measures what is sent, with
+the truncation clause (flag 1); `Agent.box_wide` lands as a new column with the
+`box_wide = resident` data migration (2); edit-past-prompt is BRANCH (3); the branch
+provenance columns land (4); `llm_role` stays administrator-only (5); attachments do not
+follow a branch in v1 (6); share recipients cannot edit-and-branch (7); and the pre-existing
+member-installs-box-wide route stays open and legible as §4.3.2 describes (8). Plan authors
+treat these as settled; none remains open.
