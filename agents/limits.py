@@ -19,6 +19,14 @@ from __future__ import annotations
 # including a call that fails, so a failing loop cannot outrun it.
 MAX_STEPS_DEFAULT = 8
 
+# THE CEILING THE AGENT FORM REFUSES ABOVE. `Agent.max_steps` is a bare
+# `PositiveIntegerField` and no constant named a ceiling before the agent
+# form existed -- so the form may not invent one inline (spec review n2).
+# Here, beside the default, for this module's own reason: both numbers
+# bound the same field and a second home for one of them is a second
+# place to change.
+MAX_STEPS_CEILING = 32
+
 # THE FALLBACK, NOT THE OPERATIVE VALUE (one-timeout task, 2026-09-17).
 # The operative wall clock for one whole turn is now the operator-
 # editable `models.queue.models.JobSettings.response_timeout_seconds`

@@ -55,11 +55,12 @@ from agents.models import (
     Agent, Conversation, ConversationTaint, Flow, Share, Turn, Workstream,
     WorkstreamScopeEntitlement, WorkstreamTaint,
 )
+from agents.limits import MAX_STEPS_CEILING, MAX_STEPS_DEFAULT
 from agents.shares import share_level, shared_keys, shares_for
 from identity import audit
 from identity.access import (
-    entitlement_ids_for_subject, entitlement_names, held_entitlement_ids, may_read_owned_row,
-    owned_rows_q, owner_fields, sees_all_content,
+    entitlement_ids_for_subject, entitlement_names, held_entitlement_ids, is_admin,
+    may_read_owned_row, owned_rows_q, owner_fields, sees_all_content,
 )
 from identity.contracts import actions
 
@@ -868,6 +869,266 @@ def labellable_agent(pk):
 def labellable_flow(pk):
     """The same, for `Flow`."""
     return Flow.objects.filter(pk=pk).first()
+
+
+AGENT_NAME_REQUIRED = "Give this agent a name."
+AGENT_NAME_TOO_LONG = "That name is too long — the limit is 255 characters."
+AGENT_MAX_STEPS_OUT_OF_RANGE = (
+    f"Steps per turn must be between 1 and {MAX_STEPS_CEILING}."
+)
+AGENT_NOT_YOURS = "That agent is not yours to change."
+_SLUG_MAX = 64
+
+
+def may_manage_agent(principal, agent, *, settings_row=None) -> bool:
+    """Whether `principal` may edit `agent`.
+
+    ADMINISTRATORS MAY EDIT ANY AGENT -- the same call `labellable_agents`
+    records for the sibling page, and what "the main chat should be owned
+    by the admin" requires.
+
+    A USER-CREATED AGENT NEEDS NO ADMINISTRATOR: its owner edits it.
+
+    A BOX-WIDE AGENT IS ADMIN-ONLY, whoever originally created it, and
+    the `box_wide` test SHORT-CIRCUITS AHEAD OF THE OWNERSHIP BRANCH,
+    which is what makes that true for a member who installed a shipped
+    default themselves (`chat-default-install` is class A; that row's
+    owner is the member). `/chat/agents/` renders those rows in a
+    read-only section with a sentence, so the refusal is never silent.
+
+    AN OPEN BOX DEGRADES CORRECTLY WITH NO BRANCH: `is_admin` answers
+    True for everybody on a box with no accounts, so whoever is at the
+    keyboard edits everything. That is the true statement about a
+    household box, not a fallback.
+
+    `may_read_owned_row` is identity's own row-predicate mirror of
+    `owned_rows_q`; nothing here restates the shape of the two owner
+    columns.
+    """
+    if is_admin(principal, settings_row=settings_row):
+        return True
+    if agent.box_wide:
+        return False
+    return may_read_owned_row(principal, agent)
+
+
+def editable_agents(principal, *, settings_row=None):
+    """The agents this principal may edit, for `/chat/agents/`.
+
+    THE COLUMN'S STANDARD SHAPE, open branch first -- not a bare
+    `owned_rows_q` filter (spec review M6). `identity.access.
+    owned_rows_q` has NO open-posture widening (it is
+    `Q(owner_kind=..., owner_key=...) | Q(owner_kind="service")`) and it
+    calls `is_admin`, which reads the `IdentitySettings` singleton.
+    Without the short-circuit three things go wrong at once on an open
+    box: a row stamped with a `user` principal (installed during an
+    accounts-on period, or after an owner reassignment) is ABSENT from
+    this list while `may_manage_agent` answers True for it, so the list
+    and the predicate disagree; the "zero permission queries on an open
+    box" rule is false; and "this is every non-box-wide agent" is false.
+
+    ON AN ACCOUNTS-ON BOX AN ADMINISTRATOR SEES THEIR OWN ROWS ONLY,
+    because `sees_all_content` is `is_admin AND admin_sees_content` and
+    the content setting is usually off. That is deliberate:
+    `/chat/agents/` is "the agents I work on"; `/settings/agents/` is
+    the box-wide view, one click away.
+
+    BOX-WIDE ROWS ARE EXCLUDED because `may_manage_agent` refuses them
+    for a non-admin -- a list offering an edit the editor will 404 is
+    worse than no list. `box_wide_agents_owned_by` below is how the page
+    still says they exist.
+    """
+    qs = Agent.objects.exclude(box_wide=True).order_by("name")
+    if sees_all_content(principal, settings_row=settings_row):
+        return qs
+    return qs.filter(owned_rows_q(principal, settings_row=settings_row))
+
+
+def box_wide_agents_owned_by(principal, *, settings_row=None):
+    """The box-wide rows THIS principal owns -- `/chat/agents/`'s
+    read-only second section.
+
+    `chat-default-install` is class A and `install_default` stamps
+    `**owner_fields(principal)`, so a MEMBER installing an ordinary
+    catalogue slug owns a row everybody on this box can use and that
+    `may_manage_agent` refuses them. Without this section they would own
+    a row that is absent from their list and refused by the editor, with
+    nothing anywhere explaining why. The audience consequence itself is
+    pre-existing -- a member's install reaches exactly the same people
+    today as it did before `box_wide` existed -- and the spec's flag 8
+    is the owner's ruling to leave the route open and make it legible.
+
+    An administrator takes the same short-circuit every sibling here
+    does, for the same reason.
+    """
+    qs = Agent.objects.filter(box_wide=True).order_by("name")
+    if sees_all_content(principal, settings_row=settings_row):
+        return qs
+    return qs.filter(owned_rows_q(principal, settings_row=settings_row))
+
+
+def _derive_agent_slug(name: str) -> str:
+    """A unique, stable key for a new agent -- the user never types one.
+
+    CHECKED AGAINST THE SHIPPED CATALOGUE AS WELL AS THE TABLE: a row
+    whose slug collides with a catalogue entry would be silently
+    overwritten by `install_defaults --reset <slug>`. Case-insensitively
+    against the table, matching `Agent`'s own `uniq_agent_slug_ci`
+    constraint rather than a stricter or looser comparison.
+
+    A name that slugifies to nothing (punctuation only) falls back to
+    `agent-<n>`: a key is required and a blank one is not a key.
+    """
+    from django.utils.text import slugify
+
+    from agents.defaults import catalogue
+
+    base = slugify(name or "")[:_SLUG_MAX]
+    fell_back = not base
+    if fell_back:
+        base = "agent"
+    taken = {slug.lower() for slug in Agent.objects.values_list("slug", flat=True)}
+    taken |= {spec.slug.lower() for spec in catalogue("agent")}
+    # THE GUARD IS THE FALLBACK, NOT THE STRING. An agent somebody
+    # really named "Agent" takes `agent` when `agent` is free; only the
+    # punctuation-only fallback -- where `base` is a placeholder rather
+    # than anybody's chosen name -- always takes a suffix, so two such
+    # rows never read as one row named twice.
+    if base.lower() not in taken and not fell_back:
+        return base
+    suffix = 2
+    while True:
+        candidate = f"{base[:_SLUG_MAX - len(str(suffix)) - 1]}-{suffix}"
+        if candidate.lower() not in taken:
+            return candidate
+        suffix += 1
+
+
+def _validated_agent_fields(principal, fields, *, settings_row=None, existing=None):
+    """`(clean, errors)` -- the shape both writers share.
+
+    ADMIN-ONLY FIELDS ARE RE-CHECKED HERE, not merely omitted by the
+    form: a POST that forges `llm_role` or `box_wide` is either a stale
+    form or a hand-made request, and both get the same answer -- the
+    field is DROPPED, silently, because it was never offered and there
+    is nothing honest to say about a control the sender never saw.
+    `slug` is dropped the same way: `Agent.save()` refuses a change, and
+    a form that offered one would be offering a refusal.
+
+    `fields` IS A WHOLE FORM, NOT A PATCH: an absent key is a CLEARED
+    value, not an unchanged one (review note 5, for tasks 7 and 9-11).
+    `bool(fields.get("enabled"))` and `fields.get("description") or ""`
+    make a caller passing a partial dict silently disable the agent and
+    blank its description and prompt -- correct for an HTML form POST,
+    where an unchecked box is simply absent, and wrong for anything
+    else. The one exception is `box_wide`, written only when the KEY IS
+    PRESENT, so an administrator unchecking a box-wide checkbox must
+    send the key explicitly or reach is one-way through the UI.
+    """
+    errors: dict = {}
+    name = (fields.get("name") or "").strip()
+    if not name:
+        errors["name"] = AGENT_NAME_REQUIRED
+    elif len(name) > 255:
+        errors["name"] = AGENT_NAME_TOO_LONG
+    try:
+        max_steps = int(fields.get("max_steps", MAX_STEPS_DEFAULT))
+    except (TypeError, ValueError):
+        max_steps = -1
+    if not 1 <= max_steps <= MAX_STEPS_CEILING:
+        errors["max_steps"] = AGENT_MAX_STEPS_OUT_OF_RANGE
+    if errors:
+        return {}, errors
+    clean = {
+        "name": name,
+        "description": fields.get("description") or "",
+        "system_prompt": fields.get("system_prompt") or "",
+        "max_steps": max_steps,
+        "enabled": bool(fields.get("enabled")),
+    }
+    if is_admin(principal, settings_row=settings_row):
+        if fields.get("llm_role"):
+            clean["llm_role"] = fields["llm_role"]
+        if "box_wide" in fields:
+            clean["box_wide"] = bool(fields["box_wide"])
+    elif existing is not None:
+        clean["llm_role"] = existing.llm_role
+    return clean, {}
+
+
+def create_agent(principal, fields, *, settings_row=None):
+    """A new agent owned by `principal` -- `(row, {})`, or `(None, errors)`.
+
+    THE CREATE LIVES HERE for the reason `create_conversation`'s own
+    docstring gives: a view that could create a row could create one
+    without `owner_fields`, and that row would be invisible to every
+    filter identity added.
+
+    `box_wide=False` AND `resident=False` ARE HARD-CODED. A new agent is
+    nobody's shipped default and reaches nobody but its owner until its
+    owner says otherwise -- which closes the creation route as an
+    audience escape hatch by construction rather than by a check.
+    `tool_keys=[]`: granting tools is a privilege question, not a form
+    field (spec decision 8), and an agent with a prompt and a model is
+    already useful.
+    """
+    from models.contracts.roles import CHAT_CONVERSE_ROLE
+
+    clean, errors = _validated_agent_fields(principal, fields, settings_row=settings_row)
+    if errors:
+        return None, errors
+    clean.setdefault("llm_role", CHAT_CONVERSE_ROLE)
+    clean.pop("box_wide", None)
+    with transaction.atomic():
+        row = Agent.objects.create(
+            slug=_derive_agent_slug(clean["name"]),
+            tool_keys=[], resident=False, box_wide=False,
+            **owner_fields(principal), **clean,
+        )
+        audit.record(principal, actions.AGENT_CREATED, target_type="agent",
+                     target_key=str(row.pk), target_label=row.slug)
+    return row, {}
+
+
+def update_agent(principal, agent, fields, *, settings_row=None) -> dict:
+    """Apply `fields` to `agent` if `principal` may. `{}` when written,
+    `{field: sentence}` when refused.
+
+    THE AUDIT ROW NAMES WHICH FIELDS CHANGED, NEVER THEIR CONTENTS. A
+    system prompt is the operator's text, and an audit trail is not the
+    place to copy it. The detail key is `fields=` and NOT `was=` (review
+    finding 1, superseding the brief): `rename_workstream` eighty lines
+    below already writes `was=` to mean THE PREVIOUS VALUE, and one
+    audit trail holding `{"was": "Old stream name"}` on one row and
+    `{"was": "name, system_prompt"}` on another is the same key carrying
+    two incompatible meanings -- which any page rendering `detail`
+    generically would print under one label. `identity.audit.record`
+    takes `**detail` verbatim and has no vocabulary to catch it, so the
+    distinction is recorded here, where the next reader is.
+
+    A NO-OP EDIT WRITES NO AUDIT ROW, the same reason `agents/labels.py::
+    _set_labels` writes the DIFFERENCE: a trail that recorded a change
+    for a save that changed nothing is a trail whose interesting lines
+    are invisible.
+    """
+    if not may_manage_agent(principal, agent, settings_row=settings_row):
+        return {"name": AGENT_NOT_YOURS}
+    clean, errors = _validated_agent_fields(principal, fields,
+                                            settings_row=settings_row, existing=agent)
+    if errors:
+        return errors
+    changed = sorted(key for key, value in clean.items()
+                     if getattr(agent, key) != value)
+    if not changed:
+        return {}
+    with transaction.atomic():
+        for key, value in clean.items():
+            setattr(agent, key, value)
+        agent.save(update_fields=[*clean, "updated_at"])
+        audit.record(principal, actions.AGENT_EDITED, target_type="agent",
+                     target_key=str(agent.pk), target_label=agent.slug,
+                     fields=", ".join(changed))
+    return {}
 
 
 def create_conversation(principal, agent, *, workstream=None):

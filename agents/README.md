@@ -307,6 +307,19 @@ turn_status` and `agents/chat/views/conversations.py::
 conversation_delete` route through `visible_turn`/`delete_conversation`
 rather than a bare `get_object_or_404` for exactly this reason.
 
+**The agent writers live here too (chat cluster, feature B, task 6).**
+`may_manage_agent` / `editable_agents` / `box_wide_agents_owned_by` / `create_agent`
+/ `update_agent` live here for the same reason `create_conversation`,
+`rename_workstream` and `set_workstream_scope` do: this module is the column's one
+owned-row read-and-write point, and a view that could create an agent could create
+one without `owner_fields`. Audience is **two independent controls**, never one:
+reach (`box_wide`, administrators only, re-checked at the write) is a plain field
+on this row and touches no labels at all; entitlement labels go through
+`agents/chat/service.py::parse_entitlement_diff` → `agents/labels.py::set_agent_labels`
+and never through a whole-set write. There is deliberately **no single audience
+writer** — one control writing both would either clobber a label its actor may not
+touch or refuse an edit it should allow.
+
 ## Agents and flows carry their own labels too (Identity & Auth, Task 15)
 
 **`AgentEntitlement`/`FlowEntitlement`** (`agents/models.py`, read and
