@@ -41,7 +41,7 @@ from identity.contracts.actions import (
     CONTENT_DELETED, CONTENT_PURGED, CONTENT_RESTORED, SOURCE_WEB,
 )
 from identity.contracts.principals import SERVICE_PRINCIPAL
-from identity.contracts.retention import RETENTION_KINDS
+from identity.contracts.retention import RETENTION_KINDS, RetentionRefused
 from identity.models import DeletionTicket, IdentitySettings
 
 logger = logging.getLogger(__name__)
@@ -179,11 +179,18 @@ def restore_content(actor, ticket, *, source: str = SOURCE_WEB) -> None:
     completed purge leaves none), so this has exactly one refusal to
     make and it is not made in this delivery: a held ticket, once the
     deferred enterprise slice can set a hold.
+
+    A TICKET ALREADY GONE (a raced sweep, a double-click) MUST NOT LOG A
+    RESTORE THAT DID NOT HAPPEN: deleting by QUERYSET rather than by
+    instance reports how many rows it actually removed, and an event is
+    written only when that count is nonzero.
     """
     row = IdentitySettings.get_solo()
     with transaction.atomic():
         kind, key, label = ticket.kind, ticket.key, ticket.label
-        ticket.delete()
+        removed, _ = DeletionTicket.objects.filter(pk=ticket.pk).delete()
+        if not removed:
+            return
         audit.record(actor, CONTENT_RESTORED, target_type=kind, target_key=key,
                      target_label=label if row.audit_detail else "",
                      source=source, kind=kind)
@@ -204,12 +211,22 @@ def purge_ticket(actor, ticket, *, source: str = SOURCE_WEB) -> dict[str, int]:
     Named, not hidden: a filesystem delete has no rollback. That is why
     every handler must be idempotent and why the next sweep completes
     the purge rather than re-raising on the half it already did.
+
+    A TICKET ALREADY GONE IS A SILENT NO-OP, NOT A SECOND EVENT: two
+    sweeps can overlap by design (prune-on-write on every delete, the
+    cron command, the Deleted page's own GET) and a person can
+    double-click "Delete permanently", so this RE-READS the row under a
+    lock inside the transaction before running a single handler, and a
+    miss returns `{}` with nothing run and nothing written.
     """
     row = IdentitySettings.get_solo()
     with transaction.atomic():
-        removed = run_retention(ticket.kind, ticket.key)
-        kind, key, label = ticket.kind, ticket.key, ticket.label
-        ticket.delete()
+        current = DeletionTicket.objects.select_for_update().filter(pk=ticket.pk).first()
+        if current is None:
+            return {}
+        removed = run_retention(current.kind, current.key)
+        kind, key, label = current.kind, current.key, current.label
+        current.delete()
         audit.record(actor, CONTENT_PURGED, target_type=kind, target_key=key,
                      target_label=label if row.audit_detail else "",
                      source=source, kind=kind, removed=removed)
@@ -239,6 +256,14 @@ def sweep(*, limit: int = SWEEP_LIMIT, source: str = SOURCE_WEB) -> int:
     block the rest of the batch. The failure is logged with its kind and
     key -- structural, never content, the shape `tools/rag/jobs.py` uses
     throughout -- and the ticket stays due for the next pass.
+
+    A `RetentionRefused` IS NOT AN ERROR AND IS CAUGHT FIRST: it is a
+    handler saying "not now" for an operator-readable reason (today,
+    `models.queue.retention.forget_conversation` when a worker still
+    holds one of the conversation's jobs), so it is logged at
+    `logger.warning` -- one line, no traceback -- and every other
+    exception keeps `logger.exception`, which is the failure this batch
+    actually needs to be noisy about.
     """
     due = list(
         DeletionTicket.objects
@@ -249,6 +274,11 @@ def sweep(*, limit: int = SWEEP_LIMIT, source: str = SOURCE_WEB) -> int:
     for ticket in due:
         try:
             purge_ticket(SERVICE_PRINCIPAL, ticket, source=source)
+        except RetentionRefused as exc:
+            logger.warning(
+                "identity.retention: purge refused for %s:%s; it stays due -- %s",
+                ticket.kind, ticket.key, exc)
+            continue
         except Exception:  # noqa: BLE001 -- one bad ticket, not a bad batch
             logger.exception(
                 "identity.retention: purge failed for %s:%s; it stays due",

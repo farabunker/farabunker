@@ -2,17 +2,19 @@
 from __future__ import annotations
 
 import datetime
+import logging
 
 import pytest
 from django.utils import timezone
 
+from identity import audit as audit_module
 from identity import retention as service
 from identity.contracts import cascades as cascades_module
 from identity.contracts.actions import (
     CONTENT_DELETED, CONTENT_PURGED, CONTENT_RESTORED,
 )
 from identity.contracts.cascades import RetentionHandler, register_retention_handler
-from identity.contracts.retention import KIND_ASK, KIND_CONVERSATION
+from identity.contracts.retention import KIND_ASK, KIND_CONVERSATION, KIND_DOCUMENT, RetentionRefused
 from identity.models import AuditEvent, DeletionTicket, IdentitySettings
 from identity.tests._helpers import (
     make_admin, make_conversation, make_user, posture, user_principal,
@@ -30,6 +32,10 @@ def ask_handler(key: str) -> int:
 
 def boom(key: str) -> int:
     raise RuntimeError("not finished")
+
+
+def refused(key: str) -> int:
+    raise RetentionRefused("a worker still holds this item")
 
 
 @pytest.fixture(autouse=True)
@@ -106,6 +112,20 @@ class TestRestore:
         assert AuditEvent.objects.filter(action=CONTENT_RESTORED).count() == 1
         assert REMOVED == []
 
+    def test_restoring_an_already_gone_ticket_writes_no_event(self):
+        """A raced purge or a double-click leaves the caller holding a
+        `DeletionTicket` instance whose row is already gone -- restoring
+        it must not log a restore that never happened, and must not
+        raise either."""
+        user = make_user()
+        ticket = service.delete_content(user_principal(user), kind=KIND_ASK,
+                                        key="5", owner=_owner(user))
+        DeletionTicket.objects.filter(pk=ticket.pk).delete()
+
+        service.restore_content(user_principal(user), ticket)
+
+        assert AuditEvent.objects.filter(action=CONTENT_RESTORED).count() == 0
+
 
 class TestPurge:
     def test_a_completed_purge_leaves_no_ticket(self):
@@ -150,6 +170,26 @@ class TestPurge:
                                        target_key="6").first()
         assert on.target_label == "Another question"
         assert AuditEvent.objects.filter(action=CONTENT_DELETED).count() == 2
+
+    def test_a_purge_of_an_already_gone_ticket_is_a_silent_no_op(self):
+        """Two sweeps can overlap by design (prune-on-write on every
+        delete, the cron command, the Deleted page's own GET) and a
+        person can double-click "Delete permanently" -- the second
+        `purge_ticket` on the same ticket must not run a handler twice
+        or write a second event."""
+        user = make_user()
+        ticket = service.delete_content(user_principal(user), kind=KIND_ASK,
+                                        key="5", owner=_owner(user))
+        first = service.purge_ticket(user_principal(user), ticket)
+        assert first == {"Ask records": 1}
+
+        second = service.purge_ticket(user_principal(user), ticket)
+        assert second == {}
+        assert REMOVED == ["5"]
+
+        events = [e for e in audit_module.by_action([CONTENT_PURGED])
+                  if e.target_key == "5"]
+        assert len(events) == 1
 
 
 class TestTicketedKeys:
@@ -268,6 +308,34 @@ class TestTheSweep:
         assert AuditEvent.objects.filter(action=CONTENT_PURGED,
                                          target_key="a").exists()
         assert REMOVED == ["a"]
+
+    def test_a_refusal_is_a_warning_not_an_error_and_does_not_stop_the_batch(self, caplog):
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION, key="t.refused", label="Refused",
+            handler=f"{__name__}.refused"))
+        register_retention_handler(RetentionHandler(
+            kind=KIND_DOCUMENT, key="t.boom", label="Boom",
+            handler=f"{__name__}.boom"))
+        user = make_user()
+        item = _owner(user)
+        refused_ticket = service.delete_content(
+            user_principal(user), kind=KIND_CONVERSATION, key=str(item.pk), owner=item)
+        errored_ticket = service.delete_content(
+            user_principal(user), kind=KIND_DOCUMENT, key="doc-1", owner=item)
+        DeletionTicket.objects.filter(
+            pk__in=[refused_ticket.pk, errored_ticket.pk]).update(
+            purge_on=timezone.localdate() - datetime.timedelta(days=1))
+
+        with caplog.at_level(logging.WARNING):
+            assert service.sweep() == 0
+
+        assert DeletionTicket.objects.filter(pk=refused_ticket.pk).exists()
+        assert DeletionTicket.objects.filter(pk=errored_ticket.pk).exists()
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(warnings) == 1 and warnings[0].exc_info is None
+        assert len(errors) == 1 and errors[0].exc_info is not None
 
 
 class TestStanding:
