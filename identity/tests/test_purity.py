@@ -30,6 +30,7 @@ _PROBE = textwrap.dedent("""
     import identity.contracts.actions
     import identity.contracts.ownership
     import identity.contracts.cascades
+    import identity.contracts.retention
     import identity.contracts.axes
     leaked = sorted(m for m in sys.modules if m == "django" or m.startswith("django."))
     print("|".join(leaked))

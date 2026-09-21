@@ -252,6 +252,29 @@ resolve and run them, inside `identity.services.delete_entitlement`'s one
 transaction, so nothing is half-deleted and the confirmation's counts
 can never drift from what actually happens.
 
+**The retention vocabulary and handler registry**, beside the cascade
+registry in the same module: `identity/contracts/retention.py` names the
+closed set of deletable kinds (`RETENTION_KINDS` — conversation,
+document, ask record, generated image; a workstream is deliberately not
+one, spec section 10.2), the shipped policy (`RETENTION_DAYS_DEFAULT`
+30, `QUEUE_RETENTION_DAYS_DEFAULT` 1), every user-facing sentence the
+Deleted page will print, and `RetentionRefused` — the one exception a
+retention handler raises to say "not now" (today, a worker still holding
+a queue job), placed in this pure module rather than beside
+`identity.services.ServiceRefused` precisely so a column that may not
+import `identity.services` (`models/queue`) can still raise it.
+`identity/contracts/cascades.py::RetentionHandler`/
+`register_retention_handler`/`retention_handlers` is that registry's
+counterpart to `EntitlementCascade`: a pure dataclass (`kind`, `key`,
+`label`, a dotted-path `handler` string, an `order` of `ORDER_ROWS`
+(default) or `ORDER_FILES`) that each column registers from its own
+`AppConfig.ready()`, with rows-before-files as the whole reason
+`order` exists — a filesystem delete has no rollback, so a row handler
+that raises after files are gone would leave a resurrected row pointing
+at bytes that no longer exist. The model, the runner and the service
+that call this registry are later work; this slice is vocabulary and
+registration only.
+
 **Four pages**: `/identity/groups/` and `/identity/groups/<pk>/edit/`
 (create/rename/delete a group, manage membership); `/identity/
 entitlements/` and `/identity/entitlements/<pk>/` (create/rename/delete
