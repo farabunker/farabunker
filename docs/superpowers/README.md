@@ -6,9 +6,12 @@ Each file under `plans/` is the implementation plan for one phase of work, writt
 that phase was executed and left untouched afterwards. Each file under `specs/` is the
 design document a plan argues from. They are dated, and they describe the tree as it stood
 on that date: paths, module names, line numbers and file counts in here are frequently
-stale, deliberately so. **Nothing in this directory is a statement about how the system
-works today.** For that, read [ARCHITECTURE.md](../ARCHITECTURE.md), the decision record in
-[docs/adr/](../adr/), and the module READMEs beside the code.
+stale, deliberately so — and so is the branch and deploy workflow they describe, which
+records the rules in force when the plan was written, not today's. **Nothing in this
+directory is a statement about how the system works today.** For that, read
+[ARCHITECTURE.md](../ARCHITECTURE.md), the decision record in [docs/adr/](../adr/), and the
+module READMEs beside the code; for the branch and deploy model, [AGENTS.md](../../AGENTS.md)
+is the current authority.
 
 ## Why keep them
 
