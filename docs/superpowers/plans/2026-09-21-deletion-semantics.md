@@ -1319,17 +1319,19 @@ git commit -m "feat(identity): the retention runner, savepointed and never swall
 from __future__ import annotations
 
 import datetime
+import logging
 
 import pytest
 from django.utils import timezone
 
+from identity import audit as audit_module
 from identity import retention as service
 from identity.contracts import cascades as cascades_module
 from identity.contracts.actions import (
     CONTENT_DELETED, CONTENT_PURGED, CONTENT_RESTORED,
 )
 from identity.contracts.cascades import RetentionHandler, register_retention_handler
-from identity.contracts.retention import KIND_ASK, KIND_CONVERSATION
+from identity.contracts.retention import KIND_ASK, KIND_CONVERSATION, KIND_DOCUMENT, RetentionRefused
 from identity.models import AuditEvent, DeletionTicket, IdentitySettings
 from identity.tests._helpers import (
     make_admin, make_conversation, make_user, posture, user_principal,
@@ -1347,6 +1349,10 @@ def ask_handler(key: str) -> int:
 
 def boom(key: str) -> int:
     raise RuntimeError("not finished")
+
+
+def refused(key: str) -> int:
+    raise RetentionRefused("a worker still holds this item")
 
 
 @pytest.fixture(autouse=True)
@@ -1423,6 +1429,20 @@ class TestRestore:
         assert AuditEvent.objects.filter(action=CONTENT_RESTORED).count() == 1
         assert REMOVED == []
 
+    def test_restoring_an_already_gone_ticket_writes_no_event(self):
+        """A raced purge or a double-click leaves the caller holding a
+        `DeletionTicket` instance whose row is already gone -- restoring
+        it must not log a restore that never happened, and must not
+        raise either."""
+        user = make_user()
+        ticket = service.delete_content(user_principal(user), kind=KIND_ASK,
+                                        key="5", owner=_owner(user))
+        DeletionTicket.objects.filter(pk=ticket.pk).delete()
+
+        service.restore_content(user_principal(user), ticket)
+
+        assert AuditEvent.objects.filter(action=CONTENT_RESTORED).count() == 0
+
 
 class TestPurge:
     def test_a_completed_purge_leaves_no_ticket(self):
@@ -1467,6 +1487,26 @@ class TestPurge:
                                        target_key="6").first()
         assert on.target_label == "Another question"
         assert AuditEvent.objects.filter(action=CONTENT_DELETED).count() == 2
+
+    def test_a_purge_of_an_already_gone_ticket_is_a_silent_no_op(self):
+        """Two sweeps can overlap by design (prune-on-write on every
+        delete, the cron command, the Deleted page's own GET) and a
+        person can double-click "Delete permanently" -- the second
+        `purge_ticket` on the same ticket must not run a handler twice
+        or write a second event."""
+        user = make_user()
+        ticket = service.delete_content(user_principal(user), kind=KIND_ASK,
+                                        key="5", owner=_owner(user))
+        first = service.purge_ticket(user_principal(user), ticket)
+        assert first == {"Ask records": 1}
+
+        second = service.purge_ticket(user_principal(user), ticket)
+        assert second == {}
+        assert REMOVED == ["5"]
+
+        events = [e for e in audit_module.by_action([CONTENT_PURGED])
+                  if e.target_key == "5"]
+        assert len(events) == 1
 
 
 class TestTicketedKeys:
@@ -1586,6 +1626,34 @@ class TestTheSweep:
                                          target_key="a").exists()
         assert REMOVED == ["a"]
 
+    def test_a_refusal_is_a_warning_not_an_error_and_does_not_stop_the_batch(self, caplog):
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION, key="t.refused", label="Refused",
+            handler=f"{__name__}.refused"))
+        register_retention_handler(RetentionHandler(
+            kind=KIND_DOCUMENT, key="t.boom", label="Boom",
+            handler=f"{__name__}.boom"))
+        user = make_user()
+        item = _owner(user)
+        refused_ticket = service.delete_content(
+            user_principal(user), kind=KIND_CONVERSATION, key=str(item.pk), owner=item)
+        errored_ticket = service.delete_content(
+            user_principal(user), kind=KIND_DOCUMENT, key="doc-1", owner=item)
+        DeletionTicket.objects.filter(
+            pk__in=[refused_ticket.pk, errored_ticket.pk]).update(
+            purge_on=timezone.localdate() - datetime.timedelta(days=1))
+
+        with caplog.at_level(logging.WARNING):
+            assert service.sweep() == 0
+
+        assert DeletionTicket.objects.filter(pk=refused_ticket.pk).exists()
+        assert DeletionTicket.objects.filter(pk=errored_ticket.pk).exists()
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(warnings) == 1 and warnings[0].exc_info is None
+        assert len(errors) == 1 and errors[0].exc_info is not None
+
 
 class TestStanding:
     def test_an_owner_and_a_sees_all_content_principal_may_purge_and_a_stranger_may_not(self):
@@ -1666,7 +1734,7 @@ from identity.contracts.actions import (
     CONTENT_DELETED, CONTENT_PURGED, CONTENT_RESTORED, SOURCE_WEB,
 )
 from identity.contracts.principals import SERVICE_PRINCIPAL
-from identity.contracts.retention import RETENTION_KINDS
+from identity.contracts.retention import RETENTION_KINDS, RetentionRefused
 from identity.models import DeletionTicket, IdentitySettings
 
 logger = logging.getLogger(__name__)
@@ -1793,11 +1861,18 @@ def restore_content(actor, ticket, *, source: str = SOURCE_WEB) -> None:
     completed purge leaves none), so this has exactly one refusal to
     make and it is not made in this delivery: a held ticket, once the
     deferred enterprise slice can set a hold.
+
+    A TICKET ALREADY GONE (a raced sweep, a double-click) MUST NOT LOG A
+    RESTORE THAT DID NOT HAPPEN: deleting by QUERYSET rather than by
+    instance reports how many rows it actually removed, and an event is
+    written only when that count is nonzero.
     """
     row = IdentitySettings.get_solo()
     with transaction.atomic():
         kind, key, label = ticket.kind, ticket.key, ticket.label
-        ticket.delete()
+        removed, _ = DeletionTicket.objects.filter(pk=ticket.pk).delete()
+        if not removed:
+            return
         audit.record(actor, CONTENT_RESTORED, target_type=kind, target_key=key,
                      target_label=label if row.audit_detail else "",
                      source=source, kind=kind)
@@ -1818,12 +1893,22 @@ def purge_ticket(actor, ticket, *, source: str = SOURCE_WEB) -> dict[str, int]:
     Named, not hidden: a filesystem delete has no rollback. That is why
     every handler must be idempotent and why the next sweep completes
     the purge rather than re-raising on the half it already did.
+
+    A TICKET ALREADY GONE IS A SILENT NO-OP, NOT A SECOND EVENT: two
+    sweeps can overlap by design (prune-on-write on every delete, the
+    cron command, the Deleted page's own GET) and a person can
+    double-click "Delete permanently", so this RE-READS the row under a
+    lock inside the transaction before running a single handler, and a
+    miss returns `{}` with nothing run and nothing written.
     """
     row = IdentitySettings.get_solo()
     with transaction.atomic():
-        removed = run_retention(ticket.kind, ticket.key)
-        kind, key, label = ticket.kind, ticket.key, ticket.label
-        ticket.delete()
+        current = DeletionTicket.objects.select_for_update().filter(pk=ticket.pk).first()
+        if current is None:
+            return {}
+        removed = run_retention(current.kind, current.key)
+        kind, key, label = current.kind, current.key, current.label
+        current.delete()
         audit.record(actor, CONTENT_PURGED, target_type=kind, target_key=key,
                      target_label=label if row.audit_detail else "",
                      source=source, kind=kind, removed=removed)
@@ -1853,6 +1938,14 @@ def sweep(*, limit: int = SWEEP_LIMIT, source: str = SOURCE_WEB) -> int:
     block the rest of the batch. The failure is logged with its kind and
     key -- structural, never content, the shape `tools/rag/jobs.py` uses
     throughout -- and the ticket stays due for the next pass.
+
+    A `RetentionRefused` IS NOT AN ERROR AND IS CAUGHT FIRST: it is a
+    handler saying "not now" for an operator-readable reason (today,
+    `models.queue.retention.forget_conversation` when a worker still
+    holds one of the conversation's jobs), so it is logged at
+    `logger.warning` -- one line, no traceback -- and every other
+    exception keeps `logger.exception`, which is the failure this batch
+    actually needs to be noisy about.
     """
     due = list(
         DeletionTicket.objects
@@ -1863,6 +1956,11 @@ def sweep(*, limit: int = SWEEP_LIMIT, source: str = SOURCE_WEB) -> int:
     for ticket in due:
         try:
             purge_ticket(SERVICE_PRINCIPAL, ticket, source=source)
+        except RetentionRefused as exc:
+            logger.warning(
+                "identity.retention: purge refused for %s:%s; it stays due -- %s",
+                ticket.kind, ticket.key, exc)
+            continue
         except Exception:  # noqa: BLE001 -- one bad ticket, not a bad batch
             logger.exception(
                 "identity.retention: purge failed for %s:%s; it stays due",
@@ -6688,3 +6786,4 @@ Checked end to end: `ticketed_keys` / `visible_tickets` / `may_purge` / `delete_
 - **Execution amendment (Task 1 review), 2026-09-21:** two fixes ordered by the controller during Task 1's own review, applied to both the code and this plan. (1) `TAB_PURGED = "Purged"` contradicted this plan's own copy constraint that the word *purge* appears nowhere a person reads — resolved toward the setting's own wording: the constant is now `TAB_LOG = "Deletion log"`, the same phrase `LABEL_AUDIT_DETAIL` ("Show item names in the deletion log") already names, so the tab heading and the setting that controls its detail share one word. Every rendered/asserted occurrence in this plan (the constant declaration, the template's `<h2>`, the smoke checklist's two "Purged tab" lines) was updated to match; prose nicknames that are neither rendered nor asserted (docstrings, a test class name) were left as-is per the same ruling. (2) The gate bullets read as if the four runs plus two posture sweeps were a per-task requirement, which is not what any task's own brief actually asked implementers to run and is not workable at the scale of 23 tasks on a machine with a cap of two concurrent suites. Reworded, commands unchanged: the four runs plus the two posture sweeps are the **branch** gate, run at the slice-one gate (after Task 15) and again before the pull request (after pinging the queue steward); each task's own pre-commit gate is its focused test modules plus the structural gates its brief names, in both feature-flag states — matching `AGENTS.md`'s "the four runs are the gate" as a branch-level statement, not a per-task one.
 - **Execution amendment (Task 5 review), 2026-09-21:** Task 5's `test_it_is_bounded_by_the_limit` interleaved four `delete_content` creates with four one-at-a-time backdates, which the unconditional prune-on-write sweep at the end of every `delete_content` call (spec section 3.9) correctly defeats — each later create's own sweep purged the previous iteration's already-overdue ticket before the test's own explicit `sweep` ran. The implementer's first pass gated that sweep on the just-created ticket's own due date to make the test pass; the controller overruled that as a fix to the wrong side: the spec is explicit that prune-on-write runs on every delete, unconditionally, so a box on the shipped 30-day default keeps itself clean with no scheduler. `identity/retention.py::delete_content` stays exactly as this plan's Step 3 prints it (`if created: sweep()`, unconditional); the test was re-shaped instead — create all four tickets first, backdate all four together in one queryset update, then assert the bounded sweep — and the behaviour the reshaped test no longer exercises (an unrelated delete purging a ticket that independently fell due) is now pinned by its own new test, `test_deleting_anything_purges_what_has_already_fallen_due`, added beside it in `TestTheSweep`. Both are reflected in Task 5's test code block above.
 - **Execution amendment (Task 6 review), 2026-09-21:** Task 6: the `_overdue` helper re-shaped to create-all-then-backdate for the same reason as Task 5's limit test; command code unchanged from the brief.
+- **Execution amendment (Task 5 review, round 2), 2026-09-21:** three Minor findings, all in `identity/retention.py` with tests in `identity/tests/test_retention_service.py`: already-gone purge is a no-op (`purge_ticket` re-reads the row under `select_for_update()` inside its transaction and returns `{}` with nothing run and nothing written when it is already gone); restore logs only what it removed (`restore_content` deletes by queryset and writes `content.restored` only when a row was actually removed); refusals are warnings (`sweep` catches `RetentionRefused` before the generic `except Exception` and logs it at `logger.warning` with no traceback, leaving `logger.exception` for every other failure). Reflected in Task 5's code and test blocks above.
