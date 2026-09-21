@@ -207,12 +207,13 @@ from typing import Iterable, Sequence
 
 _Key = tuple[str, str, str]
 
-# How many times model-affinity reordering may put a later-by-(priority,
-# id) peer ahead of one candidate before that candidate is PINNED --
-# ordered strictly by id within its priority from then on, and never
-# reordered behind a peer again (owner decision 4). Supplied by the claim
-# code as a keyword argument so table tests can vary it; this is the
-# default the queue actually runs with.
+# How many admission ROUNDS a candidate may lose to model-affinity
+# reordering before it is PINNED -- ordered strictly by id within its
+# priority from then on (owner decision 4). ONE per round, however many
+# later-by-(priority, id) peers were admitted ahead of it in that round:
+# the bound counts occasions a job lost its turn, not peers. Supplied by
+# the claim code as a keyword argument so table tests can vary it; this
+# is the default the queue actually runs with.
 MAX_PASSOVERS = 3
 
 
