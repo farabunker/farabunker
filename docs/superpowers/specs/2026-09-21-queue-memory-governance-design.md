@@ -1,7 +1,7 @@
 # Queue memory governance — design
 
 **Date:** 2026-09-21
-**Status:** Final, revision 4 (adversarial review rounds 1–3 applied and closed — see §13)
+**Status:** Final, revision 5 (review rounds 1–3 + engine-steward amendment applied — see §13)
 **Columns touched:** `models/queue`, `models/registry` (bindings, connection facts,
 console labels), `models/contracts` (job-kind registry, engine seam docs),
 `agents/chat`, `agents/runtime`
@@ -133,13 +133,23 @@ unrelated disclosure. A new `_FOOTPRINT_SOURCE_LABELS` dictionary sits beside it
 |---|---|
 | `override` | set by the operator |
 | `measured` | measured after a run on *date* |
-| `engine_reported` | reported by the model server on *date* |
+| `engine_reported` | from the engine's residency snapshot on *date* |
 | `None` | not measured yet — this model runs alone |
 
 The measured rung's label changes because it is the one place the console currently
 says something untrue: a post-run delta measurement is *our* observation of the
 engine, not the engine's declaration. That is the whole of Q1's "labelled honestly"
 requirement.
+
+**Rung 3's label says "residency snapshot", not "reported by the model server", because
+the stronger phrasing would be untrue on one of the two live engines.** The steward's
+line-by-line check found that the image engine reports no per-model residency or size
+at all (`list_installed` carries `size=None` by design); its `loaded_size` is the
+adapter's *own* post-run delta, kept in the same TTL'd memo — so on that engine rung 3
+is very nearly rung 2 restated, with the same provenance and the same memo lifetime,
+and is close to valueless as an independent fact. On the text engine, which answers a
+real residency endpoint, rung 3 is genuinely engine-reported and is worth having. One
+label has to be honest on both; this one is.
 
 **Named template edit.** `models/registry/templates/inference/_registered_connection.html`
 renders `footprint_source_labels.connection` / `.engine` *directly* rather than
@@ -194,7 +204,7 @@ the write landed.
 
 The pass, its four-phase split and its degradation idiom are reused. Six changes.
 
-#### (a) The queue must know what `unload` frees — `unload_scope`
+#### (a) The queue must know what `unload` frees, and what a residency report is worth
 
 Everything below depends on a fact the seam does not currently expose: the image
 adapter's `unload` **frees every model at the endpoint and ignores `model_id`**,
@@ -208,8 +218,11 @@ other optional engine capability is read (`getattr`, degrade, never `hasattr`
 branching):
 
 ```
-InferenceEngine.unload_scope: str  # "model" | "endpoint"
+InferenceEngine.unload_scope: str          # "model" | "endpoint"
+InferenceEngine.residency_authority: str   # "endpoint" | "memo"
 ```
+
+`unload_scope` — what a call frees:
 
 - `"model"` — `unload(endpoint, model_id)` releases that model and leaves others.
 - `"endpoint"` — the call releases everything at the endpoint; `model_id` is
@@ -217,12 +230,31 @@ InferenceEngine.unload_scope: str  # "model" | "endpoint"
 - **Absent → the queue assumes `"endpoint"`**, the safe assumption: it can cost a
   needless reload, never a destroyed cold load.
 
-**Cross-column, flagged not specced.** Declaring the attribute on each adapter is a
-one-line edit inside adapter code this track does not own. Both declarations
-(`"endpoint"` on the image adapter, `"model"` on the text adapter) are **flagged to
-their stewards** as a dependency that should land with or before task 3. Until they
-do, the safe default applies and eviction is coarser on the per-model engine — an
-accepted, named interim cost (§11), not a correctness gap.
+`residency_authority` — **how much the engine's own residency report is worth**, which
+§3.3(d)(3)'s narrowing depends on and which nothing else carries:
+
+- `"endpoint"` — `list_installed`'s `loaded` flags come from a real residency endpoint
+  the engine answers live. "Nothing resident" from such an engine is a fact.
+- `"memo"` — they come from a TTL'd, process-local belief the adapter maintains itself.
+  "Nothing resident" from such an engine means "this process does not remember
+  anything", which a restart alone can produce.
+- **Absent → the queue assumes `"memo"`**, the safe default: it triggers the
+  precautionary barrier call rather than trusting an empty answer.
+
+This second attribute exists because the round-2 narrowing as first written was
+**unimplementable**: "a TTL'd memo rather than a real residency endpoint" is knowable
+only by reading adapter source, and no seam carried it. A declaration does.
+
+**Cross-column, flagged not specced — and pre-cleared.** Declaring these on an adapter
+is a one-line-each edit inside code this track does not own. The **image adapter's two
+lines (`unload_scope="endpoint"`, `residency_authority="memo"`) are PRE-CLEARED by the
+engine steward**, who verified §3.1–§3.3 against the adapters and will take those lines
+in their own column when the plan lands. The **text adapter's lines are that engine
+steward's call**; factually they are `"model"` and `"endpoint"`-authority, and the
+queue's behaviour is consistent either way. Until any declaration lands, the safe
+defaults apply: eviction is coarser on a per-model engine, and an authoritative engine
+is given a precautionary call it does not need — both accepted, named interim costs
+(§11), neither a correctness gap.
 
 #### (b) Residency is a belief, and unloading is not free (Q5)
 
@@ -320,14 +352,15 @@ So the barrier is defined by what the queue actually knows:
    model is unloaded (one call at a `"model"` endpoint per model; **one call total**
    at an `"endpoint"` endpoint, since the first frees everything).
 
-   **The precautionary call is narrowed to where the belief is unauthoritative.**
-   When `list_installed` was unavailable or raised, or when it reports nothing
-   resident *and the engine's residency report is a TTL'd, process-local memo rather
-   than a real residency endpoint*, one precautionary call is made anyway, addressed
-   with any `model_id` registered for that endpoint (`registered_endpoints()` supplies
-   one — §3.3e) or the admitted job's own ref when the endpoint is its own. An engine
-   with an authoritative residency endpoint that reports nothing resident gets **no**
-   precautionary call: there is nothing to barrier and nothing its answer could add.
+   **The precautionary call is narrowed by `residency_authority` (§3.3a), the one
+   thing that makes the narrowing implementable.** When `list_installed` was
+   unavailable or raised, or when it reports nothing resident *and the endpoint's
+   engine declares (or defaults to) `residency_authority="memo"`*, one precautionary
+   call is made anyway, addressed with any `model_id` registered for that endpoint
+   (`registered_endpoints()` supplies one — §3.3e) or the admitted job's own ref when
+   the endpoint is its own. An engine declaring `residency_authority="endpoint"` that
+   reports nothing resident gets **no** precautionary call: it actually knows, so
+   there is nothing to barrier and nothing its answer could add.
 
    This narrowing is a real cost, not a tidy-up. At an `unload_scope="endpoint"`
    engine with an empty belief — the case the precautionary call exists for — the
@@ -798,7 +831,9 @@ unloaded at a `"model"`-scope endpoint, and IS at its own `"endpoint"`-scope end
 the protection check evaluated **before** the residency snapshot, asserted by a test
 that fails if any `list_installed` is called on a tick refused for a protected
 endpoint; the barrier's precautionary call distinguished from the per-model loop, and
-**not issued** at an endpoint whose residency report is authoritative and empty;
+**not issued** at an endpoint whose engine declares `residency_authority="endpoint"`
+and reports nothing resident, **and issued** where that attribute is absent or `"memo"`
+(the safe default pinned as its own case);
 `False` honoured for a believed-resident call and ignored for a precautionary one;
 the bounded-refusal failure requiring **both** `MAX_BARRIER_REFUSALS` and
 `MIN_BARRIER_REFUSAL_SPAN_SECONDS` (a test that three refusals inside the span do not
@@ -890,9 +925,9 @@ One branch, tasks in this order, each reviewed before the next:
 admission-side query filter this track adds, so task 3 and task 4 must re-pin the
 claim's query counts together.
 
-**Cross-column:** no adapter or vision-column file is edited by this track. One
-dependency is **flagged, not specced** — the two one-line `unload_scope` declarations
-(§3.3a) — and the safe default keeps the track correct if they slip. If any finding
+**Cross-column:** no adapter or vision-column file is edited by this track. The
+dependency is **flagged, not specced** — the `unload_scope` and `residency_authority`
+declarations (§3.3a), the image adapter's pair **pre-cleared by its steward** — and the safe default keeps the track correct if they slip. If any finding
 turns out to need more than that, it goes to the steward, not into this branch.
 
 **Deploy:** two migrations, a new settings shape, and a worker restart (the pool, the
@@ -977,9 +1012,11 @@ No success language before these pixels exist.
 9. **The refusal bound is count *and* time.** Half-second ticks make a pure count
    meaningless against a busy engine, which returns an informative `False` precisely
    because it is still working.
-10. **The precautionary call is narrowed to unauthoritative beliefs.** An engine that
-    genuinely knows nothing is resident gets no 30 s no-rise poll, on every exclusive
-    admission, for no information.
+10. **The precautionary call is narrowed to unauthoritative beliefs, through a second
+    declared attribute.** An engine that genuinely knows nothing is resident gets no
+    30 s no-rise poll on every exclusive admission for no information — and because
+    "genuinely knows" is not derivable from any existing seam, `residency_authority`
+    carries it, in the same getattr/degrade idiom and with the safe default.
 11. **The duplicate-submit refusal restores the row to the live attempt** rather than
    requeueing it, which would strip heartbeat protection, churn every tick for the
    length of a cold load, and discard the live attempt's result.
@@ -1026,10 +1063,31 @@ No success language before these pixels exist.
   call.** A configured default endpoint with no connection row yields no addressable
   `model_id`; its believed-resident models are still evicted by the per-model loop, but
   an empty or unavailable belief there leaves the endpoint unbarriered.
-- **`unload_scope` is a declaration, not a probe.** Until the two flagged declarations
-  land, the safe default applies and eviction is coarser on the per-model engine (an
-  unneeded model sharing an endpoint with a needed one survives). Named cost, not a
-  correctness gap.
+- **`unload_scope` and `residency_authority` are declarations, not probes.** Until an
+  adapter takes its lines, the safe defaults apply: eviction is coarser on a per-model
+  engine (an unneeded model sharing an endpoint with a needed one survives), and an
+  engine with a real residency endpoint is given precautionary calls it does not need.
+  Named costs, not correctness gaps.
+- **A `True` from the image adapter's no-baseline path observed nothing.** When
+  `/system_stats` is unreadable at the moment the call starts, that adapter cannot
+  compute a rise at all, so it degrades to the pre-barrier contract: the POST's own 2xx
+  plus one queue-idle check, and returns `True`. That is *exactly* the precautionary-call
+  case (§3.3d(3)), and a `True` there is a confirmation of nothing — the queue launches
+  an exclusive job into memory that may still be held, which is the crash shape this
+  track exists to close. The queue cannot tell that `True` from a real one; only the
+  adapter knows, and this spec does not change adapters.
+- **Machine-wide memory drift can fake the rise.** The settle threshold falls back to a
+  256 MiB floor read from machine-wide available memory, so an unrelated process
+  finishing work during the poll window can clear it and read as a settled eviction —
+  the adapter's own documented false-positive, which additionally drops its run memo and
+  therefore its residency belief. A barrier that returns `True` on drift launches on an
+  endpoint nothing actually freed.
+- **The residency memo is LRU-capped at eight endpoints.** A ninth endpoint evicts the
+  oldest belief, so on a box with many registered endpoints an endpoint can report
+  "nothing resident" purely because its belief aged out — which, under
+  `residency_authority="memo"`, buys an extra precautionary call (and its full no-rise
+  poll) rather than a wrong decision. Safe direction, real cost; it compounds with the
+  timing note below.
 - **The barrier refusal count is in-process.** A worker restart resets it, so a
   pathological endpoint could refuse three times per worker lifetime rather than three
   times ever.
@@ -1066,7 +1124,8 @@ No success language before these pixels exist.
   every exclusive admission — i.e. on every chat turn. §3.3(d)(3) narrows it to
   unauthoritative beliefs for exactly this reason, and done-when proof 2(ii) times it,
   but a box with several endpoint-scope engines and no residency endpoints still pays
-  real seconds per exclusive admission.
+  real seconds per exclusive admission — and the eight-endpoint memo cap above can add
+  calls on a busy box by aging a belief out rather than by anything changing.
 - **The barrier's refusal bounds are process-local where the count is concerned.** The
   `not_before` hold-off is durable; the consecutive-refusal count and its wall-clock
   span are in-process, so a restart resets them (see the bullet above on the count).
@@ -1090,11 +1149,15 @@ No success language before these pixels exist.
 - Multi-worker coordination, distributed claims, or cross-host scheduling.
 - A real memory manager: process-peak measurement, accelerator-upcast modelling, or
   per-layer accounting.
-- Probing an engine for its unload granularity rather than reading a declaration.
+- Probing an engine for its unload granularity or the authority of its residency
+  report, rather than reading a declaration.
 - Automatic budget tuning, or any code path that changes an operator's posture without
   them saying so.
 - Engine adapter internals — residency endpoints, unload semantics, measurement methods.
-  The `unload_scope` declarations are flagged to their stewards, not written here.
+  The `unload_scope` / `residency_authority` declarations are flagged to their stewards
+  (the image adapter's pre-cleared), not written here. In particular, closing the
+  no-baseline `True` and the drift false-positive named in §11 is adapter work this
+  track names and does not attempt.
 - Migrating the chat page onto the shared poll loop, and any other poller consolidation.
 - Streaming turn output, or any change to the rule that a tool runner never waits on a
   queue job.
@@ -1203,7 +1266,7 @@ round 4.
 
 Both are consistency-of-record rather than mechanism, and they close the same argument
 §3.6 already makes and Q14 already commits to: a delay the queue imposes deliberately is
-never left for an operator to infer. **The spec is closed at revision 4.**
+never left for an operator to infer. **The spec was closed at revision 4**, and reopened once for the steward amendment below.
 
 ## Owner rulings (2026-09-21)
 
@@ -1214,3 +1277,21 @@ recorder with zero tolerance (3), affinity on by default with `MAX_PASSOVERS = 3
 per-kind wait ceilings editable on the settings page (5), refusal bound ends in an honest
 job failure (6), and idempotent stranded-turn auto-repair (7). Plan authors treat these as
 settled; none remains open.
+
+### Steward amendment (2026-09-21)
+
+The engine-owning session verified §3.1–§3.3 line-by-line against the real adapters and
+returned three findings; the orchestrator accepted all three. This is a targeted
+amendment, not a review round — two of the three correct statements this spec could not
+have checked from the queue column, and the third adds residuals it could not have known.
+
+| Finding | Applied in | Note |
+|---|---|---|
+| S-1 §3.3(d)(3)'s narrowing was **unimplementable**: "TTL'd memo vs real residency endpoint" is knowable only from adapter source, and no seam carried it | §3.3(a), §3.3(d)(3), §5, §9.10, §12 | A second optional declaration, `residency_authority: "endpoint" \| "memo"`, in the same getattr/degrade idiom as `unload_scope`, absent → `"memo"` (safe: triggers the precautionary call). The image adapter's two lines (`unload_scope="endpoint"`, `residency_authority="memo"`) are **PRE-CLEARED by the engine steward** and land in their column with the plan; the text adapter's are that steward's call, factually `"model"` / `"endpoint"`-authority. |
+| S-2 the rung-3 label was **untrue on the image engine**: it reports no per-model residency or size (`list_installed` `size=None` by design), so its `loaded_size` is the adapter's own post-run delta from the same TTL'd memo | §3.1 | Label changed to "from the engine's residency snapshot on *date*", which is honest on both engines, plus one paragraph naming the rung-3 ≈ rung-2 equivalence there (near-valueless on the image engine, genuinely engine-reported on the text engine). |
+| S-3 three adapter-level residuals the queue column could not have known | §11 (three new bullets), §12 | (a) the no-baseline path returns `True` on a 2xx plus one queue-idle check when `/system_stats` is unreadable at call start — a `True` that observed nothing, in exactly the precautionary-call case, launching into possibly-held memory; (b) machine-wide memory drift ≥ 256 MiB during the poll fakes the rise and drops the run memo; (c) the residency memo is LRU-capped at eight endpoints, so a ninth ages the oldest belief out and buys extra precautionary calls. **Named, not fixed:** all three are adapter-side, and §12 says so. |
+
+S-1 is the load-bearing one: without a declaration the round-2 narrowing could not have
+been built at all, and a plan author would have discovered that only after reading
+adapter source. S-3 changes no mechanism — it makes the barrier's honest failure modes
+visible in the document that claims the barrier is safe. **Revision 5; closed again.**
