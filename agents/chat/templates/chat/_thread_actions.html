@@ -86,7 +86,7 @@ html`, and the gate is what will say so.
       _delete_control.html`: a native <details> reveals the real form,
       no `confirm()`/`alert()`/`prompt()` anywhere. Delete TICKETS now
       (Task 8) -- it does not erase: the conversation moves to Settings
-      → Deleted, where it is restorable until its purge date, and is
+      → Deleted, where it is restorable until the date shown there, and is
       only destroyed at purge time, together with its turns, shares,
       attachment claims and chat-scoped documents (`agents.retention.
       purge_conversation`, Task 9). See `conversation_delete`'s own
@@ -95,7 +95,7 @@ html`, and the gate is what will say so.
       <summary>Delete this conversation</summary>
       <div class="delete-confirm">
         <span class="muted">Delete this conversation? It moves to Settings → Deleted,
-          where you can restore it until its purge date.</span>
+          where you can restore it until the date shown there.</span>
         <form method="post" action="{% url 'chat-conversation-delete' conversation.id %}">
           {% csrf_token %}
           <button type="submit" class="danger">Yes, delete</button>

@@ -51,13 +51,13 @@ pytestmark = pytest.mark.django_db
 # brief's own prose names a helper by a descriptive alias, and `make_
 # thread` (`agents/chat/tests/_helpers.py`) -- "a conversation with a
 # finished USER + ASSISTANT pair" -- is the one existing helper in this
-# module's family that already fits it; `TestConversationAndTurnsAreGone.
-# test_the_conversation_and_its_turns_are_deleted`, below, already calls
+# module's family that already fits it; `TestTheRowsSurviveADelete.
+# test_the_conversation_and_its_turns_survive_and_a_ticket_hides_them`, below, already calls
 # it for the identical reason. No second helper is added.
 
 
-class TestConversationAndTurnsAreGone:
-    def test_the_conversation_and_its_turns_are_deleted(self, client):
+class TestTheRowsSurviveADelete:
+    def test_the_conversation_and_its_turns_survive_and_a_ticket_hides_them(self, client):
         """RE-PINNED (Task 8): a delete no longer erases the row. The
         conversation and its turns SURVIVE the request; what actually
         happens is that the thread leaves every reader that goes through
@@ -109,7 +109,8 @@ class TestConversationAndTurnsAreGone:
             follow=True,
         )
         assert response.status_code == 200
-        assert "Settings → Deleted" in response.content.decode()
+        body = response.content.decode()
+        assert "Conversation deleted. You can restore it from Settings → Deleted." in body
 
 
 class TestTheAuditSurvives:
@@ -169,7 +170,7 @@ class TestTheAgentIsUntouched:
         assert Agent.objects.filter(pk=agent.pk).exists()
 
 
-class TestAttachmentRowsGoWithTheConversation:
+class TestAttachmentRowsSurviveADelete:
     """Round 11 re-review, minor 4: `DocumentAttachment.conversation_id`
     is a UUID BY VALUE, never a real FK (`tools/rag` may not import
     `agents.models`) -- nothing would clean those rows up when the
@@ -184,7 +185,7 @@ class TestAttachmentRowsGoWithTheConversation:
     own job narrows to the SOFT-DELETE half -- the claim survives a
     delete exactly like everything else the conversation owns."""
 
-    def test_deleting_a_conversation_removes_its_attachment_rows(self, client):
+    def test_deleting_a_conversation_leaves_its_attachment_rows(self, client):
         """MOVED (Task 9, `agents/tests/test_retention.py`): "removes"
         is now true at PURGE, through `agents.retention.
         purge_conversation`'s attachment handler -- not at delete. The
@@ -293,12 +294,50 @@ class TestTheDeleteControlOnThePage:
 # `agents/tests/test_retention.py` (Task 9), against `agents.retention.
 # purge_conversation`: round 12's document cascade ("if I submit a
 # document but have scope for chat, then it should only be used in that
-# chat") ran at delete time through the SAME cleanup slot `Attachment
-# RowsGoWithTheConversation` above used, and that slot no longer runs at
-# delete time either. `TestDeleteWritesATicketAndHidesTheThread`, below,
-# is where this module's own soft-delete-time claim about a chat-scoped
-# document now lives -- nothing cascades at delete time, whatever a
-# document's scope.
+# chat") ran at delete time through the SAME cleanup slot
+# `TestAttachmentRowsSurviveADelete` above used, and that slot no longer
+# runs at delete time either. The PURGE half of round 12's own claim
+# (`delete_document` is called, a universal document's row survives)
+# now lives in `agents/tests/test_retention.py`; `TestASoftDeleteLeavesAttachedDocumentsAlone`,
+# below, is where this module's own soft-delete-time claim about a
+# chat-scoped document now lives -- nothing cascades at delete time,
+# whatever a document's scope.
+
+
+class TestASoftDeleteLeavesAttachedDocumentsAlone:
+    """Round 12 (owner ruling, verbatim: "if I submit a document but
+    have scope for chat, then it should only be used in that chat")
+    used to cascade a chat-scoped document's own delete at CONVERSATION
+    delete time, through the same cleanup slot
+    `TestAttachmentRowsSurviveADelete` above pins. RE-PINNED (Task 8):
+    that cascade now runs only at PURGE (`agents/tests/test_retention.py`,
+    Task 9) -- a soft delete calls `identity.retention.delete_content`,
+    which never touches the attachment-cleanup registry at all, so a
+    chat-scoped document's row, its attachment claim and its files are
+    every bit as untouched by a soft delete as a universal document's.
+
+    `services.delete_document` ITSELF IS MOCKED, not exercised with
+    real files on disk -- the same scoping the moved purge-time test
+    uses, and the same reason: this pins the CASCADE DECISION (called
+    or not), not `delete_document`'s own file-removal correctness
+    (`tools/rag/tests/test_views_documents.py::TestDocumentDelete`)."""
+
+    def test_a_chat_scoped_documents_delete_document_is_not_called(self, client):
+        from unittest.mock import patch
+
+        from agents.tests._helpers import make_document
+        from tools.rag.models import Document, DocumentAttachment
+
+        conversation = make_conversation()
+        doc = make_document(scope=Document.Scope.CONVERSATION)
+        DocumentAttachment.objects.create(document=doc, conversation_id=conversation.id)
+
+        with patch("tools.rag.services.delete_document") as mock_delete:
+            client.post(reverse("chat-conversation-delete", args=[conversation.id]))
+
+        mock_delete.assert_not_called()
+        assert DocumentAttachment.objects.filter(
+            document=doc, conversation_id=conversation.id).exists()
 
 
 class TestDeleteWritesATicketAndHidesTheThread:
@@ -326,7 +365,8 @@ class TestDeleteWritesATicketAndHidesTheThread:
         conversation = make_thread()
         response = client.post(
             reverse("chat-conversation-delete", args=[conversation.id]), follow=True)
-        assert "Deleted" in response.content.decode()
+        body = response.content.decode()
+        assert "Conversation deleted. You can restore it from Settings → Deleted." in body
 
     def test_a_second_delete_of_the_same_thread_is_a_404_not_a_second_ticket(self, client):
         conversation = make_thread()

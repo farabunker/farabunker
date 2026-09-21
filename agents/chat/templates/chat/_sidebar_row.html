@@ -120,7 +120,7 @@ all agree with the page-level flag anyway.
         <summary>Delete</summary>
         <div class="delete-confirm">
           <span class="muted">Delete this conversation? It moves to Settings → Deleted,
-            where you can restore it until its purge date.</span>
+            where you can restore it until the date shown there.</span>
           <form method="post"
                 action="{% url 'chat-conversation-delete' row.conversation.id %}">
             {% csrf_token %}
