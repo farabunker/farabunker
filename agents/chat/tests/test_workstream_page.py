@@ -1187,8 +1187,21 @@ class TestTheStreamPageCostsTheSameAtOneAndTenConversations:
     # EXPECTED_QUERIES`'s own later note), once for this page's OWN
     # Conversations-list call named just above -- so both totals move by
     # 2, not 1.
-    OWNER_QUERIES = 57
-    RECIPIENT_QUERIES = 59
+    #
+    # RAISED BY TWO, EACH, BY THE DELETION-SEMANTICS TASK 10:
+    # `tools.rag.workstreams.panel` -- this page's own `rag.documents`
+    # stream panel, reached through `panels_for` -- calls `readable_
+    # documents(...)` exactly ONCE per render (every other line in that
+    # panel filters the SAME queryset further, never a second call), so
+    # its new `_deleted_document_ids()` cost lands on this page exactly
+    # once, not once per conversation: two `ticketed_keys` reads on the
+    # common path, where no conversation on the box carries an open
+    # deletion ticket (`tools/rag/access.py::_deleted_document_ids`'s
+    # own docstring has the full accounting, including the third,
+    # conditional read a ticketed conversation would add). Both totals
+    # move by 2, not 3.
+    OWNER_QUERIES = 59
+    RECIPIENT_QUERIES = 61
 
     def _conversations(self, principal, agent, stream, count):
         from agents.models import Conversation

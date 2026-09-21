@@ -23,6 +23,8 @@ from identity.access import (
     held_entitlement_ids, is_admin, may_see_unlabelled, owned_entitlement_ids,
     owned_rows_q, sees_all_content,
 )
+from identity.contracts.retention import KIND_CONVERSATION, KIND_DOCUMENT
+from identity.retention import ticketed_keys
 from tools.rag.models import AskRecord, Document, DocumentAttachment
 
 logger = logging.getLogger(__name__)
@@ -288,7 +290,49 @@ def document_visibility(principal, *, settings_row=None, stream=None,
     )
 
 
-def readable_documents(principal, *, workstream_id=None, settings_row=None):
+def _deleted_document_ids() -> list[int]:
+    """Documents a ticket hides: the ones deleted outright, plus every
+    chat-scoped document whose CONVERSATION is deleted.
+
+    A `Document` with `scope=conversation` has exactly one
+    `DocumentAttachment`, for one conversation (`delete_attachments`
+    states and depends on that invariant), so a chat-scoped document
+    follows its conversation and nothing else does. Universal and
+    stream-contained documents are UNTOUCHED: an attachment is a CLAIM a
+    conversation makes on a document, never the document's own
+    existence, and deleting a conversation must not hide a document
+    another conversation still holds a claim on.
+
+    TWO QUERIES WHEN NOTHING IS TICKETED, THREE WHEN A CONVERSATION IS --
+    flat in the number of TICKETS rather than in the number of documents
+    (the `agents.shares.shared_keys` cost model, unchanged), never
+    guessed. The two `ticketed_keys()` reads always run; the third, the
+    chat-scoped lookup keyed off the conversation ticket ids, is answered
+    by the ORM WITHOUT a database round trip when that id list is empty
+    -- filtering on an empty `__in` is known-empty at compile time, so
+    there is nothing for Postgres to be asked. That is a real saving,
+    not a corner being cut: the common box has no open conversation
+    ticket at all, and the cheaper path is exactly that common case. A
+    box with at least one open conversation ticket pays the third query,
+    still bounded by the number of TICKETS rather than documents.
+
+    COMPUTED ONCE PER CALL AND THREADED. Its three callers each call it
+    exactly once and pass the result down -- `attached_documents` in
+    particular would otherwise pay for it twice, once for its own
+    `chat_scoped` query and once inside `readable_documents`.
+    """
+    ids = [int(key) for key in ticketed_keys(KIND_DOCUMENT) if key.isdecimal()]
+    ids.extend(
+        Document.objects.filter(
+            scope=Document.Scope.CONVERSATION,
+            attachments__conversation_id__in=ticketed_keys(KIND_CONVERSATION),
+        ).values_list("pk", flat=True)
+    )
+    return ids
+
+
+def readable_documents(principal, *, workstream_id=None, settings_row=None,
+                       deleted_ids=None):
     """Documents whose CONTENT this principal may reach -- the bytes, the
     transcript, and the chunks retrieval may return.
 
@@ -314,6 +358,11 @@ def readable_documents(principal, *, workstream_id=None, settings_row=None):
     runtime.loop._run_turn`) threads it in rather than paying a second
     read here. `None` -- every caller before this round -- reproduces
     exactly what `document_visibility(principal)` already did.
+
+    `deleted_ids`, OPTIONAL (deletion semantics, Task 10): an
+    already-computed list from `_deleted_document_ids()`, threaded in by
+    a caller that has one, exactly as `settings_row=` is. `None` -- every
+    caller before this round -- computes it here.
 
     THE CONTAINMENT CLAUSE IS OUTSIDE THE `unrestricted` BRANCH, so it
     binds in the open posture and for an administrator with
@@ -345,8 +394,13 @@ def readable_documents(principal, *, workstream_id=None, settings_row=None):
     `readable_document`'s own universal branch), never inside a specific
     stream's own listing.
     """
+    if deleted_ids is None:
+        deleted_ids = _deleted_document_ids()
     contained = Q(workstream__isnull=True) | Q(workstream_id=workstream_id)
     not_chat_scoped = ~Q(scope=Document.Scope.CONVERSATION)
+    # THE EXCLUSION IS ON THE BASE, BEFORE the `unrestricted` branch --
+    # that branch is every principal on an open box.
+    base_rows = Document.objects.exclude(pk__in=deleted_ids)
     v = document_visibility(principal, settings_row=settings_row)
     if v.unrestricted:
         # ROUND 12 REVIEW I-2: a first cut left this branch untouched,
@@ -373,7 +427,7 @@ def readable_documents(principal, *, workstream_id=None, settings_row=None):
         base = contained & not_chat_scoped
         if workstream_id is None:
             base = base | Q(scope=Document.Scope.CONVERSATION)
-        return Document.objects.filter(base)
+        return base_rows.filter(base)
     labelled = Q(entitlement_labels__entitlement_id__in=v.entitlement_ids)
     if v.unlabelled_allowed:
         base = contained & (labelled | Q(entitlement_labels__isnull=True))
@@ -383,7 +437,7 @@ def readable_documents(principal, *, workstream_id=None, settings_row=None):
     if workstream_id is None:
         base = base | Q(scope=Document.Scope.CONVERSATION,
                         owner_kind=principal.kind, owner_key=principal.key)
-    return Document.objects.filter(base).distinct()
+    return base_rows.filter(base).distinct()
 
 
 def attached_documents(principal, *, conversation_id, stream=None,
@@ -498,8 +552,18 @@ def attached_documents(principal, *, conversation_id, stream=None,
     MERGED BY `created_at`, not appended after: the combined list still
     reads as ONE chronological attachment history, whichever branch
     supplied each row.
+
+    `deleted_ids` (deletion semantics, Task 10) IS COMPUTED EXACTLY ONCE,
+    HERE, at the top -- never inside `readable_documents` itself -- and
+    threaded into every place that would otherwise recompute it: this
+    function's own `chat_scoped` query, and both of its own `readable_
+    documents(...)` calls below. `_deleted_document_ids()`'s own cost
+    (two queries, or three with an open conversation ticket -- see its
+    docstring) is paid once here, not twice.
     """
     from tools.rag.workstreams import scope_with_pins, stream_documents
+
+    deleted_ids = _deleted_document_ids()
 
     # ROUND 13 (message-bound attachments): `turn_id` annotated straight
     # off the join, not a second query -- `uniq_document_attachment`
@@ -513,8 +577,9 @@ def attached_documents(principal, *, conversation_id, stream=None,
     #
     # (a)/(b) above -- see this function's own docstring paragraph.
     chat_scoped = list(
-        Document.objects.filter(scope=Document.Scope.CONVERSATION,
-                                attachments__conversation_id=conversation_id)
+        Document.objects.exclude(pk__in=deleted_ids)
+        .filter(scope=Document.Scope.CONVERSATION,
+                attachments__conversation_id=conversation_id)
         .annotate(turn_id=F("attachments__turn_id"))
     )
     chat_scoped_ids = {d.pk for d in chat_scoped}
@@ -542,7 +607,7 @@ def attached_documents(principal, *, conversation_id, stream=None,
     chat_scoped_readable_ids: set[int] = set()
     if chat_scoped:
         chat_scoped_readable_ids = set(
-            readable_documents(principal, settings_row=settings_row)
+            readable_documents(principal, settings_row=settings_row, deleted_ids=deleted_ids)
             .filter(pk__in=chat_scoped_ids).values_list("pk", flat=True)
         )
 
@@ -550,6 +615,7 @@ def attached_documents(principal, *, conversation_id, stream=None,
     readable_workstream_id = scope.workstream_id if scope is not None else None
     attached = list(readable_documents(
         principal, workstream_id=readable_workstream_id, settings_row=settings_row,
+        deleted_ids=deleted_ids,
     ).exclude(pk__in=chat_scoped_ids).filter(attachments__conversation_id=conversation_id)
      .annotate(turn_id=F("attachments__turn_id")))
 
@@ -833,7 +899,7 @@ def artifact_file_for(pk: int, principal) -> ArtifactFile:
     )
 
 
-def listable_documents(principal):
+def listable_documents(principal, *, deleted_ids=None):
     """Document ROWS this principal may see -- title, category, labels,
     status, size, ingest state.
 
@@ -861,11 +927,17 @@ def listable_documents(principal):
     the ADMIN listing, unless `sees_all_content` -- the brief's own
     "chat badge... excluded from other users' listings" line, applied
     to the row-list too, not only to content-reachability.
+
+    `deleted_ids`, OPTIONAL (deletion semantics, Task 10): threaded
+    straight through, exactly as `settings_row=` is threaded elsewhere in
+    this module -- `None` computes it here, once, whichever leg runs.
     """
+    if deleted_ids is None:
+        deleted_ids = _deleted_document_ids()
     if is_admin(principal):
-        rows = Document.objects.all()
+        rows = Document.objects.exclude(pk__in=deleted_ids)
     else:
-        rows = readable_documents(principal)
+        rows = readable_documents(principal, deleted_ids=deleted_ids)
     if not sees_all_content(principal):
         rows = rows.exclude(
             Q(scope=Document.Scope.CONVERSATION)

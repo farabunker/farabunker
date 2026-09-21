@@ -188,6 +188,23 @@ class RagConfig(AppConfig):
             handler="tools.rag.labels.unlabel_all_for_entitlement",
         ))
 
+        # THIS COLUMN'S ANSWER TO "A DELETED CONVERSATION'S DATE HAS
+        # ARRIVED". FILES band: it unlinks a staging note and reaches
+        # `services.delete_document`, which removes a managed store
+        # directory. Same dotted-path mechanism, same import-law reason.
+        from identity.contracts.cascades import (
+            ORDER_FILES, RetentionHandler, register_retention_handler,
+        )
+        from identity.contracts.retention import KIND_CONVERSATION
+
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION,
+            key="rag.conversation_notes",
+            label="Staging notes",
+            handler="tools.rag.retention.purge_conversation_notes",
+            order=ORDER_FILES,
+        ))
+
         # THE OTHER DIRECTION ON THE SAME TABLE, COUNTED ONLY. The
         # entitlements list shows one reach column per registered axis,
         # and a Documents column that was simply missing would read as

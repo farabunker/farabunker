@@ -24,16 +24,23 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from django.utils import timezone
 from llama_index.core.vector_stores.types import (
     FilterCondition, FilterOperator, MetadataFilter,
 )
 
 from agents.contracts.workstreams import WorkstreamScope
+from agents.visibility import delete_conversation
 from identity.contracts.principals import OPEN_PRINCIPAL
+from identity.models import DeletionTicket
 from tools.rag import retrieval
-from tools.rag.access import DocumentVisibility, attached_documents, readable_documents
+from tools.rag.access import (
+    DocumentVisibility, attached_documents, listable_documents, readable_documents,
+)
 from tools.rag.models import Document, DocumentAttachment
-from tools.rag.tests._helpers import _workstream, make_document, make_user, posture
+from tools.rag.tests._helpers import (
+    _workstream, make_conversation, make_document, make_user, posture, user_principal,
+)
 
 pytestmark = pytest.mark.django_db
 
@@ -62,6 +69,16 @@ def _matches(filters, metadata: dict) -> bool:
 def _chat_scoped(conversation_id, **overrides):
     doc = make_document(scope=Document.Scope.CONVERSATION, **overrides)
     DocumentAttachment.objects.create(document=doc, conversation_id=conversation_id)
+    return doc
+
+
+def _chat_scoped_document_attached_to(conversation, **overrides):
+    return _chat_scoped(conversation.id, **overrides)
+
+
+def _universal_document_attached_to(conversation, **overrides):
+    doc = make_document(**overrides)
+    DocumentAttachment.objects.create(document=doc, conversation_id=conversation.id)
     return doc
 
 
@@ -509,3 +526,51 @@ class TestTheUploaderMayAdministerTheirOwnChatScopedDocument:
             sign_in(client, stranger)
             response = client.post(reverse("rag-document-reingest", args=[doc.id]))
         assert response.status_code in (403, 404)
+
+
+class TestAChatScopedDocumentFollowsItsConversation:
+    """A `Document` with `scope=conversation` has exactly ONE attachment
+    row, for one conversation -- the invariant `delete_attachments`
+    already depends on. So a ticketed conversation hides its chat-scoped
+    documents too, on both the content read and the library list."""
+
+    def test_it_is_hidden_from_both_document_functions(self):
+        with posture("open"):
+            principal = user_principal(make_user())
+            conversation = make_conversation()
+            document = _chat_scoped_document_attached_to(conversation)
+            delete_conversation(principal, conversation)
+            assert document not in readable_documents(principal)
+            assert document not in listable_documents(principal)
+
+    def test_a_universal_document_attached_to_that_conversation_survives(self):
+        """An attachment is a CLAIM a conversation makes on a document,
+        never the document's own existence."""
+        with posture("open"):
+            principal = user_principal(make_user())
+            conversation = make_conversation()
+            universal = _universal_document_attached_to(conversation)
+            delete_conversation(principal, conversation)
+            assert universal in readable_documents(principal)
+            assert universal in listable_documents(principal)
+
+    def test_attached_documents_drops_rows_for_a_ticketed_conversation(self):
+        with posture("open"):
+            principal = user_principal(make_user())
+            conversation = make_conversation()
+            _chat_scoped_document_attached_to(conversation)
+            delete_conversation(principal, conversation)
+            assert attached_documents(
+                principal, conversation_id=conversation.id) == []
+
+    def test_a_ticketed_document_is_hidden_from_both_functions(self):
+        """Slice 2 makes the library delete write these tickets; the
+        exclusion ships now so both halves land together."""
+        with posture("open"):
+            principal = user_principal(make_user())
+            document = make_document()
+            DeletionTicket.objects.create(
+                kind="document", key=str(document.pk),
+                purge_on=timezone.localdate())
+            assert document not in readable_documents(principal)
+            assert document not in listable_documents(principal)
