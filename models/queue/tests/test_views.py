@@ -609,21 +609,26 @@ class TestResponseTimeoutSettings:
 
 @pytest.mark.django_db
 class TestTheJobExecutionPage:
-    """`jobs-settings` -- the registered settings page all six
+    """`jobs-settings` -- the registered settings page all seven
     `JobSettings` controls now live on (originally four; `max_queued_
     per_principal` joined at C-7 round-3 hardening, `response_timeout_
-    seconds` at the one-timeout task, fix round 1 MINOR 2 -- this class
-    docstring drifted behind both additions until now). What the
-    settings-area guards (`foundation/tests/test_settings_help.py`,
-    `test_page_names.py`, `test_settings_area.py`) already pin is not
-    repeated here; this is the page's own behaviour."""
+    seconds` at the one-timeout task, fix round 1 MINOR 2, `kind_wait_
+    seconds` at Task 16 of the queue memory-governance track,
+    2026-09-21 -- this class docstring drifted behind all three
+    additions until now). What the settings-area guards
+    (`foundation/tests/test_settings_help.py`, `test_page_names.py`,
+    `test_settings_area.py`) already pin is not repeated here; this is
+    the page's own behaviour."""
 
-    def test_it_renders_the_six_controls_each_under_its_own_anchor(self, client):
-        """One id per CONTROL, not one per form. The help card cites six
+    def test_it_renders_the_seven_controls_each_under_its_own_anchor(self, client):
+        """One id per CONTROL, not one per form. The help card cites seven
         separate anchors and two fields sharing one is exactly the defect
         `TestTheModelFieldCoverage` exists to catch -- this is the same
         claim asserted against the rendered page from the page's own
-        side."""
+        side. `kind-waits` (Task 16) is the seventh, added here rather
+        than as a new test -- `registered_test_kind` (autouse) already
+        registers `"test.marker"`, so the wrapper it lives on renders
+        unconditionally regardless."""
         JobSettings.objects.create(
             pk=1, memory_budget_bytes=round(8.5 * 1024**3), max_concurrent_jobs=3,
             retention_limit=20, default_priority=77, max_queued_per_principal=9,
@@ -634,7 +639,8 @@ class TestTheJobExecutionPage:
 
         for anchor in ("memory-budget", "max-concurrent-jobs",
                        "retention-limit", "default-priority",
-                       "max-queued-per-principal", "response-timeout-seconds"):
+                       "max-queued-per-principal", "response-timeout-seconds",
+                       "kind-waits"):
             assert f'id="{anchor}"' in body, anchor
         assert 'value="8.5"' in body
         assert 'value="3"' in body
@@ -646,15 +652,16 @@ class TestTheJobExecutionPage:
     def test_both_forms_post_to_the_one_dispatched_endpoint(self, client):
         """S2's sanctioned topology, from the template's side: ONE POST
         URL for the page, with a hidden `form` field saying which of the
-        three submitted -- never a URL per field. Three forms now
-        (one-timeout task, 2026-09-17 added "timeout"), the test name
-        kept as-is since it names the TOPOLOGY, not a count."""
+        four submitted -- never a URL per field. Four forms now (Task 16
+        of the queue memory-governance track added "waits"), the test
+        name kept as-is since it names the TOPOLOGY, not a count."""
         body = client.get(reverse("jobs-settings")).content.decode()
 
-        assert body.count(f'action="{reverse("jobs-settings-update")}"') == 3
+        assert body.count(f'action="{reverse("jobs-settings-update")}"') == 4
         assert 'name="form" value="budget"' in body
         assert 'name="form" value="retention"' in body
         assert 'name="form" value="timeout"' in body
+        assert 'name="form" value="waits"' in body
 
     def test_it_marks_its_own_sidebar_entry_current(self, client):
         """The one step of the settings-page recipe with no guard of its
@@ -736,6 +743,126 @@ class TestTheJobExecutionPage:
         assert settings_row.retention_limit == 20
         assert settings_row.default_priority == 77
         assert not AuditEvent.objects.filter(action=actions.QUEUE_SETTINGS_UPDATED).exists()
+
+
+# --- Task 16: per-kind wait ceilings (spec §3.5a) ----------------------------
+
+
+@pytest.mark.django_db
+class TestTheWaitCeilingForm:
+    """`JobSettings.kind_wait_seconds` -- the fourth settings form
+    (`form="waits"`, `models.queue.views._update_kind_waits`), one row
+    per REGISTERED job kind (`_job_settings_context`'s `kind_wait_rows`),
+    never a fixed template field list -- `registered_test_kind` (autouse,
+    this module's own top-of-file fixture) already registers
+    `"test.marker"` for every test here, so it is always one of the rows
+    a POST to this form iterates.
+
+    DEVIATIONS FROM THE BRIEF'S LITERAL FIXTURE LIST, both named here:
+    `admin_signed_in` does not exist anywhere in this codebase --
+    `TestTheUnsetBudgetIsLoud`'s own class docstring (below) names the
+    same absence and the same reason (the open posture this suite runs
+    under renders `identity_is_admin` True for every viewer, so no
+    sign-in is needed to reach an admin-gated form) -- plain `client` is
+    used throughout instead, matching that precedent. `reset_registry`
+    is not a fixture this module defines either (unlike `test_worker.py`/
+    `test_backend.py`, which build one via `registry_reset_fixture`);
+    `registered_test_kind`'s own snapshot/clear/restore already covers
+    every test in this file, so a test that registers an extra kind of
+    its own simply does so directly, with no second fixture to name."""
+
+    def _post(self, client, **fields):
+        data = {"form": "waits"}
+        data.update(fields)
+        return client.post(reverse("jobs-settings-update"), data, follow=True)
+
+    def test_one_row_per_registered_kind_renders_from_the_registry(self, client):
+        register_job_kind(
+            JobKind(
+                key="test.echo", label="Echo", planner=f"{MODULE}.plan_noop",
+                handler=f"{MODULE}.handle_noop", summarizer=f"{MODULE}.summarize_marker",
+            )
+        )
+
+        body = client.get(reverse("jobs-settings")).content.decode()
+
+        assert "Echo" in body
+        assert 'name="wait_test.echo"' in body
+
+    def test_saving_one_leaves_the_others_untouched(self, client):
+        register_job_kind(
+            JobKind(
+                key="test.a", label="A", planner=f"{MODULE}.plan_noop",
+                handler=f"{MODULE}.handle_noop", summarizer=f"{MODULE}.summarize_marker",
+            )
+        )
+        register_job_kind(
+            JobKind(
+                key="test.b", label="B", planner=f"{MODULE}.plan_noop",
+                handler=f"{MODULE}.handle_noop", summarizer=f"{MODULE}.summarize_marker",
+            )
+        )
+        # `get_solo()` FIRST -- same fix `TestTheUnsetBudgetIsLoud.test_a_
+        # set_budget_renders_no_callout` names for the identical
+        # `.filter(pk=1).update(...)`-on-an-empty-table shape.
+        JobSettings.get_solo()
+        JobSettings.objects.filter(pk=1).update(kind_wait_seconds={"test.a": 10, "test.b": 20})
+
+        self._post(client, **{"wait_test.a": "900", "wait_test.b": "20"})
+
+        assert JobSettings.get_solo().kind_wait_seconds == {"test.a": 900, "test.b": 20}
+
+    def test_a_blank_value_clears_that_kinds_ceiling(self, client):
+        JobSettings.get_solo()
+        JobSettings.objects.filter(pk=1).update(kind_wait_seconds={"test.marker": 300})
+
+        self._post(client, **{"wait_test.marker": ""})
+
+        assert JobSettings.get_solo().kind_wait_seconds == {}
+
+    def test_a_non_numeric_value_saves_nothing_and_says_so(self, client):
+        response = self._post(client, **{"wait_test.marker": "abc"})
+
+        assert "must be a whole number of seconds" in response.content.decode()
+        assert JobSettings.get_solo().kind_wait_seconds == {}
+
+    def test_a_mixed_post_over_a_seeded_map_proves_all_or_nothing_not_partial(self, client):
+        """F2 (review): the single-field post above cannot tell 'nothing
+        was saved' apart from 'the good field was saved and the bad one
+        was skipped', because it starts from an empty map -- this pins
+        the actual never-500 promise `_update_kind_waits`'s own docstring
+        makes ('a bad field for ANY one kind leaves the WHOLE map --
+        every kind's entry, not just the bad one's -- exactly as it
+        was'), the same mixed-post shape `TestBudgetConcurrencySettings`/
+        `TestRetentionPrioritySettings`/`TestResponseTimeoutSettings`
+        each already use to pin their own form's all-or-nothing save."""
+        register_job_kind(
+            JobKind(
+                key="test.a", label="A", planner=f"{MODULE}.plan_noop",
+                handler=f"{MODULE}.handle_noop", summarizer=f"{MODULE}.summarize_marker",
+            )
+        )
+        register_job_kind(
+            JobKind(
+                key="test.b", label="B", planner=f"{MODULE}.plan_noop",
+                handler=f"{MODULE}.handle_noop", summarizer=f"{MODULE}.summarize_marker",
+            )
+        )
+        JobSettings.get_solo()
+        JobSettings.objects.filter(pk=1).update(kind_wait_seconds={"test.a": 10, "test.b": 20})
+
+        response = self._post(client, **{"wait_test.a": "900", "wait_test.b": "abc"})
+
+        assert "must be a whole number of seconds" in response.content.decode()
+        assert JobSettings.get_solo().kind_wait_seconds == {"test.a": 10, "test.b": 20}
+        assert not AuditEvent.objects.filter(action=actions.QUEUE_SETTINGS_UPDATED).exists()
+
+    def test_an_unknown_kind_key_is_ignored_rather_than_stored(self, client):
+        """The form renders from the registry, so a posted key that names
+        no registered kind is tampering, not data."""
+        self._post(client, **{"wait_test.marker": "100", "wait_bogus.kind": "999"})
+
+        assert JobSettings.get_solo().kind_wait_seconds == {"test.marker": 100}
 
 
 # --- Task 15: the unset budget is loud, and the prefill names the worker ----

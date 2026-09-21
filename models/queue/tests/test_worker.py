@@ -834,6 +834,126 @@ class TestJobContextWriters:
         assert job_b.progress == {"done": 5, "total": 10, "unit": "items", "label": ""}
 
 
+@pytest.mark.django_db
+class TestTheWaitCeiling:
+    """`Worker._build_job_context`'s wait-ceiling resolution (Task 16,
+    spec §3.5a): the OPERATOR's own `JobSettings.kind_wait_seconds` entry
+    for a kind wins when present, else that kind's own code-declared
+    `JobKind.default_wait_seconds`, else `None` -- never a guess. Rides
+    on the SAME `get_solo()` call `TestJobContextWriters`'s own
+    `response_timeout_seconds` tests already pin
+    (`test_resolving_it_costs_no_second_settings_read` below is this
+    class's own version of that pin). An unregistered kind degrades to
+    `None` rather than raising, same as an unreadable settings row does
+    for `response_timeout_seconds`."""
+
+    def test_the_operators_value_wins_for_that_kind(self, worker):
+        # `get_solo()` FIRST: `.filter(pk=1).update(...)` alone updates
+        # zero rows against an empty table (no data migration seeds
+        # `pk=1`), which would leave `kind_wait_seconds` at its own `{}`
+        # default and make this assertion pass for the wrong reason --
+        # the exact fix `TestTheUnsetBudgetIsLoud::test_a_set_budget_
+        # renders_no_callout` (`models/queue/tests/test_views.py`) names
+        # for the identical brief-snippet shape. Deviation from the
+        # brief's literal `.filter(pk=1).update(...)`-only snippet, named
+        # here.
+        JobSettings.get_solo()
+        JobSettings.objects.filter(pk=1).update(kind_wait_seconds={"test.echo": 42})
+
+        ctx = worker._build_job_context(
+            {"id": 1, "kind": "test.echo", "claim_token": uuid.uuid4()}
+        )
+
+        assert ctx.wait_seconds == 42
+
+    def test_a_kinds_declared_default_applies_with_no_operator_value(
+        self, worker, reset_registry,
+    ):
+        register_job_kind(JobKind(
+            key="test.slow",
+            label="Slow",
+            planner=f"{MODULE}.plan_no_models",
+            handler=f"{MODULE}.echo_handler",
+            summarizer=f"{MODULE}.summarize_noop",
+            default_wait_seconds=900,
+        ))
+
+        ctx = worker._build_job_context(
+            {"id": 1, "kind": "test.slow", "claim_token": uuid.uuid4()}
+        )
+
+        assert ctx.wait_seconds == 900
+
+    def test_a_kind_declaring_nothing_gets_none_not_a_guess(self, worker, reset_registry):
+        # Review F1: registering "test.echo" here (rather than leaving it
+        # unregistered) is load-bearing -- `reset_registry` (autouse in
+        # this module) empties the registry per test, so without this
+        # call the lookup would take `get_job_kind`'s `ValueError`
+        # branch and this test would be a byte-for-byte behavioural
+        # duplicate of `test_an_unregistered_kind_does_not_raise` below,
+        # pinning nothing about a REGISTERED kind that simply declares no
+        # `default_wait_seconds`.
+        register_job_kind(JobKind(
+            key="test.echo",
+            label="Echo",
+            planner=f"{MODULE}.plan_no_models",
+            handler=f"{MODULE}.echo_handler",
+            summarizer=f"{MODULE}.summarize_noop",
+        ))
+
+        ctx = worker._build_job_context(
+            {"id": 1, "kind": "test.echo", "claim_token": uuid.uuid4()}
+        )
+
+        assert ctx.wait_seconds is None
+
+    def test_an_unregistered_kind_does_not_raise(self, worker):
+        ctx = worker._build_job_context(
+            {"id": 1, "kind": "test.gone", "claim_token": uuid.uuid4()}
+        )
+
+        assert ctx.wait_seconds is None
+
+    def test_resolving_it_costs_no_second_settings_read(self, worker, django_assert_num_queries):
+        """It rides on the row `_build_job_context` already fetches for
+        `response_timeout_seconds` -- a SECOND `get_solo()` would be a
+        query-count regression and is explicitly not how this is read.
+
+        THE ROW IS CREATED FIRST, deliberately: `get_solo()` is a
+        `get_or_create`, so on a database where the singleton does not yet
+        exist it is a SELECT plus savepoint/INSERT/RELEASE, and a pin
+        written without this line would pass or fail on fixture ordering
+        rather than on the code under test."""
+        JobSettings.get_solo()
+
+        with django_assert_num_queries(1):
+            worker._build_job_context(
+                {"id": 1, "kind": "test.echo", "claim_token": uuid.uuid4()}
+            )
+
+    def test_a_malformed_persisted_map_degrades_to_none_rather_than_raising(self, worker):
+        """F3 (review): `_resolve_wait_seconds` is called INSIDE the same
+        guarded `try` `response_timeout_seconds` already relies on
+        (`_build_job_context`'s own docstring: anything this method lets
+        escape strands the job RUNNING forever, since the call sits
+        outside `_execute`'s own guard). A `kind_wait_seconds` that is
+        not even a dict -- reachable only through a hand-edited row or a
+        future writer, never through `_update_kind_waits` itself, which
+        can only ever produce `dict[str, int]` -- must degrade BOTH
+        stamped values to `None` together, exactly like an unreadable
+        settings row already does, rather than raising `AttributeError`
+        out of this method."""
+        JobSettings.get_solo()
+        JobSettings.objects.filter(pk=1).update(kind_wait_seconds="not-a-dict")
+
+        ctx = worker._build_job_context(
+            {"id": 1, "kind": "test.echo", "claim_token": uuid.uuid4()}
+        )
+
+        assert ctx.wait_seconds is None
+        assert ctx.response_timeout_seconds is None
+
+
 @pytest.mark.django_db(transaction=True)
 class TestStaleWriteback:
     def test_mismatched_claim_token_writeback_is_discarded(self, worker):

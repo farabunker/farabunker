@@ -228,6 +228,47 @@ def _total_memory_bytes() -> int:
     return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
 
 
+def _resolve_wait_seconds(settings_row: JobSettings, kind: str | None) -> float | None:
+    """This job's `JobContext.wait_seconds` (spec §3.5a): the OPERATOR's
+    per-kind override (`settings_row.kind_wait_seconds`) when one is
+    present, else the KIND's own code-declared `JobKind.
+    default_wait_seconds`, else `None` -- never a guess.
+
+    Takes `settings_row` rather than reading `JobSettings.get_solo()`
+    itself -- this rides on the SAME row `_build_job_context` already
+    fetched for `response_timeout_seconds`; a second read here would be
+    the query-count regression `JobSettings.kind_wait_seconds`'s own
+    field comment names, and is explicitly not how this is read.
+
+    The operator's key is checked FIRST and, when present, wins WITHOUT
+    ever resolving the kind through the registry -- an operator override
+    for a kind that has since been unregistered (or was mistyped) still
+    reads back exactly as saved; nothing about honouring it depends on
+    the kind existing. Only the FALLBACK path (no operator value for this
+    kind) needs `get_job_kind`, and its `ValueError` for an unregistered
+    kind is tolerated here, never raised -- `_build_job_context`'s own
+    caller (`Worker._execute`) sits outside a guard for this method (see
+    its docstring), so nothing this function does may strand a job
+    RUNNING forever over a kind lookup.
+
+    `kind=None` (`_build_job_context` reads it via `descriptor.get
+    ("kind")`, never `descriptor["kind"]`) degrades the same tolerant
+    way: some hand-built descriptors in this test suite name no `"kind"`
+    at all (they exercise `_build_job_context`'s progress/checkpoint
+    writers, not job-kind dispatch), and a real claim descriptor
+    (`models.queue.claim.claim_and_admit`) always carries one -- this is
+    a test-fixture accommodation, not a production path this function
+    expects to take."""
+    override = settings_row.kind_wait_seconds.get(kind)
+    if override is not None:
+        return float(override)
+    try:
+        default = get_job_kind(kind).default_wait_seconds
+    except ValueError:
+        return None
+    return None if default is None else float(default)
+
+
 class Worker:
     """One worker process: claims admitted jobs and runs them in a thread
     pool. `worker_id` defaults to `f"{socket.gethostname()}:{os.getpid()}"`
@@ -998,6 +1039,13 @@ class Worker:
         the `JobContext` `agents.runtime.loop` reads it back from. One
         extra read per job execution, not per tick.
 
+        THE WAIT CEILING (spec §3.5a) RIDES ON THIS SAME READ. `get_solo()`
+        is called ONCE here, and BOTH `response_timeout_seconds` and
+        `wait_seconds` are derived off that one row (`_resolve_wait_
+        seconds` above never reads `JobSettings` itself) -- see that
+        function's own docstring for why a second `get_solo()` for the
+        wait map is explicitly not how this is read.
+
         GUARDED, NOT TRUSTED (fix round 1, B1): `_execute` -- THIS
         method's one caller -- is contracted to never raise past its own
         `try`/`finally` (see that method's own docstring); the call to
@@ -1011,19 +1059,40 @@ class Worker:
         mid-deploy box) -- exactly the window `response_timeout_seconds
         =None`'s documented fallback (`agents.limits.TURN_DEADLINE_
         SECONDS`) exists for. So the read is wrapped here, not trusted:
-        an unreadable settings row degrades to that same `None` fallback
-        rather than ever propagating out of this method.
+        an unreadable settings row degrades BOTH `response_timeout_
+        seconds` and `wait_seconds` to that same `None` fallback rather
+        than ever propagating out of this method. An unregistered job
+        kind (`models.contracts.jobkinds.get_job_kind`'s `ValueError`,
+        resolved inside `_resolve_wait_seconds`) is tolerated the same
+        way -- `wait_seconds` degrades to `None`, never raises.
         """
         job_id = descriptor["id"]
         claim_token = descriptor["claim_token"]
         try:
-            response_timeout_seconds = float(JobSettings.get_solo().response_timeout_seconds)
+            settings_row = JobSettings.get_solo()
+            response_timeout_seconds = float(settings_row.response_timeout_seconds)
+            # Review F3: resolved INSIDE this same try, not after it --
+            # `_resolve_wait_seconds` can still raise on a malformed
+            # PERSISTED value (`float("abc")` if a non-numeric string
+            # ever lands in the map, `AttributeError` if `kind_wait_
+            # seconds` is ever not a dict at all), and this method's own
+            # docstring states the rule plainly: anything it lets escape
+            # strands the job RUNNING forever, because the call to THIS
+            # method sits outside `_execute`'s own guard. Today's only
+            # writer (`models.queue.views._update_kind_waits`) cannot
+            # produce either shape, but a hand-edited row or a future
+            # writer is exactly the "not-yet-migrated column on a
+            # mid-deploy box" class of surprise the paragraph below
+            # already accepts for `get_solo()` itself -- one degradation
+            # path should cover all three values, not two of three.
+            wait_seconds = _resolve_wait_seconds(settings_row, descriptor.get("kind"))
         except Exception:  # noqa: BLE001 -- never-500 parity: degrade, never strand the job
             logger.exception(
                 "worker: job %s could not read the response timeout; falling back to "
                 "agents.limits.TURN_DEADLINE_SECONDS", job_id,
             )
             response_timeout_seconds = None
+            wait_seconds = None
         last_progress_monotonic: list[float | None] = [None]
 
         def _report(progress: dict) -> None:
@@ -1050,6 +1119,7 @@ class Worker:
             _report=_report,
             _checkpoint=_checkpoint,
             response_timeout_seconds=response_timeout_seconds,
+            wait_seconds=wait_seconds,
         )
 
     def _execute(self, descriptor: dict) -> None:

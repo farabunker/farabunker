@@ -52,7 +52,7 @@ from foundation.settings_area import settings_redirect
 from foundation.settings_bounds import (
     BIGINT_FIELD_MAX, POSITIVE_INT_FIELD_MAX, exceeds_field_ceiling,
 )
-from models.contracts.jobkinds import get_job_kind, resolve_dotted_path
+from models.contracts.jobkinds import all_job_kinds, get_job_kind, resolve_dotted_path
 from models.contracts.queue import QueueUnavailable
 from models.queue.visibility import may_read_job_content, may_see_job_id, visible_rows
 
@@ -124,7 +124,22 @@ def _job_settings_context(settings_row: JobSettings | None) -> dict:
     every other value above -- a box that has never run a worker (or is
     on the degraded path) has genuinely never had the fact measured, and
     the settings page's own `{% if detected_memory_human %}` already
-    treats `None` as "say nothing" rather than a value to fake."""
+    treats `None` as "say nothing" rather than a value to fake.
+
+    Task 16 (spec §3.5a): `kind_wait_rows` is ONE `{key, label, value}`
+    per `all_job_kinds()` -- registration order, matching every other
+    registry-driven sweep in this codebase (`all_job_kinds()`'s own
+    docstring) -- so the template needs no edit when a feature app
+    registers a new kind; the row simply appears the next time this box
+    imports it. `value` is the OPERATOR's own saved override
+    (`settings_row.kind_wait_seconds.get(key, "")`, blank when unset),
+    never the kind's code-declared `default_wait_seconds` -- this is the
+    editable half of the ceiling, and prefilling an input with a value
+    the operator never saved would make a blank Save silently pin the
+    code default into the database. A degraded box (`settings_row is
+    None`) has no map to read at all, so every row's `value` is blank --
+    the same "say nothing false" the rest of this branch already gives
+    every other field."""
     if settings_row is None:
         return {
             "memory_budget_bytes": None,
@@ -137,6 +152,9 @@ def _job_settings_context(settings_row: JobSettings | None) -> dict:
             "response_timeout_seconds": JobSettings.RESPONSE_TIMEOUT_SECONDS_DEFAULT,
             "detected_memory_human": None,
             "detected_memory_at": None,
+            "kind_wait_rows": [
+                {"key": kind.key, "label": kind.label, "value": ""} for kind in all_job_kinds()
+            ],
         }
     return {
         "memory_budget_bytes": settings_row.memory_budget_bytes,
@@ -152,6 +170,14 @@ def _job_settings_context(settings_row: JobSettings | None) -> dict:
         "response_timeout_seconds": settings_row.response_timeout_seconds,
         "detected_memory_human": _human_size(settings_row.detected_memory_bytes),
         "detected_memory_at": settings_row.detected_memory_at,
+        "kind_wait_rows": [
+            {
+                "key": kind.key,
+                "label": kind.label,
+                "value": settings_row.kind_wait_seconds.get(kind.key, ""),
+            }
+            for kind in all_job_kinds()
+        ],
     }
 
 
@@ -516,11 +542,13 @@ def queue_settings_update(request):
     """POST /queue/settings/update/ -- ONE endpoint for EVERY settings
     form the Job execution page renders (budget + max concurrent jobs;
     retention limit + default priority + per-principal cap; response
-    timeout, added by the one-timeout task, 2026-09-17), matching the
-    task's explicit "same POST handler" instruction for each. A hidden
-    `form` field (`"budget"` / `"retention"` / `"timeout"`) says which one
-    posted -- each form only ever submits its OWN fields, so this
-    dispatches cleanly without any cross-form field collision.
+    timeout, added by the one-timeout task, 2026-09-17; per-kind wait
+    ceilings, added by Task 16 of the queue memory-governance track,
+    2026-09-21), matching the task's explicit "same POST handler"
+    instruction for each. A hidden `form` field (`"budget"` /
+    `"retention"` / `"timeout"` / `"waits"`) says which one posted -- each
+    form only ever submits its OWN fields, so this dispatches cleanly
+    without any cross-form field collision.
 
     THIS IS THE SANCTIONED SETTINGS WRITE TOPOLOGY (S2, Coherence Wave
     C): one dispatched POST endpoint per settings page, never one URL
@@ -563,7 +591,7 @@ def queue_settings_update(request):
     existing precedent, not an oversight new to this view.
     """
     form = request.POST.get("form", "").strip()
-    if form not in ("budget", "retention", "timeout"):
+    if form not in ("budget", "retention", "timeout", "waits"):
         messages.error(request, f"{form!r} is not a recognised settings form.")
         return settings_redirect(request, "jobs-settings")
 
@@ -572,8 +600,10 @@ def queue_settings_update(request):
         _update_budget_and_concurrency(request, settings_row)
     elif form == "retention":
         _update_retention_and_priority(request, settings_row)
-    else:
+    elif form == "timeout":
         _update_response_timeout(request, settings_row)
+    else:
+        _update_kind_waits(request, settings_row)
 
     return settings_redirect(request, "jobs-settings")
 
@@ -804,6 +834,69 @@ def _update_response_timeout(request, settings_row: JobSettings) -> None:
             response_timeout_seconds=value,
         )
     messages.info(request, f"Response timeout set to {value} seconds.")
+
+
+def _update_kind_waits(request, settings_row: JobSettings) -> None:
+    """Validates and saves the WHOLE `kind_wait_seconds` map from one POST
+    of the fourth form (Task 16 of the queue memory-governance track,
+    spec §3.5a) -- one `wait_<kind key>` field per row `_job_settings_
+    context`'s `kind_wait_rows` rendered, `jobs/settings.html`'s own
+    template loop over `all_job_kinds()`.
+
+    THE REGISTRY IS THE ALLOWLIST, not the posted field names: only keys
+    named by `all_job_kinds()` are ever looked up in `request.POST`, so a
+    posted `wait_<key>` for a key that names no registered kind is
+    tampering, not data -- it is never read, and therefore never stored,
+    even if it happens to already be present (e.g. left over from a kind
+    that has since been unregistered) in the row's own saved map. That
+    last case is deliberate too: an already-saved override for a kind
+    that is no longer registered survives an UNRELATED save through this
+    form, because this only ever touches keys currently in the registry --
+    it does not prune the map down to exactly the registered set on every
+    submission.
+
+    Same never-500, all-or-nothing shape as its three siblings above: a
+    bad field for ANY one kind leaves the WHOLE map -- every kind's
+    entry, not just the bad one's -- exactly as it was, and nothing is
+    saved. Blank means "clear this kind's own ceiling" (the map's own
+    "no operator override, fall back to the kind's own `default_wait_
+    seconds`" contract, `models.contracts.jobkinds.JobKind.
+    default_wait_seconds`'s own docstring) -- a clean, valid input, not
+    an error, the same "blank means unset" grammar `_update_budget_and_
+    concurrency`'s `budget_gb` already gives its own null-means-unset
+    field."""
+    updated = dict(settings_row.kind_wait_seconds)
+    for kind in all_job_kinds():
+        raw = request.POST.get(f"wait_{kind.key}", "").strip()
+        if not raw:
+            updated.pop(kind.key, None)
+            continue
+        try:
+            seconds = int(raw)
+        except ValueError:
+            messages.error(
+                request, f"Wait ceiling for {kind.label!r} must be a whole number of seconds.",
+            )
+            return
+        if seconds <= 0:
+            messages.error(
+                request, f"Wait ceiling for {kind.label!r} must be a positive number.",
+            )
+            return
+        if exceeds_field_ceiling(seconds, max_stored=POSITIVE_INT_FIELD_MAX):
+            messages.error(request, f"Wait ceiling for {kind.label!r} is too large.")
+            return
+        updated[kind.key] = seconds
+
+    settings_row.kind_wait_seconds = updated
+    with transaction.atomic():
+        settings_row.save(update_fields=["kind_wait_seconds"])
+        audit.record(
+            principal_for_request(request), actions.QUEUE_SETTINGS_UPDATED,
+            target_type="jobsettings", target_key=settings_row.pk,
+            kind_wait_seconds=updated,
+        )
+    messages.info(request, "Wait ceilings saved.")
 
 
 @require_POST

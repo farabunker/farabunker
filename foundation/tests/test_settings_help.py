@@ -383,6 +383,13 @@ _FIELD_ANCHORS: dict[str, dict[str, str]] = {
         # more "operator-editable" fields; see that test's own docstring.
         "detected_memory_bytes": "detected-memory",
         "detected_memory_at": "detected-memory-at",
+        # Task 16 (queue memory-governance, 2026-09-21): the per-kind
+        # wait-ceiling map. ONE model field (a single `JSONField`), so it
+        # carries ONE anchor here even though its own page renders it as
+        # one row per registered job kind -- `test_no_two_fields_on_one_
+        # model_share_an_anchor` below is a MODEL-field constraint, and
+        # this is exactly one field.
+        "kind_wait_seconds": "kind-waits",
     },
 }
 
@@ -529,10 +536,20 @@ class TestTheModelFieldCoverage:
         renders goes uncovered -- applies to a display-only fact exactly
         as much as to a control. Mapping them keeps that point true
         rather than carving out an exception for it; `queue_excluded`
-        stays `0` because neither is a `_NAMED_EXCLUSIONS` entry either."""
+        stays `0` because neither is a `_NAMED_EXCLUSIONS` entry either.
+
+        TWENTY BECAME TWENTY-ONE when Task 16 of the same track
+        (2026-09-21) added `JobSettings.kind_wait_seconds`'s fourth form
+        (`"waits"`, `id="kind-waits"`) -- back to an OPERATOR-EDITABLE
+        control, same category as the audit's own eighteen, not the
+        display-only pair just above. ONE model field, ONE `HelpField`
+        anchor, even though its own page renders it as one row per
+        registered job kind: `test_no_two_fields_on_one_model_share_an_
+        anchor` above is about MODEL fields sharing an anchor, and this
+        is exactly one field carrying one."""
         mapped_count = sum(len(v) for v in _FIELD_ANCHORS.values())
         queue_excluded = sum(1 for (m, _f) in _NAMED_EXCLUSIONS if m == "JobSettings")
-        # 4 IdentitySettings + 1 ChatSettings + 7 RagSettings + 6 JobSettings
+        # 4 IdentitySettings + 1 ChatSettings + 7 RagSettings + 7 JobSettings
         # (operator-editable) + 2 JobSettings (worker-measured, display-only)
-        assert mapped_count == 20
+        assert mapped_count == 21
         assert queue_excluded == 0

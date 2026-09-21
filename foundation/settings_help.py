@@ -520,6 +520,23 @@ CARDS: tuple[HelpCard, ...] = (
                     "memory budget by itself."
                 ),
             ),
+            HelpField(
+                name="Per-kind wait ceilings",
+                anchor="kind-waits",
+                meaning=(
+                    "One row per registered job kind: how long that kind's own handler may "
+                    "wait on its engine before giving up, in seconds. Left BLANK for a kind, "
+                    "that kind falls back to its own code-declared default -- or no ceiling "
+                    "at all, for a kind that declares none."
+                ),
+                effects=(
+                    "Applies to the next job of that kind that runs; a job already running "
+                    "keeps whatever ceiling it started with. A kind whose ceiling expires "
+                    "must not report a finished job while its engine still reports the work "
+                    "running -- the ceiling bounds how long a handler waits, never how long "
+                    "the underlying work is allowed to take."
+                ),
+            ),
         ),
     ),
     HelpCard(

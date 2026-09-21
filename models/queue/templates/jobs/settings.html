@@ -31,6 +31,23 @@ RESPONSE TIMEOUT (one-timeout task, 2026-09-17) gets its OWN section
 and its OWN dispatched `form` value (`"timeout"`) -- a chat/agent turn's
 own wall-clock limit is a different kind of policy from the budget and
 retention groups below it, not a sixth field folded into either.
+
+WAIT CEILINGS (Task 16, queue memory-governance track, 2026-09-21) is
+the FOURTH form and dispatched `form` value (`"waits"`), one editable
+row per `kind_wait_rows` (one `{key, label, value}` per registered job
+kind, `models.queue.views._job_settings_context`) -- so a feature app
+registering a new job kind needs no edit here, the row simply appears
+the next time this template renders. `kind_wait_seconds` is ONE
+`JSONField` on `JobSettings` (`models/queue/models.py`), so it carries
+ONE anchor (`id="kind-waits"`) on the section wrapping every row, not
+one per kind -- `foundation/tests/test_settings_help.py::
+TestTheModelFieldCoverage` maps MODEL FIELDS to `HelpField`s, and this
+is one field, however many rows it renders as. The anchor is
+UNCONDITIONAL, on the wrapper `<div>` itself rather than inside the
+`{% templatetag openblock %} for {% templatetag closeblock %}` loop, so
+it exists even on a box with zero registered kinds -- the same
+"anchor span must not be hidden, and must exist regardless of what it
+wraps" rule Task 15's `#detected-memory-at` comment already states.
 {% endcomment %}
 {% block title %}Job execution — farabunker{% endblock %}
 {% block side_current_jobs %}current{% endblock %}
@@ -203,6 +220,28 @@ retention groups below it, not a sixth field folded into either.
       </div>
     </form>
     <p class="caveat">How long a single agent or chat response may take end to end, from 60 to 7200 seconds (1 minute to 2 hours). This is the ONLY timeout that governs a turn -- the chat model's own inner request timeout is now built from this same value, so it never ends a turn before this limit does.</p>
+  </section>
+
+  <section class="settings">
+    <h2>Per-kind wait ceilings</h2>
+    <form method="post" action="{% url 'jobs-settings-update' %}{{ assistant.open_query }}">
+      {% csrf_token %}
+      <input type="hidden" name="form" value="waits">
+      <div class="settings-row" id="kind-waits">
+        {% for row in kind_wait_rows %}
+        <div>
+          <label for="wait_{{ row.key }}">{{ row.label }}</label>
+          <input type="number" id="wait_{{ row.key }}" name="wait_{{ row.key }}" min="1" step="1" value="{{ row.value }}" placeholder="no ceiling">
+        </div>
+        {% endfor %}
+        <button type="submit">Save</button>
+      </div>
+    </form>
+    {% if kind_wait_rows %}
+    <p class="caveat">How long each job kind's own handler may wait on its engine before giving up, in seconds. Blank falls back to that kind's own code-declared default, or no ceiling at all when it declares none. A kind whose ceiling expires must not report a finished job while its engine still reports the work running.</p>
+    {% else %}
+    <p class="caveat">No job kinds are registered on this box yet, so there is nothing to set a ceiling for.</p>
+    {% endif %}
   </section>
   {% endif %}
 
