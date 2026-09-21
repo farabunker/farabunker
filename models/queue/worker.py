@@ -1088,8 +1088,10 @@ class Worker:
             wait_seconds = _resolve_wait_seconds(settings_row, descriptor.get("kind"))
         except Exception:  # noqa: BLE001 -- never-500 parity: degrade, never strand the job
             logger.exception(
-                "worker: job %s could not read the response timeout; falling back to "
-                "agents.limits.TURN_DEADLINE_SECONDS", job_id,
+                "worker: job %s could not read the response timeout or the per-kind wait "
+                "ceiling; both fall back to None (the response timeout to "
+                "agents.limits.TURN_DEADLINE_SECONDS, the wait ceiling to no ceiling)",
+                job_id,
             )
             response_timeout_seconds = None
             wait_seconds = None

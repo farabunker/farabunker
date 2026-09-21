@@ -46,7 +46,7 @@ Every task's requirements implicitly include all of these.
 - **No AI model or vendor names in committed prose.** Engine names (`ollama`, `comfyui`, "the image engine", "the text engine") are fine; checkpoint filenames and vendor model names are not. `foundation/ops/tests/test_docs_model_names.py` walks `docs/superpowers/` too — run it in any task that touches a `.md`.
 - **No absolute machine paths** in tracked files (`<repo>`, `<worktree>`, `<home>`); tests build paths from `tmp_path`.
 - **No `conftest.py`.** Shared fixtures live in each app's `tests/_helpers.py` and are imported by name.
-- **Import law.** `agents/` never imports `models.queue` (only `models.contracts`). `models/queue` never imports `agents`. `models/contracts` imports neither. The stranded-turn reconciliation therefore lives in `agents/runtime/jobs.py` and is reached by `agents/chat`, never by the queue.
+- **Import law.** `agents/` never imports `models.queue` (only `models.contracts`). `models/queue` never imports `agents`. `models/contracts` imports neither. The stranded-turn reconciliation therefore lives in `agents/runtime/jobs.py` and is reached by `agents/chat`, never by the queue. *(Corrected 2026-09-21 as shipped, Task 19: it lives in NEW `agents/reconcile.py`, at the column root — not in `agents/runtime/jobs.py`. `reconcile_stranded_turn` must call `models.contracts.queue.get_job`, and `foundation/ops/tests/test_column_boundaries.py::test_no_runtime_module_blocks_on_a_queue_job` forbids that call anywhere under `agents/runtime/`. The import law itself is unchanged; only the module that satisfies it moved.)*
 - **Cross-column law.** No file under `tools/` is edited. The only adapter edit in this branch is Task 11's two pre-cleared one-liners.
 - **Two migrations, two apps, seven columns — no more.** `models/registry/migrations/0009_*` (2 columns, Task 1) and `models/queue/migrations/0005_*` (5 columns, Task 10). Verified against the tree on 2026-09-21: registry's highest is `0008_modelset.py`, the queue's is `0004_jobsettings_response_timeout_seconds.py`. Every task after 10 consumes columns that already exist; **no task may add a third migration**. `python manage.py makemigrations --check --dry-run` is part of the final gate.
 - **Engine optional seams are read with `getattr`, never `hasattr` branching, and always degrade** — the idiom `_residency_snapshot`/`_evict_*` already use for `list_installed`/`unload`, extended to `unload_scope` and `residency_authority`.
@@ -85,7 +85,7 @@ Every task's requirements implicitly include all of these.
 | `models/queue/tests/test_claim.py` | kind-aware sweep, `not_before`, pass-over increment (+ its **newly authored** query pin) | 6, 12, 14 |
 | `models/queue/tests/test_scheduler.py` | `affinity_order` table tests; invariants re-pinned | 14 |
 | `models/queue/tests/test_views.py` | hold-off/passed-over readings, loud budget, wait-ceiling form, never-500 | 13, 14, 15, 16 |
-| `agents/runtime/jobs.py` | + `reconcile_stranded_turn` / `reconcile_stranded_turns` | 17 |
+| `agents/reconcile.py` | **new** (2026-09-21 correction, Task 19 — this row read `agents/runtime/jobs.py`) — `STRANDED_TURN_GRACE_SECONDS`, `reconcile_stranded_turn`, `reconcile_stranded_turns`, `count_stranded_turns`. Outside `agents/runtime/`, because `test_no_runtime_module_blocks_on_a_queue_job` forbids the `get_job` call this module IS. `agents/runtime/jobs.py` is **not edited by this plan**. | 17 |
 | `agents/management/commands/reconcile_turns.py` | **new** — the operator sweep, with `--dry-run` | 17 |
 | `agents/chat/views/turns.py` | `turn_status` reconciles a missing job row; retryable `503` | 17, 18 |
 | `agents/chat/templates/chat/conversation.html` | poll loop counts an unactionable body | 18 |
@@ -4409,7 +4409,7 @@ row goes terminal."
 **Spec:** §3.8, owner decision 7 (accepted: idempotent auto-repair), §9.15.
 
 **Files:**
-- Modify: `agents/runtime/jobs.py` (+ `STRANDED_TURN_GRACE_SECONDS`, `reconcile_stranded_turn`, `reconcile_stranded_turns`)
+- Create: `agents/reconcile.py` (+ `STRANDED_TURN_GRACE_SECONDS`, `reconcile_stranded_turn`, `reconcile_stranded_turns`, `count_stranded_turns`) — *2026-09-21 correction, Task 19: this line read "Modify: `agents/runtime/jobs.py`". The module had to move to the column root, because `foundation/ops/tests/test_column_boundaries.py::test_no_runtime_module_blocks_on_a_queue_job` forbids a `get_job` call anywhere under `agents/runtime/`, and this module's whole condition is that call. `agents/runtime/jobs.py` was not edited.*
 - Create: `agents/management/commands/reconcile_turns.py`
 - Modify: `agents/chat/views/turns.py` (`_queued_body`/`_running_body` reconcile a missing job row)
 - Modify: `agents/runtime/tests/test_jobs.py`, `agents/chat/tests/test_turn_status.py`
@@ -4662,7 +4662,7 @@ the read surface already visits exactly the row that matters."
 
 ## Task 18: A poll loop that cannot tick silently for ever
 
-**Spec:** §3.9 (both changes, with change 1 named load-bearing), §9.16.
+**Spec:** §3.9 (both changes, with change 1 named load-bearing), and §9's author decision 16. *(2026-09-21, Task 19: this read "§9.16", which reads as a subsection the spec does not have — §9 is a numbered list of author decisions, not a sectioned chapter. The binding text for this task is §3.9; author decision 16 is the ruling that the loop is fixed in place under its existing exemption. Spelled out rather than renumbered, because the reference itself was correct.)*
 
 **Files:**
 - Modify: `agents/chat/views/turns.py` (`turn_status`'s retryable `503`)
@@ -4677,7 +4677,7 @@ the read surface already visits exactly the row that matters."
 
 **Change 2 is explicitly best-effort** and cannot be a view-local `try` around the body builders: the view touches the database in principal resolution and turn visibility *before* any builder runs, and session middleware touches it before the view is entered at all. The guard therefore wraps the whole view body and names `OperationalError` explicitly — and a truly unavailable database can still produce a non-JSON 5xx that only change 1 handles.
 
-**The gate, and the obligation this creates.** The hand-rolled loop is held in `_EXEMPT` in `foundation/ops/tests/test_shared_poller.py` under a dated, self-deleting exemption whose companion test asserts the loop still exists. Fixing in place is therefore correct today — and when the held follow-up repoints the page onto `foundation/templates/_poller.html`, **change 1 must be carried onto that shared loop** or it is silently lost. Task 21 writes that obligation into `agents/chat/README.md`.
+**The gate, and the obligation this creates.** The hand-rolled loop is held in `_EXEMPT` in `foundation/ops/tests/test_shared_poller.py` under a dated, self-deleting exemption whose companion test asserts the loop still exists. Fixing in place is therefore correct today — and when the held follow-up repoints the page onto `foundation/templates/_poller.html`, **change 1 must be carried onto that shared loop** or it is silently lost. Task 19 writes that obligation into `agents/chat/README.md`. *(2026-09-21: this sentence read "Task 21", a task number this plan does not have — the doc task is 19, as its own heading and the spec-coverage table both say.)*
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4922,7 +4922,7 @@ These must be green **before** the edits, so a later failure is unambiguously th
 - `docs/OPERATIONS.md` — a new section: each new log line and what to do about it; the failed-after-three-refusals error an operator will find on a job row; and `manage.py reconcile_turns` with its `--dry-run`.
 - `docs/EXTENDING.md` — in the job-kind material: a kind declaring its `stale_after_seconds` and `default_wait_seconds`, and the rule about never releasing the exclusive slot early.
 - `agents/chat/README.md` — stranded-turn reconciliation, the poll loop's failure vocabulary, and **the obligation**: when the held follow-up repoints this page onto the shared loop, change 1 must be carried onto `foundation/templates/_poller.html` or it is silently lost.
-- `agents/runtime/README.md` — `jobs.py`'s two new functions and the command.
+- `agents/README.md` — the module-list row for `agents/reconcile.py` and the command. *(2026-09-21 correction, Task 19: this line read "`agents/runtime/README.md` — `jobs.py`'s two new functions and the command". The reconciliation shipped in `agents/reconcile.py`, outside `agents/runtime/`, so it is documented in the column README's module list; `agents/runtime/README.md` carries only a one-line pointer from its `jobs.py` row.)*
 
 **No model or vendor names anywhere** — engine names only ("the image engine", "the text engine", `ollama`, `comfyui`).
 

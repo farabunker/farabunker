@@ -1042,3 +1042,577 @@ stored as `0` should make the turn end immediately via the existing, graceful `b
 branch (which is what a floorless deadline already does correctly) — the real hazard MINOR 7
 named is specifically a REAL httpx client built with `request_timeout=0`, which only ever
 happens at the two `get_llm_for` call sites, both of which now floor there and nowhere else.
+
+## Amendment (2026-09-21) — Queue memory governance: a four-rung footprint ladder, the eviction rewrite, affinity ordering, the worker lifecycle, and the kind registry
+
+A live incident set this track going: the machine ran out of memory while the
+queue believed it had the room, and the queue's own account of what was
+resident — and of what an unload had actually freed — turned out to be a
+belief nothing checked. What follows changes §3, §4, §5, §7 and §8 of this
+ADR. Nothing above is rewritten; every paragraph this amendment supersedes is
+named where it is superseded.
+
+### 1. §4's memory accounting: four rungs, their own label vocabulary, and a recorder that keeps the maximum
+
+**The footprint ladder now has four rungs, walked on `is not None`.**
+`ModelConnection.effective_footprint_bytes` (`models/registry/models.py`)
+resolves `footprint_override_bytes` (the operator's word, always final), then
+`measured_footprint_bytes` (what this queue observed after a run it executed),
+then the NEW `engine_reported_footprint_bytes` (what the engine said a loaded
+copy occupied), then `None` — "unknown", which §4's "unknown or oversize runs
+alone" rule already turns into an exclusive admission. The walk tests
+`is not None`, never truthiness: a genuine zero is a value, and reading it as
+unknown would silently make a zero-cost model exclusive.
+
+Rung 3 exists because those numbers were already on the wire and thrown away.
+`Worker._residency_snapshot` reads each engine's `list_installed` on every
+eviction pass; the `loaded_size` a loaded model carries is now harvested
+there, through `models.registry.bindings.record_engine_reported_footprint` —
+**never a call made for this purpose**. Only a POSITIVE reading is written; a
+missing or zero size writes nothing, because a stored zero reads back as a
+real "this model is free" answer. It is a SEPARATE column from rung 2, not a
+fold into it: the two are facts of different quality, the recorder compares a
+reading only against its own standing value, and one column answering for both
+would make the console's label untrue again.
+
+**Its own label vocabulary, deliberately separate.** `footprint_source` now
+answers `"override"` / `"measured"` / `"engine_reported"` / `None`, keyed to
+`models.registry.views._FOOTPRINT_SOURCE_LABELS` — "set by the operator",
+"measured after a run", "from the engine's residency snapshot", and "not
+measured yet — this model runs alone". It is NOT keyed to `_SOURCE_LABELS`,
+which stays the map for `DiscoveryRow.capability_source`: "detected from the
+model server" is true of a capability probe and a lie about a post-run delta
+measurement. The label is resolved in the view (`_footprint_source_label`),
+not in the template, so the rendered label and the rendered value can no
+longer be two independent decisions about one row; the date is localized
+before formatting, because `date_format` alone does not and the difference is
+a visibly wrong day on a non-UTC box.
+
+**The recorder keeps the maximum, with no tolerance band.** Both recorders now
+go through one writer, `models.registry.bindings._record_footprint`. No
+standing value: write. A reading greater than or equal to the standing value:
+write — a footprint going up is always believed, because under-counting is the
+direction that crashes hosts. A reading BELOW it: refused entirely, neither
+the bytes nor the timestamp, with one line naming the connection, the standing
+value and the refused reading.
+
+There is no tolerance band, and that is the whole reasoning rather than a
+simplification. A percentage tolerance measured against the standing value
+ratchets geometrically: five successive "within tolerance" writes at 0.75×
+walk 26.4 GB down to 6.2 GB, which is the exact shape of the incident the rule
+exists to refuse — and the condition is RECURRING (a model that under-measures
+whenever it is warm), so repeated warm runs are the normal path, not an
+adversarial one. Keeping the maximum makes the standing value a high-water
+mark by construction, with no extra column and no constant to tune.
+`FOOTPRINT_DIP_WARNING_RATIO` (0.75) is a LOG-LEVEL threshold only — a refusal
+under three quarters of the standing value is an operator-actionable WARNING
+naming the remedy (set `footprint_override_bytes`), a smaller dip is INFO —
+and no reading below the standing value is ever written at any ratio. The
+accepted cost is named: a genuinely shrunk model stays high until an operator
+sets an override, which is the safe direction and is already the documented
+correction path.
+
+### 2. §4's eviction, rewritten: what an unload frees, what residency is worth, and what must never be taken
+
+**§4's closing "Eviction reconciles residency to the plan" paragraph is
+superseded by this section.** The guiding principle is unchanged — admission
+plans against declared footprints; eviction makes the machine match the plan —
+and everything else in that paragraph is now narrower, wider, or both.
+
+**Two engine declarations, and the queue must know both.**
+`models.contracts.engines.base.InferenceEngine` gains two OPTIONAL
+declarations, read the same defensive `getattr` way the existing
+`list_installed`/`unload` seams are, never called and never required:
+
+- `unload_scope` — `"model"` means one `unload(endpoint, model_id)` call
+  releases that model and leaves the others; `"endpoint"` means the call
+  releases everything there and `model_id` is *addressing, not selection*.
+- `residency_authority` — `"endpoint"` means the `loaded` flags come from a
+  real residency endpoint the engine answers live, so "nothing resident" is a
+  FACT; `"memo"` means they come from a TTL'd, process-local belief the
+  adapter keeps, so "nothing resident" means "this process does not remember
+  anything", which a restart alone produces.
+
+**Absent or unrecognised reads as the SAFE member of each pair** — `"endpoint"`
+for `unload_scope`, `"memo"` for `residency_authority` (`Worker._unload_scope`,
+`Worker._residency_authority`, and `_UNLOAD_SCOPES`/`_RESIDENCY_AUTHORITIES`
+whose last element is the safe one). The directions are not symmetric, which
+is why the defaults are not: assuming an unload frees the whole endpoint costs
+at worst a needless reload, while wrongly assuming per-model granularity
+destroys a live cold load measured in minutes on this hardware; and treating
+an empty residency answer as forgetfulness costs one precautionary call, while
+trusting it as fact launches an exclusive job on top of memory nobody released.
+
+Both shipped adapters take their lines. The **image engine** declares
+`unload_scope = "endpoint"` (its free call frees every model there) and
+`residency_authority = "memo"` (its `loaded` flags come from its own run memo).
+The **text engine** declares `unload_scope = "model"` (its unload names one
+model and releases that model alone) and `residency_authority = "endpoint"`
+(its `loaded` flags come from a live residency call against the engine). The
+second declaration is what spares an idle text engine a precautionary unload on
+every exclusive admission.
+
+**The protected-key rule, including the admitted batch.**
+`Worker._protected_keys` is the one safety set: every model key held by a
+RUNNING job, UNION every key held by an attempt still in flight in this
+process (`_inflight_refs`). The first half covers this tick's own admitted
+batch for free — `claim_and_admit` has already persisted the admissions as
+`running` before eviction runs — and that matters concretely, because an agent
+turn is planned exclusive, so every chat message runs this pass and an
+unprotected definition would unload that turn's own warm model and cold-load it
+again on every single message. The second half covers the window this ADR's
+2026-08-25 amendment named as its third follow-up: an attempt the orphan sweep
+requeued while its handler is genuinely still cold-loading has a row back at
+`queued` and is invisible to the RUNNING query for exactly as long as that load
+takes.
+
+The rule is applied PER SCOPE. At `"model"` scope, protected keys are skipped
+one by one and everything else at the endpoint is unloaded individually. At
+`"endpoint"` scope, one call frees everything, so the WHOLE endpoint is skipped
+if any protected key lives at it — **with one sanctioned exception, and its
+boundary is the point**: the endpoint is still freed when every protected key
+there belongs to the admitted exclusive job's OWN keys at its OWN endpoint.
+Freeing that endpoint unavoidably takes its own model with it, there is no
+per-model call to make instead, and the job pays at worst one reload. The
+`own_keys` set is EMPTY for every other caller, which is what keeps the
+exception to the one case it is written for; it is never applied to another
+job's key or to a live attempt's.
+
+**The fifth ordering rule: protection is checked before any HTTP.**
+`_evict_to_match_plan` already had four ordering rules; the fifth is that
+`_protection_refusal` runs BEFORE `_residency_snapshot`. The reasoning is cost,
+not taste: the protected set comes from database rows and this process's own
+maps and needs no network at all, while evaluating it after the snapshot would
+pay a full cross-engine probe on every 0.5 s tick for the entire life of the
+protecting attempt — a cold load measured in minutes. A tick refused for
+protection has therefore made **no HTTP call at all**.
+
+**The barrier, redesigned, and the ambiguity of `False`.** An admitted exclusive
+job is not launched until the memory it was promised is actually free. Its
+scope is the WHOLE swept set, not the job's own endpoints. It has four parts:
+the protection refusal above; the real unload calls the exclusive pass makes
+against believed-resident models; a PRECAUTIONARY call at any endpoint where
+the belief is worth nothing; and then reading what those calls said.
+
+`False` from an unload is ambiguous, and the whole design turns on telling its
+two readings apart. A call made against a model the snapshot says is RESIDENT
+is INFORMATIVE: `False` means what it says, and the barrier honours it. A
+PRECAUTIONARY call — made precisely because the belief is worth nothing — gets
+no such weight: the adapter cannot tell "nothing freed" from "nothing to
+free", and a cold, empty endpoint is the common case after a restart, so a rule
+that refused there would make an exclusive job unlaunchable not for one tick but
+for ever. A precautionary `False` is logged at INFO and the job launches on that
+same tick.
+
+**The precautionary call is narrowed, and the narrowing is load-bearing.** It
+is issued only where the belief is worth nothing — the snapshot has no entry
+for that endpoint (unavailable, or the call raised), or the entry reports
+nothing loaded AND the engine declares (or defaults to)
+`residency_authority="memo"`. An engine declaring `"endpoint"` that reports
+nothing gets NO call: it actually knows nothing is resident, so there is
+nothing to barrier and nothing its answer could add. Without that narrowing an
+endpoint-scope adapter runs its settle poll to the full timeout because nothing
+rises, on every exclusive admission — i.e. on every chat turn. A per-turn
+regression of tens of seconds is the symptom that the narrowing has stopped
+working, and is to be caught in a timed smoke check rather than in use.
+
+**The refusal is bounded in count AND in wall clock, with a durable hold-off.**
+A refused job is handed back with `not_before = now + BARRIER_HOLDOFF_SECONDS`
+(45 s, comfortably longer than one unload timeout) so it is not re-claimed on
+every 0.5 s tick against an engine that is still holding memory; its `attempts`
+is deliberately untouched, because it never ran. A job is FAILED only once
+**both** `MAX_BARRIER_REFUSALS` (3) and `MIN_BARRIER_REFUSAL_SPAN_SECONDS`
+(300 s) are satisfied — counting refusals alone is a trap, because an
+informative `False` is exactly what a BUSY engine returns, so three of them
+could elapse in barely more than the time three unload calls take and "three
+attempts" would mean "a second and a half". A successful barrier RESETS the
+count: an engine that released its memory this time has not been failing for
+three spaced attempts. The failure is honest and names what an operator can
+act on — `engine '<name>' at <endpoint> did not release memory for this
+exclusive job after 3 attempts over N minutes; it was not retried again`.
+
+**A PROTECTION refusal is never counted.** That wait is bounded by the live
+attempt's own end, and since an agent turn is planned exclusive, counting it
+would fail three consecutive chat turns for an ordinary long-running foreign
+job at a shared endpoint — a job the queue was correctly waiting for.
+
+**The sweep now sees the whole machine, on the ticks that are entitled to it.**
+`_eviction_targets` starts from the RUNNING jobs' own endpoints and, **only on
+a tick that admits an EXCLUSIVE job**, unions in
+`models.registry.bindings.registered_endpoints()` — the one notion of "every
+engine endpoint this box knows about", shared with the console's own per-engine
+discovery map so a freshly configured engine cannot be visible to one and
+invisible to the other. That endpoint set is the union of the configured
+defaults and every connection row's endpoint, per engine; deriving it from
+connection rows alone would miss a second engine running at its configured
+address with no registered connection yet, which is exactly the case this
+widening exists for. A model left warm on an IDLE engine was never visited
+before; on a unified-memory box that model is the one that crashes the host.
+
+The bound is the cost control: only the admission entitled to the whole machine
+pays for the whole machine to be probed, and every other tick keeps exactly the
+prior reach. **The stated consequence for the budget arithmetic**: `over_budget`
+counts more resident bytes on those ticks than on others, so the number is not
+comparable tick to tick. Deliberate — under-counting resident memory is the
+direction that crashes hosts.
+
+**The budget gate MOVED, and this is not a tidy-up.** Previously an unset
+`memory_budget_bytes` returned early from the whole function, which made every
+mechanism below it dead code exactly where it was needed — and "no budget set"
+is the posture the field actually ran in. Now the endpoint targeting, the
+protected set, the residency snapshot, the exclusive pass, the barrier and all
+the logging run **unconditionally**; only the capped, budget-driven pass stays
+gated, because it is the one mechanism whose decision is arithmetic against a
+number that may not exist.
+
+**The log vocabulary, fixed.** A successful eviction used to be silent and a
+`False` was the only thing the pass ever logged — precisely the asymmetry that
+left an operator watching a host fill up unable to tell "nothing needed
+evicting" from "everything was skipped". Now:
+
+- ONE INFO line per unload attempt: who (engine, endpoint, model), at what
+  granularity (`model` / `endpoint`), WHY (`not needed at an exclusive
+  endpoint` / `over budget` / `precautionary barrier`), and the RESULT
+  (`accepted` / `refused`).
+- ONE INFO line per tick that evicts at all, naming the trigger(s), how many
+  endpoints were swept, the resident bytes, the admitted marginal bytes, and
+  the budget — rendered as `unset` rather than `None`, because that is a
+  posture, not a missing value.
+- INFO for a skipped endpoint whose `list_installed` raised, and INFO once per
+  engine+method for an engine offering no `list_installed`/`unload` at all
+  (which degrades to the prior idle-timeout-only behaviour for it).
+- **WARNING is reserved for what an operator can act on**: a whole endpoint
+  skipped because live work is protected there, an exclusive job not launched
+  this tick, a job failed after the refusal bounds, and the registry's own
+  refused-lowering line.
+
+**The unset budget is now loud rather than merely true.** The Queue page says
+what the posture costs ("Jobs run one at a time, and nothing is offloaded for
+budget reasons") and points an administrator at the settings page. The worker
+process — never the console — writes what ITS machine reports as total memory
+onto the settings row once at boot (`JobSettings.detected_memory_bytes`/
+`detected_memory_at`), rendered as a labelled prefill naming the process that
+measured it and the date. **Nothing is ever applied on the operator's behalf**:
+the console renders in the web service and the budget governs the worker
+service — separate containers — and a container sees the VM's allocation rather
+than the host's, so a silently derived budget would be authoritative and wrong.
+
+### 3. §3's ordering: model-affinity batching within a priority, and `not_before` as the one admission-order change
+
+**Rule 10, affinity batching with an aging bound.** `models/queue/scheduler.py`
+gains `affinity_order`, a pure function ordering candidates by
+`(priority, not pinned, not affine, job_id)`. Among candidates AT THE SAME
+PRIORITY NUMBER, one whose model keys are ALL already resident sorts ahead of
+one that would have to load something — the owner's own requirement that like
+work for one model runs together even when it was submitted at different times.
+"Affine" means "would load NOTHING", not "would load less"; a candidate
+declaring no models is never affine, since the subset test would be vacuously
+true and such a job is already effectively exclusive under §4.
+
+`resident_keys` is a plain frozen set the CALLER hands in — the worker's last
+residency snapshot with that pass's own unloads subtracted — reached through a
+new `claim_and_admit(resident_keys=...)` keyword. It is neither a live
+`list_installed` (that would put engine HTTP inside the claim's advisory-lock
+transaction and stall every other admitter) nor this module's own fold over
+running jobs (that would make affinity a no-op in sequential mode, exactly the
+posture where batching matters most). It is therefore deliberately STALE — in
+sequential mode it can be minutes old, and a fresh worker has none at all,
+which falls back to plain `(priority, id)` order. That is precisely why it
+drives an ordering PREFERENCE and nothing else: a wrong guess costs one
+suboptimal ordering decision, never a wrong admission and never a wrong
+eviction. `affinity_order` is the seam a different policy would replace; the
+claim code and `plan_admissions` both walk the same helper, so the order
+reasoned about and the order walked can never drift.
+
+**The aging bound counts ROUNDS, not peers.** `InferenceJob.passed_over` is a
+durable column (a worker restart must not reset a job's age), incremented by
+one bulk `UPDATE` inside the claim's existing transaction, once per round in
+which a later-by-`(priority, id)` peer was admitted ahead of the candidate —
+**one increment however many peers went past it**. At
+`scheduler.MAX_PASSOVERS` (3) the candidate is PINNED.
+
+**What "pinned" does, stated precisely, because the shipped key term is weaker
+than the phrase this design was first written with.** Pinning sets the second
+element of the sort key, so **a pinned candidate sorts by id ahead of every
+UNPINNED peer at its priority and is never reordered behind one again**. It is
+NOT true that a pinned candidate is never reordered behind *any* peer: the
+`not affine` term still discriminates *among pinned candidates*, so a pinned
+non-affine job can still sort behind a pinned affine one. Within one priority
+number a job can therefore be passed over at most `MAX_PASSOVERS` rounds by
+unpinned peers, which is the bound that matters, while the affinity preference
+survives among the aged. **This is an owner-visible decision point, recorded
+rather than smoothed over**: dropping the affine term for pinned candidates
+(making pinning a strict `(priority, id)` tail) is a one-line change to
+`affinity_order`'s key and would trade the last of the batching benefit for a
+simpler promise. It is not made here.
+
+**Priority is never crossed, and neither proof moves.** §3's no-backfill
+deadlock proof is untouched: the walk still stops at the first candidate it
+cannot admit, and whichever candidate heads a round is still admitted alone the
+instant the machine is idle. Across priority numbers nothing changed, so §3's
+honestly-scoped starvation caveat — a sustained inflow at a lower priority
+number can still starve an older, higher-number job — is neither improved nor
+worsened, and is restated here unchanged.
+
+**`not_before` is the one admission-order change this track makes.**
+`InferenceJob.not_before` is a durable timestamp written by the worker when an
+exclusive launch is refused; the claim's candidate query gains a single extra
+`WHERE` on the SAME `SELECT` (`not_before IS NULL OR not_before <= now`), not a
+second statement. It is durable rather than in-process deliberately: the
+restart that would clear an in-memory hold-off is the same restart that clears
+the barrier's refusal count, and the two together would drop a freshly
+restarted worker straight back into 0.5 s-tick churn against an endpoint that
+is still holding memory.
+
+**Why the deadlock proof survives it**, in one sentence, because a new
+admission-side filter is exactly the kind of change that quietly breaks it: the
+exclusion is TIME-BOUNDED and SELF-CLEARING — the job returns to its own head
+position the moment the hold-off expires, and an effectively-exclusive head is
+still admitted alone the instant the machine is idle — so nothing can wait
+behind it for ever. The hold-off renders on the Queue page's waiting row
+("waiting for engine memory — retries at HH:MM") and only while it is still in
+the future; a past `not_before` is a hold-off that has expired, and rendering
+it would read as a delay still in force.
+
+### 4. §7's worker lifecycle: a heartbeat thread, kind-aware staleness, sleep detection, the duplicate-submit refusal, and boot tolerance
+
+**The heartbeat has its own thread.** §7's account of the heartbeat as "one
+fact an orphan sweep trusts" is unchanged; what changed is who writes it. It
+used to be written from the tick thread alone, so a tick that BLOCKS — a
+synchronous eviction pass, a slow engine call — starved the very signal that
+says this worker is alive, and the sweep then reclaimed jobs the worker still
+legitimately held. This ADR's 2026-08-25 amendment named that as its first
+follow-up; `Worker._heartbeat_forever` is it. It is a daemon thread, it waits
+`HEARTBEAT_SECONDS / 2` between iterations (no floor — a floor makes the thread
+unprovable in a test), and it calls `close_old_connections()` at the top of
+every iteration for the same reason the tick loop and each job thread do:
+Django's connection model is per-thread, so a third long-lived thread otherwise
+holds a third connection open indefinitely, past `CONN_MAX_AGE` and straight
+through a database restart. It survives a transient write error rather than
+dying quietly, and it is not started for a single-tick run.
+
+**Staleness belongs to the kind.** `JobKind` gains a code-declared
+`stale_after_seconds`; `claim._sweep_orphans` resolves a whole kind→threshold
+map and sweeps with ONE query grouped by DISTINCT threshold, never one query
+per kind. A kind the registry does not know (deregistered since the row was
+enqueued) falls back to the worker's global cutoff, so no row is left running
+for ever merely because nothing declares a number for it. This discharges the
+other half of the 2026-08-25 follow-up 1: a 120 s global cutoff could never be
+right for both a sub-second embed and a job that cold-loads a large model for
+minutes.
+
+**`claim_and_admit` gains two keyword arguments**, both defaulted so every
+existing call site is unchanged: `stale_after_seconds` is now the *default*
+threshold rather than the only one, `sweep_orphans=True` lets the caller skip
+the sweep for one round, and `resident_keys=frozenset()` carries rule 10's
+ordering snapshot.
+
+**Sleep detection.** A tick whose WALL-CLOCK delta exceeds its MONOTONIC delta
+by more than `SLEEP_DETECT_SECONDS` (60) did not take that long — the host (or
+the container VM) was suspended, since a monotonic clock does not advance
+across a sleep and wall clock does. On wake every running row looks stale at
+once, and a sweep at that instant mass-orphans healthy work. The worker writes
+an immediate heartbeat and passes `sweep_orphans=False` for
+`SLEEP_GRACE_SECONDS` (30), long enough for every live worker's rows to
+re-stamp themselves and short enough that a genuinely dead job is still
+reclaimed promptly. It is a heuristic, and the cost of a false positive is
+exactly one skipped orphan sweep — deliberately the cheap direction.
+
+**The duplicate-submit refusal restores the row to the live attempt.** This is
+the unbuilt half of the 2026-08-25 reclaim fix, which repaired the bookkeeping
+but never stopped the second execution: a job this process is already executing
+can be orphaned (its own cold load starved the heartbeat), re-admitted, and
+launched a SECOND time in the same process — two handlers, one job, one set of
+models. `_launch` now refuses to submit a job id that still has a live
+(not-done) future. The naive requeue is not what it does, because a requeue
+would leave the row `queued` with no token tracked, strip the live attempt of
+heartbeat protection, invite re-admission 0.5 s later for the whole length of
+the cold load this exists for, and finally discard the live attempt's own
+token-conditional writeback so the job ran a third time. Instead a conditional
+`UPDATE` puts the row back to `running` under the LIVE attempt's own claim
+token, claimed by this worker, freshly heartbeaten; that token is re-registered
+in `_active_tokens`, and the superseding claim is discarded with one WARNING
+line.
+
+**And when that conditional `UPDATE` matches zero rows, the fresh claim is
+simply DISCARDED — it is not requeued.** The design text said "requeued the
+ordinary way"; the shipped code cannot do that and should not. The restore
+filters on the fresh claim's own token; the requeue fallback beneath it filters
+on that same token AND `state=running`, a strictly stronger predicate — so any
+row the restore failed to match, the requeue cannot match either. The fallback
+is dead by construction, the fresh claim's only effect is releasing its own
+in-memory token, and **a row another worker legitimately owns is never touched
+by this one**, which is the correct outcome. Recorded as a correction to the
+design note rather than left as a discrepancy a reader would have to find.
+
+**Boot tolerance at both settings reads.** A worker starting against a database
+whose `migrate` is still running used to traceback. The constructor now waits
+`BOOT_SCHEMA_WAIT_ATTEMPTS` × `BOOT_SCHEMA_WAIT_SECONDS` for the row and then
+sizes its pool from the documented default rather than blocking a compose boot;
+the tick loop tolerates the same failure independently, at its own read. Both
+sites catch both exception classes (`ProgrammingError`, `OperationalError`) and
+emit ONE waiting line, no traceback. A cold boot is quiet.
+
+### 5. §5's kind registry: two new declarations, an operator-editable ceiling, and the rule that comes with it
+
+`models.contracts.jobkinds.JobKind` gains two optional, code-declared,
+trailing-and-defaulted fields, so every existing registration is unchanged:
+
+- **`stale_after_seconds`** — §4 above; read by the orphan sweep alone.
+- **`default_wait_seconds`** — how long this kind's handler may wait on its
+  ENGINE before giving up, or `None` for "this kind does not wait".
+
+**The operator edits the ceiling, never the staleness.** `JobSettings` gains
+`kind_wait_seconds`, a `{kind key: seconds}` map edited on the Job execution
+page's fourth form, one row per registered kind rendered straight from
+`all_job_kinds()` so a feature app registering a new kind needs no template
+edit. The registry is the allowlist: only keys the registry names are ever read
+out of the POST, and a blank field CLEARS that kind's override rather than
+pinning the code default into the database. The resolved value — operator
+override first, else the kind's own declaration, else `None`, never a guess —
+is stamped onto `JobContext.wait_seconds` by `Worker._build_job_context`,
+**riding the settings row that method already fetches for
+`response_timeout_seconds`**; a second `get_solo()` would be a query-count
+regression and is explicitly not how this is read.
+
+Staleness stays code-declared because a kind's staleness is a property of what
+the work DOES, in the same spirit as `default_priority` (§2); the ceiling is
+operator-editable because how patient this box should be is an operational
+judgement.
+
+**THE RULE THAT COMES WITH THE CEILING, and it is not optional: a wait ceiling
+may never release the exclusive slot early.** A handler whose ceiling expires
+MUST NOT write a terminal outcome while its own engine still reports the work
+running. The exclusive slot is released the instant the job row goes terminal,
+so a handler that gives up waiting and reports success hands the machine to the
+next admission while its own engine is still sampling — which is the 2026-08-25
+follow-up 2, and is exactly the state the incident ran into. Such a handler
+must either keep holding (continuing to report progress, which keeps the row
+alive under the worker's heartbeat) or cancel the engine-side work and confirm
+the engine is terminal, and only then return. The rule is published on
+`JobKind.handler` and `JobKind.default_wait_seconds` and in
+[`docs/EXTENDING.md`](../EXTENDING.md), because the queue can only enforce ONE
+side of it: the barrier catches a still-working engine before the next
+EXCLUSIVE job launches, since the barrier-polling adapter withholds `True`
+while a prompt is still running — but the exclusive→non-exclusive case and the
+cross-engine case stay unenforceable from the queue side (§8 below).
+
+**No shipped kind declares either field today.** The registry carries them, the
+worker and the sweep read them, the settings page edits the ceiling, and every
+shipped kind leaves both `None` — which is exactly the prior behaviour. Said
+plainly so nobody reads this section as a claim about a kind that has not made
+one.
+
+### 6. §8's named gaps: the three 2026-08-25 follow-ups are DISCHARGED, and the residuals that replace them
+
+**The 2026-08-25 amendment's three follow-ups are closed by this track.**
+
+1. **`STALE_AFTER_SECONDS` cannot survive a cold model load that starves the
+   worker.** Discharged, by both candidate fixes at once: the heartbeat now has
+   its own thread, decoupled from the tick loop a slow model load can starve
+   (§4 above), and staleness is now kind-aware, so a kind that cold-loads large
+   models declares its own allowance instead of sharing one number with a
+   sub-second embed.
+2. **A kind's own wait timeout releasing the exclusive slot early.**
+   Discharged on both halves that are reachable from here: the rule is now
+   published as part of the kind contract (§5 above), and the barrier enforces
+   it where the queue can — a still-working engine withholds `True`, and the
+   next exclusive job is not launched. Its unenforceable remainder is named
+   below rather than claimed as closed.
+3. **Eviction's blindness to a live attempt.** Discharged: the protected set is
+   no longer derived from RUNNING rows alone but from RUNNING rows UNION this
+   process's own in-flight attempts (§2 above), which is precisely the
+   orphaned-but-still-running window that amendment described.
+
+**The residuals that replace them, recorded honestly and fixed nowhere.**
+
+- **Three of them are ADAPTER-side, contributed by the engine steward, and this
+  track changes no adapter internals.** (a) The image adapter's no-baseline
+  path returns `True` having observed NOTHING: when its own system-stats read
+  is unavailable as the call starts, it cannot compute a memory rise at all and
+  degrades to the pre-barrier contract — a 2xx plus one queue-idle check. That
+  is exactly the precautionary-call case, so a `True` there is a confirmation of
+  nothing, and the queue cannot tell it from a real one; only the adapter can.
+  (b) Machine-wide memory drift can fake the settle rise: the threshold falls
+  back to a floor read from machine-wide available memory, so an unrelated
+  process finishing during the poll window reads as a settled eviction. (c) The
+  adapter's residency memo is LRU-capped at eight endpoints, so on a box with
+  many endpoints a belief can age out and an endpoint report "nothing resident"
+  purely for that reason — which, under `residency_authority="memo"`, buys an
+  extra precautionary call rather than a wrong decision. Named, not fixed: all
+  three are adapter-side.
+- **A configured endpoint with no connection row cannot be barriered.** The
+  unload seam takes a `model_id`, and such an endpoint supplies none; its
+  believed-resident models are still evicted by the per-model loop, but an
+  empty or unavailable belief there leaves it unbarriered. Never papered over
+  with a synthetic id the engine would not recognise.
+- **`unload_scope` and `residency_authority` are declarations, not probes.**
+  The queue reads what an adapter says and never asks the engine to prove it.
+  Until an adapter takes its lines the safe defaults apply — coarser eviction
+  on a per-model engine, and needless precautionary calls to an engine with a
+  real residency endpoint. Named costs, not correctness gaps.
+- **The refusal count and its span are process-local.** The `not_before`
+  hold-off is durable; the consecutive-refusal count is not, so a restart
+  resets it and a pathological endpoint could refuse three times per worker
+  lifetime rather than three times ever.
+- **Wait-ceiling enforcement is partial** — §5's exclusive→non-exclusive and
+  cross-engine cases, above.
+- **Cross-process live attempts stay invisible to eviction.** The protected set
+  uses THIS worker's own in-flight map; with more than one worker, another
+  worker's loading model could still be unloaded. There is one worker today,
+  and a durable claim-level signal is the fix if that changes.
+- **An exclusive job waiting behind a protected endpoint has a cost as well as
+  a duration.** The wait is bounded by the live attempt's own end; the per-tick
+  price is bounded by the fifth ordering rule (no HTTP before the protection
+  check) and by the hold-off (one claim round-trip per hold-off period rather
+  than a full cross-engine probe every 0.5 s). It is not zero.
+- **The §2 endpoint-scope exception does cost a reload**, bounded to that one
+  case.
+- **`over_budget` is computed over a wider endpoint set on exclusive-admitting
+  ticks**, so the number is not comparable tick to tick.
+- **A genuinely shrunk model stays high for ever** until an operator sets an
+  override.
+- **Residency belief remains a belief.** A restart loses the memo; the barrier
+  mitigates, it does not cure.
+- **The widened sweep adds HTTP to an admitting tick, and the precautionary
+  call is the expensive half** — bounded by the exclusive-only condition, by
+  the narrowing, and by the heartbeat thread, but real seconds on a box with
+  several endpoint-scope engines and no residency endpoints.
+- **Affinity reads a pre-eviction snapshot** that can be minutes old in
+  sequential mode, and none at all on a fresh worker.
+- **Sleep detection is a heuristic** (§4 above).
+- **Measurement is still not process-peak and still not accelerator-upcast
+  aware.** This track makes the estimate honest and monotonic, not exact.
+
+§8's own original gaps — the CLI's `--queue` bypass, unauthenticated job-id
+access, no-JS ask submission, per-endpoint budgets, and the unexplained
+oversize reason on the Queue page — are all unchanged by this amendment.
+
+### 7. ADR 0015's agent-layer gaps are untouched
+
+This track fixes **two chat-surface defects** and changes **no tool contract**,
+no tool result shape, and nothing about what an agent may do.
+
+The first: a turn whose job row vanished (a database crash rolling back the row
+that `on_turn_terminal` is driven by) sat at "working" for ever, and recovery
+was "delete the conversation and resend". `agents/reconcile.py` — deliberately
+at the column root, because `reconcile_stranded_turn` must call
+`models.contracts.queue.get_job` and every module under `agents/runtime/` is
+swept for exactly that call — closes such a turn honestly with one conditional,
+idempotent `UPDATE`, from the poll view that was going to answer "queued" for
+ever and from `manage.py reconcile_turns` for the row nobody is polling. There
+is no background sweeper: the condition is rare and the read surface already
+visits exactly the row that matters.
+
+The second: the chat page's poll loop could tick silently for ever on a
+response it could not act on — a parseable body with no recognized state, or a
+5xx that happened to parse. Forward compatibility is kept (an unknown state is
+still retried, not treated as an error on the first tick); what it no longer
+buys is an unbounded loop, because every answer the page cannot act on is now
+counted against the same bounded transport ceiling a dropped connection uses,
+and only a recognized state clears the count. A recovering database now answers
+a RETRYABLE 503 the loop retries, told apart from the terminal "the queue is
+not configured" 503 that keeps its setup link and stops polling.
+
+[ADR 0015](0015-agent-layer-and-tool-contract.md)'s own named gaps are
+unchanged, and none of them is addressed here.

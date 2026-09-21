@@ -556,8 +556,21 @@ puts the row back to `running` under the **live attempt's own claim token**, wit
 row is then not a candidate, the live attempt is heartbeat-protected again, and its
 eventual writeback matches the row it is writing to. If the conditional update
 matches zero rows (another worker legitimately owns it now), the fresh claim is
-requeued the ordinary way and the live attempt is left to finish and discover its
-writeback is stale — the existing, documented behaviour.
+simply **discarded**: the live attempt is left to finish and discover its writeback
+is stale — the existing, documented behaviour — and the foreign owner's row is never
+touched.
+
+> **Correction, 2026-09-21 (written against the shipped code, Task 19).** This
+> paragraph originally said the zero-rows case "requeued the fresh claim the ordinary
+> way". It does not, and cannot. `_restore_to_live_attempt` filters on
+> `pk AND claim_token=<the fresh claim's token>`; the fallback it calls,
+> `_requeue_unlaunched`, filters on `pk AND state=running AND claim_token=<that same
+> token>` — a *strictly stronger* predicate. Any row the restore failed to match, the
+> requeue cannot match either, so the fallback writes nothing and the fresh claim's
+> only real effect is the `_active_tokens` pop the requeue path performs first. That
+> is the correct outcome (a row another worker legitimately owns must not be rewritten
+> by this one), so the code is right and this sentence was wrong; the ADR amendment
+> records the discard, not a requeue.
 
 ### 3.5 Kind-owned wait ceilings, and the exclusive slot (Q6, Q10)
 
@@ -1019,7 +1032,12 @@ No success language before these pixels exist.
     carries it, in the same getattr/degrade idiom and with the safe default.
 11. **The duplicate-submit refusal restores the row to the live attempt** rather than
    requeueing it, which would strip heartbeat protection, churn every tick for the
-   length of a cold load, and discard the live attempt's result.
+   length of a cold load, and discard the live attempt's result. *(Corrected
+   2026-09-21, Task 19: when the restore matches zero rows — another worker
+   legitimately owns the row — the fresh claim is **discarded**, not requeued. The
+   requeue fallback's predicate is strictly stronger than the restore's, so it is dead
+   by construction and the foreign owner's row is never touched. See §3.4(d)'s own
+   correction note.)*
 12. **Affinity reads the worker's last residency snapshot**, not a live engine call
    (HTTP inside the advisory lock) and not the running-jobs fold (dead in sequential
    mode, where batching matters most).

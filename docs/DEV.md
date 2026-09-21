@@ -315,6 +315,27 @@ explicitly and threads it through per call, rather than a removed
 and the vector index/query engine, so the suite is fully deterministic and
 offline.
 
+**A test that drives the queue worker must import the engine-endpoint fence**, and this one
+is not a convention — it protects the models warm on your own machine. The queue's eviction
+pass widens its swept endpoint set on any tick that admits an exclusive job: it reads
+`settings.INFERENCE_DEFAULT_ENDPOINTS`, which holds REAL addresses, against the REAL
+adapters registered at import time. So a test module that touches `Worker.tick()`,
+`Worker._evict_to_match_plan()` or `run_jobs --once` will otherwise probe whatever engine is
+listening on your box and then call `unload()` against it — dropping a warm model mid-run
+while the suite reports all green. That is not hypothetical; it was proven against a shipped
+test module whose planner declares `exclusive=True`. The fence is one import, at the top of
+the module: `from models.contracts.testing import hermetic_engine_endpoints  # noqa: F401`
+— it is `autouse=True`, so the import alone is what fences the file (hence the `noqa`), and
+it blanks the endpoint map rather than stubbing the engine registry, so real engine
+resolution stays under test. A test that genuinely wants addresses assigns
+`settings.INFERENCE_DEFAULT_ENDPOINTS` itself and that assignment wins.
+`foundation/ops/tests/test_engine_endpoint_fence.py` is the gate that stops the next module
+forgetting — a plain importable fixture rather than a `conftest.py` (forbidden anywhere in
+this repo), so the fence is visible in the file it protects. **The gate walks `git ls-files`,
+so a brand-new test module is unpoliced until you `git add` it**: a module written and run
+in your working tree can go green without the fence, and the gate catches it the moment it
+joins the index — before any commit, review or merge can carry it anywhere.
+
 **Where page CSS goes** is enforced, not just documented: a selector's home is
 the deepest template that is an ancestor of every template that uses it —
 shared design tokens and cross-column primitives in `foundation/templates/

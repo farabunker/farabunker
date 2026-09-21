@@ -62,6 +62,18 @@ EXEMPT = (
 
 
 def _tracked_test_files() -> list[str]:
+    """Every test module GIT TRACKS -- and that word is the gate's one
+    honest limit, stated here rather than left to be discovered: a brand
+    new test module that has never been `git add`ed is invisible to
+    `git ls-files`, so it is UNPOLICED until it is staged. A module
+    written and run in a working tree can therefore drive the worker
+    without the fence and go green; the gate catches it the moment it
+    joins the index, which is before any commit, review or merge can
+    carry it anywhere. Deriving from the index rather than `Path.glob`
+    is deliberate for the reason `test_docs_model_names._tracked_files`
+    gives: untracked scratch and a vendored `node_modules` on somebody's
+    machine are not this repository's business.
+    """
     out = subprocess.run(["git", "ls-files", "--", "*.py"], cwd=REPO_ROOT,
                          capture_output=True, text=True, check=True)
     return [p for p in out.stdout.splitlines() if _is_test_file(p)]
