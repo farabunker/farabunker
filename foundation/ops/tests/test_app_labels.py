@@ -92,6 +92,10 @@ from django.core.management import call_command
 # (see agents/models.py::ChatSettings). It lives under the `agents`
 # label, not `chat`: `agents.chat` owns no model at all, which is the
 # same reason that app contributes no key of its own here.
+# Deletion semantics Task 2 (identity/migrations/0004_deletion_ticket_
+# and_retention_settings.py) adds ONE more: `identity.deletionticket`,
+# the single deletion ticket every delete/restore/purge writes through
+# (see identity/models.py::DeletionTicket).
 EXPECTED_LABELS = frozenset({
     "agents", "chat", "rag", "vision", "inference", "jobs", "setup", "ops",
     "identity", "landing",
@@ -142,6 +146,7 @@ EXPECTED_TABLES = {
     "identity.auditevent": "identity_auditevent",
     "identity.entitlement": "identity_entitlement",
     "identity.entitlementgrant": "identity_entitlementgrant",
+    "identity.deletionticket": "identity_deletionticket",
 }
 
 
