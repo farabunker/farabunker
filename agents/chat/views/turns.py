@@ -38,6 +38,7 @@ from agents.chat.service import (
 from agents.chat.views.thread import thread_context
 from agents.limits import TURN_TIMEOUT_ADMIN_HINT, TURN_TIMEOUT_ERROR
 from agents.models import Turn
+from agents.reconcile import reconcile_stranded_turn
 from agents.visibility import may_post_to, visible_turn
 from agents.workstreams import scope_for_conversation
 from models.contracts.queue import QueueUnavailable, get_job
@@ -230,8 +231,25 @@ def _queued_body(turn, request) -> dict:
     script's swap needs the user's own bubble at EVERY poll tick, not
     only the final one, or a requeued poll after an earlier swap would
     have nothing to re-anchor to.
+
+    OWNER DECISION 7: a `None` job here is also the one place a STRANDED
+    turn (its job row gone, past `STRANDED_TURN_GRACE_SECONDS`) becomes
+    visible -- so before answering "queued" forever, this tries
+    `reconcile_stranded_turn`, and re-reads and re-renders honestly when
+    it closed something. `agents.reconcile.reconcile_stranded_turn`'s own
+    docstring carries the condition and why it is safe to call from a
+    polled GET.
     """
     job = get_job(turn.queue_job_id)
+    if job is None and reconcile_stranded_turn(turn):
+        # The strand is visible HERE, at the one surface that was going
+        # to answer "Queued — waiting…" for ever. Re-read and answer
+        # with the honest state instead, within this same poll tick --
+        # a plain reload takes the same path through the rendered card,
+        # so this is not a JS-only repair. `_failed_body` (what this
+        # recurses into) never reconciles, so this recurses at most once.
+        turn.refresh_from_db()
+        return _BODY_BUILDERS[turn.state](turn, request)
     return {
         "state": turn.state,
         "position": job.position if job is not None else None,
@@ -244,8 +262,14 @@ def _running_body(turn, request) -> dict:
     """`{"state", "progress", "step", "label", "html"}` -- `progress`
     verbatim, `step`/`label` lifted out of it too (spec section 8.3) so
     the script can show them without knowing the dict's shape. `html`
-    is D1's own fix, the same as `_queued_body`'s."""
+    is D1's own fix, the same as `_queued_body`'s.
+
+    OWNER DECISION 7: the same stranded-turn reconciliation `_queued_
+    body` runs, and for the same reason -- see its own docstring."""
     job = get_job(turn.queue_job_id)
+    if job is None and reconcile_stranded_turn(turn):
+        turn.refresh_from_db()
+        return _BODY_BUILDERS[turn.state](turn, request)
     progress = job.progress if job is not None else None
     return {
         "state": turn.state,
@@ -345,8 +369,14 @@ _BODY_BUILDERS = {
 }
 
 
-# R7 (audit 2, S22): read-only, and now declared so. A POST to this URL
-# is a 405 before any row is resolved.
+# R7 (audit 2, S22): a POST to this URL is a 405 before any row is
+# resolved. NOT PURELY READ-ONLY as of owner decision 7: a GET that
+# lands on a stranded turn (`_queued_body`/`_running_body`) performs one
+# sanctioned repair write via `reconcile_stranded_turn` -- safe under a
+# safe verb because it is idempotent, conditionally guarded, and carries
+# no request-supplied data; see that function's own docstring. `require_
+# safe` still names the right method pair; only "read-only" no longer
+# describes what a GET here can do.
 #
 # `require_safe`, NOT `require_GET` (audit-2 confirm, observation 7):
 # `require_GET` is `require_http_methods(["GET"])` and rejects HEAD,

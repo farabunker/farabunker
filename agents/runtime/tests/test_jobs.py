@@ -1,17 +1,33 @@
 """The planner declares what a turn may load; the hook cleans up after a
 turn that never ran; the summarizer never touches the database.
-"""
+
+`TestReconcileStrandedTurn`/`TestTheReconcileTurnsCommand` below test
+`agents.reconcile` (a sibling top-level module, not `agents.runtime.jobs`
+-- see that module's own docstring for why the `get_job` call it makes
+cannot live in this package), not this module's own functions. They stay
+here, beside `_turn_for`/`_payload`, because they are built on those two
+helpers and the house pattern is one helper set per app rather than a
+sixth copy."""
 from __future__ import annotations
 
+from datetime import timedelta
+from io import StringIO
+
 import pytest
+from django.core.management import call_command
+from django.utils import timezone
 
 from agents.contracts.tools import ToolSpec, register_tool
 from agents.models import ToolInvocation, Turn
+from agents.reconcile import (
+    STRANDED_TURN_GRACE_SECONDS, reconcile_stranded_turn, reconcile_stranded_turns,
+)
 from agents.runtime.jobs import on_turn_terminal, plan_turn, summarize_turn
 from agents.runtime.tests._helpers import (  # noqa: F401 -- the fixture
     bind_chat_role, bound_chat_role, bound_embed_role, isolated_tool_registry,  # import
     make_agent, make_conversation, make_flow, make_turn,  # IS its registration
 )
+from identity.testing import make_queue_job
 from models.contracts.roles import CHAT_CONVERSE_ROLE
 
 pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("isolated_tool_registry")]
@@ -42,6 +58,28 @@ def _payload(turn, **overrides):
                   connection=None, mode="chat")
     fields.update(overrides)
     return fields
+
+
+def _assistant_turn(*, state, queue_job_id, age_seconds: int):
+    """One ASSISTANT turn in `state`, pointing at `queue_job_id` (which
+    may name no row at all), whose row has been in that state for
+    `age_seconds` -- the three facts the stranded condition reads."""
+    turn = _turn_for(make_agent())
+    Turn.objects.filter(pk=turn.pk).update(
+        role=Turn.Role.ASSISTANT, state=state, queue_job_id=queue_job_id,
+        created_at=timezone.now() - timedelta(seconds=age_seconds),
+    )
+    turn.refresh_from_db()
+    return turn
+
+
+def _stranded_assistant_turn():
+    """The shape the poll path reconciles: past the grace, pointing at a
+    job row that does not exist."""
+    return _assistant_turn(
+        state=Turn.State.RUNNING, queue_job_id=4242,
+        age_seconds=STRANDED_TURN_GRACE_SECONDS + 10,
+    )
 
 
 class TestPlanTurn:
@@ -323,3 +361,141 @@ class TestRegistration:
         assert kind.on_terminal is not None
         for path in (kind.planner, kind.handler, kind.summarizer, kind.on_terminal):
             assert callable(resolve_dotted_path(path))
+
+
+class TestReconcileStrandedTurn:
+    """A chat turn whose job row was rolled back by a database crash sits
+    at "working" for ever: the on_terminal hook that closes a placeholder
+    is driven by the job row's own terminal write, and there is no row
+    left to write. Recovery today is "delete the conversation and
+    resend"."""
+
+    def test_a_turn_whose_job_row_is_gone_is_closed_honestly(self):
+        turn = _assistant_turn(state=Turn.State.RUNNING, queue_job_id=4242,
+                               age_seconds=STRANDED_TURN_GRACE_SECONDS + 10)
+
+        assert reconcile_stranded_turn(turn) is True
+
+        turn.refresh_from_db()
+        assert turn.state == Turn.State.FAILED
+        assert turn.error == "The queue lost this turn before it ran; nothing was retried."
+
+    def test_a_turn_whose_job_row_exists_is_left_alone(self):
+        job = make_queue_job(kind="agent.turn")
+        turn = _assistant_turn(state=Turn.State.RUNNING, queue_job_id=job.pk,
+                               age_seconds=STRANDED_TURN_GRACE_SECONDS + 10)
+
+        assert reconcile_stranded_turn(turn) is False
+
+    def test_a_turn_inside_the_grace_is_left_alone(self):
+        """The enqueue-then-commit window: a turn mid-creation genuinely
+        has no job row yet."""
+        turn = _assistant_turn(state=Turn.State.QUEUED, queue_job_id=None, age_seconds=1)
+
+        assert reconcile_stranded_turn(turn) is False
+
+    def test_a_terminal_turn_is_never_rewritten(self):
+        turn = _assistant_turn(state=Turn.State.DONE, queue_job_id=4242,
+                               age_seconds=STRANDED_TURN_GRACE_SECONDS + 10)
+
+        assert reconcile_stranded_turn(turn) is False
+
+    def test_a_user_turn_is_never_touched(self):
+        turn = _turn_for(make_agent())
+        Turn.objects.filter(pk=turn.pk).update(
+            role=Turn.Role.USER, state=Turn.State.RUNNING, queue_job_id=4242,
+            created_at=timezone.now() - timedelta(seconds=STRANDED_TURN_GRACE_SECONDS + 10),
+        )
+        turn.refresh_from_db()
+
+        assert reconcile_stranded_turn(turn) is False
+
+        turn.refresh_from_db()
+        assert turn.state == Turn.State.RUNNING
+
+    def test_it_closes_the_turns_open_invocation_rows(self):
+        turn = _assistant_turn(state=Turn.State.RUNNING, queue_job_id=4242,
+                               age_seconds=STRANDED_TURN_GRACE_SECONDS + 10)
+        invocation = ToolInvocation.objects.create(
+            principal_kind="resident_agent", principal_key="general",
+            tool_key="rag.search", outcome=ToolInvocation.Outcome.ERROR,
+            queue_job_id=4242,
+        )
+
+        assert reconcile_stranded_turn(turn) is True
+
+        invocation.refresh_from_db()
+        assert invocation.finished_at is not None
+
+    def test_the_null_job_id_half_closes_nothing_and_says_so(self):
+        """Documented no-op: `close_open_invocations` returns zero for a
+        falsy job id, because nothing was ever stamped with one."""
+        turn = _assistant_turn(state=Turn.State.QUEUED, queue_job_id=None,
+                               age_seconds=STRANDED_TURN_GRACE_SECONDS + 10)
+
+        assert reconcile_stranded_turn(turn) is True
+
+    def test_calling_it_twice_writes_once(self):
+        """Idempotent by construction: one conditional UPDATE filtered on
+        the two non-terminal states."""
+        turn = _assistant_turn(state=Turn.State.RUNNING, queue_job_id=4242,
+                               age_seconds=STRANDED_TURN_GRACE_SECONDS + 10)
+
+        assert reconcile_stranded_turn(turn) is True
+        turn.refresh_from_db()
+        assert reconcile_stranded_turn(turn) is False
+
+    def test_the_sweep_counts_what_it_closed(self):
+        # `_assistant_turn` calls `make_agent()` with no slug, which is
+        # fine for the single-turn tests above but collides on
+        # `uniq_agent_slug_ci` the second time in ONE test -- so this one
+        # test builds its three rows on three explicitly slugged agents,
+        # via the same conditional-UPDATE shape `_assistant_turn` uses.
+        def _stranded_turn_for(agent, *, state, queue_job_id, age_seconds):
+            turn = _turn_for(agent)
+            Turn.objects.filter(pk=turn.pk).update(
+                role=Turn.Role.ASSISTANT, state=state, queue_job_id=queue_job_id,
+                created_at=timezone.now() - timedelta(seconds=age_seconds),
+            )
+            return turn
+
+        _stranded_turn_for(make_agent(slug="sweep-one"), state=Turn.State.RUNNING,
+                           queue_job_id=4242, age_seconds=STRANDED_TURN_GRACE_SECONDS + 10)
+        _stranded_turn_for(make_agent(slug="sweep-two"), state=Turn.State.QUEUED,
+                           queue_job_id=None, age_seconds=STRANDED_TURN_GRACE_SECONDS + 10)
+        _stranded_turn_for(make_agent(slug="sweep-three"), state=Turn.State.QUEUED,
+                           queue_job_id=None, age_seconds=1)
+
+        assert reconcile_stranded_turns() == 2
+
+    def test_a_shorter_grace_closes_a_younger_turn(self):
+        """The argument is the CONDITION, not just the candidate filter
+        (review round 1, finding 1): a turn 20s old is invisible to the
+        module default (60s) but stranded under an explicit 10s grace,
+        and the sweep must actually close it, not just widen its own
+        candidate query and then reject the row anyway."""
+        _assistant_turn(state=Turn.State.RUNNING, queue_job_id=4242, age_seconds=20)
+
+        assert reconcile_stranded_turns(grace_seconds=10) == 1
+
+
+class TestTheReconcileTurnsCommand:
+    def test_dry_run_reports_without_writing(self):
+        out = StringIO()
+        turn = _assistant_turn(state=Turn.State.RUNNING, queue_job_id=4242,
+                               age_seconds=STRANDED_TURN_GRACE_SECONDS + 10)
+
+        call_command("reconcile_turns", "--dry-run", stdout=out)
+
+        turn.refresh_from_db()
+        assert turn.state == Turn.State.RUNNING
+        assert "1" in out.getvalue()
+
+    def test_it_closes_them_for_real_without_the_flag(self):
+        turn = _assistant_turn(state=Turn.State.RUNNING, queue_job_id=4242,
+                               age_seconds=STRANDED_TURN_GRACE_SECONDS + 10)
+
+        call_command("reconcile_turns", stdout=StringIO())
+
+        turn.refresh_from_db()
+        assert turn.state == Turn.State.FAILED

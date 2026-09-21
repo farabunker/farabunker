@@ -15,6 +15,7 @@ from agents.chat.tests._helpers import (   # noqa: F401 -- the import IS the reg
     make_user, posture, sign_in, user_principal,
 )
 from agents.models import ToolInvocation, Turn
+from agents.runtime.tests.test_jobs import _assistant_turn, _stranded_assistant_turn
 from agents.visibility import create_conversation
 from identity.contracts.postures import POSTURE_ENTERPRISE
 from models.contracts.queue import QueueUnavailable
@@ -370,3 +371,28 @@ class TestTheTwoNon200s:
                          queue_job_id=1)
         _code, body = _status(client, turn)
         assert body["state"] == "queued" and body["position"] is None
+
+
+class TestReconciliationOnThePollPath:
+    """Owner decision 7: a turn whose job row vanished recovers instead of
+    sitting at "working" forever. `_queued_body`/`_running_body` are the
+    one surface that was going to answer "Queued — waiting…" for ever, so
+    that is where the strand becomes visible and gets repaired, within
+    the same poll tick that noticed it -- no separate JS-only path, since
+    a plain reload takes the same view."""
+
+    def test_a_polled_turn_whose_job_row_is_gone_comes_back_failed(self, client):
+        """Turns a permanent "Queued — waiting…" into an honest failed
+        card within one poll tick -- with JS on or off, since a plain
+        reload takes the same path through the rendered card."""
+        turn = _stranded_assistant_turn()
+        _code, body = _status(client, turn)
+        assert body["state"] == "failed"
+        assert "lost this turn" in body["error"]
+
+    def test_a_turn_inside_the_grace_still_reports_queued(self, client):
+        """The enqueue-then-commit window: a turn mid-creation genuinely
+        has no job row yet, and the poll path must not race it."""
+        turn = _assistant_turn(state=Turn.State.QUEUED, queue_job_id=4242, age_seconds=1)
+        _code, body = _status(client, turn)
+        assert body["state"] == "queued"
