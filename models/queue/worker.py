@@ -668,7 +668,84 @@ class Worker:
         declaration comment in `__init__` for what this fixes."""
         job_id = descriptor["id"]
         claim_token = descriptor["claim_token"]
+
+        # NO DUPLICATE SUBMIT (spec §3.4d, the unbuilt half of the
+        # 2026-08-25 reclaim fix). A job this process is ALREADY executing
+        # can be orphaned (its own cold load starved the heartbeat),
+        # re-admitted, and launched a second time here: two handlers, one
+        # job, one set of models.
+        #
+        # The naive answer -- requeue the fresh claim -- is wrong in four
+        # ways at once: the row would sit `queued` with no token tracked,
+        # the live attempt would lose heartbeat protection, re-admission
+        # would come round again 0.5s later for the entire length of the
+        # cold load this exists for (each tick paying a widened eviction
+        # pass), and the live attempt's own token-conditional writeback
+        # would finally be discarded, running the job a THIRD time.
+        #
+        # So the refusal RESTORES the row to the live attempt instead: back
+        # to `running` under that attempt's own token, claimed by this
+        # worker, freshly heartbeaten. The row is then not a candidate, the
+        # live attempt is heartbeat-protected again, and its eventual
+        # writeback matches the row it is writing to.
+        live_token = self._live_attempt_token(job_id, exclude=claim_token)
+        if live_token is not None:
+            # NOTE FOR TASK 12: this `return` sits ABOVE the `_futures`
+            # insert at the bottom of this method, and Task 12 adds a
+            # companion `_inflight_refs` write beside that insert. That
+            # write MUST stay below this refusal -- written above it, a
+            # refused descriptor would leave an `_inflight_refs` entry with
+            # no matching `_futures` key, which `_prune_finished_futures`
+            # (it iterates `_futures`) could never drop, and eviction would
+            # protect that key for the life of the process.
+            logger.warning(
+                "worker %s: refusing to submit job %s twice -- an attempt is still in "
+                "flight here; restoring the row to it and discarding this claim",
+                self.worker_id, job_id,
+            )
+            if not self._restore_to_live_attempt(descriptor, live_token):
+                self._requeue_unlaunched([descriptor])
+            return
+
         self._futures[(job_id, claim_token)] = self._executor.submit(self._execute, descriptor)
+
+    def _live_attempt_token(self, job_id: int, exclude: uuid.UUID) -> uuid.UUID | None:
+        """The claim token of an attempt for `job_id` this process still
+        has IN FLIGHT (a future that is not `done()`), other than
+        `exclude` -- or `None`.
+
+        `self._futures` is keyed per attempt (2026-08-25's second defect
+        fix), which is exactly what makes this answerable: a superseded
+        attempt and its successor are both present, under their own keys.
+        """
+        for (tracked_id, token), future in self._futures.items():
+            if tracked_id == job_id and token != exclude and not future.done():
+                return token
+        return None
+
+    def _restore_to_live_attempt(self, descriptor: dict, live_token: uuid.UUID) -> bool:
+        """Give the row back to the attempt that is genuinely still
+        running it, under THAT attempt's own claim token, and report
+        whether the write landed.
+
+        Conditional on the SUPERSEDING token, so this can only ever
+        rewrite the row this claim actually holds: if another worker
+        legitimately owns it by now, zero rows match and the caller
+        requeues the fresh claim the ordinary way instead (the existing,
+        documented "stale token, zero rows" shape).
+        """
+        job_id = descriptor["id"]
+        restored = InferenceJob.objects.filter(
+            pk=job_id, claim_token=descriptor["claim_token"],
+        ).update(
+            state=RUNNING, claim_token=live_token, claimed_by=self.worker_id,
+            heartbeat_at=timezone.now(),
+        )
+        if not restored:
+            return False
+        with self._active_lock:
+            self._active_tokens[job_id] = live_token
+        return True
 
     def _build_job_context(self, descriptor: dict) -> JobContext:
         """Build the `models.contracts.jobkinds.JobContext` `_execute` passes

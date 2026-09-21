@@ -1324,9 +1324,87 @@ class TestReclaimedAttemptTokenCollision:
     `TestDrain` above all need it -- see `TestJobExecution`'s own class
     docstring)."""
 
-    def test_attempt_a_finishing_late_does_not_evict_attempt_bs_bookkeeping(
+    def test_attempt_a_finishing_late_does_not_evict_attempt_bs_bookkeeping(self, worker):
+        """The 2026-08-25 FIRST defect: `_execute`'s `finally` pops
+        `self._active_tokens[job_id]` ONLY when the stored token is its
+        own. Task 8's refusal means `tick()` can no longer produce two
+        live attempts for one job id, so the superseded shape is built
+        directly here (as `TestShutdownAccountsForSupersededAttempt.
+        _two_live_attempts` now does) -- the guard is what is under test,
+        not the route by which attempt B came to exist."""
+        _reclaim_attempt_a_release.clear()
+        _reclaim_attempt_b_release.clear()
+        _register("test.reclaim", handler=f"{MODULE}.reclaim_collision_handler")
+        job = _job(kind="test.reclaim", state=RUNNING, attempts=1)
+
+        token_a = uuid.uuid4()
+        InferenceJob.objects.filter(pk=job.pk).update(
+            claim_token=token_a, claimed_by=worker.worker_id,
+        )
+        worker._active_tokens[job.pk] = token_a
+        future_a = worker._executor.submit(worker._execute, {
+            "id": job.pk, "kind": "test.reclaim", "payload": {}, "model_refs": [],
+            "claim_token": token_a, "exclusive": False, "checkpoint": None,
+            "attempts": 0,
+        })
+        worker._futures[(job.pk, token_a)] = future_a
+
+        # A is superseded WHILE still running: attempt B now owns the row
+        # and `job_id`'s slot in `_active_tokens`.
+        token_b = uuid.uuid4()
+        InferenceJob.objects.filter(pk=job.pk).update(claim_token=token_b)
+        future_b = worker._executor.submit(worker._execute, {
+            "id": job.pk, "kind": "test.reclaim", "payload": {}, "model_refs": [],
+            "claim_token": token_b, "exclusive": False, "checkpoint": None,
+            "attempts": 1,
+        })
+        worker._futures[(job.pk, token_b)] = future_b
+        worker._active_tokens[job.pk] = token_b
+
+        _reclaim_attempt_a_release.set()
+        concurrent.futures.wait([future_a], timeout=5)
+
+        # THE FIX: A's late `finally` must NOT have evicted B's token.
+        assert worker._active_tokens.get(job.pk) == token_b
+        # Per-attempt keying: both entries remain, under their own keys.
+        assert worker._futures.get((job.pk, token_a)) is future_a
+        assert worker._futures.get((job.pk, token_b)) is future_b
+        # A's writeback is token-conditional: zero rows, row is still B's.
+        job.refresh_from_db()
+        assert job.state == RUNNING
+        assert job.claim_token == token_b
+        assert job.result is None
+
+        # B's token is genuinely still "active", not present by coincidence.
+        InferenceJob.objects.filter(pk=job.pk).update(
+            heartbeat_at=timezone.now() - timedelta(seconds=999)
+        )
+        worker._last_heartbeat_monotonic = None
+        worker._maybe_heartbeat()
+        job.refresh_from_db()
+        assert job.heartbeat_at > timezone.now() - timedelta(seconds=5)
+
+        _reclaim_attempt_b_release.set()
+        concurrent.futures.wait([future_b], timeout=5)
+        job.refresh_from_db()
+        assert job.state == SUCCEEDED
+        assert job.result == {"echo": "attempt-b"}
+        assert job.claim_token == token_b
+        assert job.pk not in worker._active_tokens
+
+    def test_a_tick_that_reclaims_a_still_running_attempt_restores_the_row_to_it(
         self, worker, monkeypatch,
     ):
+        """Task 8 (spec §3.4d) closed the other half of this same defect:
+        `_launch` itself now refuses a reclaim while an earlier attempt's
+        future is still live, so tick 2 below never actually submits a
+        second execution at all -- it restores the row to attempt A's own
+        token instead (`Worker._restore_to_live_attempt`). What this test
+        still proves is that the restore and the orphan sweep's bookkeeping
+        (the bump to `attempts`) coexist correctly, and that attempt A's
+        own bookkeeping -- its `_futures` entry, its eventual heartbeat and
+        completion -- is left completely undisturbed by the sweep-and-
+        reclaim tick that raced its still-running handler."""
         monkeypatch.setattr(worker_module, "STALE_AFTER_SECONDS", 0)
         _reclaim_attempt_a_release.clear()
         _reclaim_attempt_b_release.clear()
@@ -1350,55 +1428,22 @@ class TestReclaimedAttemptTokenCollision:
 
         # Tick 2: `_sweep_orphans` requeues the stale row (attempts bumped
         # 0 -> 1) and, in the SAME transaction, `claim_and_admit` re-admits
-        # it -- launched here as attempt B under a brand-new token, while
-        # attempt A's thread is still blocked on
-        # `_reclaim_attempt_a_release`, unaware.
+        # it under a brand-new token -- but attempt A's thread is still
+        # blocked on `_reclaim_attempt_a_release`, so `_launch` refuses the
+        # reclaim and restores the row to A's own token instead of ever
+        # submitting a second execution.
         worker.tick()
         job.refresh_from_db()
         assert job.state == RUNNING
-        assert job.attempts == 1
-        token_b = job.claim_token
-        assert token_b is not None
-        assert token_b != token_a
-        assert worker._active_tokens[job.pk] == token_b
-        future_b = worker._futures[(job.pk, token_b)]
-        assert future_b is not future_a
-        # Per-attempt keying (2026-08-25 second defect fix): A's own entry
-        # is untouched by B's `_launch` call -- both attempts' futures are
-        # simultaneously reachable, under their own distinct keys.
+        assert job.attempts == 1  # the orphan sweep's own bump still happened
+        assert job.claim_token == token_a  # restored, not a fresh token
+        assert worker._active_tokens[job.pk] == token_a
+        # No second attempt was ever launched -- A's is still the only entry.
         assert worker._futures[(job.pk, token_a)] is future_a
-
-        # Release attempt A and wait for ITS OWN future specifically --
-        # deterministic: `Future.done()` only becomes `True` after
-        # `_execute`'s `finally` has already run to completion. Attempt B
-        # is still blocked on its own event throughout this wait.
-        _reclaim_attempt_a_release.set()
-        concurrent.futures.wait([future_a], timeout=5)
-
-        # The fix under test: attempt A's late `finally` must NOT have
-        # evicted attempt B's still-active bookkeeping.
-        assert worker._active_tokens.get(job.pk) == token_b
-        assert worker._futures.get((job.pk, token_b)) is future_b
-        # A's own entry, keyed separately, is STILL present and reachable
-        # too -- `_execute`'s `finally` never touches `self._futures` at
-        # all (see its own comment); only `_prune_finished_futures` (not
-        # called in this test) would remove it. This is exactly what makes
-        # A's escaped-exception safety net available even for a superseded
-        # attempt -- see `TestSupersededAttemptExceptionNet` below.
-        assert worker._futures.get((job.pk, token_a)) is future_a
-
-        # Attempt A's own writeback is token-conditional (ADR 0013) and
-        # must have matched zero rows -- the row must still look exactly
-        # like B's in-progress claim, not A's completion.
-        job.refresh_from_db()
-        assert job.state == RUNNING
-        assert job.claim_token == token_b
-        assert job.result is None
+        assert [key for key in worker._futures if key[0] == job.pk] == [(job.pk, token_a)]
 
         # A subsequent heartbeat write must still be able to refresh this
-        # row under B's token -- proving B's token is genuinely still
-        # "active" in `self._active_tokens`, not merely present by
-        # coincidence.
+        # row under A's own (restored) token.
         InferenceJob.objects.filter(pk=job.pk).update(
             heartbeat_at=timezone.now() - timedelta(seconds=999)
         )
@@ -1407,13 +1452,14 @@ class TestReclaimedAttemptTokenCollision:
         job.refresh_from_db()
         assert job.heartbeat_at > timezone.now() - timedelta(seconds=5)
 
-        # Let attempt B complete normally.
-        _reclaim_attempt_b_release.set()
-        concurrent.futures.wait([future_b], timeout=5)
+        # Let attempt A complete normally -- it was never actually
+        # superseded, so its own writeback is the terminal one.
+        _reclaim_attempt_a_release.set()
+        concurrent.futures.wait([future_a], timeout=5)
         job.refresh_from_db()
         assert job.state == SUCCEEDED
-        assert job.result == {"echo": "attempt-b"}
-        assert job.claim_token == token_b
+        assert job.result == {"echo": "attempt-a-finished-late"}
+        assert job.claim_token == token_a
         assert job.pk not in worker._active_tokens
 
     def test_normal_single_attempt_still_cleans_both_dicts(self, worker):
@@ -1436,6 +1482,105 @@ class TestReclaimedAttemptTokenCollision:
         assert job.pk not in worker._active_tokens
         worker._prune_finished_futures()
         assert (job.pk, token) not in worker._futures
+
+    @pytest.mark.django_db(transaction=True)
+    def test_a_second_launch_restores_the_row_to_the_live_attempt(self, worker):
+        """Two handlers, one job, one set of models -- the shape the
+        2026-08-25 fix repaired the bookkeeping for without ever stopping
+        the second execution."""
+        job = _job(state=RUNNING)
+        live_token = uuid.uuid4()
+        live_future = concurrent.futures.Future()
+        worker._futures[(job.pk, live_token)] = live_future
+        superseding = uuid.uuid4()
+        InferenceJob.objects.filter(pk=job.pk).update(claim_token=superseding)
+
+        worker._launch({
+            "id": job.pk, "kind": job.kind, "payload": {}, "model_refs": [],
+            "claim_token": superseding, "exclusive": False, "checkpoint": None,
+            "attempts": 0,
+        })
+
+        job.refresh_from_db()
+        assert job.state == RUNNING
+        assert job.claim_token == live_token
+        assert job.claimed_by == worker.worker_id
+        assert (job.pk, superseding) not in worker._futures
+        with worker._active_lock:
+            assert worker._active_tokens[job.pk] == live_token
+        live_future.set_result(None)
+
+    @pytest.mark.django_db(transaction=True)
+    def test_the_refusal_is_logged_as_a_warning_naming_the_job(self, worker, caplog):
+        job = _job(state=RUNNING)
+        live_token = uuid.uuid4()
+        future = concurrent.futures.Future()
+        worker._futures[(job.pk, live_token)] = future
+        superseding = uuid.uuid4()
+        InferenceJob.objects.filter(pk=job.pk).update(claim_token=superseding)
+
+        with caplog.at_level("WARNING", logger="models.queue.worker"):
+            worker._launch({
+                "id": job.pk, "kind": job.kind, "payload": {}, "model_refs": [],
+                "claim_token": superseding, "exclusive": False, "checkpoint": None,
+                "attempts": 0,
+            })
+
+        assert any(str(job.pk) in r.getMessage() for r in caplog.records)
+        future.set_result(None)
+
+    @pytest.mark.django_db(transaction=True)
+    def test_a_done_attempt_does_not_block_a_relaunch(self, worker):
+        job = _job(state=RUNNING)
+        finished_token = uuid.uuid4()
+        done = concurrent.futures.Future()
+        done.set_result(None)
+        worker._futures[(job.pk, finished_token)] = done
+        fresh = uuid.uuid4()
+        InferenceJob.objects.filter(pk=job.pk).update(claim_token=fresh)
+
+        worker._launch({
+            "id": job.pk, "kind": job.kind, "payload": {}, "model_refs": [],
+            "claim_token": fresh, "exclusive": False, "checkpoint": None, "attempts": 0,
+        })
+
+        assert (job.pk, fresh) in worker._futures
+        # Per-attempt keying: the fresh insert must not clobber the done,
+        # not-yet-pruned entry still sitting under its own key.
+        assert worker._futures[(job.pk, finished_token)] is done
+
+    @pytest.mark.django_db(transaction=True)
+    def test_when_another_worker_owns_the_row_the_fresh_claim_is_discarded(self, worker):
+        """Zero rows matched on BOTH the restore and its `_requeue_unlaunched`
+        fallback: someone else's own claim has already overwritten this
+        row's token by the time this call reaches it. The fresh claim's
+        `superseding` token never matches, so neither write may touch the
+        row -- it is silently discarded, left exactly as its genuine,
+        current holder set it (the existing, documented "stale token,
+        zero rows" behaviour every other writeback in this module already
+        uses), NOT stolen back to `queued` out from under them."""
+        job = _job(state=RUNNING)
+        live_token = uuid.uuid4()
+        future = concurrent.futures.Future()
+        worker._futures[(job.pk, live_token)] = future
+        superseding = uuid.uuid4()
+        someone_elses_token = uuid.uuid4()
+        InferenceJob.objects.filter(pk=job.pk).update(claim_token=someone_elses_token)
+
+        worker._launch({
+            "id": job.pk, "kind": job.kind, "payload": {}, "model_refs": [],
+            "claim_token": superseding, "exclusive": False, "checkpoint": None,
+            "attempts": 0,
+        })
+
+        job.refresh_from_db()
+        assert job.state == RUNNING
+        assert job.claim_token == someone_elses_token
+        assert job.claimed_by != worker.worker_id  # not stolen back
+        assert (job.pk, superseding) not in worker._futures  # no second execution
+        with worker._active_lock:
+            assert job.pk not in worker._active_tokens  # stale registration cleared
+        future.set_result(None)
 
 
 # --- per-attempt `_futures` keying (2026-08-25 second defect fix) -----------
@@ -1481,10 +1626,19 @@ class TestSupersededAttemptExceptionNet:
     `_reclaim_attempt_b_release`) can both be alive at once, released
     independently."""
 
-    def test_prune_surfaces_a_superseded_attempts_escaped_exception(
-        self, monkeypatch, caplog,
-    ):
-        monkeypatch.setattr(worker_module, "STALE_AFTER_SECONDS", 0)
+    def test_prune_surfaces_a_superseded_attempts_escaped_exception(self, caplog):
+        """Task 8 (spec §3.4d) means `_launch` itself now refuses a fresh
+        claim while an earlier attempt's future is still live, so B can no
+        longer come to exist via a real second `_launch`/`tick()` call
+        while A is still blocked -- the same "construct the shape
+        directly" move `TestShutdownAccountsForSupersededAttempt.
+        _two_live_attempts` and Task 8's own new tests use. B's future is
+        inserted directly, BEFORE A is released, so A is genuinely
+        SUPERSEDED while still running (not merely completed): A's own
+        terminal writeback, once it does run, is token-conditional against
+        a row that has already moved on to B and matches zero rows -- its
+        escaped exception is authentically a superseded attempt's, not a
+        completed one's."""
         _reclaim_attempt_a_release.clear()
         _reclaim_attempt_b_release.clear()
         _register("test.reclaim", handler=f"{MODULE}.reclaim_collision_handler")
@@ -1497,18 +1651,23 @@ class TestSupersededAttemptExceptionNet:
             token_a = job.claim_token
             future_a = w._futures[(job.pk, token_a)]
 
-            InferenceJob.objects.filter(pk=job.pk).update(
-                heartbeat_at=timezone.now() - timedelta(seconds=1)
-            )
+            # A is superseded WHILE still running: B's row and future are
+            # installed by hand before A is ever released.
+            token_b = uuid.uuid4()
+            InferenceJob.objects.filter(pk=job.pk).update(claim_token=token_b)
+            future_b = w._executor.submit(w._execute, {
+                "id": job.pk, "kind": "test.reclaim", "payload": {}, "model_refs": [],
+                "claim_token": token_b, "exclusive": False, "checkpoint": None,
+                "attempts": 1,
+            })
+            w._futures[(job.pk, token_b)] = future_b
+            assert not future_b.done()  # B is genuinely running
 
-            w.tick()  # attempt B reclaims (attempts=1) -- also blocks
-            job.refresh_from_db()
-            token_b = job.claim_token
-            assert token_b != token_a
-            future_b = w._futures[(job.pk, token_b)]
-
-            # Release A only. Its own handler call succeeds, but the
-            # subclass then raises PAST `_execute`'s never-raise guard.
+            # Release A. Its own handler call succeeds, but the subclass
+            # then raises PAST `_execute`'s never-raise guard; its own
+            # terminal writeback is token-conditional against token_a and
+            # the row has already moved on to token_b, so it matches zero
+            # rows -- A's exception is genuinely a superseded attempt's.
             _reclaim_attempt_a_release.set()
             concurrent.futures.wait([future_a], timeout=5)
             assert future_a.exception() is not None
@@ -1543,33 +1702,56 @@ class TestShutdownAccountsForSupersededAttempt:
     past the grace period as genuinely in-flight, not merely whatever
     `job_id`'s CURRENT slot happens to hold."""
 
-    def _two_live_attempts(self, worker, monkeypatch):
-        monkeypatch.setattr(worker_module, "STALE_AFTER_SECONDS", 0)
+    def _two_live_attempts(self, worker):
+        """Constructs the shape `_drain_inflight`/`_shutdown` must handle:
+        two still-live futures tracked under the same `job_id`, one
+        superseded. Task 8 (spec §3.4d) means a real `tick()`-driven
+        reclaim can no longer produce this shape -- `_launch` now refuses
+        and restores the row to a still-live attempt instead of ever
+        letting a second one coexist with it (see
+        `TestReclaimedAttemptTokenCollision`) -- but `_drain_inflight`/
+        `_shutdown` operate purely on `self._futures` as bookkeeping (see
+        `_drain_inflight`'s own docstring: no separate lookup into
+        `self._active_tokens`), so the two entries are built directly here
+        to keep exercising the invariant they were written for."""
         _reclaim_attempt_a_release.clear()
         _reclaim_attempt_b_release.clear()
         _register("test.reclaim", handler=f"{MODULE}.reclaim_collision_handler")
-        job = _job(kind="test.reclaim")
+        # attempts=1 mirrors what a real orphan-sweep-and-reclaim would
+        # already have bumped by the time a second attempt exists.
+        job = _job(kind="test.reclaim", state=RUNNING, attempts=1)
 
-        worker.tick()  # attempt A -- blocks
-        job.refresh_from_db()
-        token_a = job.claim_token
-        InferenceJob.objects.filter(pk=job.pk).update(
-            heartbeat_at=timezone.now() - timedelta(seconds=1)
+        token_a = uuid.uuid4()
+        InferenceJob.objects.filter(pk=job.pk).update(claim_token=token_a)
+        descriptor_a = {
+            "id": job.pk, "kind": "test.reclaim", "payload": {}, "model_refs": [],
+            "claim_token": token_a, "exclusive": False, "checkpoint": None,
+            "attempts": 0,
+        }
+        worker._futures[(job.pk, token_a)] = worker._executor.submit(
+            worker._execute, descriptor_a,
         )
-        worker.tick()  # attempt B reclaims -- also blocks
+
+        token_b = uuid.uuid4()
+        InferenceJob.objects.filter(pk=job.pk).update(claim_token=token_b)
+        descriptor_b = {
+            "id": job.pk, "kind": "test.reclaim", "payload": {}, "model_refs": [],
+            "claim_token": token_b, "exclusive": False, "checkpoint": None,
+            "attempts": 1,
+        }
+        worker._futures[(job.pk, token_b)] = worker._executor.submit(
+            worker._execute, descriptor_b,
+        )
+
         job.refresh_from_db()
-        token_b = job.claim_token
-        assert token_b != token_a
         return job, token_a, token_b
 
-    def test_drain_with_a_stale_and_b_live_requeues_only_under_bs_token(
-        self, worker, monkeypatch,
-    ):
+    def test_drain_with_a_stale_and_b_live_requeues_only_under_bs_token(self, worker):
         """Reviewer's TestProbe3Drain shape: both A and B are still
         blocked when the grace period elapses. Only B's own row is
         requeued (its token still matches); A's late writes, now
         token-conditional against a row that has moved on, are no-ops."""
-        job, token_a, token_b = self._two_live_attempts(worker, monkeypatch)
+        job, token_a, token_b = self._two_live_attempts(worker)
         future_a = worker._futures[(job.pk, token_a)]
         future_b = worker._futures[(job.pk, token_b)]
 
@@ -1622,7 +1804,7 @@ class TestShutdownAccountsForSupersededAttempt:
         `os._exit` having been called -- NOT via `executor.shutdown
         (wait=True)`, which is what would hang."""
         monkeypatch.setattr(worker_module, "SHUTDOWN_GRACE_SECONDS", 0.2)
-        job, token_a, token_b = self._two_live_attempts(worker, monkeypatch)
+        job, token_a, token_b = self._two_live_attempts(worker)
         future_a = worker._futures[(job.pk, token_a)]
         future_b = worker._futures[(job.pk, token_b)]
 
