@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from django.db import OperationalError
+from django.db import OperationalError, ProgrammingError
 from django.urls import reverse
 from django.utils import timezone
 
@@ -432,6 +432,59 @@ class TestTheRetryable503:
             "agents.chat.views.turns.get_job",
             lambda job_id: (_ for _ in ()).throw(QueueUnavailable("no tables")),
         )
+        turn = make_turn(role=Turn.Role.ASSISTANT, state=Turn.State.QUEUED,
+                         queue_job_id=1)
+
+        response = client.get(reverse("chat-turn-status", args=[turn.pk]))
+
+        assert response.status_code == 503
+        body = response.json()
+        assert body.get("retryable") is not True
+        assert "setup_url" in body
+
+    def test_a_database_blip_inside_the_queue_read_is_retryable_too(
+        self, client, monkeypatch
+    ):
+        """THE MOST LIKELY PATH, and the one that used to answer
+        terminally. `_queued_body` reads the queue through `get_job`,
+        whose backend wraps every ORM error in `QueueUnavailable`
+        (`models/queue/backend.py::_guarded`) -- so a recovering database
+        reaches the view as the exception that means "go configure the
+        queue" unless the view looks at what the guard CHAINED. It does,
+        and the answer is the retryable one, byte-identical to the blip
+        this view catches for itself."""
+        def _blip(job_id):
+            try:
+                raise OperationalError("server closed the connection unexpectedly")
+            except OperationalError as exc:
+                raise QueueUnavailable("get_job: queue tables unavailable") from exc
+
+        monkeypatch.setattr("agents.chat.views.turns.get_job", _blip)
+        turn = make_turn(role=Turn.Role.ASSISTANT, state=Turn.State.QUEUED,
+                         queue_job_id=1)
+
+        response = client.get(reverse("chat-turn-status", args=[turn.pk]))
+
+        assert response.status_code == 503
+        body = response.json()
+        assert body["retryable"] is True
+        assert "setup_url" not in body
+
+    def test_missing_queue_tables_inside_the_queue_read_stay_terminal(
+        self, client, monkeypatch
+    ):
+        """The other half of the same `__cause__` read, so the widening
+        above cannot be mistaken for "every `QueueUnavailable` is
+        retryable now". A `ProgrammingError` cause is the unmigrated box
+        the terminal 503 and its setup link exist for, and it keeps
+        both."""
+        def _no_tables(job_id):
+            try:
+                raise ProgrammingError('relation "jobs_inferencejob" does not exist')
+            except ProgrammingError as exc:
+                raise QueueUnavailable("get_job: queue tables unavailable") from exc
+
+        monkeypatch.setattr("agents.chat.views.turns.get_job", _no_tables)
         turn = make_turn(role=Turn.Role.ASSISTANT, state=Turn.State.QUEUED,
                          queue_job_id=1)
 

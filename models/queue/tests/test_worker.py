@@ -1240,6 +1240,56 @@ class TestHeartbeat:
 
         assert still_blocked, "_maybe_heartbeat ran its throttle outside the lock"
 
+    @pytest.mark.django_db(transaction=True)
+    def test_shutdown_stops_and_joins_a_live_heartbeat_thread(self, worker, monkeypatch):
+        """THE JOIN NOTHING HELD (whole-branch review F10a). `_shutdown`
+        sets `_stopping` and joins the thread, and both the branch and the
+        ADR lean on that join being what OBSERVES the thread exit -- but
+        no test drove `_shutdown` with a live thread: the shutdown suite
+        never starts one, and the heartbeat tests set `_stopping` and join
+        for themselves. Here `_shutdown` does both, unaided, and the
+        thread is dead on the other side of it.
+
+        `os._exit` is patched for the reason
+        `test_shutdown_takes_the_bounded_exit_path_not_wait_true` gives:
+        an empty `_futures` with `crashed=False` would otherwise take the
+        clean return, but patching it keeps this test honest on either
+        path rather than depending on which one is taken."""
+        monkeypatch.setattr(worker_module, "HEARTBEAT_SECONDS", 0.05)
+        monkeypatch.setattr(worker_module.os, "_exit", lambda code: None)
+        worker._start_heartbeat_thread()
+        thread = worker._heartbeat_thread
+        assert thread.is_alive(), "the thread must be running for the join to mean anything"
+
+        worker._shutdown()
+
+        assert worker._stopping.is_set()
+        assert not thread.is_alive()
+
+    def test_a_heartbeat_thread_that_fails_to_start_leaves_nothing_to_join(
+        self, worker, monkeypatch
+    ):
+        """F10b: the attribute is set BEFORE `start()` so the idempotence
+        guard holds, which used to mean a `start()` that raised left a
+        never-started thread behind for `_shutdown` to join -- and joining
+        one raises `RuntimeError`, on the crash path, where a second
+        exception is the last thing wanted. The clear is what makes
+        `_shutdown`'s `is not None` test mean "joinable"."""
+        def _refuse(self):
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(threading.Thread, "start", _refuse)
+
+        with pytest.raises(RuntimeError):
+            worker._start_heartbeat_thread()
+
+        assert worker._heartbeat_thread is None
+        # The proof that matters: shutdown's join is now unreachable
+        # rather than fatal.
+        monkeypatch.undo()
+        monkeypatch.setattr(worker_module.os, "_exit", lambda code: None)
+        worker._shutdown()
+
 
 # --- orphan sweep, via the worker's own wiring -------------------------------
 
@@ -2770,6 +2820,32 @@ class TestEviction:
         worker._evict_to_match_plan([])
 
         assert idle.list_installed_calls == 0
+
+    def test_an_exclusive_job_declaring_no_models_does_not_pay_it_either(
+            self, worker, register_engine, settings):
+        """The two predicates used to disagree here (whole-branch review
+        F8). The sweep widened on "any exclusive descriptor"; pass 1 and
+        the barrier fire on `own_endpoints`, which is built from the
+        exclusive descriptors' `model_refs` and is therefore EMPTY for a
+        job declaring none. Such a tick probed every registered endpoint
+        and then evicted nothing and barriered nothing. One expression
+        now, so it keeps the reach a non-exclusive tick has."""
+        settings.INFERENCE_DEFAULT_ENDPOINTS = {"idle": "http://idle:1"}
+        idle = register_engine(FakeEngine("idle", installed=[_installed("warm", loaded=True)]))
+        _set_budget(memory_budget_bytes=None)
+        row = _job(state=RUNNING, model_refs=[])
+        InferenceJob.objects.filter(pk=row.pk).update(exclusive=True)
+        claimed = [{
+            "id": row.pk, "kind": row.kind, "payload": {}, "model_refs": [],
+            "claim_token": uuid.uuid4(), "exclusive": True,
+            "checkpoint": None, "attempts": 0,
+        }]
+
+        refused = worker._evict_to_match_plan(claimed)
+
+        assert refused == set()
+        assert idle.list_installed_calls == 0
+        assert idle.unload_calls == []
 
     # --- the budget gate, moved ------------------------------------------
 

@@ -1612,7 +1612,20 @@ buys is an unbounded loop, because every answer the page cannot act on is now
 counted against the same bounded transport ceiling a dropped connection uses,
 and only a recognized state clears the count. A recovering database now answers
 a RETRYABLE 503 the loop retries, told apart from the terminal "the queue is
-not configured" 503 that keeps its setup link and stops polling.
+not configured" 503 that keeps its setup link and stops polling — **on both of
+the paths a database blip can take into that view**, which took one correction
+to be true of. `_queued_body`/`_running_body` read the queue through
+`models.contracts.queue.get_job`, and the backend's `_guarded` converts every
+ORM `ProgrammingError`/`OperationalError` into `QueueUnavailable`, so on exactly
+the queued/running turn this feature exists for the blip arrives wearing the
+terminal exception's clothes. `turn_status` therefore reads the chained
+`__cause__` rather than the exception class alone: an `OperationalError` cause
+is the retryable answer, while a `ProgrammingError` cause (tables not migrated)
+and a causeless `QueueUnavailable` (no backend configured) both stay terminal
+and keep the setup link. Teaching `_guarded` itself to tell "table missing"
+from "database unreachable" is the better fix and remains open — it is a
+queue-contract change across fifteen `except QueueUnavailable` sites in three
+columns, and is not made here.
 
 [ADR 0015](0015-agent-layer-and-tool-contract.md)'s own named gaps are
 unchanged, and none of them is addressed here.

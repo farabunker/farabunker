@@ -425,6 +425,26 @@ def turn_status(request, turn_id: int) -> JsonResponse:
     session middleware touches it before this view is entered at all, so
     a truly unavailable database can still produce a non-JSON 5xx that
     only the loop's own counting handles.
+
+    AND THE RETRYABLE HALF HAS TO LOOK THROUGH `QueueUnavailable`, which
+    is the least obvious thing in this view. `_queued_body`/
+    `_running_body` reach the database through `models.contracts.queue.
+    get_job`, and the backend wraps every public function in a guard
+    (`models/queue/backend.py::_guarded`) that converts an ORM
+    `ProgrammingError`/`OperationalError` into `QueueUnavailable`. So on
+    exactly the queued/running turn the retryable answer exists for, a
+    recovering database arrives here as `QueueUnavailable`, not as
+    `OperationalError` -- and answering the terminal 503 there would stop
+    the poll loop and blame a setup page that is not the problem. The
+    guard chains the original (`raise ... from exc`), so the `__cause__`
+    is the fact that decides: an `OperationalError` cause is the
+    database being momentarily away (RETRYABLE); anything else --
+    including the `ProgrammingError` cause that means the queue tables do
+    not exist yet, and a bare `QueueUnavailable` with no cause at all
+    (no backend configured) -- stays TERMINAL. Teaching the guard itself
+    to make that distinction would be the better fix, but it is a queue-
+    contract change across fifteen `except QueueUnavailable` sites in
+    three columns, so it is not made here.
     """
     try:
         principal = principal_for_request(request)
@@ -436,26 +456,43 @@ def turn_status(request, turn_id: int) -> JsonResponse:
             # `TestTheTwoNon200s::test_an_unknown_turn_is_404`.
             raise Http404(f"Turn {turn_id} does not exist.")
         body = _BODY_BUILDERS[turn.state](turn, request)
-    except QueueUnavailable:
-        # TERMINAL: the queue is not configured. Keeps its setup link, and
-        # the loop stops -- retrying would spin for ever on a box that
-        # needs an operator, not another request.
+    except QueueUnavailable as exc:
+        if isinstance(exc.__cause__, OperationalError):
+            # RETRYABLE, wearing the terminal exception's clothes -- see
+            # the docstring's `_guarded` paragraph. The cause is read, not
+            # the message, so a wording change in the guard cannot
+            # silently turn a recovering database back into a dead end.
+            return _retryable_503()
+        # TERMINAL: the queue is not configured, or its tables do not
+        # exist yet. Keeps its setup link, and the loop stops -- retrying
+        # would spin for ever on a box that needs an operator, not
+        # another request.
         return JsonResponse(
             {"error": QUEUE_UNAVAILABLE, "setup_url": reverse("inference-console")},
             status=503,
         )
     except OperationalError:
         # RETRYABLE: the database was momentarily unavailable (a restart,
-        # a recovery). The loop counts this answer against the same
-        # bounded transport ceiling a dropped connection uses, so a
-        # database that never comes back cannot make the page tick for
-        # ever either.
-        return JsonResponse(
-            {"error": "The queue is briefly unavailable; this will retry.",
-             "retryable": True},
-            status=503,
-        )
+        # a recovery), raised by one of this view's OWN reads rather than
+        # through the queue guard. The loop counts this answer against
+        # the same bounded transport ceiling a dropped connection uses,
+        # so a database that never comes back cannot make the page tick
+        # for ever either.
+        return _retryable_503()
     return JsonResponse(body)
+
+
+def _retryable_503() -> JsonResponse:
+    """The RETRYABLE half of `turn_status`'s two 503s, in one place
+    because two clauses answer with it -- a database blip raised by this
+    view's own reads, and the same blip arriving as a `QueueUnavailable`
+    the queue guard chained it into. Both are the same fact to the
+    poller, so they must be the same bytes."""
+    return JsonResponse(
+        {"error": "The queue is briefly unavailable; this will retry.",
+         "retryable": True},
+        status=503,
+    )
 
 
 @require_POST

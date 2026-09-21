@@ -791,14 +791,29 @@ class Worker:
 
     def _start_heartbeat_thread(self) -> None:
         """Start the dedicated heartbeat thread. Called by `run_forever`
-        only -- see `__init__`'s own note on why not the constructor."""
+        only -- see `__init__`'s own note on why not the constructor.
+
+        THE ATTRIBUTE IS SET BEFORE `start()` AND CLEARED IF IT RAISES,
+        which is the only order that serves both readers of it. Setting
+        it first is what makes the guard above idempotent even against a
+        re-entrant caller; clearing it on failure is what keeps
+        `_shutdown`'s `join(timeout=2.0)` honest, since joining a thread
+        that was never started raises `RuntimeError` rather than
+        returning -- and `_shutdown` runs on the crash path, where a
+        second exception is the last thing wanted. A thread object that
+        failed to start is not reusable, so the clear leaves the worker
+        free to try a fresh one rather than holding a dead handle."""
         if self._heartbeat_thread is not None:
             return
         thread = threading.Thread(
             target=self._heartbeat_forever, name="jobs-heartbeat", daemon=True,
         )
         self._heartbeat_thread = thread
-        thread.start()
+        try:
+            thread.start()
+        except RuntimeError:
+            self._heartbeat_thread = None
+            raise
 
     def _record_detected_memory(self) -> None:
         """Write what THIS PROCESS's machine reports as total memory onto
@@ -948,6 +963,16 @@ class Worker:
                 "flight here; restoring the row to it and discarding this claim",
                 self.worker_id, job_id,
             )
+            # DEFENSE IN DEPTH, AND DEAD BY CONSTRUCTION -- deliberately,
+            # not by oversight. `_requeue_unlaunched` filters `pk AND
+            # state=RUNNING AND claim_token=<this same token>`, strictly
+            # stronger than the restore's `pk AND claim_token`, so any row
+            # the restore failed to match this cannot match either. What it
+            # DOES do is pop this claim's `_active_tokens` entry, which is
+            # the whole effect the discarded claim is entitled to. Do not
+            # delete it as dead without reading that, and do not "fix" it
+            # into a predicate that would actually rewrite a row another
+            # worker legitimately owns (ADR 0013 §4).
             if not self._restore_to_live_attempt(descriptor, live_token):
                 self._requeue_unlaunched([descriptor])
             return
@@ -978,9 +1003,14 @@ class Worker:
 
         Conditional on the SUPERSEDING token, so this can only ever
         rewrite the row this claim actually holds: if another worker
-        legitimately owns it by now, zero rows match and the caller
-        requeues the fresh claim the ordinary way instead (the existing,
-        documented "stale token, zero rows" shape).
+        legitimately owns it by now, zero rows match, the fresh claim is
+        simply DISCARDED, and a row another worker legitimately owns is
+        never touched by this one. NOT "requeued the ordinary way" -- the
+        design note said that and the shipped code cannot do it, because
+        the caller's `_requeue_unlaunched` fallback filters on this same
+        token AND `state=running`, a strictly stronger predicate than
+        this `UPDATE`'s. See the call site's own comment, and ADR 0013 §4,
+        which records the correction.
         """
         job_id = descriptor["id"]
         restored = InferenceJob.objects.filter(
@@ -1490,6 +1520,18 @@ class Worker:
         `own_endpoints` is the admitted exclusive job's OWN endpoints,
         derived from THIS tick's batch and never recomputed later.
 
+        AND IT IS THE WIDENING PREDICATE TOO, not "any exclusive
+        descriptor" -- the two used to be different expressions and could
+        disagree on one reachable case: an exclusive job declaring NO
+        `model_refs` at all. `own_endpoints` is built from those refs, so
+        it is empty for such a job, while `any(exclusive)` was true -- a
+        tick that paid the whole `registered_endpoints()` cross-engine
+        probe and then evicted nothing and barriered nothing, because
+        `_evict_to_match_plan` gates pass 1 and the barrier on
+        `own_endpoints`. One expression now, so the sweep widens on
+        exactly the condition the pass fires on, and such a job keeps
+        today's reach instead of buying a probe it cannot use.
+
         `model_ids_by_endpoint` is what each endpoint can be ADDRESSED by,
         from the same `registered_endpoints()` call -- the unload seam
         takes a `model_id`, so a foreign endpoint with no connection row
@@ -1515,7 +1557,7 @@ class Worker:
         }
 
         model_ids_by_endpoint: dict[tuple[str, str], tuple[str, ...]] = {}
-        if any(descriptor.get("exclusive") for descriptor in claimed):
+        if own_endpoints:
             for engine_name, endpoint, model_ids in registered_endpoints():
                 endpoints.add((engine_name, endpoint))
                 model_ids_by_endpoint[(engine_name, endpoint)] = model_ids
@@ -1865,7 +1907,23 @@ class Worker:
 
         `already_swept` is whatever pass 1 covered, skipped here so an
         endpoint it emptied uncapped is not nibbled at again under the
-        cap."""
+        cap.
+
+        THIS PASS'S UNLOAD REFUSALS ARE NEVER BARRIER EVIDENCE, and the
+        reason is an ORDERING rather than a filter. `_unload_endpoint`
+        records a `False` answer in `self._unload_refusals`, shared with
+        pass 1 -- but the caller runs `_barrier` BEFORE this pass and
+        `_evict_to_match_plan` rebinds the set at the top of the next
+        one, so what this pass writes there is read by nothing and the
+        writes are inert. That is correct: §3.3d(4) sanctions barrier
+        evidence from the exclusive pass only, so a budget-driven
+        refusal -- which is about memory pressure, not about an engine
+        declining to release a model the admitted job needs -- must not
+        fail a job. IF THE ORDERING EVER CHANGES and the barrier comes to
+        read the set after this pass, the set must be scoped to pass 1
+        (an out-parameter on `_unload_endpoint`, or a separate set here)
+        rather than left shared, or budget refusals will start failing
+        exclusive jobs silently."""
         released: set[tuple[str, str, str]] = set()
         remaining = MAX_UNLOADS_PER_TICK
         for key in sorted(installed_by_endpoint):
