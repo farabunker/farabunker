@@ -220,6 +220,14 @@ MAX_BARRIER_REFUSALS = 3
 MIN_BARRIER_REFUSAL_SPAN_SECONDS = 300
 
 
+def _total_memory_bytes() -> int:
+    """What THIS machine reports as total physical memory. A module-level
+    function, not an inline `os.sysconf` call, purely so a test can patch
+    the worker's own name instead of the stdlib object every other test in
+    the process shares."""
+    return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+
+
 class Worker:
     """One worker process: claims admitted jobs and runs them in a thread
     pool. `worker_id` defaults to `f"{socket.gethostname()}:{os.getpid()}"`
@@ -448,6 +456,7 @@ class Worker:
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
         self._start_heartbeat_thread()
+        self._record_detected_memory()
         logger.info("worker %s: starting", self.worker_id)
         crashed = False
         try:
@@ -749,6 +758,39 @@ class Worker:
         )
         self._heartbeat_thread = thread
         thread.start()
+
+    def _record_detected_memory(self) -> None:
+        """Write what THIS PROCESS's machine reports as total memory onto
+        the settings row, once, at startup (spec §3.7).
+
+        WHY THE WORKER AND NOT THE CONSOLE: the console renders in the web
+        service and the budget governs the worker service -- separate
+        containers -- so memory detected in the web process describes the
+        wrong machine, in precisely the way the operator would be misled
+        by.
+
+        NOTHING IS APPLIED ON THE OPERATOR'S BEHALF. This is a PREFILL and
+        a label, never a budget: the container sees the VM's allocation
+        rather than the host's, and a silently derived budget would be
+        authoritative and wrong. The settings page renders the number with
+        the process and the date attached so an operator can judge it.
+
+        No new dependency: `os.sysconf` answers on both platforms this
+        runs on. A platform that does not answer writes NOTHING -- an
+        honestly absent number, like the budget itself -- rather than a
+        guess."""
+        try:
+            total = _total_memory_bytes()
+        except (AttributeError, ValueError, OSError):
+            return
+        if total <= 0:
+            return
+        try:
+            JobSettings.objects.filter(pk=1).update(
+                detected_memory_bytes=total, detected_memory_at=timezone.now(),
+            )
+        except (ProgrammingError, OperationalError):
+            return
 
     def _heartbeat_forever(self) -> None:
         """The heartbeat's own thread (Q8, spec §3.4a).

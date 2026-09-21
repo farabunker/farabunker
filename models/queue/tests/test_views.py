@@ -20,7 +20,8 @@ ordering/position assertions unambiguous.
 from __future__ import annotations
 
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta
+from datetime import timezone as dt_timezone
 
 import pytest
 from django.db import OperationalError
@@ -378,7 +379,15 @@ class TestBudgetConcurrencySettings:
 
         assert JobSettings.get_solo().memory_budget_bytes is None
         response = client.get(reverse("jobs-queue"))
-        assert "not set. Jobs run one at a time." in response.content.decode()
+        # Task 15: the unset-budget block became a callout naming what an
+        # unset budget costs (`TestTheUnsetBudgetIsLoud` covers its
+        # wording); the old "not set. Jobs run one at a time." phrase no
+        # longer sits contiguous in the HTML ("not set." now closes its
+        # own `<strong>` before "Jobs run..."), so the assertion here
+        # moved to the callout's own new copy.
+        assert "Memory budget — not set." in response.content.decode()
+        assert "Jobs run one at a time, and nothing is offloaded for budget reasons." \
+            in response.content.decode()
 
     def test_a_valid_write_is_audited_exactly_once(self, client):
         """S3 (Coherence Wave B): `JobSettings` was one of the four
@@ -727,6 +736,63 @@ class TestTheJobExecutionPage:
         assert settings_row.retention_limit == 20
         assert settings_row.default_priority == 77
         assert not AuditEvent.objects.filter(action=actions.QUEUE_SETTINGS_UPDATED).exists()
+
+
+# --- Task 15: the unset budget is loud, and the prefill names the worker ----
+
+
+@pytest.mark.django_db
+class TestTheUnsetBudgetIsLoud:
+    """With the budget gate moved (Task 14), an unset budget no longer
+    switches the apparatus off -- but the operator still had no way to
+    know the capped pass runs with no number to work against. The Queue
+    page's read-only budget block becomes a real callout naming both
+    consequences and the control that changes them; the settings page's
+    prefill note names the process and the date that measured it.
+
+    `client` alone, no sign-in: both pages read `identity_is_admin`,
+    which is True for every viewer on the open-posture default this
+    suite runs under (see `queue.html`'s own comment on the "Change the
+    budget..." link), so there is no `admin_signed_in` fixture in this
+    module -- an admin session is only ever minted explicitly, with
+    `sign_in(client, make_admin())` inside `posture(...)`, by the tests
+    above that actually need a non-open posture."""
+
+    def test_the_queue_page_says_what_an_unset_budget_costs(self, client):
+        body = client.get(reverse("jobs-queue")).content.decode()
+
+        assert "Jobs run one at a time" in body
+        assert "nothing is offloaded for budget reasons" in body
+        assert reverse("jobs-settings") in body
+
+    def test_a_set_budget_renders_no_callout(self, client):
+        # `get_solo()` FIRST: `.filter(pk=1).update(...)` alone updates
+        # zero rows against an empty table (no data migration seeds
+        # `pk=1`), which would leave the budget unset and make this
+        # assertion pass for the wrong reason. Deviation from the brief's
+        # literal `.filter(pk=1).update(...)`-only snippet, named here.
+        JobSettings.get_solo()
+        JobSettings.objects.filter(pk=1).update(memory_budget_bytes=32 * 1024**3)
+
+        assert "nothing is offloaded for budget reasons" not in client.get(
+            reverse("jobs-queue")).content.decode()
+
+    def test_the_prefill_names_the_process_that_measured_it(self, client):
+        # Same fix as `test_a_set_budget_renders_no_callout` above: the
+        # row must exist before `.update()` can touch it.
+        JobSettings.get_solo()
+        JobSettings.objects.filter(pk=1).update(
+            detected_memory_bytes=64 * 1024**3,
+            detected_memory_at=datetime(2026, 3, 4, tzinfo=dt_timezone.utc),
+        )
+
+        body = client.get(reverse("jobs-settings")).content.decode()
+
+        assert "detected by the worker process on March 4, 2026" in body
+        assert "64" in body
+
+    def test_with_nothing_detected_the_settings_page_still_renders(self, client):
+        assert client.get(reverse("jobs-settings")).status_code == 200
 
 
 # --- Worker-down hint --------------------------------------------------------
@@ -1164,7 +1230,10 @@ class TestDegradation:
         assert response.status_code == 200
         assert "run database migrations" not in body
         assert "Nothing has been queued yet." in body
-        assert "not set. Jobs run one at a time." in body
+        # Task 15: same wording move as `TestBudgetConcurrencySettings::
+        # test_blank_budget_clears_to_none_and_shows_not_set_copy` above.
+        assert "Memory budget — not set." in body
+        assert "Jobs run one at a time, and nothing is offloaded for budget reasons." in body
 
 
 # --- Escaping ------------------------------------------------------------------
@@ -1273,7 +1342,15 @@ class TestTheQueueSettingsFormsAreAdminOnlyOnThePage:
             sign_in(client, make_admin())
             body = client.get(reverse("jobs-queue")).content
         assert reverse("jobs-settings-update").encode() not in body
-        assert body.count(reverse("jobs-settings").encode()) == 2
+        # Task 15: THREE now, not two -- the unset-budget callout itself
+        # (default JobSettings row here has no budget) gained its own
+        # admin-only "Set a budget on Job execution" link, on top of the
+        # two pre-existing "Change the budget..."/"Change the
+        # retention..." links below. Still admin-only, still class S, so
+        # the invariant this test's docstring states ("a way to reach
+        # them did not [leave]") holds -- there are just three doors to
+        # it now instead of two.
+        assert body.count(reverse("jobs-settings").encode()) == 3
 
     def test_a_member_is_offered_neither(self, client):
         """I4 (Wave C review): the earlier version of this test signed in

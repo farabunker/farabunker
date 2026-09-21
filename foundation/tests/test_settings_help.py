@@ -375,6 +375,14 @@ _FIELD_ANCHORS: dict[str, dict[str, str]] = {
         "default_priority": "default-priority",
         "max_queued_per_principal": "max-queued-per-principal",
         "response_timeout_seconds": "response-timeout-seconds",
+        # Task 15 (queue memory-governance, spec §3.7): the worker-
+        # measured memory prefill. NEITHER FIELD IS OPERATOR-EDITABLE --
+        # there is no form control for either, only the informational
+        # note `jobs/settings.html` renders beside the budget input -- so
+        # they join the count below as a NEW category rather than as
+        # more "operator-editable" fields; see that test's own docstring.
+        "detected_memory_bytes": "detected-memory",
+        "detected_memory_at": "detected-memory-at",
     },
 }
 
@@ -505,9 +513,26 @@ class TestTheModelFieldCoverage:
         SEVENTEEN BECAME EIGHTEEN when the one-timeout task (2026-09-17)
         added `JobSettings.response_timeout_seconds`, the turn's own
         response timeout -- mapped the identical way, on its own section
-        of the same page, for the same reason."""
+        of the same page, for the same reason.
+
+        EIGHTEEN BECAME TWENTY when Task 15 of the queue memory-
+        governance track (2026-09-21) added `JobSettings.detected_
+        memory_bytes`/`detected_memory_at`, the worker-measured memory
+        prefill shown beside the budget. THIS IS A DIFFERENT KIND OF
+        ADDITION than the four before it: neither field is operator-
+        editable (there is no form control for either, only an
+        informational note), so they are not two more of "the audit's
+        eighteen" -- the audit counted operator-editable fields, and this
+        pair is not that. What they ARE is real, individually-anchored
+        `HelpField`s: the settings page renders both (`jobs/settings.
+        html`), and this assertion's own point -- that nothing this page
+        renders goes uncovered -- applies to a display-only fact exactly
+        as much as to a control. Mapping them keeps that point true
+        rather than carving out an exception for it; `queue_excluded`
+        stays `0` because neither is a `_NAMED_EXCLUSIONS` entry either."""
         mapped_count = sum(len(v) for v in _FIELD_ANCHORS.values())
         queue_excluded = sum(1 for (m, _f) in _NAMED_EXCLUSIONS if m == "JobSettings")
         # 4 IdentitySettings + 1 ChatSettings + 7 RagSettings + 6 JobSettings
-        assert mapped_count == 18
+        # (operator-editable) + 2 JobSettings (worker-measured, display-only)
+        assert mapped_count == 20
         assert queue_excluded == 0

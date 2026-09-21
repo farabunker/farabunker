@@ -3466,3 +3466,41 @@ class TestBootTolerance:
             worker.tick()  # must not raise
 
         assert not any(r.levelname == "ERROR" for r in caplog.records)
+
+
+@pytest.mark.django_db
+class TestTheDetectedMemoryFact:
+    """Task 15 (spec §3.7): the worker measures ITS OWN process's machine
+    once at boot and writes it onto the settings row, labelled -- never
+    applied as a budget. `test_worker.py::TestBootTolerance` above is the
+    row-read side of "the worker degrades honestly"; this is the write
+    side of a brand new fact, so it gets its own class rather than
+    folding into an existing one."""
+
+    def test_the_worker_writes_it_once_at_boot(self, worker):
+        worker._record_detected_memory()
+
+        row = JobSettings.get_solo()
+        assert row.detected_memory_bytes > 0
+        assert row.detected_memory_at is not None
+
+    def test_a_platform_that_does_not_answer_writes_nothing(self, worker, monkeypatch):
+        # Patched on the WORKER MODULE's own name, not on the real `os`
+        # module: `monkeypatch.setattr(worker_module.os, ...)` reaches
+        # through to the stdlib object every other test in the process
+        # shares. `_record_detected_memory` therefore calls a
+        # module-level `_total_memory_bytes()` helper, and this patches
+        # THAT.
+        monkeypatch.setattr(worker_module, "_total_memory_bytes",
+                            lambda: (_ for _ in ()).throw(ValueError()))
+
+        worker._record_detected_memory()
+
+        assert JobSettings.get_solo().detected_memory_bytes is None
+
+    def test_it_never_sets_the_budget(self, worker):
+        """The container sees the VM's allocation, not the host's: a
+        silently derived budget would be authoritative and wrong."""
+        worker._record_detected_memory()
+
+        assert JobSettings.get_solo().memory_budget_bytes is None

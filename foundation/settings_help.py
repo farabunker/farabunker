@@ -490,6 +490,36 @@ CARDS: tuple[HelpCard, ...] = (
                     "before it is caught."
                 ),
             ),
+            HelpField(
+                name="Detected memory (worker-measured)",
+                anchor="detected-memory",
+                meaning=(
+                    "What the worker process's own machine reported as total physical memory "
+                    "the last time the worker service started. A prefill for the memory "
+                    "budget above, never applied automatically -- the console renders in the "
+                    "web service and the budget governs the worker service, separate "
+                    "containers, so this is measured where it matters."
+                ),
+                effects=(
+                    "Informational only: nothing on this box acts on it, and the memory "
+                    "budget above stays whatever an operator set (or left unset) regardless "
+                    "of this figure. It changes only the next time the worker service "
+                    "restarts."
+                ),
+            ),
+            HelpField(
+                name="Detected memory, measured on",
+                anchor="detected-memory-at",
+                meaning=(
+                    "The date the worker process last measured its own machine's total "
+                    "memory, shown beside the detected figure so an operator can judge how "
+                    "stale it is."
+                ),
+                effects=(
+                    "Informational only, like the figure it dates. It does not change the "
+                    "memory budget by itself."
+                ),
+            ),
         ),
     ),
     HelpCard(

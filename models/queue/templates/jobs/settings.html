@@ -117,6 +117,41 @@ retention groups below it, not a sixth field folded into either.
     <p class="caveat">Not set. Jobs run one at a time — leave the budget blank to keep it that way, or set the total memory the platform may use for model runs and jobs whose footprints fit within it will run together.</p>
     {% endif %}
     <p class="caveat">Max concurrent jobs is a hard cap on top of the budget: the queue never starts more than this many at once, however small their footprints are.</p>
+    {% comment %}
+    Task 15 (spec §3.7): the worker-measured prefill. THE IDS ARE
+    UNCONDITIONAL (`id="detected-memory"` on the `<p>` itself, never only
+    inside the `{% templatetag openblock %} if {% templatetag closeblock %}`
+    branch) on purpose -- `foundation/tests/test_settings_help.py::
+    TestTheAnchors` sweeps this card's own live `HelpField` anchors
+    against a FRESH `JobSettings` row (no worker has ever run in that
+    test), so an anchor that only rendered once a figure existed would
+    fail there exactly the way `inference-console`'s cold-start branch
+    already taught this codebase to watch for. `detected_memory_bytes`/
+    `detected_memory_at` are two distinct concrete fields
+    (`foundation/tests/test_settings_help.py::TestTheModelFieldCoverage`),
+    so they carry two distinct anchors rather than one shared between
+    them. `detected-memory-at` sits on its own EMPTY span IMMEDIATELY
+    ABOVE the paragraph -- the same shape `inference/console.html`'s
+    `#in-use`/`#on-this-machine` anchors use and, per that template's own
+    comment, for the same reason: `.settings-main :target`
+    (`_shell.html`) is how a help card's "Jump to" link is meant to land,
+    and that rule paints nothing for a `hidden` (display:none) target, so
+    the span is plainly visible-but-empty, never wrapped around the
+    rendered date inline. `TestTheUnsetBudgetIsLoud::test_the_prefill_
+    names_the_process_that_measured_it` (`models/queue/tests/
+    test_views.py`) asserts "detected by the worker process on March 4,
+    2026" as ONE CONTIGUOUS string, and any tag opened between "on" and
+    the date would split it -- which is why the anchor is not simply
+    wrapped around `{{ detected_memory_at }}` in place.
+    {% endcomment %}
+    <span id="detected-memory-at"></span>
+    <p class="caveat" id="detected-memory">
+      {% if detected_memory_human %}
+      This box reports {{ detected_memory_human }} of memory in total — detected by the worker process on {{ detected_memory_at|date:"N j, Y" }}. It is not applied for you: a container sees its own allocation rather than the host's, so the number that belongs here is yours to decide.
+      {% else %}
+      Not yet detected. The worker process measures this box's total memory once, at startup, and this note fills in the next time it starts.
+      {% endif %}
+    </p>
   </section>
 
   <section class="settings">

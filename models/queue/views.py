@@ -117,7 +117,14 @@ def _job_settings_context(settings_row: JobSettings | None) -> dict:
     placeholder, the same "" convention `memory_budget_gb_value` above
     already uses for its own null-means-unset field, because Django's
     template engine renders a bare `None` context value as the literal
-    string "None", not an empty string."""
+    string "None", not an empty string.
+
+    Task 15 (spec §3.7): `detected_memory_human`/`detected_memory_at`
+    carry the WORKER-measured prefill, `None`-safe here exactly like
+    every other value above -- a box that has never run a worker (or is
+    on the degraded path) has genuinely never had the fact measured, and
+    the settings page's own `{% if detected_memory_human %}` already
+    treats `None` as "say nothing" rather than a value to fake."""
     if settings_row is None:
         return {
             "memory_budget_bytes": None,
@@ -128,6 +135,8 @@ def _job_settings_context(settings_row: JobSettings | None) -> dict:
             "default_priority": JobSettings.DEFAULT_PRIORITY_DEFAULT,
             "max_queued_per_principal": "",
             "response_timeout_seconds": JobSettings.RESPONSE_TIMEOUT_SECONDS_DEFAULT,
+            "detected_memory_human": None,
+            "detected_memory_at": None,
         }
     return {
         "memory_budget_bytes": settings_row.memory_budget_bytes,
@@ -141,6 +150,8 @@ def _job_settings_context(settings_row: JobSettings | None) -> dict:
             else settings_row.max_queued_per_principal
         ),
         "response_timeout_seconds": settings_row.response_timeout_seconds,
+        "detected_memory_human": _human_size(settings_row.detected_memory_bytes),
+        "detected_memory_at": settings_row.detected_memory_at,
     }
 
 
