@@ -1978,11 +1978,18 @@ def _isolated_registry():
 def _overdue(count: int):
     user = make_user()
     item = make_conversation(owner_kind="user", owner_key=str(user.pk))
-    for index in range(count):
-        ticket = service.delete_content(user_principal(user), kind=KIND_ASK,
-                                        key=str(index), owner=item)
-        DeletionTicket.objects.filter(pk=ticket.pk).update(
-            purge_on=timezone.localdate() - datetime.timedelta(days=1))
+    tickets = [
+        service.delete_content(user_principal(user), kind=KIND_ASK,
+                               key=str(index), owner=item)
+        for index in range(count)
+    ]
+    # ALL tickets are created first, then backdated together in ONE queryset
+    # update: backdating one at a time would let each later `delete_content`
+    # call's own unconditional prune-on-write sweep purge the earlier,
+    # already-overdue ticket before this helper -- or the test that called
+    # it -- ever gets to see it.
+    DeletionTicket.objects.filter(pk__in=[ticket.pk for ticket in tickets]).update(
+        purge_on=timezone.localdate() - datetime.timedelta(days=1))
 
 
 class TestPurgeDeleted:
@@ -6680,3 +6687,4 @@ Checked end to end: `ticketed_keys` / `visible_tickets` / `may_purge` / `delete_
 - Round 2 (2026-09-21): CLEAN — every amendment verified against the real source (registry isolation complete across all registering test modules; the demo test sees the real handlers; held re-pins exact); no new findings.
 - **Execution amendment (Task 1 review), 2026-09-21:** two fixes ordered by the controller during Task 1's own review, applied to both the code and this plan. (1) `TAB_PURGED = "Purged"` contradicted this plan's own copy constraint that the word *purge* appears nowhere a person reads — resolved toward the setting's own wording: the constant is now `TAB_LOG = "Deletion log"`, the same phrase `LABEL_AUDIT_DETAIL` ("Show item names in the deletion log") already names, so the tab heading and the setting that controls its detail share one word. Every rendered/asserted occurrence in this plan (the constant declaration, the template's `<h2>`, the smoke checklist's two "Purged tab" lines) was updated to match; prose nicknames that are neither rendered nor asserted (docstrings, a test class name) were left as-is per the same ruling. (2) The gate bullets read as if the four runs plus two posture sweeps were a per-task requirement, which is not what any task's own brief actually asked implementers to run and is not workable at the scale of 23 tasks on a machine with a cap of two concurrent suites. Reworded, commands unchanged: the four runs plus the two posture sweeps are the **branch** gate, run at the slice-one gate (after Task 15) and again before the pull request (after pinging the queue steward); each task's own pre-commit gate is its focused test modules plus the structural gates its brief names, in both feature-flag states — matching `AGENTS.md`'s "the four runs are the gate" as a branch-level statement, not a per-task one.
 - **Execution amendment (Task 5 review), 2026-09-21:** Task 5's `test_it_is_bounded_by_the_limit` interleaved four `delete_content` creates with four one-at-a-time backdates, which the unconditional prune-on-write sweep at the end of every `delete_content` call (spec section 3.9) correctly defeats — each later create's own sweep purged the previous iteration's already-overdue ticket before the test's own explicit `sweep` ran. The implementer's first pass gated that sweep on the just-created ticket's own due date to make the test pass; the controller overruled that as a fix to the wrong side: the spec is explicit that prune-on-write runs on every delete, unconditionally, so a box on the shipped 30-day default keeps itself clean with no scheduler. `identity/retention.py::delete_content` stays exactly as this plan's Step 3 prints it (`if created: sweep()`, unconditional); the test was re-shaped instead — create all four tickets first, backdate all four together in one queryset update, then assert the bounded sweep — and the behaviour the reshaped test no longer exercises (an unrelated delete purging a ticket that independently fell due) is now pinned by its own new test, `test_deleting_anything_purges_what_has_already_fallen_due`, added beside it in `TestTheSweep`. Both are reflected in Task 5's test code block above.
+- **Execution amendment (Task 6 review), 2026-09-21:** Task 6: the `_overdue` helper re-shaped to create-all-then-backdate for the same reason as Task 5's limit test; command code unchanged from the brief.
