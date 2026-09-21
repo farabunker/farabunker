@@ -11,11 +11,16 @@ citation against a tree that has moved. The read-only audit
 SHA above; it is the evidence, this is the design.
 **Sources:** the owner-approved brief (`.superpowers/deletion-design-brief.md`) is binding; the
 audit is evidence. Where the two disagree, the brief wins.
-**Columns touched:** `identity/` (the ticket, the orchestration, the page), `agents/` (one
-contract slot, one retention module), `tools/rag`, `tools/vision`, `models/queue` +
-`models/contracts/queue.py` (one passthrough), `foundation/` (three registration tables).
+**Columns touched:** `identity/` (the ticket, the whole retention policy, the orchestration, the
+page), `agents/` (one contract slot, one retention module), `tools/rag`, `tools/vision`,
+`models/queue` (a payload-keyed handler, an age condition on the existing prune, one new
+non-creating read across the identity seam — **no migration**) + `models/contracts/queue.py`
+(one passthrough), `foundation/` (three registration tables).
+**Migrations:** **exactly one**, in `identity/` — the ticket table plus the four retention
+policy fields on `IdentitySettings` (§4). `models/queue` gains no column at all.
 **Lands as:** three slices on one branch off `origin/dev`, in the brief's order.
-**Open questions:** none. Every call is made; §11 lists the ones the owner may want to overrule.
+**Open questions:** none. Every call is made; §11 lists the ones the owner may want to overrule,
+and §11.1 is an owner ruling that already overrode the author's first draft.
 
 No model or vendor names appear in this document. No absolute paths appear in this document;
 `<repo>` stands for the checkout root.
@@ -53,9 +58,12 @@ Four owner rulings bind the design and are implemented where named:
 1. **Tool-call records** (`agents.models.ToolInvocation`'s `args` / `text` / `error`) are
    SCRUBBED at the item's retention cliff by default; a setting allows a LONGER retention for
    them (extra days after the item's purge; default 0). → §3.6, §3.8.
-2. **Queue rows for a deleted conversation are DELETED**, in the same request. The queue also
+2. **Queue rows for a deleted conversation are DELETED**, in the same request — after the
+   queue's own cancel path has closed any row that is not terminal yet (§3.6). The queue also
    gets a natural cliff of its own — finished rows older than the queue's retention (default
-   one day) go regardless. → §3.6, §3.11.
+   one day) go regardless. That number is `IdentitySettings.queue_retention_days`, one of the
+   four fields of the single centralised retention policy (**owner ruling, §11.1**); the queue
+   reads it, it does not own it. → §3.6, §3.11, §11.1.
 3. **Existing residue** is handled by that queue cliff; no one-shot purge command. Ask history
    rows simply become deletable. → §3.11, §9.
 4. **Audit keeps what an audit needs.** Deletion events are ALWAYS written and ALWAYS visible
@@ -397,7 +405,7 @@ the brief names. Registration is one call in each column's `AppConfig.ready()`, 
 
 | Order | Key | Dotted path | What it does |
 |---|---|---|---|
-| ROWS | `queue.conversation_jobs` | `models.queue.retention.forget_conversation` | Deletes every `InferenceJob` whose payload names this conversation (§3.7) |
+| ROWS | `queue.conversation_jobs` | `models.queue.retention.forget_conversation` | **Cancels** any non-terminal `InferenceJob` whose payload names this conversation through the queue's own cancel path, then deletes every row it names (§3.7) |
 | FILES | `agents.conversation` | `agents.retention.purge_conversation` | The whole of the agents-side purge, in order (below) |
 | FILES | `rag.conversation_notes` | `tools.rag.retention.purge_conversation_notes` | The staging note file and the note `Document` |
 
@@ -550,6 +558,35 @@ payload shapes are read from their producers: `agents/chat/service.py` for `agen
 `agents/chat/views/workstreams.py` for `rag.consolidate` (which carries the conversation id AND
 the conversation's `title`), `tools/rag/ingest.py` for `rag.ingest`.
 
+**A live row is CANCELLED before it is deleted, never deleted out from under a running turn.**
+This is a binding condition from the queue steward, and it is a correctness rule, not a
+courtesy. `agents/runtime/jobs.py::on_turn_terminal` — the `on_terminal` hook
+`models/queue/backend.py::cancel_job` schedules on a successful cancel — is what closes a
+stranded placeholder assistant turn; its own docstring names the three handler-never-started
+paths it exists for. A purge that simply deleted a queued or running row would skip that hook
+entirely, and the turn's poller (`agents/chat/views/turns.py::_queued_body` / `_running_body`,
+each calling `models.contracts.queue.get_job`) would see the job vanish mid-poll — which reads
+as a database fault, not as a delete. So `forget_conversation`, for every non-terminal row it
+matched:
+
+1. calls the queue's EXISTING `models/queue/backend.py::cancel_job` — an intra-column call, so
+   no new passthrough on `models/contracts/queue.py` is needed for it. The queued→cancelled
+   transition stays that function's single conditional `UPDATE`, and its `on_terminal`
+   scheduling stays exactly as it is;
+2. deletes the row only once it is terminal. A row that came back `"cancelled"`, `"unknown"` or
+   `"already_finished"` is deletable in this same call;
+3. **refuses on `"already_running"`.** A worker holds that job; nothing here may delete it.
+   `forget_conversation` raises, which — the runner never swallowing (§3.5) — aborts the purge
+   with the ticket intact and every row and byte untouched, because this handler is `ORDER_ROWS`
+   and registered FIRST for the kind, so it runs before any other handler has done anything.
+   The view renders the refusal sentence; the cliff sweep simply retries on its next pass. The
+   item stays invisible the whole time (§3.4) — the promise is kept even while the purge waits.
+
+The `on_terminal` hook scheduled in step 1 fires on commit of `purge_ticket`'s outer
+`transaction.atomic()` — after the turns are already gone — and `on_turn_terminal` is one
+conditional `UPDATE` filtered on the states a stranded turn can be in, so it matches zero rows
+and no-ops. That is the existing ordering preserved, not a new one. §5 carries the edge case.
+
 **Rows are DELETED, not scrubbed** — owner ruling 2. The audit's own open question weighed
 keeping the row for its timings and `model_refs`; the ruling is that a finished job's
 bookkeeping is not worth a table of half-erased rows, and the queue's own cliff removes finished
@@ -638,28 +675,94 @@ The enterprise row is the whole reason the policy is posture-keyed: on a box wit
 obligation, a user's delete must be a request, not an erasure, and the person who could override
 that is the entitlement's owner. Everywhere else, delete means delete.
 
-### 3.11 The queue's own cliff, and today's orphans
+### 3.11 The queue's age cliff — identity's number, the queue's prune — and today's orphans
 
-`models/queue/models.py::JobSettings` gains `retention_days` —
-`PositiveIntegerField(null=True, blank=True, default=1)`. Null means **no age cliff** (the FIFO
-`retention_limit` alone), the same "honestly unknown, never silently assumed" convention
-`memory_budget_bytes` and `max_queued_per_principal` already document on that model; `1` is the
-shipped default the brief sets.
+**`JobSettings` gains no field.** The queue's age cliff is `IdentitySettings.
+queue_retention_days` — `PositiveIntegerField(null=True, blank=True, default=1)`, the fourth
+field of the one centralised retention policy (§4, **owner ruling §11.1**). Null means **no age
+cliff** (the FIFO `retention_limit` alone), the same "honestly unknown, never silently assumed"
+convention `memory_budget_bytes` and `max_queued_per_principal` already document on
+`JobSettings`; `1` is the shipped default the brief sets. The queue READS this number; it does
+not own it.
 
 `models/queue/backend.py::_prune_finished_jobs` gains an age condition beside its existing
-cutoff-pk delete: terminal rows whose `finished_at` is older than `retention_days` go, in the
-same bulk delete, still scoped to `state__in=TERMINAL_STATES` so a queued or running row can
-never be counted or removed. It already runs on every `enqueue()`, so no new call site exists.
+cutoff-pk delete: terminal rows whose `finished_at` is older than the policy's day count go, in
+the same bulk delete, still scoped to `state__in=TERMINAL_STATES` so a queued or running row can
+never be counted or removed. Today its only call site is `enqueue()`, which runs one prune per
+call (verified in that function, whose `cancel_job` docstring also relies on the fact); the
+queue steward's reshaping also drives it from the worker tick. The signature takes the days as
+a parameter — `_prune_finished_jobs(limit, retention_days)` — so the READ is the caller's, made
+once, and this function stays a pure query.
+
+**How `models/queue` reads an identity-owned number, exactly.** Three conditions, each a rule
+with a reason:
+
+- **Across the sanctioned seam, never `identity.models`.** `models/` sits below `identity/` in
+  the import law (`AGENTS.md`, "The import law": a column imports downward through
+  `identity → foundation → models → agents → tools`), so `models/queue` importing identity is
+  permitted — `models/queue/visibility.py` already imports `identity.access`, and
+  `models/queue/views.py` already imports `identity.audit`, `identity.contracts` and
+  `identity.request`. But the permitted surface is an ALLOWLIST:
+  `foundation/ops/tests/test_import_law.py`'s `IDENTITY_PERMITTED` is exactly
+  `("identity.contracts", "identity.access", "identity.request", "identity.audit")`, and
+  `test_no_column_imports_identitys_private_modules`' own docstring says the consequence in
+  words: *"it means no column ever imports `identity.models`."* So the queue calls a function on
+  `identity/access.py`, and identity does the model read on its own side of the seam — the
+  identical shape `identity/access.py::settings_row` was written for, and whose docstring gives
+  this exact reason for existing.
+- **A NON-CREATING read: the queue must never materialise the identity singleton.**
+  `IdentitySettings.get_solo()` is `objects.get_or_create(pk=1)` — it WRITES when the row is
+  absent. A worker is the wrong process to create the posture row, and creating it inside the
+  claim's advisory-lock transaction is worse. So the new seam is its own function, not
+  `settings_row()`:
+
+  ```
+  identity/access.py::queue_retention_days() -> int | None
+      row = IdentitySettings.objects.filter(pk=1).first()
+      return QUEUE_RETENTION_DAYS_DEFAULT if row is None else row.queue_retention_days
+  ```
+
+  `.first()`, never `get_or_create`; `QUEUE_RETENTION_DAYS_DEFAULT = 1` lives in
+  `identity/contracts/retention.py` (pure, and `identity.contracts` is a permitted seam) so the
+  queue can name the same constant its fallback uses. An absent row means a box whose posture
+  page has never been opened, and the documented default is the honest answer for it.
+- **Tolerant at boot, because an exception here is read as a crash.** The prune runs on the
+  worker path, and an exception escaping `tick()` is what `models/queue/worker.py::run_forever`
+  records as `crashed=True` — `_shutdown(crashed=True)` ends in `os._exit(1)`. A racing
+  `migrate` can leave `identity_identitysettings` absent for a few seconds. So the CALLER wraps
+  the seam call in `except (ProgrammingError, OperationalError)` and falls back to
+  `QUEUE_RETENTION_DAYS_DEFAULT`, logging the same way, and never re-raises. The precedent is
+  merged and in the same function: `enqueue` already wraps its one `JobSettings.get_solo()` in
+  exactly those two exception types, logs with `exc_info=True`, and forgives by skipping the
+  prune — deliberately those two and not a bare `except Exception`, so a genuine bug still
+  raises loudly. The queue steward's branch makes the `JobSettings` reads on the tick path
+  tolerant the same way; this read follows that established shape rather than inventing one.
+- **One read per prune, never one per row.** The identity read happens at most once per prune
+  call, beside the single `JobSettings` read `enqueue` already hoists to the top of the call
+  (its own comment: *"ONE `JobSettings` read per enqueue, threaded to the three steps below that
+  each used to make their own"*). Never inside a per-job loop, and never inside
+  `_prune_finished_jobs` itself. §7 pins this with a query-count test, the same instrument §7
+  already uses for `ticketed_keys`.
+
+**The queue settings page does not show this number at all.** Its POST writer gains nothing;
+the Queue settings form keeps the fields it has. One retention policy, one place to edit it —
+a read-only echo would still be a second place to look, and the simpler choice is the one that
+cannot drift. The Queue settings page's help text says where the cliff lives, in one sentence
+pointing at the retention section of Identity & security, and that is all it says.
+
+**The bound is validated in the identity settings writer**, not in the queue and not in the
+database: `identity/services.py::set_posture` (the one writer for that row, whose refusals are
+`ServiceRefused` sentences and whose audit events are `identity/audit.py`'s) validates all four
+retention fields, through `foundation/settings_bounds.py::exceeds_field_ceiling` with
+`POSITIVE_INT_FIELD_MAX` — the same ceiling helper `models/queue/views.py` uses for
+`retention_limit` today — plus the per-field range check (`queue_retention_days`: 1–3650, or
+blank for null), with the form field on `identity/forms.py::PostureForm` beside
+`session_idle_minutes`, and the refusal raised before `.save()`.
 
 **This is what clears the live box's residue.** The 69 orphaned `agent.turn` payloads are
-terminal rows older than a day; the first `enqueue()` after deploy removes them, along with
-every other finished row past the cliff. No one-shot purge command, per owner ruling 3 — a
-command that existed only to fix a historical state is a command nobody deletes afterwards.
-
-The bound lives in the writer, not the database: `models/queue/views.py`'s settings POST
-validates `retention_days` the way it already validates `retention_limit`, through
-`foundation/settings_bounds.py::exceeds_field_ceiling` with `POSITIVE_INT_FIELD_MAX`, plus a
-range check (1–3650, or blank for null), and refuses with its own copy before `.save()`.
+terminal rows older than a day; the first prune after deploy removes them, along with every
+other finished row past the cliff. No one-shot purge command, per owner ruling 3 — a command
+that existed only to fix a historical state is a command nobody deletes afterwards.
 
 ### 3.12 Audit actions, and the detail toggle
 
@@ -759,31 +862,33 @@ The demo requirement, stated as the mechanism that delivers it:
 
 ## 4. Data model and migrations
 
-**Exactly two migrations.**
+**Exactly one migration.**
 
-1. **`identity/migrations/0004_deletion_ticket_and_retention_settings.py`** — creates
-   `DeletionTicket` (§3.2) and adds three fields to `IdentitySettings`:
+**`identity/migrations/0004_deletion_ticket_and_retention_settings.py`** — creates
+`DeletionTicket` (§3.2) and adds **four** fields to `IdentitySettings`, the whole retention
+policy on one row (**owner ruling, §11.1**):
 
-   | Field | Type | Default | Bound (in the writer) |
-   |---|---|---|---|
-   | `retention_days` | `PositiveIntegerField` | `30` | 0–3650; `0` is legal and means purge on delete |
-   | `tool_record_extra_days` | `PositiveIntegerField` | `0` | 0–3650 |
-   | `audit_detail` | `BooleanField` | `False` | — |
+| Field | Type | Default | Bound (in the writer) |
+|---|---|---|---|
+| `retention_days` | `PositiveIntegerField` | `30` | 0–3650; `0` is legal and means purge on delete |
+| `queue_retention_days` | `PositiveIntegerField(null=True, blank=True)` | `1` | 1–3650, or blank for null = no age cliff (§3.11) |
+| `tool_record_extra_days` | `PositiveIntegerField` | `0` | 0–3650 |
+| `audit_detail` | `BooleanField` | `False` | — |
 
-   All three are edited on `identity-settings` (Identity & security), which is where the posture
-   and `admin_sees_content` already live, and all three are audited under ONE new action,
-   `RETENTION_POLICY_CHANGED = "identity.retention_policy_changed"`, with `detail` carrying
-   `field` and `to`. That follows `LIBRARY_SETTINGS_UPDATED`'s recorded rule — one action per
-   settings DOMAIN, the literal column in `detail` — rather than the three-way split
-   `POSTURE_CHANGED` / `LIBRARY_POSTURE_CHANGED` / `ADMIN_CONTENT_ACCESS_CHANGED` uses, because
-   those three are semantically distinct security postures and these three are one retention
-   policy expressed as three knobs. That makes five new action names in total, one of them a
-   settings action rather than a content one; §11 records the choice.
+All four are edited in ONE settings section on `identity-settings` (Identity & security), which
+is where the posture and `admin_sees_content` already live, and all four are audited under ONE
+new action, `RETENTION_POLICY_CHANGED = "identity.retention_policy_changed"`, with `detail`
+carrying `field` and `to`. That follows `LIBRARY_SETTINGS_UPDATED`'s recorded rule — one action
+per settings DOMAIN, the literal column in `detail` — rather than the three-way split
+`POSTURE_CHANGED` / `LIBRARY_POSTURE_CHANGED` / `ADMIN_CONTENT_ACCESS_CHANGED` uses, because
+those three are semantically distinct security postures and these four are one retention policy
+expressed as four knobs. That makes five new action names in total, one of them a settings
+action rather than a content one; §11 records the choice.
 
-   Queue retention is **not** on this row (§11): the queue owns its own cliff.
-
-2. **`models/queue/migrations/0006_jobsettings_retention_days.py`** — one nullable field (§3.11).
-   `0005` is the queue steward's, whose PR lands first (§9).
+**`models/queue` gets no migration and no new column.** The queue's age cliff is
+`queue_retention_days` above, read across the identity seam at prune time (§3.11). There is no
+`models/queue/migrations/0006`, and no `0005`-versus-`0006` sequencing question with the queue
+steward's branch, because this feature adds no queue migration to sequence.
 
 **No per-model soft-delete columns, and the reasons are three.** (a) Four tables in three columns
 means four migrations and four places to forget an exclusion; the ticket means one table and one
@@ -813,6 +918,8 @@ design deletes through them.
 | Deleting a conversation whose documents are shared universally | The documents survive. Only `scope=conversation` documents die with their conversation — the invariant `tools/rag/access.py::delete_attachments` already depends on (exactly one attachment row, for that conversation). A universal or stream-contained document loses only its attachment CLAIM, exactly as today. | §3.4, §3.6 |
 | Workstream delete | **Unchanged.** It still refuses while the stream holds conversations (`PROTECT`), still deletes shares and pins, still audits `WORKSTREAM_DELETED`. Streams are not a ticket kind (§10). | §10 |
 | A `sees_all_content` principal viewing tickets | Sees every ticket, including other people's, and may restore or permanently delete them where the posture allows — the same predicate that already lets them read the content. On an open box that is every principal, which is correct: there is nobody for anything to be hidden from. An administrator with the content setting OFF sees only their own, and the labels on the Purged tab stay empty for them regardless of `audit_detail`. | §3.10 |
+| **A conversation is permanently deleted while one of its turns is still queued or running** | The SOFT delete always succeeds — the ticket is written, the conversation vanishes from every surface immediately (§3.4), and the in-flight turn's own behaviour is exactly today's: `delete_conversation` never touched queue rows and could not (import-law rule 2), so the job simply runs to its end. The PURGE is where the two states differ. A still-QUEUED row is CANCELLED through `models/queue/backend.py::cancel_job` — preserving its `on_terminal` scheduling, so `agents/runtime/jobs.py::on_turn_terminal` runs its one conditional `UPDATE` on commit and no-ops against turns that are already gone — and then deleted. A RUNNING row is never deleted: `forget_conversation` refuses, the purge aborts with the ticket and every row and byte intact (that handler is `ORDER_ROWS` and runs first), the view shows the refusal sentence, and the next sweep — or the next click — completes it once the worker is done. Deleting a live row would make the job vanish under the turn's own poller (`agents/chat/views/turns.py` calling `get_job` each tick), which reads as a database fault rather than as a delete. | §3.6, §3.7 |
+| The identity settings row is unreadable when the queue prunes | Not an error, and never a crash. The prune's read of `queue_retention_days` goes through `identity/access.py`, is NON-CREATING (`.first()`, never `get_solo`'s `get_or_create` — a worker must not materialise the posture singleton), and its caller catches `ProgrammingError`/`OperationalError` and falls back to the documented default of one day. An exception escaping the worker's `tick()` is read by `run_forever` as a crash and ends in `os._exit(1)`; a racing `migrate` must not be able to cause that. The precedent is `enqueue`'s existing tolerance of its own `JobSettings.get_solo()`. | §3.11 |
 | Two deletes of the same item race | `get_or_create` on `(kind, key)`, backed by the unique constraint: the second is a no-op returning the first ticket, and writes no second audit event. | §3.2 |
 | The item was hard-deleted by an older path while a ticket stood | Every handler is a filtered delete or update, so it removes zero rows and returns zero. The purge completes, the ticket goes, the audit event stands. | §3.5 |
 
@@ -909,11 +1016,45 @@ because this is identity, posture and visibility work in every column it touches
   and touches no other row; `forget_document` the same for `rag.ingest`.
 - `models/queue/retention.py` imports nothing from `agents` — asserted directly, in this
   column's own tests, not left to the repo-wide gate.
-- `_prune_finished_jobs` with `retention_days=1` removes a terminal row finished two days ago,
+- **`forget_conversation` and a non-terminal row.** A QUEUED row is cancelled through
+  `cancel_job` BEFORE it is deleted — asserted by the `on_terminal` hook having been invoked,
+  not merely by the row's absence, since only the hook distinguishes a cancel-then-delete from
+  a bare delete. A RUNNING row is **not** deleted: the handler raises, the purge aborts, the
+  ticket survives, every other row and file is untouched, and re-running the purge after the
+  job reaches a terminal state completes it. An already-terminal row is deleted with no cancel
+  attempt.
+- `_prune_finished_jobs` with a one-day cliff removes a terminal row finished two days ago,
   keeps one finished an hour ago, and **never** touches a queued or running row however old.
-  `retention_days=None` reproduces today's FIFO-only behaviour byte for byte.
+  A null cliff reproduces today's FIFO-only behaviour byte for byte. The days come from
+  `IdentitySettings.queue_retention_days`, which the tests SET on that row — there is no
+  `JobSettings` field to set.
+- **The queue reads the policy from identity, and `JobSettings` is unchanged.** Setting
+  `IdentitySettings.queue_retention_days` changes what the prune deletes; `JobSettings` has no
+  `retention_days`-style field at all (asserted directly against the model's fields, so a later
+  re-introduction fails this test); and `models/queue` reaches identity only through the
+  allowlisted seams — a direct `identity.models` import in this column is a violation, which
+  `foundation/ops/tests/test_import_law.py::test_no_column_imports_identitys_private_modules`
+  already fails on and this column re-asserts for its own files.
+- **The read is non-creating, tolerant, and made once.** With no `identity_identitysettings` row
+  at all, the prune uses the documented default and **creates no row** (asserted by counting
+  `IdentitySettings` rows after the prune — the failure this pins is `get_solo`'s
+  `get_or_create` being used from a worker). With the table itself absent — a
+  `ProgrammingError`/`OperationalError` raised from the seam — the prune falls back to the
+  default, logs, and **does not raise**, so nothing can escape `tick()` and be read as a crash.
+  And a **query-count test**: one prune over twenty-five terminal rows makes exactly ONE
+  identity read, the same instrument the `ticketed_keys` count test uses.
 - `forget_jobs` on the contracts seam dispatches through `INFERENCE_QUEUE_BACKEND` and is a
   no-op for an id that does not exist.
+
+**`identity/` — the retention policy fields.**
+- `set_posture` writes all four retention fields, refuses each out-of-range value with its own
+  sentence before `.save()` (including `queue_retention_days=0`, which is NOT legal — blank is
+  how "no age cliff" is expressed), and writes one `identity.retention_policy_changed` event per
+  field CHANGED, with the field named in `detail`. Unchanged fields write no event.
+- `identity/access.py::queue_retention_days()` returns the row's value, returns the documented
+  default when no row exists, and creates nothing in either case.
+- `retention_days=0` and `queue_retention_days=None` are both round-trippable through the form
+  and the writer — the "zero stays expressible" constraint, now for two fields.
 
 **Guards that must stay green, each asserted after the change.**
 - `foundation/ops/tests/test_column_boundaries.py`'s AST audit guard: `identity/audit.py` is
@@ -955,11 +1096,11 @@ Same commit as the code it describes, per non-negotiable 1.
 | `docs/OPERATIONS.md` | The "Deleted content and your backups" section (§6), and one line in the retention discussion pointing at `manage.py purge_deleted` for an operator who wants a cron rather than relying on prune-on-write |
 | `docs/adr/0019-deletion-and-retention.md` | **The next number** (the record runs to `0018-settings-assistant.md`). The policy decision: delete means delete; one ticket table rather than per-model columns; the retention namespace on the existing cascade registry; posture-keyed policy; the content/audit split; backups as their own layer; the named residue (§10) |
 | `docs/EXTENDING.md` | A new recipe, **"Registering a retention handler"**, beside "Adding an entitlement axis": the `RetentionHandler` fields, the two order bands and when to use each, the `(key, *, commit) -> int` signature, the idempotence obligation, the one-line `AppConfig.ready()` registration, and the two tests a new handler owes (count-then-commit agreement, and re-run-after-failure) |
-| `identity/README.md` | The ticket table, the orchestration, the Deleted page, and the sentence that identity answers "which keys are deleted", never "which conversations" |
+| `identity/README.md` | The ticket table, **the four-field retention policy on `IdentitySettings` and the new non-creating `identity/access.py::queue_retention_days` seam** (what it returns when there is no row, and why it is not `settings_row()`), the orchestration, the Deleted page, and the sentence that identity answers "which keys are deleted", never "which conversations" |
 | `agents/README.md` | `agents/retention.py`, the new artifact-purge slot, and the tool-record scrub's rule |
 | `tools/rag/README.md`, `tools/vision/README.md` | Their handlers, and what each one does and does not reach |
-| `models/README.md` | The payload-keyed queue handler, the age cliff, and `forget_jobs` on the contracts seam |
-| `foundation/settings_help.py` | The Deleted page's `HelpCard` — what the page is for, what Restore and Delete permanently do, that the purge date is fixed at delete time and a changed setting governs future deletes only, and that backups are a separate layer |
+| `models/README.md` | The payload-keyed queue handler and its cancel-before-delete rule; the age cliff **and the fact that its number is identity's, read across the `identity.access` seam non-creatingly and tolerantly, with `JobSettings` gaining nothing**; and `forget_jobs` on the contracts seam |
+| `foundation/settings_help.py` | The Deleted page's `HelpCard` — what the page is for, what Restore and Delete permanently do, that the purge date is fixed at delete time and a changed setting governs future deletes only, and that backups are a separate layer. **The Queue settings card gains one sentence** saying the finished-job cliff is part of the retention policy on Identity & security, since the number is not editable on the Queue page (§3.11) |
 
 No document names a model or a vendor; `test_docs_model_names.py` walks the planning archive
 too, so this spec is inside its reach.
@@ -974,7 +1115,8 @@ merge-readiness gate's whole-feature UAT walked by hand on this branch's preview
 ### Slices, exactly as the brief has them
 
 **Slice 1 — personal-posture hard purge, conversation kind, end to end.**
-The identity ticket, the three settings fields, the retention namespace on the cascade registry,
+The identity ticket, the four retention policy fields and their one settings section, the
+non-creating `queue_retention_days` seam, the retention namespace on the cascade registry,
 the runner, the audit actions and the audit reader; the agents handler (turn/share/attachment
 rows, the tool-record scrub, the artifact collection and the vision hand-off); the rag notes
 handler; the vision artifact-purge registration; the Deleted page with both tabs; the sweep and
@@ -993,12 +1135,27 @@ Hold, the owner-set cliff, no early purge, and the `audit_detail` labels.
 
 ### Sequencing constraints
 
-- **The `models/queue` half lands after the queue steward's PR.** Their migration is `0005`;
-  ours becomes `0006`. That half is `models/queue/retention.py`, the `_prune_finished_jobs` age
-  condition, `JobSettings.retention_days`, its settings-page writer and bound, and `forget_jobs`
-  on `models/contracts/queue.py`. It is isolated as its own task (or two) at the end of slice 1,
-  and until it lands the conversation purge is complete in every column but the queue — a state
-  the task's own tests assert rather than leave ambiguous.
+- **The `models/queue` half is still implemented after the queue steward's PR lands — but the
+  reason has narrowed to textual adjacency.** There is no longer a MIGRATION-ordering constraint
+  with that steward at all: the centralised policy (§11.1) leaves `models/queue` with no
+  migration, so there is no `0005`/`0006` sequence to agree on and nothing that has to land in a
+  particular order to apply cleanly. What REMAINS is that their PR reshapes the Queue page and
+  its settings form, and this feature's queue half edits the same files —
+  `models/queue/backend.py`'s prune, `models/queue/views.py`'s settings help text, and the Queue
+  page's own copy. Writing ours on top of theirs is textual conflict avoidance, nothing more.
+  That half is `models/queue/retention.py` (including the cancel-before-delete rule, §3.7), the
+  `_prune_finished_jobs` age condition and its one identity read, the Queue settings help
+  sentence, and `forget_jobs` on `models/contracts/queue.py`. It is isolated as its own task (or
+  two) at the end of slice 1, and until it lands the conversation purge is complete in every
+  column but the queue — a state the task's own tests assert rather than leave ambiguous. The
+  identity half — the four fields, the settings section, the writer and its bounds — carries no
+  such constraint and lands with the rest of slice 1.
+- **The queue steward's four binding conditions are carried in the design, not in the task
+  brief**: boot tolerance and no worker-side `get_or_create` (§3.11, §5), one read per prune
+  (§3.11, pinned by a query-count test in §7), and terminal-rows-only plus cancel-before-delete
+  for `forget_conversation` (§3.6, §3.7, §5, §7). The clearance packet for that steward is the
+  diff against `models/queue/backend.py`, `models/queue/views.py` and the new
+  `models/queue/retention.py`.
 - **Second lander merges `dev`.** `agents/visibility.py` is under heavy edit on the chat-cluster
   branch, and the settings sidebar is a shared surface; whichever of the two lands second merges
   current `dev` into its branch, resolves there, and re-runs its full gate — the rule
@@ -1024,7 +1181,9 @@ Downward only, through `identity → foundation → models → agents → tools`
 | `agents/contracts/artifacts.py` (one slot) | agents | stays pure | — |
 | `agents/retention.py` (new) | agents | `agents.*`, `identity.*`, `models.contracts.*` | `tools.*`, `models.queue.*` |
 | `tools/rag/retention.py`, `tools/vision/retention.py` (new) | tools | `identity.*`, `models.contracts.*`, `agents.contracts.*`, own column | `models.queue.models` (rule 2) |
-| `models/queue/retention.py` (new) | models | `models.queue.*`, `identity.*` | **anything under `agents.` or `tools.`** |
+| `models/queue/retention.py` (new) | models | `models.queue.*` (including `backend.cancel_job`), `identity.contracts`, `identity.access`, `identity.audit`, `identity.request` | **anything under `agents.` or `tools.`**, and `identity.models` — see the row below |
+| `models/queue/backend.py` (amended: the prune's age condition) | models | `identity.access.queue_retention_days`, `identity.contracts.retention` for the default constant — the same direction `models/queue/visibility.py` already takes with `identity.access.is_admin`/`sees_all_content` | **`identity.models`**, which is outside `IDENTITY_PERMITTED`; the row read happens on identity's side of the seam |
+| `identity/access.py` (one new non-creating reader) | identity | `identity.models` (intra-column) | `agents`, `tools`, `models` |
 | `models/contracts/queue.py` (one passthrough) | models | unchanged | `models.queue.models` |
 
 Every cross-column reach in this feature is either a dotted-path registration resolved at run
@@ -1047,7 +1206,8 @@ would be exactly the wrong mechanism for a delete that must be explicit, counted
    `/engine/input` and `/engine/output` are bind mounts this platform tracks with no row at all;
    the Engine files admin page remains the manual door, and its `ENGINE_FILE_DELETED` audit
    action is untouched.
-4. **Per-user retention overrides.** The cliff is a box policy on the `IdentitySettings` row. A
+4. **Per-user retention overrides.** The whole retention policy — all four fields — is a box
+   policy on the `IdentitySettings` row (§11.1). A
    per-person or per-entitlement cliff needs a second table and a precedence rule; not now.
 5. **Export before delete.** No "download your data" step. Delete is delete, and an export
    surface is its own feature with its own gating.
@@ -1062,15 +1222,37 @@ would be exactly the wrong mechanism for a delete that must be explicit, counted
 
 ## 11. Decisions the author made
 
-Each is a place the brief left a choice, with what was chosen and why.
+Each is a place the brief left a choice, with what was chosen and why. **Decision 1 is no longer
+the author's**: the owner ruled on it on 2026-09-21 and that ruling stands in its place, marked
+as such. The rest are the author's and are open to the same treatment. Nothing is renumbered.
 
-1. **Queue retention lives on `JobSettings`, not on `IdentitySettings`.** The brief listed a
-   `queue_retention_days` field on the identity row AND a `JobSettings.retention_days` in the
-   queue paragraph. Two homes for one number is a drift source; `JobSettings` wins because the
-   queue's own writer, its own settings page, its own bound and its own `_prune_finished_jobs`
-   are all there, and `models/queue/backend.py` reading `IdentitySettings` on every `enqueue()`
-   would add a read to the hottest write path in the platform for a number that is queue policy.
-   `IdentitySettings` therefore gains three fields, not four.
+1. **The retention policy is CENTRALISED on `IdentitySettings`. `JobSettings` gains no field.**
+   *(Owner ruling, 2026-09-21 — **overrides the author's first draft**, which put
+   `queue_retention_days` on `JobSettings` beside the queue's own writer and prune.)*
+
+   All four policy fields live on the existing `IdentitySettings` row, beside the posture:
+   `retention_days` (default 30, `0` allowed), `queue_retention_days` (default 1; null = no age
+   cliff, the FIFO `retention_limit` alone), `tool_record_extra_days` (default 0) and
+   `audit_detail` (default False). One settings section on the identity settings page edits all
+   four; one audit action (`identity.retention_policy_changed`, with the field named in
+   `detail`) records every change; one writer validates every bound.
+
+   **The owner's reason, in plain words:** one retention policy with four numbers belongs in one
+   place. Two settings pages means two places to look, two writers to validate, and a real
+   chance the content cliff is changed while the queue silently keeps its own. The extra
+   single-row read in the prune step is negligible on a single-box install.
+
+   **What this costs the queue, and why it is affordable.** `models/queue/backend.py::
+   _prune_finished_jobs` reads the number at prune time across the `identity.access` seam —
+   permitted, because `models/` imports downward to `identity/` (`AGENTS.md`'s import law) and
+   `models/queue/visibility.py` already does exactly that. The read is non-creating, tolerant of
+   a missing table, and made once per prune, never per row; `identity.models` stays closed to
+   this column, as `IDENTITY_PERMITTED` requires. §3.11 specifies all three, §5 carries the
+   failure cases and §7 pins them.
+
+   The knock-on consequences are carried through this document rather than left implied: **one**
+   migration instead of two (§4), no `0005`/`0006` sequencing with the queue steward (§9), and
+   the settings-writer tests living in `identity/` (§7).
 2. **The registry gets an explicit `order` field with two named bands, rather than relying on
    registration order.** `AppConfig.ready()` order is not a contract, and "filesystem last" is a
    correctness rule about the one operation no transaction can undo. Two values (`ORDER_ROWS`,
