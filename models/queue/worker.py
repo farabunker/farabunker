@@ -156,6 +156,25 @@ SHUTDOWN_GRACE_SECONDS = 20
 # guarantee.
 MAX_UNLOADS_PER_TICK = 2
 
+# A tick whose WALL-CLOCK delta exceeds its MONOTONIC delta by this many
+# seconds did not take that long -- the host (or the container VM) was
+# suspended. Monotonic clocks on this platform do not advance across a
+# sleep; wall clock does. 60s is far beyond any scheduling delay a 0.5s
+# tick loop could accumulate and far below the shortest sleep worth
+# noticing. A false positive (a genuinely slow, non-sleep tick that
+# somehow drifted this far) costs exactly one skipped orphan sweep --
+# deliberately the cheap direction (spec §11): a job that is actually
+# dead waits one extra tick to be reclaimed, versus a job that is alive
+# being wrongly mass-orphaned.
+SLEEP_DETECT_SECONDS = 60
+
+# How long after a detected sleep the orphan sweep is skipped, so every
+# live worker's rows can re-stamp themselves before anything judges them.
+# Comfortably more than `HEARTBEAT_SECONDS` and less than
+# `STALE_AFTER_SECONDS`: long enough for a heartbeat to land, short enough
+# that a genuinely dead job is still reclaimed promptly.
+SLEEP_GRACE_SECONDS = 30
+
 
 class Worker:
     """One worker process: claims admitted jobs and runs them in a thread
@@ -242,6 +261,20 @@ class Worker:
         # needs the token-conditional pop documented above).
         self._futures: dict[tuple[int, uuid.UUID], Future] = {}
         self._last_heartbeat_monotonic: float | None = None
+
+        # Sleep detection (spec §3.4c, Task 7): the wall-clock/monotonic
+        # pair from THIS tick, so the next one can compute both deltas and
+        # compare them -- `None` until the first tick ever runs, which
+        # therefore never trips the check (nothing to compare against
+        # yet). `_sweep_skip_until` is a MONOTONIC deadline (not a wall
+        # clock one, which is exactly the untrustworthy-after-a-sleep
+        # clock this whole mechanism exists to stop trusting): once a
+        # sleep is detected it holds `mono + SLEEP_GRACE_SECONDS`, and
+        # `tick()` skips the orphan sweep for as long as the current tick's
+        # monotonic reading stays below it.
+        self._last_tick_wall: float | None = None
+        self._last_tick_monotonic: float | None = None
+        self._sweep_skip_until: float | None = None
 
         # The dedicated heartbeat thread (Q8, spec §3.4a). `None` until
         # `run_forever` starts it -- NEVER started by this constructor: a
@@ -340,16 +373,53 @@ class Worker:
         advisory lock, not another statement inside the round every other
         admitter is waiting on. An operator's edit lands on the very next
         tick either way. Pinned by `models/queue/tests/test_worker.py::
-        TestTheSingleSettingsReadPerTick`."""
+        TestTheSingleSettingsReadPerTick`.
+
+        SLEEP DETECTION (spec §3.4c, Task 7), first: a suspended host (or
+        a ballooned container VM) leaves this process's monotonic clock
+        barely advanced while wall clock jumped hours -- on wake, EVERY
+        running row this or any other worker holds looks stale at once,
+        and the very next orphan sweep would reclaim all of them
+        regardless of whether they are still genuinely running. This tick
+        compares the two deltas since the last tick; a divergence past
+        `SLEEP_DETECT_SECONDS` says so honestly in the log, writes a fresh
+        heartbeat IMMEDIATELY (off the throttle -- every row this process
+        holds needs to re-stamp itself before anything judges it, and the
+        next admitter's sweep is not necessarily this process's own), and
+        skips the orphan sweep for `SLEEP_GRACE_SECONDS` so every live
+        worker gets the same chance."""
         close_old_connections()
         self._prune_finished_futures()
         self._maybe_heartbeat()
+
+        wall, mono = time.time(), time.monotonic()
+        if self._last_tick_wall is not None:
+            drift = (wall - self._last_tick_wall) - (mono - self._last_tick_monotonic)
+            if drift > SLEEP_DETECT_SECONDS:
+                logger.warning(
+                    "worker %s: the host appears to have slept for about %.0f seconds "
+                    "(wall clock moved that much further than the monotonic clock); "
+                    "skipping the orphan sweep for %ss so live rows can re-stamp "
+                    "themselves before anything judges them",
+                    self.worker_id, drift, SLEEP_GRACE_SECONDS,
+                )
+                self._sweep_skip_until = mono + SLEEP_GRACE_SECONDS
+                # A fresh heartbeat IMMEDIATELY, not on the throttle: every
+                # row this worker holds looks stale at this instant, and
+                # the next admitter's sweep is not necessarily ours.
+                with self._active_lock:
+                    self._last_heartbeat_monotonic = None
+                self._maybe_heartbeat()
+        self._last_tick_wall, self._last_tick_monotonic = wall, mono
+
+        sweep = self._sweep_skip_until is None or mono >= self._sweep_skip_until
 
         settings_row = JobSettings.get_solo()
         claimed = claim_and_admit(
             self.worker_id,
             stale_after_seconds=STALE_AFTER_SECONDS,
             settings_row=settings_row,
+            sweep_orphans=sweep,
         )
         if not claimed:
             return

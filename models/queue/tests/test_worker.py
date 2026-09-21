@@ -2325,3 +2325,77 @@ class TestTheSingleSettingsReadPerTick:
         finally:
             worker._executor.shutdown(wait=False)
         assert self._settings_reads(evict_ctx) == 1
+
+
+@pytest.mark.django_db(transaction=True)
+class TestSleepDetection:
+    """`transaction=True`: every test here calls `worker.tick()`, which
+    calls `close_old_connections()` -- see `TestOrphanSweepViaTick`'s own
+    class docstring for why the plain `django_db` marker is fatal for
+    that.
+
+    The container VM ballooning after a host sleep, and the host
+    sleeping mid-job, produce the same trap: wall-clock hours pass while
+    the process's monotonic clock barely advances, so on wake EVERY
+    running row looks stale at once and the sweep mass-orphans healthy
+    work."""
+
+    def test_a_wall_clock_jump_skips_one_sweep_and_writes_a_heartbeat(self, worker, monkeypatch):
+        seen = {}
+
+        def _fake_claim(worker_id, **kwargs):
+            seen.update(kwargs)
+            return []
+
+        monkeypatch.setattr(worker_module, "claim_and_admit", _fake_claim)
+        worker.tick()
+        assert seen["sweep_orphans"] is True
+
+        worker._last_tick_wall -= 4 * 3600
+        worker.tick()
+
+        assert seen["sweep_orphans"] is False
+
+    def test_the_grace_period_ends_and_sweeping_resumes(self, worker, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(
+            worker_module, "claim_and_admit",
+            lambda worker_id, **kwargs: (seen.update(kwargs), [])[1],
+        )
+        # A SMALL POSITIVE grace, never 0: with 0 the detecting tick
+        # itself computes `mono >= mono + 0` -> True, so the final
+        # assertion passes without the grace ever having been in force and
+        # the test proves nothing.
+        monkeypatch.setattr(worker_module, "SLEEP_GRACE_SECONDS", 0.2)
+
+        worker.tick()
+        worker._last_tick_wall -= 4 * 3600
+        worker.tick()
+        assert seen["sweep_orphans"] is False, "the grace was never in force"
+
+        time.sleep(0.3)
+        worker.tick()
+
+        assert seen["sweep_orphans"] is True
+
+    def test_it_says_so_honestly(self, worker, monkeypatch, caplog):
+        monkeypatch.setattr(worker_module, "claim_and_admit", lambda *a, **k: [])
+        worker.tick()
+        worker._last_tick_wall -= 4 * 3600
+
+        with caplog.at_level("WARNING", logger="models.queue.worker"):
+            worker.tick()
+
+        assert any("slept" in r.getMessage() for r in caplog.records)
+
+    def test_an_ordinary_tick_never_trips_it(self, worker, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(
+            worker_module, "claim_and_admit",
+            lambda worker_id, **kwargs: (seen.update(kwargs), [])[1],
+        )
+
+        worker.tick()
+        worker.tick()
+
+        assert seen["sweep_orphans"] is True
