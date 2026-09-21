@@ -3711,15 +3711,16 @@ gains two bounded ticket reads with no open conversation ticket on the box, thre
 **Files:**
 - Create: `tools/vision/retention.py`
 - Modify: `tools/vision/visibility.py` (`visible_jobs`)
+- Modify: `tools/vision/services.py` (new `delete_jobs(job_ids) -> int`, beside `delete_job` — see the amendment note below)
 - Modify: `tools/vision/apps.py` (register the artifact purge)
 - Modify: `tools/vision/README.md`
-- Test: `tools/vision/tests/test_retention.py` (new), `tools/vision/tests/test_visibility.py` (extend)
+- Test: `tools/vision/tests/test_retention.py` (new — also covers `delete_jobs`), `tools/vision/tests/test_visibility.py` (extend)
 
-**Held tests:** `tools/vision/tests/test_visibility.py::TestGeneratedImagesAreContent::test_the_gallery_and_the_recent_list_both_narrow` and `::test_a_member_sees_only_their_own_generations` — both stand, but `visible_jobs` gains one query. Check for a `django_assert_num_queries` on the gallery path in `test_views_gallery.py` and re-pin it if present; name it in the commit message if so.
+**Held tests:** `tools/vision/tests/test_visibility.py::TestGeneratedImagesAreContent::test_the_gallery_and_the_recent_list_both_narrow` and `::test_a_member_sees_only_their_own_generations` — both stand, but `visible_jobs` gains one query. Check for a `django_assert_num_queries` on the gallery path in `test_views_gallery.py` and re-pin it if present; name it in the commit message if so. Also confirm `foundation/ops/tests/test_column_boundaries.py::test_no_vision_module_queries_generationjob_directly` (IA-1's closed set of two) stays green — see the amendment note below for why that gate is the reason `purge_artifacts` may not query `GenerationJob.objects` itself.
 
 **Interfaces:**
-- Consumes: `identity.retention.ticketed_keys`; `identity.contracts.retention.KIND_VISION_JOB`; `agents.contracts.artifacts.parse_artifact`, `register_artifact_purge`; `tools.vision.services.delete_job`; `tools.vision.models.GeneratedOutput`, `JobInput`, `GenerationJob`.
-- Produces: `tools.vision.retention.purge_artifacts(refs, generation_ids) -> int`.
+- Consumes: `identity.retention.ticketed_keys`; `identity.contracts.retention.KIND_VISION_JOB`; `agents.contracts.artifacts.parse_artifact`, `register_artifact_purge`; `tools.vision.services.delete_jobs`; `tools.vision.models.GeneratedOutput`, `JobInput`.
+- Produces: `tools.vision.retention.purge_artifacts(refs, generation_ids) -> int`; `tools.vision.services.delete_jobs(job_ids) -> int`.
 - **Deferred to the queue half (Task 19):** `purge_artifacts` will also call `models.contracts.queue.forget_jobs(queue_job_ids)`. Until then it does not touch the queue at all, and this module asserts nothing about it — the unlanded state is recorded once, by `identity/tests/test_deletion_demo.py`'s two gate markers, which assert a real row's presence rather than a function's absence.
 
 - [ ] **Step 1: Write the failing tests**
@@ -3734,6 +3735,7 @@ import uuid
 
 import pytest
 
+from tools.vision import services
 from tools.vision.models import GeneratedOutput, GenerationJob, JobInput
 from tools.vision.retention import purge_artifacts
 from tools.vision.tests._helpers import seed_sweep_posture
@@ -3819,6 +3821,13 @@ class TestMappingReferencesToJobs:
     def test_an_unparseable_reference_is_dropped_not_raised(self):
         assert purge_artifacts(["not-a-reference", ""], []) == 0
 
+    def test_a_document_reference_is_skipped_silently(self):
+        """`document:<id>` names a `Document` row, which the attachment
+        seam already reaches -- `agents.retention._collect` never hands
+        one to this column in the first place, and this pins that a
+        caller who did anyway would not raise or count it."""
+        assert purge_artifacts(["document:451"], []) == 0
+
     def test_it_is_idempotent(self):
         job = _generation()
         output = _output(job=job)
@@ -3833,6 +3842,59 @@ class TestMappingReferencesToJobs:
         job = _generation()
         purge_artifacts([], [str(job.pk)])
         assert calls == [job.pk]
+
+
+class TestEmptyInputCostsNothing:
+    """CONTROLLER ADDITION: the artifact-purge slot is called on EVERY
+    conversation purge on a vision box, including the common case -- a
+    conversation with no images -- which hands it two empty lists. That
+    must not touch a job, run no engine-side sweep, and cost no more
+    than the mapping itself needs, which is zero queries for empty
+    input."""
+
+    def test_two_empty_lists_return_zero_and_touch_nothing(
+        self, monkeypatch, django_assert_num_queries,
+    ):
+        from tools.vision import retention as module
+
+        called = []
+        monkeypatch.setattr(module.services, "delete_jobs",
+                            lambda job_ids: called.append(list(job_ids)) or 0)
+        with django_assert_num_queries(0):
+            assert purge_artifacts([], []) == 0
+        assert called == []
+
+
+class TestDeleteJobs:
+    """`tools.vision.services.delete_jobs` -- the one unscoped read of
+    `GenerationJob.objects` `purge_artifacts` above hands its mapped job
+    ids to, rather than querying the table itself (IA-1's closed set of
+    two, `foundation/ops/tests/test_column_boundaries.py`). Lives beside
+    `purge_artifacts`'s own tests, not `test_services.py`, which this
+    module's own size keeps under the split threshold."""
+
+    def test_it_deletes_exactly_the_named_jobs_and_leaves_another_alone(self):
+        gone = _generation()
+        stays = _generation()
+
+        assert services.delete_jobs([gone.pk]) == 1
+
+        assert not GenerationJob.objects.filter(pk=gone.pk).exists()
+        assert GenerationJob.objects.filter(pk=stays.pk).exists()
+
+    def test_an_empty_list_deletes_nothing(self):
+        _generation()
+
+        assert services.delete_jobs([]) == 0
+
+        assert GenerationJob.objects.count() == 1
+
+    def test_ids_of_jobs_already_gone_answer_zero_and_do_not_raise(self):
+        job = _generation()
+        job_id = job.pk
+        job.delete()
+
+        assert services.delete_jobs([job_id]) == 0
 ```
 
 This module asserts nothing about the queue. Task 19 ADDS `test_the_generations_queue_row_goes_with_it` here when `forget_jobs` exists; until then the state is recorded by `identity/tests/test_deletion_demo.py`'s two gate markers, which assert a real row's presence rather than a function's absence.
@@ -3889,7 +3951,50 @@ def visible_jobs(principal):
 
 `known_job_uuids` is **not** narrowed: it is the Engine files page's box-inventory accounting seam, and a deleted-but-not-yet-purged job's engine-side files are still accounted for, not orphaned. Say so in a comment there.
 
-- [ ] **Step 4: Write `tools/vision/retention.py`**
+- [ ] **Step 4: Add `delete_jobs` to `tools/vision/services.py`, then write `tools/vision/retention.py` against it**
+
+**Amended by the controller during Task 11's own review** — see the note below the two code blocks for why. Beside `delete_job`:
+
+```python
+def delete_jobs(job_ids) -> int:
+    """Delete every `GenerationJob` named by `job_ids` (each through
+    `delete_job`, so its files and its best-effort engine sweep go too)
+    and return how many were actually deleted.
+
+    THE ONE UNSCOPED READ OF `GenerationJob.objects` A RETENTION PURGE
+    NEEDS, and it lives here rather than in `tools.vision.retention` on
+    purpose: that module maps a conversation's artifact references and
+    generation ids to job ids, and `tools/vision`'s own IA-1 rule
+    (`foundation/ops/tests/test_column_boundaries.py`'s closed set of
+    two) is that only `visibility.py` and this module may query the job
+    table directly -- a THIRD site is exactly the drift that gate
+    exists to catch, and `visibility.py` is the wrong home regardless,
+    since it answers "who may see this", and a purge must reach a
+    ticketed job, or a job owned by somebody else, that nobody may see
+    at all.
+
+    DELIBERATELY NOT VISIBILITY-SCOPED: unlike `visibility.visible_jobs`,
+    this reads every matching row regardless of owner or ticket, because
+    the whole point of a purge is to finish what a ticket already
+    started.
+
+    Catches nothing: a failure deleting one job's rows or files
+    propagates, so the retention runner's own transaction rolls back and
+    the ticket stays due for the next sweep. `delete_job`'s own
+    engine-side sweep is the one documented best-effort exception, and
+    it already lives inside `delete_job` -- there is no second one here.
+
+    Idempotent: an empty or already-gone id in `job_ids` simply matches
+    no row and contributes nothing.
+    """
+    deleted = 0
+    for job in GenerationJob.objects.filter(pk__in=job_ids):
+        delete_job(job)
+        deleted += 1
+    return deleted
+```
+
+Then `tools/vision/retention.py`:
 
 ```python
 """What `tools/vision` destroys for a deleted conversation.
@@ -3928,7 +4033,7 @@ import uuid
 
 from agents.contracts.artifacts import parse_artifact
 from tools.vision import services
-from tools.vision.models import GeneratedOutput, GenerationJob, JobInput
+from tools.vision.models import GeneratedOutput, JobInput
 
 logger = logging.getLogger(__name__)
 
@@ -3937,9 +4042,22 @@ def purge_artifacts(refs, generation_ids) -> int:
     """Delete every generation job these references and ids name.
     Returns the number of JOBS deleted, deduped.
 
-    Each job goes through `tools.vision.services.delete_job`, so its
-    child rows cascade, its managed directory goes, and its best-effort
-    engine-side sweep runs.
+    THIS MODULE NEVER QUERIES `GenerationJob.objects` ITSELF: it only
+    maps references and generation ids to job ids, and hands them to
+    `tools.vision.services.delete_jobs` for the one unscoped read and
+    the actual deletion -- `foundation/ops/tests/
+    test_column_boundaries.py`'s IA-1 gate pins `visibility.py` and
+    `services.py` as the only two files in this column allowed to touch
+    that manager, and a third site here is exactly the drift it exists
+    to catch. Each job goes through `services.delete_job` (inside
+    `delete_jobs`), so its child rows cascade, its managed directory
+    goes, and its best-effort engine-side sweep runs.
+
+    With two empty lists this returns 0 having run no query at all
+    beyond what parsing an empty sequence costs (none) and without
+    calling `delete_jobs` -- every conversation purge on a vision box
+    reaches this function, most of them for a conversation with no
+    images, and that common case must cost nothing.
 
     Idempotent: a reference whose row is already gone contributes
     nothing, and so does a job id that matches no row.
@@ -3977,12 +4095,10 @@ def purge_artifacts(refs, generation_ids) -> int:
     if not job_ids:
         return 0
 
-    deleted = 0
-    for job in GenerationJob.objects.filter(pk__in=job_ids):
-        services.delete_job(job)
-        deleted += 1
-    return deleted
+    return services.delete_jobs(job_ids)
 ```
+
+**Why this deviates from the brief's first draft, and from what the vision steward's own notes (Global Constraints) said Step 4 would look like:** the first draft closed the loop itself — `for job in GenerationJob.objects.filter(pk__in=job_ids): services.delete_job(job)` — directly inside `retention.py`. The Task 11 implementer wrote that draft, ran it against the real tree (not just read it), and found `foundation/ops/tests/test_column_boundaries.py::test_no_vision_module_queries_generationjob_directly` goes red the instant the file is tracked: that gate is a **closed set of two** files (`visibility.py`, `services.py`) allowed to touch `GenerationJob.objects` anywhere in `tools/vision`, and a third site — even one this plan wrote by hand — is exactly the drift it exists to catch. The implementer stopped rather than guess a fix and reported the conflict for a ruling (correctly, per this plan's own "no re-pinning a test the brief doesn't name" discipline). The controller's ruling, applied above: neither edit the gate (it is not this task's file, and not the vision steward's to relax) nor route the read through `visibility.py` (that module answers "who may see this"; a purge must reach a ticketed job, or one owned by somebody else, that nobody may currently see — routing the unscoped read through the visibility module would be the wrong shape even if the gate allowed it). The unscoped read belongs beside the delete it feeds, in the other allowed file: `services.py` gains `delete_jobs(job_ids) -> int`, and `retention.py` never imports `GenerationJob` at all.
 
 - [ ] **Step 5: Register the slot in `tools/vision/apps.py`**
 
@@ -4002,7 +4118,7 @@ Inside `ready()`, **after** the feature-flag early return and beside the `regist
 
 - [ ] **Step 6: Document it in `tools/vision/README.md`**
 
-Say, **once**: this column registers the artifact purge, which maps `output:`/`input:` references and `Turn.data["id"]` generation ids to jobs, dedupes by job and calls `delete_job` — and `delete_job`'s **best-effort engine-side sweep** (`store.remove_engine_files`, which never raises) is the only reach this platform has into `/engine/output` and `/engine/input`, which are tracked by no row at all; the Engine files page remains the operator's manual door. Do not restate that at any call site. Also record the accepted residue: a generation whose tool turn was never written is reachable only through the gallery.
+Say, **once**: this column registers the artifact purge, which maps `output:`/`input:` references and `Turn.data["id"]` generation ids to jobs, dedupes by job and calls `services.delete_jobs`, which in turn calls `delete_job` per job — and `delete_job`'s **best-effort engine-side sweep** (`store.remove_engine_files`, which never raises) is the only reach this platform has into `/engine/output` and `/engine/input`, which are tracked by no row at all; the Engine files page remains the operator's manual door. Do not restate that at any call site. Also add one or two sentences on `delete_jobs` itself, where `delete_job` is already documented in the service-layer list: it is the one place outside `visibility.py` that queries `GenerationJob.objects` directly (IA-1's closed set of two). Also record the accepted residue: a generation whose tool turn was never written is reachable only through the gallery.
 
 - [ ] **Step 7: Run the tests, in both flag states**
 
@@ -4012,8 +4128,8 @@ Expected: PASS.
 - [ ] **Step 8: Run the full gate and commit**
 
 ```bash
-git add tools/vision/retention.py tools/vision/visibility.py tools/vision/apps.py \
-        tools/vision/README.md tools/vision/tests/
+git add tools/vision/retention.py tools/vision/visibility.py tools/vision/services.py \
+        tools/vision/apps.py tools/vision/README.md tools/vision/tests/
 git commit -m "feat(vision): the registered artifact purge and the gallery exclusion"
 ```
 
@@ -6870,3 +6986,4 @@ Checked end to end: `ticketed_keys` / `visible_tickets` / `may_purge` / `delete_
 - **Execution amendment (Task 8 review), 2026-09-21:** confirm copy no longer says purge; zero-day notice; soft-delete document pin restored; four tests renamed.
 - **Execution amendment (Task 9 fix round 1), 2026-09-21:** Task 9 review: `agents.attachments.delete_attachments_for` no longer swallows a broken cleanup provider (FIX C1) — its only production caller is `agents.retention.purge_conversation` at purge time, so a failure now logs and re-raises through the runner's own never-swallows contract, re-pinning `TestTheCleanupSavepoint` to expect propagation (and full survival, driven through `identity.retention.purge_ticket`) instead of a completed purge; `purge_conversation` now hands refs/generation ids to the registered artifact-purge slot LAST, after every row delete and the tool-record scrub, so a failure upstream never deletes a file whose row then survives (FIX I2, `TestBytesGoLast`); the collect step's parse-failure log line names the turn and conversation id only, never the raw stored reference (FIX M6); and two residues are now stated as docstring sentences rather than left implicit — `WorkstreamTaint.first_conversation` keeps a purged conversation's id by value, content-free and deliberately left, and `scrub_tool_records` cannot reach a tool call whose invocation was written but whose turn never was (FIX M7/I4), mirrored into `agents/README.md`. Task 7 fix round 1: the rendered Retention help copy said "purge date"/"cliff", both banned by this plan's own copy rule (`identity/contracts/retention.py`'s docstring) — reworded to "removal date"/"that date" and "no age limit"; the queue-jobs effects sentence was also factually wrong (a finished job carries no stamped purge date) and is now "applies ... the next time the queue tidies up, which happens whenever a new job is added"; the deletion-log effects sentence now says "permanent-deletion entries" rather than "purge entries". Both fixes reflected in the code/test/doc blocks above and in `foundation/settings_help.py`/`agents/attachments.py`/`agents/retention.py`/`agents/README.md`/`tools/rag/README.md` directly.
 - **Execution amendment (Task 10 review), 2026-09-21:** the "made unconditionally... THREE BOUNDED QUERIES, ALWAYS" claim this plan's own `_deleted_document_ids` code block made was checked against the real query planner and found wrong: a `filter(...__in=[])` on an empty id list is answered by the ORM without a database round trip, so the box's common state — no open conversation ticket — costs two queries, not three; a box with at least one open conversation ticket pays the third. The controller ruled this the correct behaviour, not a defect to paper over: the cheaper path is the common one, and forcing the third query to run unconditionally just to keep a test constant flat would trade a real query on the common case for a documentation convenience. The delta table, `_deleted_document_ids`'s own docstring, and the two held pins in `tools/rag/tests/test_access_documents.py` are corrected to +2/+3 throughout this task (never +3 flat, never +6); each re-pinned test gained a sibling that tickets one conversation first and asserts the one-query-more count, so both costs are held rather than only the cheaper one.
+- **Execution amendment (Task 11 review), 2026-09-21:** Task 11's first draft of `purge_artifacts` — the brief's own printed Step 4, `for job in GenerationJob.objects.filter(pk__in=job_ids): services.delete_job(job)` inside `tools/vision/retention.py` — was run against the real tree and found to trip `foundation/ops/tests/test_column_boundaries.py::test_no_vision_module_queries_generationjob_directly`, the IA-1 structural gate that closes `GenerationJob.objects` access in `tools/vision` to exactly two files (`visibility.py`, `services.py`); `retention.py` is a third site, and the implementer stopped and reported the conflict rather than editing that gate or guessing a fix. The controller's ruling: the gate stands (it is not this task's file, and not the vision steward's to relax) and `visibility.py` is not the right reroute either — that module answers "who may see this", and a purge must reach a ticketed job, or one owned by somebody else, that nobody may currently see, which is not a visibility question at all. The unscoped read moved beside the delete it feeds: `tools/vision/services.py` gained `delete_jobs(job_ids) -> int` (loops `GenerationJob.objects.filter(pk__in=job_ids)`, calling `delete_job` per row, catching nothing), and `retention.py` now imports no model but `GeneratedOutput`/`JobInput` and ends `return services.delete_jobs(job_ids)`. Two further consequences, both applied and reflected in Task 11's file list and code blocks above: `purge_artifacts` returns 0 for two empty lists without running any query or calling `delete_jobs` at all (pinned by `TestEmptyInputCostsNothing`, a `django_assert_num_queries(0)` test — CONTROLLER ADDITION (a) from this task's own dispatch, which the first pass had not yet added); and `delete_jobs`'s own tests live in `test_retention.py`, not `test_services.py`, because adding them to the latter pushed it to 2,132 lines, over `test_column_boundaries.py`'s own 2,100-line test-module split threshold gate — a second structural gate the same shape of fix (moving the test, not editing the gate) resolved.
