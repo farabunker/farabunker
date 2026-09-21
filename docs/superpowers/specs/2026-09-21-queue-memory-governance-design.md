@@ -633,6 +633,18 @@ suboptimal ordering decision, never a wrong admission or a wrong eviction. It fa
 back to the running jobs'
 declared keys when no snapshot exists yet (a fresh worker's first ticks).
 
+> **Correction, 2026-09-21 (written against the shipped code, whole-branch review F4).**
+> The last sentence contradicts this same section three paragraphs earlier, and the
+> shipped code follows the earlier ruling. With no snapshot there is **no fallback fold
+> at all**: the worker hands `claim_and_admit` an empty frozen set
+> (`models/queue/claim.py`), and `affinity_order` with an empty resident set makes
+> `not affine` true for every candidate, so the ordering degrades to plain
+> `(priority, id)` — exactly the order that was in force before this section existed.
+> Falling back to the running jobs' declared keys is the "pure scheduler's own resident
+> fold" this section explicitly rejects above, because it would make affinity a no-op
+> in sequential mode. `affinity_order`'s own docstring and the ADR both state the real
+> fallback correctly; this sentence was the stale one.
+
 **The seam, stated exactly.** `plan_admissions` returns only admitted ids and sorts
 defensively inside itself, so neither the ordering nor the pass-over signal can be
 smuggled through it as it stands. A new pure helper in the same module:
@@ -662,6 +674,22 @@ ordered by insertion; across priority numbers nothing changed, so the ADR's exis
 honestly-scoped starvation caveat is neither improved nor worsened. The deadlock
 guarantee is untouched because whichever candidate heads a round is still admitted
 alone the instant the machine is idle.
+
+> **Correction, 2026-09-21 (written against the shipped code, whole-branch review F2).**
+> The two sentences above overstate what pinning does, in the same way four code
+> comments did until this fix round. Pinning sets the **second** element of the sort
+> key `(priority, not pinned, not affine, job_id)`, so the precise statement is: a
+> pinned candidate **sorts by id ahead of every UNPINNED peer at its priority and is
+> never reordered behind one again**. It is NOT true that it "sorts strictly by id
+> within its priority and can never be reordered behind a peer again", nor that it is
+> "ordered by insertion": the `not affine` term still discriminates *among pinned
+> candidates*, so a pinned non-affine job can still sort behind a pinned affine one.
+> The starvation bound therefore reads: within one priority number a job can be passed
+> over at most `MAX_PASSOVERS` **rounds by unpinned peers**, which is the bound that
+> matters, while the affinity preference survives among the aged. ADR 0013 §3 records
+> the same correction, and records that dropping the affine term for pinned candidates
+> (making pinning a strict `(priority, id)` tail) is an open one-line owner decision
+> that was deliberately **not** taken here.
 
 The Queue page shows the count on a waiting row ("passed over twice") — an invisible
 reordering is exactly the kind of thing that gets blamed for an unrelated delay.
@@ -712,6 +740,20 @@ at which job, and may not import the agent layer):
 agents.runtime.jobs.reconcile_stranded_turn(turn) -> bool
 agents.runtime.jobs.reconcile_stranded_turns(grace_seconds) -> int
 ```
+
+> **Correction, 2026-09-21 (written against the shipped code, whole-branch review F5).**
+> The module path above is wrong and could not have shipped. The reconciliation lives
+> in `agents/reconcile.py`, not under `agents/runtime/`, because its whole condition is
+> a `models.contracts.queue.get_job` call and
+> `foundation/ops/tests/test_column_boundaries.py::test_no_runtime_module_blocks_on_a_queue_job`
+> forbids exactly that call anywhere in the `agents/runtime/` package — the guard test
+> is what forces the placement, so this is a boundary ruling and not a filing
+> preference. Three public functions shipped, not two: `reconcile_stranded_turn(turn)`,
+> `reconcile_stranded_turns(grace_seconds)` and `count_stranded_turns(grace_seconds)`,
+> the last being what the management command's `--dry-run` answers with. The plan, ADR
+> 0013, `agents/README.md`, `agents/runtime/README.md` and `models/queue/README.md`
+> were all corrected in Task 19; this spec paragraph was the one place left pointing at
+> the module that cannot exist.
 
 The condition, deliberately narrow: an **assistant** turn still `queued`/`running`,
 whose `queue_job_id` is null or names a job row that **no longer exists**, and whose

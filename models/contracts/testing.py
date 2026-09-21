@@ -107,5 +107,18 @@ def hermetic_engine_endpoints(settings):
     pin both depend on. A test that genuinely wants addresses assigns
     `settings.INFERENCE_DEFAULT_ENDPOINTS` itself, and that assignment
     wins -- this fixture only sets the default.
+
+    WHAT IT DOES NOT COVER, said plainly so the sentence above is not
+    read as more than it is: the swept set comes from `registered_
+    endpoints()`, which UNIONS this configured map with every
+    `ModelConnection` row's own endpoint. This fixture blanks the
+    CONFIGURED half. A test that creates a connection row naming a REAL
+    registered engine at a REAL address would still reach it, and no
+    import can prevent that -- the row is written by the test itself.
+    The connection-row half is therefore the test author's own
+    responsibility, which the house pattern already discharges by naming
+    a FAKE engine (`test-inference`, at an address nothing listens on)
+    rather than a registered real one. Every shipped module that drives a
+    tick does exactly that today.
     """
     settings.INFERENCE_DEFAULT_ENDPOINTS = {}

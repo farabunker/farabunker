@@ -156,8 +156,10 @@ class InferenceJob(models.Model):
     # OF THIS JOB (spec §3.6). Durable, not in-memory state: a worker
     # restart must not reset a job's age and let it be passed over for
     # ever. At `models.queue.scheduler.MAX_PASSOVERS` the job is PINNED --
-    # it sorts strictly by id within its priority from then on and can
-    # never be reordered behind a peer again.
+    # it sorts by id ahead of every UNPINNED peer at its priority from
+    # then on and is never reordered behind one again. Not ahead of every
+    # peer: pinning sets the second element of the sort key, so the
+    # affinity term still discriminates among pinned candidates.
     passed_over = models.PositiveSmallIntegerField(default=0)
 
     class Meta:

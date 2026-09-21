@@ -136,9 +136,9 @@ says what to do about each one.
 |---|---|---|
 | INFO | `unload <model> at <endpoint> (<engine>), scope <model\|endpoint>, <reason> -- accepted\|refused` | One line per unload attempt. `<reason>` is `not needed at an exclusive endpoint`, `over budget`, or `precautionary barrier`. |
 | INFO | `eviction pass (<triggers>): swept N endpoints, R resident, M admitted marginal, budget <bytes\|unset>` | One line per tick that evicts at all. `unset` is a posture, not a missing value. |
-| INFO | `eviction could not list installed models at <endpoint> -- that endpoint is skipped this tick` | One engine briefly unreachable. Nothing to do. |
+| INFO | `eviction could not list installed models at <endpoint> (<engine>) -- that endpoint is skipped this tick` | One engine briefly unreachable. Nothing to do. |
 | INFO | `engine <name> has no <method>() -- eviction degrades to today's idle-timeout behavior for it` | Once per engine+method, for an adapter offering no `list_installed`/`unload`. |
-| WARNING | `eviction skipped the whole endpoint <endpoint> -- one unload there frees everything, and <model> is protected by live work` | Correct refusal. Only actionable if it repeats while nothing is running. |
+| WARNING | `eviction skipped the whole endpoint <endpoint> (<engine>) -- one unload there frees everything, and <model> is protected by live work (<reason>)` | Correct refusal. Only actionable if it repeats while nothing is running. |
 | WARNING | `not launching exclusive job N this tick -- ... is protected by live work` | The job waits for the live attempt to end. |
 | WARNING | `not launching exclusive job N this tick -- engine <name> at <endpoint> refused to release <model>` | The informative refusal. Three of these, spanning five minutes, fail the job. |
 | WARNING | `job N failed -- engine '<name>' at <endpoint> did not release memory ... after 3 attempts` | The honest failure, also on the job row. |
@@ -216,6 +216,15 @@ It blanks the endpoint map rather than stubbing the engine registry, deliberatel
 engine resolution stays under test, which is what the widened sweep's own tests and its
 query-count pin depend on. A test that genuinely wants addresses assigns
 `settings.INFERENCE_DEFAULT_ENDPOINTS` itself and that assignment wins.
+
+**The fence covers the configured half of the union, not both halves.** `registered_
+endpoints()` unions `INFERENCE_DEFAULT_ENDPOINTS` with every `ModelConnection` row's
+endpoint, and the fixture blanks only the first. A test that creates a connection row
+naming a real registered engine at a real address is still unfenced — no import can stop
+that, since the row is the test's own write. The connection-row half is the test author's
+responsibility, and the house pattern already discharges it: name a **fake** engine
+(`test-inference`) at an address nothing listens on, which is what every shipped ticking
+module does.
 
 `foundation/ops/tests/test_engine_endpoint_fence.py` is the gate that stops the next module
 forgetting — it is a plain importable fixture rather than a `conftest.py`, which this repo

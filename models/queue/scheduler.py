@@ -169,10 +169,14 @@ elsewhere in this module cites one of these numbers):
    first candidate it cannot admit, so the no-backfill deadlock proof is
    untouched: whichever candidate heads a round is still admitted alone
    the instant the machine is idle. THE AGING BOUND: a candidate whose
-   `passed_over` count has reached `max_passovers` is PINNED and sorts
-   strictly by id within its priority from then on, so within one
-   priority number a job can be passed over at most that many ROUNDS --
-   the count is of OCCASIONS a job lost its turn, one per round however
+   `passed_over` count has reached `max_passovers` is PINNED -- it sorts
+   by id ahead of every UNPINNED peer at its priority and is never
+   reordered behind one again. It is NOT never reordered behind ANY
+   peer: pinning sets the SECOND element of the sort key, so the `not
+   affine` term still discriminates among pinned candidates. Within one
+   priority number a job can therefore be passed over at most that many
+   ROUNDS BY UNPINNED PEERS, which is the bound that matters -- the
+   count is of OCCASIONS a job lost its turn, one per round however
    many peers went ahead, not of peers. Across priority numbers nothing
    changed, so rule 9's honestly-scoped starvation caveat is neither
    improved nor worsened. The believed-
@@ -208,8 +212,12 @@ from typing import Iterable, Sequence
 _Key = tuple[str, str, str]
 
 # How many admission ROUNDS a candidate may lose to model-affinity
-# reordering before it is PINNED -- ordered strictly by id within its
-# priority from then on (owner decision 4). ONE per round, however many
+# reordering before it is PINNED -- ordered by id ahead of every UNPINNED
+# peer at its priority from then on, and never reordered behind one again
+# (owner decision 4). Not ahead of every peer: pinning sets the second
+# element of the sort key, so `not affine` still discriminates among
+# pinned candidates, and the bound is therefore rounds lost to UNPINNED
+# peers. ONE per round, however many
 # later-by-(priority, id) peers were admitted ahead of it in that round:
 # the bound counts occasions a job lost its turn, not peers. Supplied by
 # the claim code as a keyword argument so table tests can vary it; this
@@ -392,10 +400,15 @@ def affinity_order(
     the instant the machine is idle.
 
     THE AGING BOUND: a candidate whose `passed_over` has reached
-    `max_passovers` is PINNED -- it sorts strictly by id within its
-    priority and can never be reordered behind a peer again. Within one
-    priority number a job can therefore be passed over at most that many
-    ROUNDS; `passed_over` counts OCCASIONS a job lost its turn, not peers,
+    `max_passovers` is PINNED -- it sorts by id ahead of every UNPINNED
+    peer at its priority and is never reordered behind one again. It is
+    NOT never reordered behind ANY peer: pinning sets the SECOND element
+    of this key, so the `not affine` term still discriminates among
+    pinned candidates and a pinned non-affine job can still sort behind
+    a pinned affine one. Within one priority number a job can therefore
+    be passed over at most that many ROUNDS BY UNPINNED PEERS, which is
+    the bound that matters, while the affinity preference survives among
+    the aged; `passed_over` counts OCCASIONS a job lost its turn, not peers,
     so a round admitting four later peers ahead of it still costs it one.
     Across priority numbers nothing changed, so the ADR's existing,
     honestly-scoped starvation caveat is neither improved nor worsened.
