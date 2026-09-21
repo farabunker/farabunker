@@ -151,6 +151,26 @@ class AgentsConfig(AppConfig):
             handler="agents.workstreams.workstream_entitlement_cascade",
         ))
 
+        # THIS COLUMN'S ANSWER TO "A DELETED CONVERSATION'S DATE HAS
+        # ARRIVED", as a DOTTED-PATH STRING so `identity/` can run it
+        # without importing `agents/` (import-law rule 4) -- the same
+        # mechanism, and the same reason, as the entitlement cascades
+        # just above. FILES band: the handler reads the turns' artifacts
+        # before it deletes them and reaches bytes through the registered
+        # artifact purge.
+        from identity.contracts.cascades import (
+            ORDER_FILES, RetentionHandler, register_retention_handler,
+        )
+        from identity.contracts.retention import KIND_CONVERSATION
+
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION,
+            key="agents.conversation",
+            label="Conversation and turns",
+            handler="agents.retention.purge_conversation",
+            order=ORDER_FILES,
+        ))
+
         # THE OTHER DIRECTION ON THE SAME THREE TABLES. The cascades
         # above answer "this entitlement is going away"; these answer
         # "which of your rows carry it, and change that" -- the question

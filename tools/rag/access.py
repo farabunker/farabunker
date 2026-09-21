@@ -671,9 +671,10 @@ def delete_attachments(conversation_id) -> int:
     and return the count of ATTACHMENT CLAIMS removed (round 11
     re-review minor 4) -- the ONE function registered as `tools/rag/
     apps.py::ready()`'s cleanup provider (`agents.contracts.attachments.
-    register_attachment_cleanup`), called from `agents.visibility.
-    delete_conversation` when a conversation is deleted, through the
-    resolver `agents.attachments.delete_attachments_for`.
+    register_attachment_cleanup`), called from `agents.retention.
+    purge_conversation` when a conversation is purged (Task 9 -- a
+    delete only writes a ticket now), through the resolver `agents.
+    attachments.delete_attachments_for`.
 
     ROUND 12 SPLITS THIS INTO TWO CASES, by the owner's own ruling ("if
     I submit a document but have scope for chat... it should only be

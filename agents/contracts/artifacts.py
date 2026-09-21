@@ -263,3 +263,39 @@ def file_resolver_for(kind: str) -> str | None:
     it two refusal paths for one condition.
     """
     return _ARTIFACT_FILE_RESOLVERS.get(kind)
+
+
+# ONE SLOT, NOT A PER-KIND DICT, matching
+# `agents.contracts.attachments.register_attachment_cleanup`'s own
+# single-slot shape for the identical situation: the agents column
+# COMPUTES values -- artifact references and generation ids -- and
+# exactly one tool column knows what they mean. `tools/rag` needs no
+# registration here, because a `document:<id>` artifact is a `Document`
+# row the attachment seam already reaches.
+_ARTIFACT_PURGE: str | None = None
+
+
+def register_artifact_purge(dotted_path: str) -> None:
+    """Register the function that destroys the rows and bytes behind a
+    conversation's artifact references.
+
+    Signature `(refs: Sequence[str], generation_ids: Sequence[str]) ->
+    int` -- ONE MODE, like every retention handler, and for the reason
+    `identity.contracts.cascades.RetentionHandler` gives: a deletion's
+    confirmation is the Deleted page, not a number.
+
+    A DOTTED PATH, resolved at purge time by the caller, never imported
+    here -- `agents/` may not import `tools/` at all.
+    """
+    if "." not in dotted_path:
+        raise ValueError(
+            f"register_artifact_purge needs a dotted path, got {dotted_path!r}")
+    global _ARTIFACT_PURGE
+    _ARTIFACT_PURGE = dotted_path
+
+
+def artifact_purge() -> str | None:
+    """The registered purge path, or `None` when nothing is -- which is
+    the common case on a box with the image column uninstalled, and is
+    not an error."""
+    return _ARTIFACT_PURGE

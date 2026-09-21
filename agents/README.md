@@ -15,7 +15,7 @@
 | `runtime/flowtool.py` | **P3 Task 13 — shipped** | The ONE registered `flow.run` tool and its per-turn narrowing. See "The tools this platform registers" and "Flows" below. |
 | `chat/` | **P3 — shipped** | Django app, label `chat`. The permanent chat product at `/chat/`: conversation list, thread, tool cards with thumbnails and citations, the 202-and-poll contract with a no-JS path, and flow rows reached through `flow.run`. See [`chat/README.md`](chat/README.md). |
 | `entitlements.py` + `labels.py` + `shares.py` | **Identity & Auth IA-2 — shipped** | `entitlements.py::tool_access_for` builds the pure `ToolAccess` (`agents/contracts/tools.py`) a turn's `granted_tools` call needs; `labels.py` reads/writes `ToolEntitlement`/`AgentEntitlement`/`FlowEntitlement` and supplies this column's two entitlement-delete cascade handlers (registered from `agents/apps.py`); `shares.py` reads/writes `Share` and answers `may_post_to`. See "The acting rule" and "The four visibility bodies get real filters" below. |
-| `visibility.py`'s `delete_conversation` | **Deletion semantics — Task 8 (delete side); `agents/retention.py`'s purge side is Task 9** | Deleting a conversation writes a `DeletionTicket` (`identity.retention.delete_content`) instead of erasing the row; `visible_conversations` excludes ticketed keys on the BASE queryset, before the `sees_all_content` early return. See "Deletion: a ticket, then a purge" below. |
+| `visibility.py`'s `delete_conversation` + `retention.py`'s `purge_conversation` | **Deletion semantics — Tasks 8 and 9, both shipped** | Deleting a conversation writes a `DeletionTicket` (`identity.retention.delete_content`) instead of erasing the row; `visible_conversations` excludes ticketed keys on the BASE queryset, before the `sees_all_content` early return. The row, its turns, its shares, its attachment claims, its chat-scoped documents and its generated images all survive until the date the Deleted page prints, then go together at purge. See "Deletion: a ticket, then a purge" below. |
 
 ## The data model
 
@@ -798,19 +798,52 @@ before the response returns. A notice that promised a restore door the
 box had already closed would be a lie the settings page's own "Keep
 deleted items for" control made possible.
 
-`agents/retention.py` (Task 9) is where the HARD side lands: the
-`purge_conversation` handler and its siblings, registered against
-`identity/cascades.py`'s retention registry, run at PURGE and destroy
-the conversation's turns, shares, attachment claims, chat-scoped
-documents and generated images together, in the one `transaction.
-atomic()` `identity.retention.purge_ticket` already opens. Until that
-task lands, a ticketed conversation's row survives even past its own
-purge date — the ticket is gone (nothing is registered yet to refuse
-it), but nothing has torn the row down. The artifact-purge slot and the
-tool-call audit trail's own scrub belong to that same task: a
-`ToolInvocation` is never reachable through a `Turn` in the first place
-(`Turn.invocation` is `SET_NULL`), and at purge time its text and error
-are blanked to a content-free shell — **scrubbed inline with the
-conversation delete's own purge, always, with no setting and no second
-date** — so a record that a tool ran outlives a conversation that named
-what it was asked, without ever repeating that content back.
+`agents/retention.py::purge_conversation` (Task 9) is where the HARD
+side lands, registered under `agents.apps.AgentsConfig.ready()` as a
+`RetentionHandler(kind=KIND_CONVERSATION, key="agents.conversation",
+handler="agents.retention.purge_conversation", order=ORDER_FILES)` —
+the FILES band, deliberately: this handler must READ a conversation's
+turns before it deletes them, so it collects everything it needs first,
+then writes. `identity.cascades.run_retention` calls it, inside the one
+`transaction.atomic()` `identity.retention.purge_ticket` already opens
+(a nested savepoint per handler), so a conversation's ticket and its
+content can never disagree about whether the item still exists.
+
+The collect step reads three things off every one of the conversation's
+turns before any row is touched: `output:<id>` / `input:<id>` artifact
+references (`document:<id>` is left alone — that is a `Document` row
+the attachment seam already reaches, never handed to the image column);
+`data["id"]` on any turn whose JSON `data` is a dict with a UUID-shaped
+`"id"` — the channel that catches a generation job that reached the
+engine and FAILED, minting no output at all, so the artifact channel
+alone would miss it entirely; and every non-null `invocation_id`,
+collected here because `Turn.invocation` is `SET_NULL` — once the turns
+are gone there is no path left from the conversation to its tool
+records at all. The refs and generation ids are then handed to the
+ONE registered artifact-purge slot (`agents.contracts.artifacts.
+register_artifact_purge` / `artifact_purge`, resolved by dotted path,
+never imported — `agents/` may not import `tools/` at all) whenever a
+handler IS registered, even with two empty lists, so that handler
+decides for itself whether there is anything to do. With nothing
+registered (vision uninstalled) the slot is a no-op and the purge
+still completes.
+
+The row deletes follow: the conversation's `Share` rows, then
+`agents.attachments.delete_attachments_for` (which reaches `tools.rag.
+access.delete_attachments` through the registered cleanup seam — a
+chat-scoped document is deleted outright there, a universal or
+stream-contained one loses only its claim), then `conversation.
+delete()`, with `Turn` going by CASCADE. Last, `scrub_tool_records`
+blanks `args`/`text`/`error` on every `ToolInvocation` id collected up
+front — content gone, the shell (principal, tool key, outcome, timings)
+kept, because that shell IS the machine audit trail. **Scrubbed inline
+with the same purge, always, with no setting and no second date.**
+
+Every step is IDEMPOTENT: a re-run on a conversation that is already
+gone, or on one only partly torn down by an earlier failed purge,
+removes zero rows for what is already gone and completes rather than
+raising — the contract every `RetentionHandler` owes
+(`identity.contracts.cascades.RetentionHandler`'s own docstring). A
+`key` that does not even parse as a UUID answers `0` rather than
+raising, the same "one bad row, not a broken purge" posture the collect
+step's own unparseable-artifact-reference handling takes.

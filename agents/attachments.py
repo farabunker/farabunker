@@ -146,13 +146,15 @@ def delete_attachments_for(conversation_id) -> int:
     or `0` when nothing is registered or the registered cleanup
     provider itself raises.
 
-    THE ONE CALLER: `agents.visibility.delete_conversation`, inside the
-    SAME transaction the conversation's own `Share` rows and the
-    conversation itself are deleted in -- so a `DocumentAttachment` row
-    naming a UUID that no `Conversation` will ever match again (the
-    column is a UUID BY VALUE, never a real FK -- `tools/rag` may not
-    import `agents.models`) does not silently outlive the conversation
-    it claimed to be attached to.
+    THE ONE CALLER: `agents.retention.purge_conversation`, at PURGE time
+    (Task 9) -- a delete only writes a ticket now
+    (`agents.visibility.delete_conversation`, Task 8), and this cascade
+    no longer runs at that moment at all. It runs alongside the
+    conversation's own `Share` rows and the conversation itself, in the
+    same purge -- so a `DocumentAttachment` row naming a UUID that no
+    `Conversation` will ever match again (the column is a UUID BY VALUE,
+    never a real FK -- `tools/rag` may not import `agents.models`) does
+    not silently outlive the conversation it claimed to be attached to.
 
     NEVER RAISES, the identical posture `attached_documents` above
     takes and for the identical reason: a broken `tools.rag` cleanup
@@ -166,8 +168,10 @@ def delete_attachments_for(conversation_id) -> int:
     docstring).
 
     THE SAVEPOINT (round 11 fix-2 verify, Important N-1): this call
-    ALWAYS runs inside `agents.visibility.delete_conversation`'s own
-    outer `transaction.atomic()` block. A Python exception from the
+    ALWAYS runs inside `agents.retention.purge_conversation`'s own
+    outer transaction (Task 9: `identity.cascades.run_retention` opens
+    one savepoint per registered handler, and this call sits inside
+    that one). A Python exception from the
     provider is caught below regardless -- but a DATABASE-level error
     (the reviewer reproduced `InternalError: current transaction is
     aborted`) does something the `except` clause alone cannot undo:

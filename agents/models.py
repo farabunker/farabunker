@@ -893,9 +893,11 @@ class Share(models.Model):
 
     ORPHANS ARE INERT AND NO SIGNAL SWEEPS THEM. This repository uses no
     Django signals anywhere; every reader resolves the target first, and
-    a target that does not resolve contributes nothing. The one shipped
-    delete surface, `agents.visibility.delete_conversation`, removes a
-    conversation's shares in the same transaction.
+    a target that does not resolve contributes nothing. `agents.
+    visibility.delete_conversation` only tickets a conversation now
+    (Task 8); its shares survive that click and are removed together
+    with the conversation, at purge, by `agents.retention.
+    purge_conversation` (Task 9).
     """
 
     class Target(models.TextChoices):
