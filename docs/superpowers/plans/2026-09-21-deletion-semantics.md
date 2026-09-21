@@ -3743,11 +3743,11 @@ gains two bounded ticket reads with no open conversation ticket on the box, thre
 
 **Files:**
 - Create: `tools/vision/retention.py`
-- Modify: `tools/vision/visibility.py` (`visible_jobs`)
+- Modify: `tools/vision/visibility.py` (`visible_jobs`; `may_read_job` — see the review round one amendment below)
 - Modify: `tools/vision/services.py` (new `delete_jobs(job_ids) -> int`, beside `delete_job` — see the amendment note below)
 - Modify: `tools/vision/apps.py` (register the artifact purge)
 - Modify: `tools/vision/README.md`
-- Test: `tools/vision/tests/test_retention.py` (new — also covers `delete_jobs`), `tools/vision/tests/test_visibility.py` (extend)
+- Test: `tools/vision/tests/test_retention.py` (new — also covers `delete_jobs`), `tools/vision/tests/test_visibility.py` (extend), `tools/vision/tests/test_views_file_cache.py` (extend — see the review round one amendment below)
 
 **Held tests:** `tools/vision/tests/test_visibility.py::TestGeneratedImagesAreContent::test_the_gallery_and_the_recent_list_both_narrow` and `::test_a_member_sees_only_their_own_generations` — both stand, but `visible_jobs` gains one query. Check for a `django_assert_num_queries` on the gallery path in `test_views_gallery.py` and re-pin it if present; name it in the commit message if so. Also confirm `foundation/ops/tests/test_column_boundaries.py::test_no_vision_module_queries_generationjob_directly` (IA-1's closed set of two) stays green — see the amendment note below for why that gate is the reason `purge_artifacts` may not query `GenerationJob.objects` itself.
 
@@ -3984,6 +3984,40 @@ def visible_jobs(principal):
 
 `known_job_uuids` is **not** narrowed: it is the Engine files page's box-inventory accounting seam, and a deleted-but-not-yet-purged job's engine-side files are still accounted for, not orphaned. Say so in a comment there.
 
+**Amended (review round one):** `visible_jobs`'s own exclusion never runs for `output_file`/`input_file` — both load their `GeneratedOutput`/`JobInput` row by primary key and call `may_read_job(principal, job)` directly, so a ticketed job's image stayed fetchable forever by its direct URL. `may_read_job` gains the same exclusion, before its own `sees_all_content` branch and for the identical reason:
+
+```python
+def may_read_job(principal, job) -> bool:
+    """Whether one already-loaded job may be read. `job_status`,
+    `job_delete`, `output_file` and `input_file` resolve through this and
+    answer 404 when it is False -- 404 rather than 403, because a 403 on
+    a row-addressed URL confirms the row exists.
+
+    A TICKETED JOB IS REFUSED HERE TOO, before the `sees_all_content`
+    branch below. `output_file` and `input_file` load their
+    `GeneratedOutput`/`JobInput` row by primary key and reach this
+    function directly -- they never go through `visible_jobs`, so the
+    base-queryset exclusion that hides a deleted generation from the
+    gallery and the Recent list never runs for them. Without a matching
+    check here, a deleted image would stay fetchable forever by anybody
+    who already had its direct URL. Placed before `sees_all_content` for
+    the same reason `visible_jobs`'s own exclusion comes first: that
+    branch answers True for every principal on an open box, so a check
+    on the restricted leg alone would leave a deleted image servable
+    exactly where it matters most. Costs one extra ticket read per file
+    fetch.
+    """
+    if str(job.pk) in ticketed_keys(KIND_VISION_JOB):
+        return False
+    if sees_all_content(principal):
+        return True
+    return may_read_owned_row(principal, job)
+```
+
+Grepped for every other production caller of `may_read_job` and every sibling per-job predicate in `visibility.py`: there is no `may_manage_job` or `may_delete_job` in this module, and the only two production call sites of `may_read_job` are `output_file` and `input_file` in `tools/vision/views.py`. Every other job-scoped route (`job_status`, `job_delete`, `jobs_delete_selected`, the create page's reuse-prefill, the gallery's job filter) already resolves through `visible_jobs(principal)`, whose own exclusion already refused a ticketed job before this amendment — so re-running, editing from, or sharing a ticketed job by id was already blocked; only the two file routes had the gap. No change was needed outside `may_read_job` itself.
+
+Tests, in `tools/vision/tests/test_views_file_cache.py` (already the module covering both routes' shared cache-header behaviour, through the project's `stored_output` helper and real files on disk): a new `TestATicketedJobsFileIsNotFetchableByItsDirectURL`, parametrized over both routes, proves the owner is refused after `identity.retention.delete_content` and served again after `identity.retention.restore_content`; that another principal on an OPEN box is refused too (the case that proves the check runs before `sees_all_content`, not only on the restricted leg); and that an unticketed job's files are unaffected.
+
 - [ ] **Step 4: Add `delete_jobs` to `tools/vision/services.py`, then write `tools/vision/retention.py` against it**
 
 **Amended by the controller during Task 11's own review** — see the note below the two code blocks for why. Beside `delete_job`:
@@ -4103,9 +4137,13 @@ def purge_artifacts(refs, generation_ids) -> int:
         try:
             kind, pk = parse_artifact(reference)
         except ValueError:
+            # THE RAW REFERENCE NEVER REACHES THE LOG: this path runs
+            # inside a deletion, and a deletion must not write what it
+            # is destroying somewhere new. The fact that one reference
+            # failed to parse and was dropped is the whole of what a
+            # reader needs.
             logger.warning(
-                "tools.vision.retention: unusable artifact reference %r; ignored.",
-                reference)
+                "tools.vision.retention: one artifact reference failed to parse; ignored.")
             continue
         if kind == "output":
             output_pks.append(pk)
@@ -4122,14 +4160,19 @@ def purge_artifacts(refs, generation_ids) -> int:
         try:
             job_ids.add(uuid.UUID(str(raw)))
         except (ValueError, AttributeError, TypeError):
+            # SAME RULE AS THE REFERENCE BRANCH ABOVE: no raw value in
+            # the log, only the fact that one generation id could not
+            # be parsed and was dropped.
             logger.warning(
-                "tools.vision.retention: unusable generation id %r; ignored.", raw)
+                "tools.vision.retention: one generation id failed to parse; ignored.")
 
     if not job_ids:
         return 0
 
     return services.delete_jobs(job_ids)
 ```
+
+**Amended (review round one):** the two `logger.warning` calls above originally carried the raw value that failed to parse (`%r` of the artifact reference, `%r` of the generation id) — a deletion path logging what it is destroying, into a log outside the audit trail's own content-free discipline. Both now log only the fact that one value failed to parse. Pinned by `TestAFailedParseIsLoggedWithoutWhatItFailedToParse` in `tools/vision/tests/test_retention.py`, which asserts the raw string never appears in any `caplog` record for either path. The same review also added `test_a_failed_job_with_no_output_is_reached_only_through_its_generation_id` beside the existing generation-id tests — the docstring's own claim (a job that reached the engine and FAILED mints no output, so the generation-id channel is the only way it is reached) had no test building a FAILED job until now.
 
 **Why this deviates from the brief's first draft, and from what the vision steward's own notes (Global Constraints) said Step 4 would look like:** the first draft closed the loop itself — `for job in GenerationJob.objects.filter(pk__in=job_ids): services.delete_job(job)` — directly inside `retention.py`. The Task 11 implementer wrote that draft, ran it against the real tree (not just read it), and found `foundation/ops/tests/test_column_boundaries.py::test_no_vision_module_queries_generationjob_directly` goes red the instant the file is tracked: that gate is a **closed set of two** files (`visibility.py`, `services.py`) allowed to touch `GenerationJob.objects` anywhere in `tools/vision`, and a third site — even one this plan wrote by hand — is exactly the drift it exists to catch. The implementer stopped rather than guess a fix and reported the conflict for a ruling (correctly, per this plan's own "no re-pinning a test the brief doesn't name" discipline). The controller's ruling, applied above: neither edit the gate (it is not this task's file, and not the vision steward's to relax) nor route the read through `visibility.py` (that module answers "who may see this"; a purge must reach a ticketed job, or one owned by somebody else, that nobody may currently see — routing the unscoped read through the visibility module would be the wrong shape even if the gate allowed it). The unscoped read belongs beside the delete it feeds, in the other allowed file: `services.py` gains `delete_jobs(job_ids) -> int`, and `retention.py` never imports `GenerationJob` at all.
 
@@ -4152,6 +4195,8 @@ Inside `ready()`, **after** the feature-flag early return and beside the `regist
 - [ ] **Step 6: Document it in `tools/vision/README.md`**
 
 Say, **once**: this column registers the artifact purge, which maps `output:`/`input:` references and `Turn.data["id"]` generation ids to jobs, dedupes by job and calls `services.delete_jobs`, which in turn calls `delete_job` per job — and `delete_job`'s **best-effort engine-side sweep** (`store.remove_engine_files`, which never raises) is the only reach this platform has into `/engine/output` and `/engine/input`, which are tracked by no row at all; the Engine files page remains the operator's manual door. Do not restate that at any call site. Also add one or two sentences on `delete_jobs` itself, where `delete_job` is already documented in the service-layer list: it is the one place outside `visibility.py` that queries `GenerationJob.objects` directly (IA-1's closed set of two). Also record the accepted residue: a generation whose tool turn was never written is reachable only through the gallery.
+
+**Amended (review round one):** the Deletion section also says, in plain sentences, that the two file-serving routes refuse a ticketed job the same way — reached by its direct URL, a deleted generation's stored image or stored input answers the same 404 as one this principal could never read, so a copied or bookmarked link cannot outlive the delete.
 
 - [ ] **Step 7: Run the tests, in both flag states**
 
@@ -7020,4 +7065,5 @@ Checked end to end: `ticketed_keys` / `visible_tickets` / `may_purge` / `delete_
 - **Execution amendment (Task 9 fix round 1), 2026-09-21:** Task 9 review: `agents.attachments.delete_attachments_for` no longer swallows a broken cleanup provider (FIX C1) — its only production caller is `agents.retention.purge_conversation` at purge time, so a failure now logs and re-raises through the runner's own never-swallows contract, re-pinning `TestTheCleanupSavepoint` to expect propagation (and full survival, driven through `identity.retention.purge_ticket`) instead of a completed purge; `purge_conversation` now hands refs/generation ids to the registered artifact-purge slot LAST, after every row delete and the tool-record scrub, so a failure upstream never deletes a file whose row then survives (FIX I2, `TestBytesGoLast`); the collect step's parse-failure log line names the turn and conversation id only, never the raw stored reference (FIX M6); and two residues are now stated as docstring sentences rather than left implicit — `WorkstreamTaint.first_conversation` keeps a purged conversation's id by value, content-free and deliberately left, and `scrub_tool_records` cannot reach a tool call whose invocation was written but whose turn never was (FIX M7/I4), mirrored into `agents/README.md`. Task 7 fix round 1: the rendered Retention help copy said "purge date"/"cliff", both banned by this plan's own copy rule (`identity/contracts/retention.py`'s docstring) — reworded to "removal date"/"that date" and "no age limit"; the queue-jobs effects sentence was also factually wrong (a finished job carries no stamped purge date) and is now "applies ... the next time the queue tidies up, which happens whenever a new job is added"; the deletion-log effects sentence now says "permanent-deletion entries" rather than "purge entries". Both fixes reflected in the code/test/doc blocks above and in `foundation/settings_help.py`/`agents/attachments.py`/`agents/retention.py`/`agents/README.md`/`tools/rag/README.md` directly.
 - **Execution amendment (Task 10 review), 2026-09-21:** the "made unconditionally... THREE BOUNDED QUERIES, ALWAYS" claim this plan's own `_deleted_document_ids` code block made was checked against the real query planner and found wrong: a `filter(...__in=[])` on an empty id list is answered by the ORM without a database round trip, so the box's common state — no open conversation ticket — costs two queries, not three; a box with at least one open conversation ticket pays the third. The controller ruled this the correct behaviour, not a defect to paper over: the cheaper path is the common one, and forcing the third query to run unconditionally just to keep a test constant flat would trade a real query on the common case for a documentation convenience. The delta table, `_deleted_document_ids`'s own docstring, and the two held pins in `tools/rag/tests/test_access_documents.py` are corrected to +2/+3 throughout this task (never +3 flat, never +6); each re-pinned test gained a sibling that tickets one conversation first and asserts the one-query-more count, so both costs are held rather than only the cheaper one.
 - **Execution amendment (Task 11 review), 2026-09-21:** Task 11's first draft of `purge_artifacts` — the brief's own printed Step 4, `for job in GenerationJob.objects.filter(pk__in=job_ids): services.delete_job(job)` inside `tools/vision/retention.py` — was run against the real tree and found to trip `foundation/ops/tests/test_column_boundaries.py::test_no_vision_module_queries_generationjob_directly`, the IA-1 structural gate that closes `GenerationJob.objects` access in `tools/vision` to exactly two files (`visibility.py`, `services.py`); `retention.py` is a third site, and the implementer stopped and reported the conflict rather than editing that gate or guessing a fix. The controller's ruling: the gate stands (it is not this task's file, and not the vision steward's to relax) and `visibility.py` is not the right reroute either — that module answers "who may see this", and a purge must reach a ticketed job, or one owned by somebody else, that nobody may currently see, which is not a visibility question at all. The unscoped read moved beside the delete it feeds: `tools/vision/services.py` gained `delete_jobs(job_ids) -> int` (loops `GenerationJob.objects.filter(pk__in=job_ids)`, calling `delete_job` per row, catching nothing), and `retention.py` now imports no model but `GeneratedOutput`/`JobInput` and ends `return services.delete_jobs(job_ids)`. Two further consequences, both applied and reflected in Task 11's file list and code blocks above: `purge_artifacts` returns 0 for two empty lists without running any query or calling `delete_jobs` at all (pinned by `TestEmptyInputCostsNothing`, a `django_assert_num_queries(0)` test — CONTROLLER ADDITION (a) from this task's own dispatch, which the first pass had not yet added); and `delete_jobs`'s own tests live in `test_retention.py`, not `test_services.py`, because adding them to the latter pushed it to 2,132 lines, over `test_column_boundaries.py`'s own 2,100-line test-module split threshold gate — a second structural gate the same shape of fix (moving the test, not editing the gate) resolved.
+- **Execution amendment (Task 11 review round one), 2026-09-21:** three findings. (1) `output_file`/`input_file` bypass `visible_jobs` entirely (they load their row by primary key and call `may_read_job` directly), so Task 11's exclusion never reached them — a ticketed job's image stayed fetchable by its direct URL after deletion; `may_read_job` now refuses a ticketed job too, before its own `sees_all_content` branch, and the only other production callers of `may_read_job` (there is no sibling `may_manage_job`/`may_delete_job` in this module) are those same two routes, so no other predicate needed the same fix. (2) `purge_artifacts` logged the raw artifact reference and the raw generation id it failed to parse; both warnings now record only that one value failed to parse, pinned by a `caplog` test. (3) the module's own docstring promised a FAILED job with no output is reached only through its generation id; no test built one until now. All three, and the README sentence recording the file-view refusal, are reflected in Task 11's Files list and code/test blocks above.
 - **Execution amendment (Task 10 review round one), 2026-09-21:** two findings. (1) `purge_conversation_notes` caught every `OSError` from the note file's own unlink and logged-and-continued to delete the `Document` row regardless — `missing_ok=True` already forgives the one case that should be forgiven, "already gone"; any OTHER `OSError` (a permissions or I/O problem) is a genuine failure, and deleting the row while the file itself stayed stuck on disk would report a purge that never happened, with the row being the only remaining handle on that file. The catch is removed: the file goes first, the row survives when it could not be removed, and `identity/cascades.py::run_retention`'s own never-swallows contract fails the whole purge and retries it on the next sweep. (2) `tools/rag/retrieval.py::_visibility_filters` never consulted the deletion exclusion at all, so a soft-deleted item's chunks stayed retrievable into a fresh answer through any surface that function still governed (today only from inside a ticketed conversation itself, which can take no new turns — but the same gap would reopen the moment a library document can be ticketed on its own). Closed uniformly rather than per-caller: `retrieve_nodes` computes `tools.rag.access._deleted_document_ids()` once per call — never once per filter leg, never once per node — and threads it into `_visibility_filters`, which expresses it as one `file_id NOT IN (...)` clause using the installed Postgres store's own `NIN` operator, added only when the list is non-empty (an empty `NOT IN (...)` is not valid SQL, and "nothing is deleted" costs nothing extra, not an inert clause). Both fixes are reflected in Task 10's Files list, code blocks and test description above, and in `tools/rag/README.md`'s deletion section.
