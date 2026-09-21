@@ -11,14 +11,44 @@ deliberately re-pinned footprint assertions named in the plan's Task 3.
 from __future__ import annotations
 
 from datetime import datetime, timezone as dt_timezone
+from unittest.mock import patch
 
 import pytest
+from django.test import override_settings
+from django.urls import reverse
 
 from models.registry.bindings import (
     FOOTPRINT_DIP_WARNING_RATIO, record_engine_reported_footprint,
     record_measured_footprint,
 )
 from models.registry.models import ModelConnection
+from models.registry.tests._helpers import (
+    ENDPOINT,
+    _mock_engine,
+    clean_probe_cache,
+    client,  # noqa: F401 -- requested by name as a fixture
+    clear_seeded_rows,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clear_seeded_rows(db):
+    """Clear the ModelConnection/RoleBinding rows migration 0002 seeds from
+    env settings, so each test starts from a known-empty registry -- copied
+    from `test_views_tables_and_picker.py`'s own header rather than
+    imported (the six-module split's convention), needed here only by
+    `TestTheEngineReportedRowRenders` below, harmless for the rest."""
+    clear_seeded_rows()
+
+
+@pytest.fixture(autouse=True)
+def _clean_probe_cache():
+    """`probe_cache` (C-07) is not automatically inert inside `django_db`
+    tests -- see the identical fixture's own docstring in
+    `test_views_tables_and_picker.py`, copied here rather than imported."""
+    clean_probe_cache()
+    yield
+    clean_probe_cache()
 
 
 @pytest.mark.django_db
@@ -218,3 +248,96 @@ class TestTheRecorderKeepsTheMaximum:
 
         assert not ModelConnection.objects.filter(
             measured_footprint_bytes__isnull=False).exists()
+
+
+@pytest.mark.django_db
+class TestTheFootprintLabelVocabulary:
+    """The footprint labels are their OWN map. `_SOURCE_LABELS` keeps
+    labelling `DiscoveryRow.capability_source`, where "detected from the
+    model server" is true; reusing it for a post-run delta measurement was
+    the one place the console said something untrue (Q1)."""
+
+    def test_every_footprint_source_value_has_a_label(self):
+        from models.registry.views import _FOOTPRINT_SOURCE_LABELS
+
+        assert _FOOTPRINT_SOURCE_LABELS["override"] == "set by the operator"
+        assert _FOOTPRINT_SOURCE_LABELS["measured"] == "measured after a run"
+        assert (
+            _FOOTPRINT_SOURCE_LABELS["engine_reported"]
+            == "from the engine's residency snapshot"
+        )
+
+    def test_the_capability_vocabulary_is_untouched(self):
+        """A shipped, unrelated disclosure: relabelling it here would
+        change what the console says about capability detection."""
+        from models.registry.views import _SOURCE_LABELS
+
+        assert _SOURCE_LABELS["engine"] == "detected from the model server"
+        assert _SOURCE_LABELS["connection"] == "manual"
+        assert "override" not in _SOURCE_LABELS
+
+    def test_the_two_maps_are_not_the_same_object(self):
+        from models.registry.views import _FOOTPRINT_SOURCE_LABELS, _SOURCE_LABELS
+
+        assert _FOOTPRINT_SOURCE_LABELS is not _SOURCE_LABELS
+
+
+@pytest.mark.django_db
+class TestTheFootprintLabelDateIsLocalized:
+    """`_footprint_source_label` must run its timestamp through
+    `timezone.localtime` before formatting -- exactly what the template's
+    own `{{ value|date:"N j, Y" }}` filter has always done -- or the
+    rendered date silently moves by a day on any non-UTC box (Task 3
+    brief). A regression back to bare `date_format` on the raw UTC value
+    would pass every other assertion in this module and still be wrong."""
+
+    @override_settings(TIME_ZONE="Pacific/Kiritimati")
+    def test_a_late_evening_utc_timestamp_renders_the_local_date(self):
+        from models.registry.views import _footprint_source_label
+
+        # 22:00 UTC on March 4th; Kiritimati is UTC+14, so the local wall
+        # clock has already turned over to March 5th.
+        at = datetime(2026, 3, 4, 22, 0, tzinfo=dt_timezone.utc)
+
+        label = _footprint_source_label("measured", at)
+
+        assert label == "measured after a run on March 5, 2026"
+
+
+@pytest.mark.django_db
+class TestTheEngineReportedRowRenders:
+    """The one rung the console has never shown before (T3) -- its label
+    must be the steward's own wording, not `_SOURCE_LABELS`'s "detected
+    from the model server", which the image engine's `list_installed`
+    (`size=None` by design) would make untrue."""
+
+    def _get(self, client):
+        with patch("models.registry.views.discover") as mock_discover, patch(
+            "models.registry.views.ENGINES"
+        ) as mock_engines:
+            mock_engines.values.return_value = [_mock_engine(healthy=True)]
+            mock_discover.return_value = []
+            return client.get(reverse("inference-console"))
+
+    def test_an_engine_reported_only_connection_says_where_the_number_came_from(self, client):
+        at = datetime(2026, 3, 4, tzinfo=dt_timezone.utc)
+        connection = ModelConnection.objects.create(
+            name="reported conn", engine="ollama", endpoint=ENDPOINT,
+            model_id="a-chat-model", capabilities=["chat"],
+            engine_reported_footprint_bytes=round(4.7 * 1024**3),
+            engine_reported_footprint_at=at,
+        )
+
+        body = self._get(client).content.decode()
+        start = body.index(f'id="conn-{connection.pk}"')
+        disclosure_html = body[start:body.index("</details>", start)]
+
+        # The brief's literal string carries a raw apostrophe; Django's
+        # default autoescaping renders the label's "engine's" as
+        # "engine&#x27;s". Pinned to what the page actually emits -- the
+        # repo's own convention (test_views_reencode_and_sections.py
+        # ~L190, test_views_ask.py ~L1337, test_users_page.py ~L234).
+        assert (
+            "<dt>Memory footprint</dt><dd>4.7 GB — from the engine&#x27;s residency "
+            "snapshot on March 4, 2026</dd>" in disclosure_html
+        )
