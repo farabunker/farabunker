@@ -16,6 +16,7 @@ from models.queue.models import (
     InferenceJob,
     JobSettings,
 )
+from models.queue.tests._helpers import make_queue_job
 
 
 @pytest.mark.django_db
@@ -101,3 +102,36 @@ class TestJobSettingsSingleton:
         assert second.pk == first.pk
         assert second.max_concurrent_jobs == 9
         assert JobSettings.objects.count() == 1
+
+
+@pytest.mark.django_db
+class TestTheGovernanceColumns:
+    def test_a_fresh_job_is_immediately_claimable_and_never_passed_over(self):
+        job = make_queue_job(kind="test.k")
+
+        assert job.not_before is None
+        assert job.passed_over == 0
+
+    def test_the_settings_row_ships_an_empty_wait_map_and_no_detected_memory(self):
+        row = JobSettings.get_solo()
+
+        assert row.kind_wait_seconds == {}
+        assert row.detected_memory_bytes is None
+        assert row.detected_memory_at is None
+
+    def test_the_wait_map_round_trips(self):
+        row = JobSettings.get_solo()
+        row.kind_wait_seconds = {"agent.turn": 1800}
+        row.save(update_fields=["kind_wait_seconds"])
+        row.refresh_from_db()
+
+        assert row.kind_wait_seconds == {"agent.turn": 1800}
+
+    def test_the_queue_row_carries_both_job_columns(self):
+        from models.queue.backend import queue_snapshot
+
+        make_queue_job(kind="test.k")
+        row = queue_snapshot().waiting[0]
+
+        assert row.not_before is None
+        assert row.passed_over == 0
