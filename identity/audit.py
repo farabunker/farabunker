@@ -90,6 +90,26 @@ def for_target(target_type: str, target_key: str, limit: int = 100) -> list[Audi
     )
 
 
+def by_action(actions, limit: int = 100) -> list[AuditEvent]:
+    """Every row whose action is one of `actions`, newest first.
+
+    HERE, not in the page that renders it, for the reason this module's
+    own docstring gives: a page that had to name `AuditEvent.objects`
+    would need an exception to the AST guard in
+    `foundation/ops/tests/test_column_boundaries.py`, and a guard with
+    an exception is a guard somebody widens. `recent` and `for_target`
+    exist for exactly the same reason; this is the third.
+
+    An empty `actions` answers `[]` without querying -- `action__in=()`
+    is a query that can only return nothing, and the Deleted page's
+    Purged tab is a never-500 surface that should not pay for one.
+    """
+    actions = tuple(actions)
+    if not actions:
+        return []
+    return list(AuditEvent.objects.filter(action__in=actions)[:limit])
+
+
 def failed_logins_since(username: str, since) -> int:
     """How many `login_failed` rows this username has since `since`.
 
