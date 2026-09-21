@@ -23,7 +23,7 @@ from datetime import timedelta
 
 import pytest
 from django.core.management import call_command
-from django.db import connection
+from django.db import OperationalError, connection
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
@@ -946,6 +946,111 @@ class TestHeartbeat:
 
         job.refresh_from_db()
         assert job.state == RUNNING  # the fresh heartbeat saved it from the sweep
+
+    def test_constructing_a_worker_starts_no_thread(self, worker):
+        """`--once` and every test in this suite construct a Worker; none
+        of them may leak a daemon thread."""
+        assert worker._heartbeat_thread is None
+
+    @pytest.mark.django_db(transaction=True)
+    def test_the_thread_refreshes_a_row_while_the_tick_thread_is_blocked(self, worker, monkeypatch):
+        """The Q8 shape: the tick thread is stuck inside a synchronous
+        eviction pass (or a starved process during a long cold load) and
+        writes nothing, and the sweep orphans a healthy job. The dedicated
+        thread is what keeps that row alive."""
+        monkeypatch.setattr(worker_module, "HEARTBEAT_SECONDS", 0.05)
+        job = _job(state=RUNNING)
+        token = uuid.uuid4()
+        InferenceJob.objects.filter(pk=job.pk).update(
+            claim_token=token, heartbeat_at=timezone.now() - timedelta(seconds=60),
+        )
+        with worker._active_lock:
+            worker._active_tokens[job.pk] = token
+
+        worker._start_heartbeat_thread()
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                job.refresh_from_db()
+                if job.heartbeat_at > timezone.now() - timedelta(seconds=5):
+                    break
+                time.sleep(0.05)
+        finally:
+            worker._stopping.set()
+            worker._heartbeat_thread.join(timeout=5)
+
+        job.refresh_from_db()
+        assert job.heartbeat_at > timezone.now() - timedelta(seconds=5)
+
+    def test_the_thread_closes_its_own_connections_each_iteration(self, worker, monkeypatch):
+        """Nothing else ever closes or health-checks this thread's own
+        connection -- Django's are thread-local."""
+        calls = []
+        monkeypatch.setattr(worker_module, "HEARTBEAT_SECONDS", 0.05)
+        monkeypatch.setattr(worker_module, "close_old_connections", lambda: calls.append(1))
+
+        worker._start_heartbeat_thread()
+        time.sleep(0.2)
+        worker._stopping.set()
+        worker._heartbeat_thread.join(timeout=5)
+
+        assert calls
+
+    def test_a_transient_write_error_does_not_kill_the_thread(self, worker, monkeypatch, caplog):
+        monkeypatch.setattr(worker_module, "HEARTBEAT_SECONDS", 0.05)
+        failures = {"count": 0}
+
+        def _boom():
+            failures["count"] += 1
+            if failures["count"] <= 2:
+                raise OperationalError("connection lost")
+
+        monkeypatch.setattr(worker, "_maybe_heartbeat", _boom)
+
+        with caplog.at_level("WARNING", logger="models.queue.worker"):
+            worker._start_heartbeat_thread()
+            time.sleep(0.3)
+            worker._stopping.set()
+            worker._heartbeat_thread.join(timeout=5)
+
+        assert failures["count"] > 2, "the thread stopped at the first error"
+        assert any("heartbeat" in r.getMessage() for r in caplog.records)
+
+    def test_the_thread_says_so_loudly_if_it_ever_exits(self, worker, monkeypatch, caplog):
+        monkeypatch.setattr(worker_module, "HEARTBEAT_SECONDS", 0.05)
+
+        with caplog.at_level("INFO", logger="models.queue.worker"):
+            worker._start_heartbeat_thread()
+            time.sleep(0.15)
+            worker._stopping.set()
+            worker._heartbeat_thread.join(timeout=5)
+
+        assert any("heartbeat thread" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.django_db(transaction=True)
+    def test_the_throttle_is_read_and_written_under_the_lock(self, worker):
+        """BEHAVIOUR, not source order. An earlier draft asserted that
+        `with self._active_lock` appeared before `_last_heartbeat_
+        monotonic` in the method's SOURCE -- which this same step's
+        instruction to name that attribute in the docstring would have
+        flipped, since a docstring IS part of the source.
+
+        Instead: hold the lock from this thread, and prove the writer
+        cannot get past its own throttle read while it is held. If the
+        read-modify-write sat outside the lock, the call would return
+        having written, and the two threads could interleave it."""
+        job = _job(state=RUNNING)
+        token = uuid.uuid4()
+        InferenceJob.objects.filter(pk=job.pk).update(claim_token=token, heartbeat_at=None)
+        with worker._active_lock:
+            worker._active_tokens[job.pk] = token
+            blocked = threading.Thread(target=worker._maybe_heartbeat, daemon=True)
+            blocked.start()
+            blocked.join(timeout=0.5)
+            still_blocked = blocked.is_alive()
+        blocked.join(timeout=5)
+
+        assert still_blocked, "_maybe_heartbeat ran its throttle outside the lock"
 
 
 # --- orphan sweep, via the worker's own wiring -------------------------------

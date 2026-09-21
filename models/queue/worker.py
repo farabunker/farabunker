@@ -241,6 +241,12 @@ class Worker:
         self._futures: dict[tuple[int, uuid.UUID], Future] = {}
         self._last_heartbeat_monotonic: float | None = None
 
+        # The dedicated heartbeat thread (Q8, spec §3.4a). `None` until
+        # `run_forever` starts it -- NEVER started by this constructor: a
+        # single-tick diagnostic run (`manage.py run_jobs --once`) and
+        # every test in this suite build a `Worker` and must spawn nothing.
+        self._heartbeat_thread: threading.Thread | None = None
+
         # Pool size is read ONCE, here, at worker startup -- never re-read
         # per tick. `JobSettings.max_concurrent_jobs` is an operator-
         # editable knob; the ADMISSION side (`claim_and_admit`, called
@@ -275,6 +281,7 @@ class Worker:
         clean `0` a deliberate, signal-initiated stop would."""
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
+        self._start_heartbeat_thread()
         logger.info("worker %s: starting", self.worker_id)
         crashed = False
         try:
@@ -460,7 +467,16 @@ class Worker:
         the ONLY place any thread writes `heartbeat_at` -- job-execution
         threads (`_execute`) never touch it, so there is exactly one
         writer and no risk of a job thread's own slow write racing this
-        one.
+        one. It IS, however, now called from two threads -- the tick
+        thread's own calls in `tick()`, and the dedicated heartbeat thread
+        (`_heartbeat_forever`, Q8, spec §3.4a) -- so the throttle's own
+        read-modify-write (`_last_heartbeat_monotonic`) has to be atomic
+        across both, or two calls landing close together could both read
+        "not throttled yet" and both go on to write. `self._active_lock`
+        already exists for `self._active_tokens`; this method holds it for
+        the throttle check too, so a call from either thread either wins
+        outright (advances `_last_heartbeat_monotonic` and proceeds) or
+        loses and returns immediately -- never both proceeding at once.
 
         Filtered on `claim_token__in=tokens` alone -- NOT also
         `claimed_by=self.worker_id`. `InferenceJob.claim_token`'s
@@ -473,15 +489,14 @@ class Worker:
         drift from the token (it never should, but the token is the one
         fact this class is supposed to trust for a decision like this).
         """
-        now = time.monotonic()
-        if (
-            self._last_heartbeat_monotonic is not None
-            and now - self._last_heartbeat_monotonic < HEARTBEAT_SECONDS
-        ):
-            return
-        self._last_heartbeat_monotonic = now
-
         with self._active_lock:
+            now = time.monotonic()
+            if (
+                self._last_heartbeat_monotonic is not None
+                and now - self._last_heartbeat_monotonic < HEARTBEAT_SECONDS
+            ):
+                return
+            self._last_heartbeat_monotonic = now
             tokens = list(self._active_tokens.values())
         if not tokens:
             return
@@ -489,6 +504,78 @@ class Worker:
         InferenceJob.objects.filter(
             state=RUNNING, claim_token__in=tokens,
         ).update(heartbeat_at=timezone.now())
+
+    def _start_heartbeat_thread(self) -> None:
+        """Start the dedicated heartbeat thread. Called by `run_forever`
+        only -- see `__init__`'s own note on why not the constructor."""
+        if self._heartbeat_thread is not None:
+            return
+        thread = threading.Thread(
+            target=self._heartbeat_forever, name="jobs-heartbeat", daemon=True,
+        )
+        self._heartbeat_thread = thread
+        thread.start()
+
+    def _heartbeat_forever(self) -> None:
+        """The heartbeat's own thread (Q8, spec §3.4a).
+
+        WHY IT EXISTS: the heartbeat used to be written from the tick
+        thread alone, so a tick that BLOCKS -- a synchronous eviction pass,
+        or a whole process starved during a cold load measured in minutes
+        -- stopped the heartbeat too, and the orphan sweep reclaimed a job
+        that was perfectly healthy. The cross-engine sweep this track adds
+        makes that worse before it makes it better: `_residency_snapshot`
+        contains no heartbeat call at all and each `list_installed` can
+        cost a full discovery timeout.
+
+        THE CONNECTION STORY IS THE WHOLE POINT, and getting it wrong
+        re-creates the bug it fixes:
+
+        - `close_old_connections()` at the TOP of every iteration. Django
+          connections are thread-local; nothing else in this process would
+          ever close or health-check the one this thread opens, so without
+          this it would hold a single connection open for ever and sail
+          straight through a database restart.
+        - the write is WRAPPED. A transient database error is logged and
+          retried on the next iteration rather than killing the thread.
+        - an exit is LOUD. A silently dead heartbeat writer mass-orphans
+          every healthy job this worker holds, which is precisely the
+          failure Q8 exists to remove.
+
+        Waits on `self._stopping` rather than sleeping, so a SIGTERM ends
+        this thread promptly instead of after one more full interval, and
+        polls at half the heartbeat cadence so the writer's own throttle
+        (`HEARTBEAT_SECONDS`, still shared with the tick thread's calls)
+        cannot stretch the effective interval to twice the constant.
+
+        The tick's own `_maybe_heartbeat()` calls REMAIN, harmlessly
+        throttled -- that is what keeps `--once` exactly as protected as
+        it is today, with no thread running at all.
+        """
+        logger.info("worker %s: heartbeat thread started", self.worker_id)
+        try:
+            # HALF the heartbeat cadence, with NO FLOOR. A floor (an
+            # earlier draft had `max(1.0, ...)`) makes a test that
+            # monkeypatches `HEARTBEAT_SECONDS` down to fractions of a
+            # second never execute this loop body at all, so the thread's
+            # own behaviour becomes unprovable. Polling at half the cadence
+            # is what stops the writer's own throttle -- still shared with
+            # the tick thread's calls -- from stretching the effective
+            # interval to twice the constant.
+            while not self._stopping.wait(HEARTBEAT_SECONDS / 2):
+                try:
+                    close_old_connections()
+                    self._maybe_heartbeat()
+                except Exception:  # noqa: BLE001 - log and retry next iteration; never die
+                    logger.warning(
+                        "worker %s: heartbeat write failed; retrying next iteration",
+                        self.worker_id, exc_info=True,
+                    )
+        finally:
+            logger.info(
+                "worker %s: heartbeat thread exiting -- every running row this worker "
+                "holds now depends on the tick thread alone", self.worker_id,
+            )
 
     # --- launching claimed jobs -------------------------------------------
 
@@ -1414,6 +1501,20 @@ class Worker:
         interpreter teardown.
         """
         requeued = self._drain_inflight(SHUTDOWN_GRACE_SECONDS)
+
+        # `self._stopping` is already set on the ordinary, signal-initiated
+        # path (`_handle_signal`) -- `.set()` here is what covers the
+        # `crashed=True` path, where `tick()` raised without a signal ever
+        # arriving. Only after it is set does the heartbeat thread's own
+        # `_stopping.wait()` loop (`_heartbeat_forever`) return, so the
+        # join below is what actually observes it exit. A short timeout,
+        # not `None`: this is a daemon thread, so a join that times out
+        # here can never hold the process open -- the thread simply gets
+        # abandoned along with everything else `os._exit` below abandons.
+        self._stopping.set()
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=2.0)
+
         # Lock acquisition is vestigial here too, kept as cheap defense in depth.
         with self._active_lock:
             still_running = [
