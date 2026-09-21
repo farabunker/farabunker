@@ -714,14 +714,21 @@ live prompt's own attachments block (`agents/runtime/prompt.py`) — one
 resolver, so the two surfaces can never disagree about what is
 attached; each returned dict also carries `"turn_id"` and `"may_detach"`
 (round 13) alongside the round-11/12 keys. Deleting a conversation
-(`agents.visibility.delete_conversation`) removes its
-`DocumentAttachment` rows through the same cleanup slot the provider
+(`agents.visibility.delete_conversation`) removes nothing by itself —
+it writes a `DeletionTicket` and the item stays exactly as it was until
+the date the Deleted page printed (deletion semantics). The teardown
+happens at PURGE time instead, from `agents.retention.
+purge_conversation`, through the same cleanup slot the provider
 registry uses for reads, inside its own savepoint (round 11 fix-2
 Important N-1); for a chat-scoped document specifically, that cascade
 deletes the DOCUMENT itself — chunks, managed-store files, and the row —
 since nothing else can ever reference it; for a universal or contained
 document merely attached to that conversation, only the attachment row
-dies and the document lives on.
+dies and the document lives on. A failure in that cleanup slot now
+fails the whole purge rather than being swallowed (Task 9 fix round 1),
+so the `DocumentAttachment` rows — and, for a chat-scoped document, the
+document itself — never silently outlive a purge that reported success;
+the ticket survives instead, and the next sweep retries.
 
 **The uploader administers their own chat-scoped document (round 12
 whole-branch review A-2/B-2).** `tools.rag.access.

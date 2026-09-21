@@ -102,15 +102,24 @@ def test_no_cleanup_registered_answers_zero(isolated_attachment_registry):
 
 
 @pytest.mark.django_db
-def test_a_raising_cleanup_degrades_to_zero_not_a_500(isolated_attachment_registry, caplog):
-    """A conversation delete the actor already confirmed must not be
-    blocked by a broken `tools.rag` cleanup provider -- the identical
-    posture the read side takes, pinned again for the delete side.
-    `django_db`: the savepoint this call now opens (Important N-1)
-    needs a real connection."""
+def test_a_raising_cleanup_propagates_not_swallowed(isolated_attachment_registry, caplog):
+    """RE-PINNED (Task 9 fix round 1, FIX C1): this used to degrade to
+    zero, on the theory that "a conversation delete the actor already
+    confirmed must not be blocked by a broken `tools.rag` cleanup
+    provider". That theory stopped holding the moment Task 8 made a
+    delete write only a ticket -- `delete_attachments_for`'s ONE
+    production caller today is `agents.retention.purge_conversation`,
+    running at PURGE time inside `identity.cascades.run_retention`'s own
+    never-swallows runner. A swallowed failure here would report a
+    successful purge while the rows this call was supposed to remove
+    survive with no ticket left to find them by, so this now logs (still
+    caught here, for the operator reading this box's own logs) and
+    RE-RAISES. `django_db`: the savepoint this call still opens
+    (Important N-1) needs a real connection."""
     register_attachment_cleanup("agents.tests.test_attachment_seam._raising_cleanup")
-    assert delete_attachments_for(uuid.uuid4()) == 0
-    assert "could not be resolved" in caplog.text
+    with pytest.raises(RuntimeError, match="the store is down"):
+        delete_attachments_for(uuid.uuid4())
+    assert "cleanup provider" in caplog.text
 
 
 # ROUND-13 REVIEW FIX, I-4: the three "NEVER RAISES PAST THIS BOUNDARY"

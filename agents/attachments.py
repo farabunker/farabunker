@@ -156,38 +156,50 @@ def delete_attachments_for(conversation_id) -> int:
     never a real FK -- `tools/rag` may not import `agents.models`) does
     not silently outlive the conversation it claimed to be attached to.
 
-    NEVER RAISES, the identical posture `attached_documents` above
-    takes and for the identical reason: a broken `tools.rag` cleanup
-    provider must not block a conversation delete the actor already
-    confirmed through `may_manage_conversation`. The `Document` rows
-    themselves are never this function's concern -- only the CLAIM a
-    conversation made on them (round 12: EXCEPT for a conversation-
-    scoped document, whose sole attachment row is itself the whole of
-    its existence -- the registered provider deletes the Document too
-    in that case; see `tools.rag.access.delete_attachments`'s own
-    docstring).
+    RE-RAISES, ON PURPOSE (Task 9 fix round 1, FIX C1). The reason this
+    function used to swallow -- "a broken `tools.rag` cleanup provider
+    must not block a conversation delete the actor already confirmed
+    through `may_manage_conversation`" -- stopped being true the moment
+    Task 8 made a delete write only a ticket: THE ONE CALLER above is
+    the whole of this function's production traffic today, and it runs
+    at PURGE time, inside `identity.cascades.run_retention`'s own
+    never-swallows runner. A swallowed failure here would let
+    `purge_conversation` report success while the `DocumentAttachment`
+    rows it was supposed to remove -- and, for a chat-scoped document,
+    the `Document` row and its stored files with them -- survive with
+    no ticket left to find them by. So this call now LOGS the failure
+    (`logger.exception`, below) and lets it propagate: the runner takes
+    the purge down, the ticket survives, and the next sweep retries. The
+    `Document` rows themselves are never this function's concern -- only
+    the CLAIM a conversation made on them (round 12: EXCEPT for a
+    conversation-scoped document, whose sole attachment row is itself
+    the whole of its existence -- the registered provider deletes the
+    Document too in that case; see `tools.rag.access.delete_
+    attachments`'s own docstring).
 
-    THE SAVEPOINT (round 11 fix-2 verify, Important N-1): this call
-    ALWAYS runs inside `agents.retention.purge_conversation`'s own
-    outer transaction (Task 9: `identity.cascades.run_retention` opens
-    one savepoint per registered handler, and this call sits inside
-    that one). A Python exception from the
-    provider is caught below regardless -- but a DATABASE-level error
-    (the reviewer reproduced `InternalError: current transaction is
-    aborted`) does something the `except` clause alone cannot undo:
-    Postgres poisons the WHOLE connection for the rest of the
-    surrounding transaction, so `conversation.delete()` itself -- run
-    AFTER this call returns, still inside the same outer atomic block
-    -- would fail too, even though this function's own contract is
-    "never raises". `transaction.atomic()`, NESTED (as it is here,
-    inside the caller's own outer one) becomes a SAVEPOINT: on an
-    exception it rolls back to just before this call and re-raises,
-    which is what lets the `except` below catch a now-ordinary Python
-    exception with the OUTER connection already restored to a healthy
-    state. Round 12's own document-cascade delete (`tools.rag.access.
-    delete_attachments`, called through `provider` below) inherits this
-    same discipline for the ROWS it touches -- a failure partway
-    through deleting several chat-scoped documents rolls their
+    THE SAVEPOINT STAYS (round 11 fix-2 verify, Important N-1) -- C1
+    changes what happens to the exception, never whether this call needs
+    one. This call ALWAYS runs inside `agents.retention.
+    purge_conversation`'s own outer transaction (Task 9:
+    `identity.cascades.run_retention` opens one savepoint per registered
+    handler, and this call sits inside that one, itself nested one level
+    deeper). A DATABASE-level error (the reviewer reproduced
+    `InternalError: current transaction is aborted`) does something a
+    bare `except`/`raise` could not undo on its own: Postgres poisons the
+    WHOLE connection for the rest of the surrounding transaction, which
+    would take `run_retention`'s own savepoint -- and the audit write
+    `identity.retention.purge_ticket` makes after it -- down for a
+    reason unrelated to the real one. `transaction.atomic()`, NESTED (as
+    it is here, inside the caller's own outer one) becomes a SAVEPOINT:
+    on an exception it rolls back to just before this call and
+    re-raises, which is what lets the now-ordinary Python exception
+    reach `run_retention`'s own savepoint with the connection already
+    restored to a healthy state -- so THAT savepoint's rollback, and the
+    ticket's survival, happen cleanly rather than on a poisoned
+    connection. Round 12's own document-cascade delete (`tools.rag.
+    access.delete_attachments`, called through `provider` below)
+    inherits this same discipline for the ROWS it touches -- a failure
+    partway through deleting several chat-scoped documents rolls their
     `Document`/`DocumentAttachment` ROWS back together, never a partial
     row-level cleanup. NOT TRUE FOR THE FILES (round 12 review, minor
     2): `tools.rag.services.delete_document`'s own docstring records
@@ -202,9 +214,13 @@ def delete_attachments_for(conversation_id) -> int:
     try:
         with transaction.atomic():
             return import_string(provider)(conversation_id)
-    except Exception:  # noqa: BLE001 -- one broken provider, not a broken delete
-        logger.exception("attachments: cleanup provider %r could not be resolved", provider)
-        return 0
+    except Exception:
+        # NOT SWALLOWED (FIX C1): logged for an operator reading this
+        # box's own logs, then re-raised so `run_retention` -- and, above
+        # it, `identity.retention.purge_ticket` -- see a real failure
+        # rather than a quiet zero.
+        logger.exception("attachments: cleanup provider %r failed", provider)
+        raise
 
 
 def stage_turn_attachments(principal, *, conversation_id, turn_id, files, workstream_id=None,

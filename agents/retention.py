@@ -58,20 +58,28 @@ def _collect(conversation_id):
     An unparseable artifact reference is DROPPED AND LOGGED, never
     raised -- `agents.shares.shared_keys`' own posture for untrusted
     stored strings: a purge must not be stopped by one bad row.
+
+    THE LOG LINE NAMES NO CONTENT (FIX M6): a deletion path must not
+    write the very bytes it is destroying into a log a purge is
+    supposed to make disappear, so this logs the TURN's own id and the
+    conversation id -- enough for an operator to find the row by hand --
+    and the fact that its reference did not parse, never the raw stored
+    string itself.
     """
     refs: list[str] = []
     generation_ids: list[str] = []
     invocation_ids: list[int] = []
     rows = Turn.objects.filter(conversation_id=conversation_id).values_list(
-        "artifacts", "data", "invocation_id")
-    for artifacts, data, invocation_id in rows:
+        "id", "artifacts", "data", "invocation_id")
+    for turn_id, artifacts, data, invocation_id in rows:
         for reference in artifacts or ():
             try:
                 kind, _pk = parse_artifact(reference)
             except ValueError:
                 logger.warning(
-                    "agents.retention: conversation %s carries an unusable "
-                    "artifact reference %r; ignored.", conversation_id, reference)
+                    "agents.retention: turn %s (conversation %s) carries an "
+                    "artifact reference that failed to parse; ignored.",
+                    turn_id, conversation_id)
                 continue
             if kind in _IMAGE_KINDS:
                 refs.append(reference)
@@ -111,6 +119,16 @@ def scrub_tool_records(invocation_ids) -> int:
 
     Idempotent by construction: a second run matches the same rows and
     writes the same three empty values.
+
+    A KNOWN, ACCEPTED RESIDUE (FIX M7/I4): this only reaches invocations
+    a SURVIVING `Turn` points at, because `_collect` above finds them by
+    walking the conversation's own turns. A tool call whose job died
+    between its `ToolInvocation` row being written (`agents/runtime/
+    invoke.py`) and its tool `Turn` being written (`agents/runtime/
+    loop.py`) has no turn and therefore no conversation link at all --
+    its `args`/`text` are not reachable by ANY conversation's purge, on
+    this or any other kind. That is a known, accepted gap with no
+    reaper today, not a bug this function is expected to close.
     """
     ids = list(invocation_ids)
     if not ids:
@@ -121,7 +139,7 @@ def scrub_tool_records(invocation_ids) -> int:
 
 def purge_conversation(key: str) -> int:
     """Destroy one conversation's agents-side content. Returns how many
-    rows and images it removed.
+    rows were removed and records scrubbed.
 
     IDEMPOTENT: every step is a filtered delete or update, so a re-run
     after a partial failure removes zero rows and returns zero rather
@@ -129,21 +147,48 @@ def purge_conversation(key: str) -> int:
     is not a UUID at all -- is not an error: the item may have been hard
     -deleted by an older path while its ticket stood.
 
-    ORDER, and every step's reason:
+    ORDER, and every step's reason -- BYTES LAST (FIX I2, Task 9 fix
+    round 1: the registered artifact-purge slot used to run SECOND,
+    right after collect, which meant a later step raising -- the
+    attachment cleanup, say -- rolled the ROW deletes back while the
+    files that slot had already removed from disk stayed gone; a
+    filesystem delete has no rollback, exactly the reason `agents.
+    attachments.delete_attachments_for`'s own docstring gives for its
+    document-file caveat):
       1. collect (see `_collect`) -- nothing is deleted yet;
-      2. hand the references and ids to the registered artifact purge --
-         called whenever a handler IS registered, even with two empty
-         lists, so the registered handler decides for itself whether
-         there is anything to do rather than this column silently
-         deciding on its behalf. It maps them to jobs, dedupes by job,
-         and deletes each job with its files and its queue row;
-      3. the row deletes: this conversation's `Share` rows, then
+      2. the row deletes: this conversation's `Share` rows, then
          `agents.attachments.delete_attachments_for` (which reaches
          `tools.rag.access.delete_attachments` through the registered
          cleanup seam -- chat-scoped documents die there, universal and
-         stream-contained ones lose only their claim), then
+         stream-contained ones lose only their claim; a failure here now
+         PROPAGATES -- FIX C1 -- rather than degrading to zero), then
          `conversation.delete()`, with `Turn` going by CASCADE;
-      4. the tool-record scrub, on the ids from step 1.
+      3. the tool-record scrub, on the invocation ids from step 1;
+      4. LAST: hand the references and generation ids collected in step
+         1 to the registered artifact purge -- called whenever a
+         handler IS registered, even with two empty lists, so the
+         registered handler decides for itself whether there is
+         anything to do rather than this column silently deciding on
+         its behalf. It maps them to jobs, dedupes by job, and deletes
+         each job with its files and its queue row. Everything this
+         step needs was read in step 1, before any row existed to go
+         stale, so moving it last costs nothing -- and means every ROW
+         this function owns is already gone before a single FILE on
+         disk is touched: if step 2 or 3 raises, this step never runs
+         at all (see `TestBytesGoLast` in `agents/tests/
+         test_retention.py`), the whole purge rolls back (FIX C1's own
+         propagation makes that true for step 2), and no file was ever
+         deleted for a conversation whose ticket just survived to be
+         retried. The reverse order could delete a file whose row then
+         survived a later failure, with nothing left pointing at the
+         gap.
+
+    A DELIBERATE, HONEST LEFTOVER (FIX M7/I4): `agents.models.
+    WorkstreamTaint.first_conversation` keeps this conversation's id BY
+    VALUE after the purge -- content-free (an entitlement id and a
+    timestamp is all a taint row ever carries), inert, and not cleaned
+    up here. Nothing reads it as a live pointer back to a conversation
+    that may no longer exist; it is left deliberately, not missed.
     """
     try:
         conversation_id = uuid.UUID(str(key))
@@ -153,10 +198,6 @@ def purge_conversation(key: str) -> int:
     refs, generation_ids, invocation_ids = _collect(conversation_id)
 
     removed = 0
-    purge = artifact_purge()
-    if purge is not None:
-        from django.utils.module_loading import import_string
-        removed += import_string(purge)(refs, generation_ids)
 
     removed += Share.objects.filter(
         target_type=Share.Target.CONVERSATION,
@@ -170,4 +211,10 @@ def purge_conversation(key: str) -> int:
     removed += deleted
 
     removed += scrub_tool_records(invocation_ids)
+
+    purge = artifact_purge()
+    if purge is not None:
+        from django.utils.module_loading import import_string
+        removed += import_string(purge)(refs, generation_ids)
+
     return removed

@@ -819,25 +819,39 @@ engine and FAILED, minting no output at all, so the artifact channel
 alone would miss it entirely; and every non-null `invocation_id`,
 collected here because `Turn.invocation` is `SET_NULL` — once the turns
 are gone there is no path left from the conversation to its tool
-records at all. The refs and generation ids are then handed to the
-ONE registered artifact-purge slot (`agents.contracts.artifacts.
-register_artifact_purge` / `artifact_purge`, resolved by dotted path,
-never imported — `agents/` may not import `tools/` at all) whenever a
-handler IS registered, even with two empty lists, so that handler
-decides for itself whether there is anything to do. With nothing
-registered (vision uninstalled) the slot is a no-op and the purge
-still completes.
+records at all. An artifact reference that fails to parse is dropped
+and logged by TURN ID AND CONVERSATION ID only — never the raw stored
+string, because a deletion path must not write the content it is
+destroying into a log (Task 9 fix round 1, FIX M6).
 
 The row deletes follow: the conversation's `Share` rows, then
 `agents.attachments.delete_attachments_for` (which reaches `tools.rag.
 access.delete_attachments` through the registered cleanup seam — a
 chat-scoped document is deleted outright there, a universal or
-stream-contained one loses only its claim), then `conversation.
-delete()`, with `Turn` going by CASCADE. Last, `scrub_tool_records`
-blanks `args`/`text`/`error` on every `ToolInvocation` id collected up
-front — content gone, the shell (principal, tool key, outcome, timings)
-kept, because that shell IS the machine audit trail. **Scrubbed inline
-with the same purge, always, with no setting and no second date.**
+stream-contained one loses only its claim; a failure here now
+PROPAGATES rather than degrading to zero, Task 9 fix round 1's FIX C1
+— that provider's only production caller today is this purge, so a
+swallowed failure would report success while its rows survive with no
+ticket left to find them by), then `conversation.delete()`, with `Turn`
+going by CASCADE. Then `scrub_tool_records` blanks `args`/`text`/
+`error` on every `ToolInvocation` id collected up front — content gone,
+the shell (principal, tool key, outcome, timings) kept, because that
+shell IS the machine audit trail. **Scrubbed inline with the same
+purge, always, with no setting and no second date.**
+
+LAST — bytes last, Task 9 fix round 1's FIX I2 — the refs and
+generation ids from the collect step are handed to the ONE registered
+artifact-purge slot (`agents.contracts.artifacts.register_artifact_
+purge` / `artifact_purge`, resolved by dotted path, never imported —
+`agents/` may not import `tools/` at all) whenever a handler IS
+registered, even with two empty lists, so that handler decides for
+itself whether there is anything to do. With nothing registered
+(vision uninstalled) the slot is a no-op and the purge still completes.
+Running this step last, after every row delete and the scrub, means a
+failure anywhere upstream of it (the attachment cleanup, say) never
+reaches it at all — the files it would have deleted from disk, which
+no database rollback can restore, are only ever touched once every row
+this function owns is already gone.
 
 Every step is IDEMPOTENT: a re-run on a conversation that is already
 gone, or on one only partly torn down by an earlier failed purge,
@@ -847,3 +861,15 @@ raising — the contract every `RetentionHandler` owes
 `key` that does not even parse as a UUID answers `0` rather than
 raising, the same "one bad row, not a broken purge" posture the collect
 step's own unparseable-artifact-reference handling takes.
+
+Two things this purge deliberately leaves behind. `agents.models.
+WorkstreamTaint.first_conversation` keeps a purged conversation's id BY
+VALUE after the purge — content-free (an entitlement id and a
+timestamp), inert, and not cleaned up here. And `scrub_tool_records`
+only reaches invocations a SURVIVING `Turn` points at, because the
+collect step finds them by walking the conversation's own turns — a
+tool call whose job died between its `ToolInvocation` row being written
+(`agents/runtime/invoke.py`) and its tool `Turn` being written
+(`agents/runtime/loop.py`) has no turn and no conversation link at all,
+so its `args`/`text` are not reachable by any conversation's purge — a
+known, accepted residue with no reaper today.

@@ -118,7 +118,11 @@ class TestTheToolRecordScrub:
         """`Turn.invocation` is SET_NULL, so after the delete there is no
         path from the conversation to its invocations at all. Collecting
         first is what makes the scrub reachable, and this is the test
-        that would fail if somebody reordered it."""
+        that would fail if somebody reordered it. (This pins the
+        INVOCATION-ID half of collect-before-delete; the ARTIFACT-PURGE
+        half -- FIX I2, Task 9 fix round 1 -- moved to run LAST, after
+        every row delete and the scrub, and is pinned separately by
+        `TestBytesGoLast` below.)"""
         conversation = make_conversation()
         invocation = ToolInvocation.objects.create(
             principal_kind="user", principal_key="1", tool_key="t",
@@ -277,23 +281,119 @@ class TestTheCleanupSavepoint:
     DATABASE-level error left the WHOLE connection "current transaction
     is aborted" for the rest of that block. `delete_attachments_for`'s
     own nested `transaction.atomic()` (a SAVEPOINT) is what still
-    protects a caller from that -- this test now drives a REAL database
-    error through `purge_conversation` itself and pins that the
-    conversation still goes, exactly as it pinned the HTTP delete path
-    before Task 8 made delete a soft ticket."""
+    protects a caller from that.
 
-    def test_a_database_error_in_cleanup_does_not_block_the_purge(
+    RE-PINNED (Task 9 fix round 1, FIX C1): a database error inside the
+    cleanup provider used to be pinned as something the purge SURVIVES
+    (the conversation still went). That was right when a broken cleanup
+    provider could only run at a conversation-delete click a person had
+    already confirmed; it stopped being right the moment this module
+    became the retention runner's own registered handler. A swallowed
+    failure at PURGE time means the rows the cleanup provider was
+    supposed to remove -- and the conversation itself, in the old
+    behaviour -- would go, while the DocumentAttachment rows the broken
+    provider left behind have no ticket left pointing at them. So this
+    now pins the OPPOSITE: the error propagates, and everything survives
+    for the next sweep to retry."""
+
+    def test_a_database_error_in_cleanup_propagates_out_of_the_purge(
         self, isolated_attachment_registry,
     ):
+        """Driven directly against `purge_conversation`: the savepoint
+        still isolates the DATABASE-level error (`delete_attachments_
+        for` re-raises an ordinary Python exception, not a poisoned
+        connection), but that exception is no longer caught here --
+        it reaches this caller."""
         from agents.contracts.attachments import register_attachment_cleanup
 
         conversation = make_conversation()
         register_attachment_cleanup(
             "agents.tests.test_retention._raising_db_cleanup")
 
-        purge_conversation(str(conversation.id))
+        with pytest.raises(Exception):
+            purge_conversation(str(conversation.id))
 
-        assert not Conversation.objects.filter(pk=conversation.id).exists()
+    def test_driven_through_purge_ticket_everything_survives_and_the_connection_stays_usable(
+        self, isolated_attachment_registry,
+    ):
+        """End to end, through `identity.retention.purge_ticket`'s own
+        outer transaction: the Conversation row, its turns, its
+        attachment rows AND the DeletionTicket itself are all still
+        there afterwards, no `content.purged` event was written, and
+        the connection is left usable -- proven with one real ORM write
+        made INSIDE the same outer `transaction.atomic()` the failure
+        happened in, the same technique `identity/tests/
+        test_retention_runner.py::test_the_savepoint_leaves_the_
+        connection_usable_after_a_db_error` uses for the runner's own
+        savepoint."""
+        from django.db import transaction as db_transaction
+
+        from agents.contracts.attachments import register_attachment_cleanup
+        from agents.tests._helpers import make_document
+        from identity.audit import by_action
+        from identity.contracts.actions import CONTENT_PURGED
+        from identity.contracts.principals import SERVICE_PRINCIPAL
+        from identity.models import DeletionTicket
+        from identity.retention import delete_content, purge_ticket
+        from tools.rag.models import DocumentAttachment
+
+        register_attachment_cleanup(
+            "agents.tests.test_retention._raising_db_cleanup")
+
+        conversation = make_conversation()
+        make_turn(conversation=conversation)
+        doc = make_document(title="Notes.pdf")
+        DocumentAttachment.objects.create(document=doc, conversation_id=conversation.id)
+
+        ticket = delete_content(
+            SERVICE_PRINCIPAL, kind="conversation", key=str(conversation.pk),
+            owner=conversation, label="")
+
+        with db_transaction.atomic():
+            with pytest.raises(Exception):
+                purge_ticket(SERVICE_PRINCIPAL, ticket)
+            # THE CONNECTION IS USABLE AGAIN: a real write, inside the
+            # SAME outer atomic the failure happened in, is what proves
+            # the savepoint did its job rather than merely asserting it.
+            assert DeletionTicket.objects.filter(pk=ticket.pk).exists()
+
+        assert Conversation.objects.filter(pk=conversation.pk).exists()
+        assert Turn.objects.filter(conversation_id=conversation.pk).exists()
+        assert DocumentAttachment.objects.filter(
+            conversation_id=conversation.id).exists()
+        assert DeletionTicket.objects.filter(pk=ticket.pk).exists()
+        purged = by_action([CONTENT_PURGED])
+        assert not any(
+            event.target_type == "conversation"
+            and event.target_key == str(conversation.pk)
+            for event in purged
+        )
+
+
+class TestBytesGoLast:
+    """FIX I2 (Task 9 fix round 1): the registered artifact-purge slot
+    deletes generated images' ROWS AND THEIR FILES ON DISK. It used to
+    run right after collect, before any row delete -- so a LATER step
+    raising (the attachment cleanup, say) rolled the row deletes back
+    while the files that slot had already removed from disk stayed
+    gone, unrecoverable. Moved to LAST: every row this function owns
+    goes first, and the artifact purge -- the one step with no
+    rollback -- runs only once nothing upstream of it can still fail."""
+
+    def test_when_the_attachment_cleanup_raises_the_artifact_purge_is_not_called(
+        self, isolated_attachment_registry,
+    ):
+        from agents.contracts.attachments import register_attachment_cleanup
+
+        conversation = make_conversation()
+        make_turn(conversation=conversation, role="tool", artifacts=["output:1"])
+        register_attachment_cleanup(
+            "agents.tests.test_retention._raising_db_cleanup")
+
+        with pytest.raises(Exception):
+            purge_conversation(str(conversation.id))
+
+        assert SEEN == []
 
 
 class TestConversationPurgeCascadesChatScopedDocuments:
