@@ -66,8 +66,9 @@ automation is live, note in your PR that you have read and agree to [CLA.md](CLA
 1. **Discuss first for anything non-trivial.** Open an issue describing the change so we can
    agree on the approach before you invest time — especially while the architecture is still
    settling.
-2. **Fork and branch.** Create a topic branch off `main` (e.g. `docs/clarify-airlock`,
-   `feat/inference-gateway`).
+2. **Fork and branch.** Create a topic branch off `dev` (e.g. `docs/clarify-airlock`,
+   `feat/inference-gateway`) — `dev` is the long-lived integration branch; pull requests land
+   there, never directly against `main`.
 3. **Make focused changes.** One logical change per pull request, and commit subjects in this
    repository's `type(scope): subject` form — see
    [AGENTS.md](AGENTS.md#code-style-and-commits).

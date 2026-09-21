@@ -58,8 +58,8 @@ docker compose up -d --build                           # run it locally, or afte
 ## The working loop
 
 - **One worktree per task**, in `.claude/worktrees/<branch>`, never the repository root
-  checkout. **The root checkout is production** (DEV.md rung 3). It carries no branch work
-  and only fast-forwards to a merged `main`. Before any deploy, check `git status --short`
+  checkout. **The root checkout is production** (DEV.md rung 3) and only fast-forwards to
+  `origin/dev`, the branch that gets deployed. Before any deploy, check `git status --short`
   there, and triage anything staged or modified rather than overwrite it.
 - **A preview stack per branch**, with its own database and ports
   ([docs/DEV.md](docs/DEV.md#testing-a-branch-before-merge)). Check for port collisions first,
@@ -79,16 +79,17 @@ docker compose up -d --build                           # run it locally, or afte
   "passing", "complete" are claims about the deployed box, not a green terminal. Mid-ladder
   reports use progress phrasing; an edit needing a second step is "edited, not yet live"; a
   status answer names its subject and that state — planned, built, tested, merged, deployed.
-- **Deploying.** Merge current `main` INTO the feature branch, in that branch's own worktree,
+- **Deploying.** Merge current `dev` INTO the feature branch, in that branch's own worktree,
   and resolve there first. The flow is one-directional: pull request → review → the owner's
-  merge word → `main` → root checkout moved to that commit → restart (or recreate, if
+  merge word → `dev` → root checkout fast-forwarded to `origin/dev` → restart (or recreate, if
   environment variables changed) → verify in a browser → announce "landed". Announce the
   deploy window first and confirm it went out — one window at a time. Permission for a merge,
   a deploy, or anything destructive arrives in the acting session's own conversation; a
   relayed "the owner said" is not authorization.
 - **Never touch, without that authorization:** the root checkout — see above — outside an
-  announced window (never push to `main` directly, never merge a branch into it); another
-  branch's bind-mounted preview containers; another session's worktree or ledger.
+  announced window (never push to `dev` directly or merge into it outside the PR flow; never
+  push to `main` at all — it takes only batched release PRs from `dev`); another branch's
+  bind-mounted preview containers; another session's worktree or ledger.
 
 ## Subagent-driven development
 
@@ -114,7 +115,7 @@ Before you open a pull request:
 - [ ] Non-negotiable 1 holds: tests, and every doc the change made stale, are in this commit.
 - [ ] The whole feature — the real workflows, not just the diff — walked end to end in a
       browser on this branch's stack (the plan's `## Smoke Checklist`, by hand).
-- [ ] Current `main` is merged into the branch and resolved there.
+- [ ] Current `dev` is merged into the branch and resolved there.
 
 An issue you are unsure about is open; never offer or even mention merge while one is open.
 
@@ -130,7 +131,7 @@ covering everything added since its last one. The merge decision is the owner's.
   explicit slice grant from that zone's owner, scoped to named files with named invariants; a
   file someone is mid-change on is fenced, so ask before touching it.
 - **Landing order is negotiated before branching** when two branches will touch one file. The
-  second to land merges `main` into its branch, resolves there, and re-runs its gate.
+  second to land merges `dev` into its branch, resolves there, and re-runs its gate.
 - **Announce before you touch a shared surface** — the live containers, the shared page shell,
   a settings registration, anything another session flagged as theirs — and announce additive
   out-of-zone touches before they merge.

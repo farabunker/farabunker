@@ -76,7 +76,7 @@ presumes none** — that is deliberate ([ADR 0010](docs/adr/0010-model-managemen
 you choose what to install and which role it backs.
 
 ```bash
-git clone <this repository> && cd farabunker
+git clone https://github.com/farabunker/farabunker.git && cd farabunker
 cp .env.example .env      # set POSTGRES_PASSWORD and SECRET_KEY before exposing the box to anything
 # .env.example ships POSTGRES_PASSWORD commented out -- uncomment it in your .env and choose
 # your own value; docker compose refuses to start without it.

@@ -242,7 +242,7 @@ The next phase on deck is a conversational agent — not simply a chat window. A
 surface that also has TOOLS for the entire system: it can interact with other features,
 modify settings, and use RAG as one tool among several, not the whole interaction. This
 phase is partly shipped: `chat.converse` and tool use landed in P2/P3; Identity & Auth's
-first half (IA-1) is next, in progress and not yet merged to main (see below), and what
+first half (IA-1) is next, in progress and not yet merged to dev (see below), and what
 remains after it is the per-role model split, grounded-by-default conversation, IA-2
 (grants, groups, labels, sharing), the MCP edge, and Tenancy. See
 [ADR 0010](adr/0010-model-management-framework.md)'s 2026-08-22 amendment for the
