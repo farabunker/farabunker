@@ -23,7 +23,7 @@ from datetime import timedelta
 
 import pytest
 from django.core.management import call_command
-from django.db import OperationalError, connection
+from django.db import OperationalError, ProgrammingError, connection
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
@@ -2581,3 +2581,41 @@ class TestSleepDetection:
         worker.tick()
 
         assert seen["sweep_orphans"] is True
+
+
+@pytest.mark.django_db
+class TestBootTolerance:
+    """On a cold compose boot the worker can win the race against
+    `migrate` at either of its two `JobSettings` reads."""
+
+    @pytest.mark.parametrize("error", [ProgrammingError, OperationalError])
+    def test_the_constructor_waits_then_falls_back_to_the_documented_default(
+            self, monkeypatch, caplog, error):
+        monkeypatch.setattr(worker_module, "BOOT_SCHEMA_WAIT_ATTEMPTS", 2)
+        monkeypatch.setattr(worker_module, "BOOT_SCHEMA_WAIT_SECONDS", 0)
+        monkeypatch.setattr(
+            JobSettings, "get_solo",
+            classmethod(lambda cls: (_ for _ in ()).throw(error("no such table"))),
+        )
+
+        with caplog.at_level("INFO", logger="models.queue.worker"):
+            built = Worker(worker_id="boot")
+
+        assert built._executor._max_workers == JobSettings.MAX_CONCURRENT_JOBS_DEFAULT
+        assert any("waiting for the database schema" in r.getMessage() for r in caplog.records)
+        assert not any(r.exc_info for r in caplog.records), "a traceback was logged"
+        built._executor.shutdown(wait=False)
+
+    @pytest.mark.django_db(transaction=True)
+    @pytest.mark.parametrize("error", [ProgrammingError, OperationalError])
+    def test_the_first_ticks_return_quietly_rather_than_raising(
+            self, worker, monkeypatch, caplog, error):
+        monkeypatch.setattr(
+            JobSettings, "get_solo",
+            classmethod(lambda cls: (_ for _ in ()).throw(error("no such table"))),
+        )
+
+        with caplog.at_level("INFO", logger="models.queue.worker"):
+            worker.tick()  # must not raise
+
+        assert not any(r.levelname == "ERROR" for r in caplog.records)

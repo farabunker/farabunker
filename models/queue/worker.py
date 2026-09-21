@@ -54,6 +54,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from django.db import close_old_connections
 from django.db import connection as db_connection
 from django.db import transaction
+from django.db import OperationalError, ProgrammingError
 from django.utils import timezone
 
 from models.registry.bindings import record_measured_footprint
@@ -174,6 +175,14 @@ SLEEP_DETECT_SECONDS = 60
 # `STALE_AFTER_SECONDS`: long enough for a heartbeat to land, short enough
 # that a genuinely dead job is still reclaimed promptly.
 SLEEP_GRACE_SECONDS = 30
+
+# How many times, and how long apart, the CONSTRUCTOR waits for a racing
+# `migrate` before giving up and sizing the pool from the documented
+# default. Deliberately small: a worker that cannot read its settings row
+# after this long is better off running at the default cap than blocking a
+# compose boot, and the tick loop tolerates the same failure independently.
+BOOT_SCHEMA_WAIT_ATTEMPTS = 10
+BOOT_SCHEMA_WAIT_SECONDS = 3.0
 
 
 class Worker:
@@ -296,8 +305,34 @@ class Worker:
         # WORKER POOL itself (not just admission) to reflect the new value
         # needs to restart the worker process -- a real, narrow limitation,
         # documented here rather than silently discovered later.
-        max_workers = max(JobSettings.get_solo().max_concurrent_jobs, 1)
+        row = self._settings_row_or_wait()
+        max_workers = max(
+            (row.max_concurrent_jobs if row is not None
+             else JobSettings.MAX_CONCURRENT_JOBS_DEFAULT),
+            1,
+        )
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="jobs-worker")
+
+    def _settings_row_or_wait(self) -> JobSettings | None:
+        """The settings row, waiting briefly for a racing `migrate`, or
+        `None` once the wait expires.
+
+        ONE INFO LINE, NEVER A TRACEBACK. On a cold compose boot the
+        worker and `migrate` start together and this read can genuinely
+        lose the race; a traceback there is noise an operator learns to
+        ignore, on the one boot where a real error would matter.
+        """
+        for attempt in range(BOOT_SCHEMA_WAIT_ATTEMPTS):
+            try:
+                return JobSettings.get_solo()
+            except (ProgrammingError, OperationalError):
+                if attempt == 0:
+                    logger.info(
+                        "worker: waiting for the database schema (the queue's tables are "
+                        "not there yet -- `migrate` is probably still running)",
+                    )
+                self._stopping.wait(BOOT_SCHEMA_WAIT_SECONDS)
+        return None
 
     # --- main loop -----------------------------------------------------
 
@@ -414,7 +449,18 @@ class Worker:
 
         sweep = self._sweep_skip_until is None or mono >= self._sweep_skip_until
 
-        settings_row = JobSettings.get_solo()
+        try:
+            settings_row = JobSettings.get_solo()
+        except (ProgrammingError, OperationalError):
+            # A tick that raises is treated by `run_forever` as a CRASH:
+            # traceback, loop stopped, non-zero exit. On a cold boot that
+            # is simply the wrong reading of "migrate has not finished
+            # yet", so the first ticks return quietly and the loop survives
+            # to try again (spec §3.10).
+            logger.info("worker %s: database schema not ready yet; skipping this tick",
+                        self.worker_id)
+            return
+
         claimed = claim_and_admit(
             self.worker_id,
             stale_after_seconds=STALE_AFTER_SECONDS,
