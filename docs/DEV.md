@@ -641,15 +641,18 @@ are reading that one working tree live. Two rules follow, both learned the
 hard way (see [ADR 0013](adr/0013-inference-execution-queue.md)'s
 Consequences for the outage that set them):
 
-- **The root checkout merges `main` SHAs only.** Never merge a feature
-  branch straight into `/app` to see what happens. A conflicted merge left
-  in that tree is picked up by the autoreloader as a code change and takes
-  the live web server down.
+- **The root checkout fast-forwards to `origin/dev` only.** Never merge a
+  feature branch straight into `/app` to see what happens. A conflicted merge
+  left in that tree is picked up by the autoreloader as a code change and
+  takes the live web server down.
 - **Serialize container git operations across sessions.** Two sessions must
   never be touching that working tree at the same moment.
 
-So: merge the branch into `main` first, then move the root checkout to that
-`main` SHA, then restart or rebuild per rung 2's rules.
+So: merge the branch into `dev` first (pull request, review, the owner's
+merge word), then fast-forward the root checkout to that `origin/dev` SHA,
+then restart or rebuild per rung 2's rules. `main` plays no part in this —
+it takes only batched, validated release pull requests from `dev`, on the
+owner's word, owner-only.
 
 ### Rung 4 — fresh pixels
 
@@ -1149,9 +1152,9 @@ the outside.
 
 ## Testing a branch before merge
 
-`compose.yaml` bind-mounts the main repo checkout, so it can never run a
-`git worktree` branch — the container always serves main's code regardless
-of which checkout you invoke `docker compose` from. `scripts/preview` +
+`compose.yaml` bind-mounts the root repo checkout, so it can never run a
+`git worktree` branch — the container always serves the root checkout's code
+regardless of which checkout you invoke `docker compose` from. `scripts/preview` +
 `compose.preview.yaml` (see [ADR 0011](adr/0011-branch-preview-stacks.md))
 solve this: a disposable, isolated stack that builds and runs a worktree
 branch's actual code against its own fresh database, side by side with the
@@ -1175,7 +1178,7 @@ scripts/preview reset model-management-framework --yes
 `data/preview/<branch>/{postgres,documents,inbox}` if this is the branch's
 first preview, then runs `docker compose -p farabunker-preview-<branch> up
 -d --build` and waits for the web container to answer before printing the
-URL. When no main repo `.env` exists to copy, that seed falls back to
+URL. When no root repo `.env` exists to copy, that seed falls back to
 `.env.example` — set `POSTGRES_PASSWORD` in the new `.env` before running
 any compose command, since compose refuses to start with it unset. The
 preview's database starts **empty** (not a copy of the primary

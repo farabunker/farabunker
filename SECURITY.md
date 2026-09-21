@@ -58,5 +58,7 @@ the security model these map to.
 ## Supported versions
 
 The project is pre-1.0 and has no tagged releases yet, so there is no supported-versions
-table to publish: **`main` is the supported version.** Report against `main`, and a table
-will appear here with the first release.
+table to publish. `dev` is the branch that runs live and moves daily; `main` holds the latest
+stable release. Check a reported vulnerability against `dev` first — it's what's actually
+deployed — and note whether it also affects `main`. Both are supported for reports, and a
+table will appear here with the first tagged release.
