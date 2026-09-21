@@ -3323,9 +3323,10 @@ Re-pins agents/chat/tests/test_delete.py's four teardown classes, which now asse
 **Files:**
 - Create: `tools/rag/retention.py`
 - Modify: `tools/rag/access.py` (`readable_documents`, `listable_documents`, `attached_documents`)
+- Modify: `tools/rag/retrieval.py` (`_visibility_filters`, `retrieve_nodes` — review round one, below)
 - Modify: `tools/rag/apps.py` (register the handler)
 - Modify: `tools/rag/README.md`
-- Test: `tools/rag/tests/test_retention.py` (new), `tools/rag/tests/test_access.py` / `test_chat_scoped_documents.py` (extend)
+- Test: `tools/rag/tests/test_retention.py` (new), `tools/rag/tests/test_access.py` / `test_chat_scoped_documents.py` (extend), `tools/rag/tests/test_retrieval.py` / `test_retrieval_visibility.py` (extend — review round one, below)
 
 **Held tests:** `tools/rag/tests/test_access_documents.py`, `test_chat_scoped_documents.py` and `agents/chat/tests/test_thread.py` carry query-count assertions that reach `readable_documents` / `listable_documents` / `attached_documents`. Before editing, run `grep -rn "django_assert_num_queries\|CaptureQueriesContext" tools/rag/tests agents/chat/tests` and re-pin each by the real delta below; name every one you touch in the commit message.
 
@@ -3336,12 +3337,14 @@ Re-pins agents/chat/tests/test_delete.py's four teardown classes, which now asse
 | `readable_documents` | **+2** with no open conversation ticket on the box; **+3** with one or more | `ticketed_keys("document")` and `ticketed_keys("conversation")` always run; the chat-scoped-document lookup, keyed off the conversation-ticket ids, is answered by the ORM without a database round trip when that id list is empty (a filter on an empty `__in` is known-empty at compile time), so it costs a query only once there is an id to filter on |
 | `listable_documents` | same **+2/+3** on the `is_admin` leg; **+0** on the member leg, which reaches them through `readable_documents` | one `_deleted_document_ids()` call either way |
 | `attached_documents` | **+2/+3**, never doubled | the ids are computed ONCE at the top and threaded into both its own `chat_scoped` query and its `readable_documents` call |
+| `retrieve_nodes` (review round one) | same **+2/+3**, on every call that does not take the `sees_nothing` early return | one `_deleted_document_ids()` call, threaded into `_visibility_filters` — see that review round's own note below |
 
 This is a real saving, not a corner cut: the common box has no open conversation ticket at all, and the cheaper path is exactly that common case — the count stays bounded by the number of open tickets, never by the number of documents, on both sides of the split. An implementation that forced the third query to run unconditionally, just to keep every pin at a single flat number, would be paying a real query on the box's most common state purely so a test constant never had to carry a branch — the wrong trade.
 
 **Interfaces:**
 - Consumes: `identity.retention.ticketed_keys`; `identity.contracts.retention.KIND_CONVERSATION`, `KIND_DOCUMENT`; `tools.rag.services.delete_document`; `django.conf.settings.NOTES_DIR`.
 - Produces: `tools.rag.retention.purge_conversation_notes(key: str) -> int`; registration `RetentionHandler(kind="conversation", key="rag.conversation_notes", label="Staging notes", handler="tools.rag.retention.purge_conversation_notes", order=ORDER_FILES)`.
+- Produces (review round one): `tools.rag.retrieval._visibility_filters(category, visibility, deleted_ids=())` gains its third parameter; `retrieve_nodes` threads `tools.rag.access._deleted_document_ids()` into it once per call.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3572,6 +3575,35 @@ def listable_documents(principal, *, deleted_ids=None):
 
 and every `readable_documents(...)` call inside that function gains `deleted_ids=deleted_ids` — there are two (the `chat_scoped_readable_ids` narrowing and the `attached` leg). Nothing else in the function changes; `stream_documents` reaches its own rows through `readable_documents`, so a stream's corpus inherits the exclusion with no further edit.
 
+- [ ] **Step 3b (review round one): thread the same exclusion into `tools/rag/retrieval.py`**
+
+The first pass of this task stopped at the row surfaces; a chunk of a ticketed item stayed retrievable through `tools.rag.retrieval._visibility_filters` regardless. `_visibility_filters` gains a third, keyword-defaultable parameter, `deleted_ids=()`, and adds one top-level `file_id NOT IN (...)` clause — the installed Postgres store's own `NIN` operator, next to the `EQ`/`ANY`/`IS_EMPTY` ones it already uses — only when the list is non-empty:
+
+```python
+def _visibility_filters(category, visibility: DocumentVisibility, deleted_ids=()):
+    ...
+    clauses.append(gated)
+
+    if deleted_ids:
+        clauses.append(MetadataFilter(
+            key="file_id", value=[str(i) for i in deleted_ids],
+            operator=FilterOperator.NIN))
+
+    if not clauses:
+        return None
+    return MetadataFilters(filters=clauses, condition=FilterCondition.AND)
+```
+
+`retrieve_nodes` computes the list ONCE, right before it builds the filter — never inside the `sees_nothing` early return, which already answers with zero nodes and has nothing to narrow:
+
+```python
+    filters = _visibility_filters(category, visibility, _deleted_document_ids())
+```
+
+`readable_documents`' own docstring line claiming to govern "the chunks retrieval may return" is corrected to name where retrieval actually applies the exclusion — a second EXPRESSION of the same rule (`test_workstream_corpus.py`'s own "two expressions of one rule" split), sharing `_deleted_document_ids()` itself rather than merely mirroring its shape.
+
+TESTS (review round one): `tools/rag/tests/test_retrieval_visibility.py` gains a `TestTheDeletedIdsClause` class pinning the clause's shape (empty list adds nothing; a non-empty list adds a top-level `NOT IN` of decimal strings; the clause survives alongside a category and a restricted visibility). `tools/rag/tests/test_chat_scoped_documents.py` gains `TestTheDeletionExclusionReachesRetrieval`, extending that file's own `_matches` evaluator with the `NIN` operator: a chat-scoped document's chunk is excluded once its conversation is ticketed (through `agents.visibility.delete_conversation`); a directly ticketed document's chunk is excluded (through `identity.retention.delete_content` with `KIND_DOCUMENT`, never a hand-inserted `DeletionTicket`); an untouched document's chunk still matches, checked against the SAME built filter object as the two exclusions (one `_deleted_document_ids()` call, not three); and with nothing ticketed the built filter is identical to one built with no `deleted_ids` argument at all. `tools/rag/tests/test_retrieval.py::TestRetrieveNodes` gains three tests: a ticketed document's id reaches the mocked retriever's own `filters` kwarg as a `NOT IN` clause (proving the real end-to-end thread, not merely `_visibility_filters`'s own output in isolation); and the ruled query-count pair, `django_assert_num_queries(2)` with nothing ticketed and `django_assert_num_queries(3)` with one open conversation ticket, mirroring `test_access_documents.py`'s own pins for the row surfaces.
+
 - [ ] **Step 4: Write `tools/rag/retention.py`**
 
 ```python
@@ -3584,15 +3616,12 @@ and its six attachment seams.
 """
 from __future__ import annotations
 
-import logging
 import uuid
 
 from django.conf import settings
 
 from tools.rag import services
 from tools.rag.models import Document
-
-logger = logging.getLogger(__name__)
 
 
 def purge_conversation_notes(key: str) -> int:
@@ -3608,13 +3637,22 @@ def purge_conversation_notes(key: str) -> int:
     `services.delete_document`, which already tears down chunks, the
     managed store directory and the row together.
 
-    A MISSING FILE IS NOT AN ERROR (`missing_ok=True`): every file
-    removal in this feature is best-effort and idempotent, because a
-    purge that failed because somebody had already cleaned up would be a
-    purge nobody could finish.
+    A MISSING FILE IS NOT AN ERROR (`missing_ok=True`): the ONE
+    best-effort case this function forgives is "somebody already cleaned
+    this up" -- a purge that failed for that reason would be a purge
+    nobody could ever finish.
 
-    Idempotent: a second run finds no file and no document and returns
-    zero.
+    ANY OTHER FAILURE TO REMOVE THE FILE IS RAISED, NOT SWALLOWED
+    (review round one -- an earlier pass caught every `OSError` here and
+    logged-and-continued, which deleted the row -- the only remaining
+    handle on the file -- even when the file itself could not actually
+    be removed). Left to propagate, `identity/cascades.py::run_retention`
+    fails the whole purge: the ticket survives, and the next sweep
+    retries this handler from the top rather than reporting a purge that
+    never actually happened.
+
+    Idempotent: once the file really is gone, a re-run finds no file and
+    no document and returns zero.
     """
     try:
         conversation_id = uuid.UUID(str(key))
@@ -3626,26 +3664,21 @@ def purge_conversation_notes(key: str) -> int:
     # READ BEFORE THE UNLINK: `missing_ok=True` returns nothing whether
     # or not the file was there, and the count has to distinguish "one
     # note removed" from "nothing to remove" -- the test asserts 2 for a
-    # note plus a document, and 0 for a re-run.
+    # note plus a document, and 0 for a re-run. A NON-MISSING failure
+    # (any other `OSError`) is NOT caught here -- it propagates, and the
+    # row below is never touched.
     existed = path.exists()
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        # Structural, never content -- the logging shape this column
-        # uses throughout. A file this box cannot unlink is an operator
-        # problem, not a reason to leave the rows standing.
-        logger.exception(
-            "tools.rag.retention: could not remove the staging note for %s",
-            conversation_id)
-    else:
-        if existed:
-            removed += 1
+    path.unlink(missing_ok=True)
+    if existed:
+        removed += 1
 
     for document in Document.objects.filter(notes_conversation_id=conversation_id):
         services.delete_document(document)
         removed += 1
     return removed
 ```
+
+TEST (review round one, added to `tools/rag/tests/test_retention.py`): patch `pathlib.Path.unlink` to raise `PermissionError` for the note's own path only (every other path unlinks for real); `purge_conversation_notes` raises, the note file still exists, and the `Document` row still exists. The pre-existing "a missing file is not an error" test is unchanged and stays green.
 
 - [ ] **Step 5: Register the handler in `tools/rag/apps.py`**
 
@@ -6987,3 +7020,4 @@ Checked end to end: `ticketed_keys` / `visible_tickets` / `may_purge` / `delete_
 - **Execution amendment (Task 9 fix round 1), 2026-09-21:** Task 9 review: `agents.attachments.delete_attachments_for` no longer swallows a broken cleanup provider (FIX C1) — its only production caller is `agents.retention.purge_conversation` at purge time, so a failure now logs and re-raises through the runner's own never-swallows contract, re-pinning `TestTheCleanupSavepoint` to expect propagation (and full survival, driven through `identity.retention.purge_ticket`) instead of a completed purge; `purge_conversation` now hands refs/generation ids to the registered artifact-purge slot LAST, after every row delete and the tool-record scrub, so a failure upstream never deletes a file whose row then survives (FIX I2, `TestBytesGoLast`); the collect step's parse-failure log line names the turn and conversation id only, never the raw stored reference (FIX M6); and two residues are now stated as docstring sentences rather than left implicit — `WorkstreamTaint.first_conversation` keeps a purged conversation's id by value, content-free and deliberately left, and `scrub_tool_records` cannot reach a tool call whose invocation was written but whose turn never was (FIX M7/I4), mirrored into `agents/README.md`. Task 7 fix round 1: the rendered Retention help copy said "purge date"/"cliff", both banned by this plan's own copy rule (`identity/contracts/retention.py`'s docstring) — reworded to "removal date"/"that date" and "no age limit"; the queue-jobs effects sentence was also factually wrong (a finished job carries no stamped purge date) and is now "applies ... the next time the queue tidies up, which happens whenever a new job is added"; the deletion-log effects sentence now says "permanent-deletion entries" rather than "purge entries". Both fixes reflected in the code/test/doc blocks above and in `foundation/settings_help.py`/`agents/attachments.py`/`agents/retention.py`/`agents/README.md`/`tools/rag/README.md` directly.
 - **Execution amendment (Task 10 review), 2026-09-21:** the "made unconditionally... THREE BOUNDED QUERIES, ALWAYS" claim this plan's own `_deleted_document_ids` code block made was checked against the real query planner and found wrong: a `filter(...__in=[])` on an empty id list is answered by the ORM without a database round trip, so the box's common state — no open conversation ticket — costs two queries, not three; a box with at least one open conversation ticket pays the third. The controller ruled this the correct behaviour, not a defect to paper over: the cheaper path is the common one, and forcing the third query to run unconditionally just to keep a test constant flat would trade a real query on the common case for a documentation convenience. The delta table, `_deleted_document_ids`'s own docstring, and the two held pins in `tools/rag/tests/test_access_documents.py` are corrected to +2/+3 throughout this task (never +3 flat, never +6); each re-pinned test gained a sibling that tickets one conversation first and asserts the one-query-more count, so both costs are held rather than only the cheaper one.
 - **Execution amendment (Task 11 review), 2026-09-21:** Task 11's first draft of `purge_artifacts` — the brief's own printed Step 4, `for job in GenerationJob.objects.filter(pk__in=job_ids): services.delete_job(job)` inside `tools/vision/retention.py` — was run against the real tree and found to trip `foundation/ops/tests/test_column_boundaries.py::test_no_vision_module_queries_generationjob_directly`, the IA-1 structural gate that closes `GenerationJob.objects` access in `tools/vision` to exactly two files (`visibility.py`, `services.py`); `retention.py` is a third site, and the implementer stopped and reported the conflict rather than editing that gate or guessing a fix. The controller's ruling: the gate stands (it is not this task's file, and not the vision steward's to relax) and `visibility.py` is not the right reroute either — that module answers "who may see this", and a purge must reach a ticketed job, or one owned by somebody else, that nobody may currently see, which is not a visibility question at all. The unscoped read moved beside the delete it feeds: `tools/vision/services.py` gained `delete_jobs(job_ids) -> int` (loops `GenerationJob.objects.filter(pk__in=job_ids)`, calling `delete_job` per row, catching nothing), and `retention.py` now imports no model but `GeneratedOutput`/`JobInput` and ends `return services.delete_jobs(job_ids)`. Two further consequences, both applied and reflected in Task 11's file list and code blocks above: `purge_artifacts` returns 0 for two empty lists without running any query or calling `delete_jobs` at all (pinned by `TestEmptyInputCostsNothing`, a `django_assert_num_queries(0)` test — CONTROLLER ADDITION (a) from this task's own dispatch, which the first pass had not yet added); and `delete_jobs`'s own tests live in `test_retention.py`, not `test_services.py`, because adding them to the latter pushed it to 2,132 lines, over `test_column_boundaries.py`'s own 2,100-line test-module split threshold gate — a second structural gate the same shape of fix (moving the test, not editing the gate) resolved.
+- **Execution amendment (Task 10 review round one), 2026-09-21:** two findings. (1) `purge_conversation_notes` caught every `OSError` from the note file's own unlink and logged-and-continued to delete the `Document` row regardless — `missing_ok=True` already forgives the one case that should be forgiven, "already gone"; any OTHER `OSError` (a permissions or I/O problem) is a genuine failure, and deleting the row while the file itself stayed stuck on disk would report a purge that never happened, with the row being the only remaining handle on that file. The catch is removed: the file goes first, the row survives when it could not be removed, and `identity/cascades.py::run_retention`'s own never-swallows contract fails the whole purge and retries it on the next sweep. (2) `tools/rag/retrieval.py::_visibility_filters` never consulted the deletion exclusion at all, so a soft-deleted item's chunks stayed retrievable into a fresh answer through any surface that function still governed (today only from inside a ticketed conversation itself, which can take no new turns — but the same gap would reopen the moment a library document can be ticketed on its own). Closed uniformly rather than per-caller: `retrieve_nodes` computes `tools.rag.access._deleted_document_ids()` once per call — never once per filter leg, never once per node — and threads it into `_visibility_filters`, which expresses it as one `file_id NOT IN (...)` clause using the installed Postgres store's own `NIN` operator, added only when the list is non-empty (an empty `NOT IN (...)` is not valid SQL, and "nothing is deleted" costs nothing extra, not an inert clause). Both fixes are reflected in Task 10's Files list, code blocks and test description above, and in `tools/rag/README.md`'s deletion section.
