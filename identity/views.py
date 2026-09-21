@@ -26,6 +26,7 @@ called AFTER Django's own `form_valid` has updated `request.user`.
 """
 from __future__ import annotations
 
+import logging
 from urllib.parse import urlencode
 
 from django.conf import settings
@@ -36,6 +37,7 @@ from django.db.models import Count, Q
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse, reverse_lazy
+from django.views.decorators.http import require_POST
 
 # THE ONE THING THIS COLUMN IMPORTS FROM ANOTHER, and it is the shell it
 # renders inside rather than a peer's logic: four of these pages are
@@ -47,7 +49,7 @@ from django.urls import reverse, reverse_lazy
 # law); the panel's own column, `agents/`, is closed to this one, which
 # is exactly why the rule lives in `foundation/` at all.
 from foundation.settings_area import settings_redirect
-from identity import audit, services, throttle
+from identity import audit, retention, services, throttle
 from identity.access import effective_entitlements, grant_subjects, is_admin, owned_entitlement_ids
 from identity.access import posture as current_posture
 from identity.axes import (
@@ -55,12 +57,17 @@ from identity.axes import (
     reach_by_entitlement,
 )
 from identity.contracts import actions
+from identity.contracts import retention as retention_copy
+from identity.contracts.actions import CONTENT_DELETED, CONTENT_PURGED, CONTENT_RESTORED
 from identity.contracts.postures import POSTURE_PERSONAL
 from identity.contracts.principals import ANONYMOUS
+from identity.contracts.retention import RetentionRefused
 from identity.forms import GrantForm, NameForm, PostureForm, SetPasswordForm, UserCreateForm
 from identity.gate import require_admin
 from identity.models import Entitlement, EntitlementGrant, IdentitySettings, User
 from identity.request import principal_for_request, settings_row_for
+
+logger = logging.getLogger(__name__)
 
 
 # IDENTICAL FOR EVERY USERNAME -- real, misspelled, or never created.
@@ -477,6 +484,174 @@ def settings_page(request):
     return render(request, "identity/settings.html", {
         "form": form, "posture": row.posture, "debug": settings.DEBUG,
     })
+
+
+# --- the deleted page -------------------------------------------------------
+
+# The three sentences the Deletion log reads, declared once, in Python.
+_EVENT_VERBS = {
+    CONTENT_DELETED: "deleted",
+    CONTENT_RESTORED: "restored",
+    CONTENT_PURGED: "destroyed",
+}
+
+# NEVER-500 FLASHES. A retention handler's own refusal (`ServiceRefused`,
+# `RetentionRefused`) carries its own operator-readable sentence and is
+# flashed verbatim; these two are the fallback for anything else a
+# handler or the restore path might raise -- a bare exception says
+# nothing safe to show a person, so the flash names no detail and the
+# traceback goes to the log instead, keyed on ids only.
+_PURGE_FAILED_MESSAGE = (
+    "That could not be deleted permanently just now. It is still in "
+    "Deleted, and it will be tried again."
+)
+_RESTORE_FAILED_MESSAGE = (
+    "That could not be restored just now. It is still in Deleted, and "
+    "it will be tried again."
+)
+
+
+def deleted_page(request):
+    """GET /identity/deleted/ -- "Deleted": what this viewer has deleted,
+    when it will be destroyed, and the two controls that change that.
+
+    CLASS A, gated EVERYONE. Every other settings entry is ADMIN or
+    ACCOUNTS_ADMIN; this page is a person's OWN deleted items, and on a
+    box with accounts a member is exactly who needs it. The one
+    consequence, recorded rather than discovered: the sidebar renders on
+    the single PUBLIC page in the settings area (`setup-index`), so an
+    anonymous visitor sees the entry and is redirected to sign in when
+    they click it -- the same thing every app-bar link on that page
+    already does.
+
+    A SWEEP RUNS FIRST, before the list is built, so this page can never
+    show a row whose promised date has passed. It is one of the three
+    callers (a delete, this GET, and `manage.py purge_deleted`); there
+    is no scheduler and no new job kind.
+
+    NO HOLD CONTROL IS RENDERED IN ANY POSTURE, including enterprise,
+    and this page says nothing about holds or about a purge an owner
+    cannot perform: that behaviour is a deferred slice (spec section
+    10.10) and the page must not imply a guarantee that is not built.
+
+    ONE `IdentitySettings` READ FOR THE WHOLE REQUEST, threaded through
+    `principal_for_request`, `visible_tickets` and every row's own
+    `may_purge` call -- the same per-request-reuse norm
+    `entitlement_edit` already follows -- so a row-per-ticket loop costs
+    no per-row settings query.
+    """
+    retention.sweep()
+    row = IdentitySettings.get_solo()
+    principal = principal_for_request(request, settings_row=row)
+    tickets = [
+        {
+            "ticket": ticket,
+            "kind_label": retention_copy.KIND_LABELS.get(ticket.kind, ticket.kind),
+            "purge_on_line": retention_copy.purge_on_line(ticket.purge_on),
+            "may_purge": retention.may_purge(principal, ticket, settings_row=row),
+        }
+        for ticket in retention.visible_tickets(principal, settings_row=row)
+    ]
+    # BUILT HERE, NOT IN THE TEMPLATE. A Django template cannot index a
+    # dict by a variable, and the log needs one plain sentence per event
+    # chosen from three actions -- so the choosing happens in Python,
+    # where every other user-facing sentence in this repository is
+    # declared, and the template renders fields.
+    events = [
+        {
+            "kind_label": retention_copy.KIND_LABELS.get(event.target_type,
+                                                         event.target_type),
+            "key": event.target_key,
+            "label": event.target_label,
+            "verb": _EVENT_VERBS[event.action],
+            "actor_label": event.actor_label,
+            "at": event.at,
+        }
+        for event in audit.by_action(
+            (CONTENT_PURGED, CONTENT_DELETED, CONTENT_RESTORED))
+    ]
+    return render(request, "identity/deleted.html", {
+        "tickets": tickets,
+        "events": events,
+        "copy": retention_copy,
+    })
+
+
+def _own_ticket_or_404(request, pk: int):
+    """The addressed ticket, if this principal has standing over it.
+
+    404, NEVER 403 -- the class-O shape: a 403 on a row-addressed URL
+    confirms the row exists. Serves the double-click/raced-sweep case
+    too -- a ticket a sweep already purged between page-load and click
+    is simply a ticket `visible_tickets` no longer lists, so this is the
+    one lookup both `deleted_restore` and `deleted_purge` need.
+    """
+    principal = principal_for_request(request)
+    ticket = retention.visible_tickets(principal).filter(pk=pk).first()
+    if ticket is None:
+        raise Http404("No such deleted item.")
+    return principal, ticket
+
+
+@require_POST
+def deleted_restore(request, pk: int):
+    """POST /identity/deleted/<pk>/restore/ -- put the item back.
+
+    NEVER-500: `restore_content` is a plain delete-and-audit and has
+    nothing of its own to refuse, but a caller here still catches
+    anything it might raise rather than let a database hiccup turn a
+    settings-area click into a traceback. The ticket survives either
+    way -- restore never removes content, so there is nothing to retry
+    beyond the click itself.
+    """
+    principal, ticket = _own_ticket_or_404(request, pk)
+    try:
+        retention.restore_content(principal, ticket)
+    except Exception:  # noqa: BLE001 -- never-500; the traceback goes to the log
+        logger.exception(
+            "identity.views: restore failed for ticket %s", ticket.pk)
+        messages.error(request, _RESTORE_FAILED_MESSAGE)
+    else:
+        messages.info(request, "Restored.")
+    return settings_redirect(request, "identity-deleted")
+
+
+@require_POST
+def deleted_purge(request, pk: int):
+    """POST /identity/deleted/<pk>/purge/ -- destroy the content now,
+    inside this request.
+
+    SYNCHRONOUS: `purge_ticket` runs every registered handler inside one
+    `transaction.atomic()` and returns before the redirect. No queue
+    job, no worker hop, no `on_commit` hook, no cache -- so after the
+    redirect the item is absent from every surface on this box.
+
+    THREE OUTCOMES, NONE OF THEM A TRACEBACK. A REFUSAL -- this column's
+    own `ServiceRefused`, or the `RetentionRefused` a retention handler
+    in a column that may not import `identity.services` raises instead
+    -- carries its own operator-readable sentence, flashed verbatim; the
+    ticket stays and the item stays invisible. ANY OTHER EXCEPTION a
+    handler leaves behind is logged with `logger.exception`, keyed on
+    ids only -- never this item's label or content -- and answered with
+    a fixed, contentless sentence; the ticket stays for the next sweep
+    or the next click either way. And a clean run flashes success. A
+    caller with no standing to purge (`may_purge` refuses) is a 404,
+    like every other row this principal may not act on.
+    """
+    principal, ticket = _own_ticket_or_404(request, pk)
+    if not retention.may_purge(principal, ticket):
+        raise Http404("No such deleted item.")
+    try:
+        retention.purge_ticket(principal, ticket)
+    except (services.ServiceRefused, RetentionRefused) as exc:
+        messages.error(request, str(exc))
+    except Exception:  # noqa: BLE001 -- never-500; the traceback goes to the log
+        logger.exception(
+            "identity.views: purge failed for ticket %s", ticket.pk)
+        messages.error(request, _PURGE_FAILED_MESSAGE)
+    else:
+        messages.info(request, "Deleted permanently.")
+    return settings_redirect(request, "identity-deleted")
 
 
 # --- the groups page -------------------------------------------------------

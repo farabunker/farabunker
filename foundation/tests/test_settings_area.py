@@ -64,17 +64,17 @@ class TestTheTable:
         purpose: `TestTheVisionFeatureGate`, below, is the one class
         that turns the flag on and asserts it joins Setup."""
         assert _labels(admin=True, posture="open") == [
-            "Models", "Library", "Chat", "Job execution", "Install guides"]
+            "Models", "Library", "Chat", "Job execution", "Install guides", "Deleted"]
 
     def test_a_member_gets_only_the_ungated_entry(self):
         """R1, carried over from the Manage row unchanged: every other
         entry is class S, and a nav entry that can only ever refuse is
         not navigation."""
-        assert _labels(admin=False, posture=POSTURE_ENTERPRISE) == ["Install guides"]
+        assert _labels(admin=False, posture=POSTURE_ENTERPRISE) == ["Install guides", "Deleted"]
 
     def test_an_administrator_on_an_accounts_box_gets_every_group(self):
         assert _labels(admin=True, posture=POSTURE_ENTERPRISE) == [
-            "Models", "Library", "Chat", "Job execution", "Install guides",
+            "Models", "Library", "Chat", "Job execution", "Install guides", "Deleted",
             "Accounts", "Groups", "Entitlements", "Tool access", "Agent access",
             "Identity & security",
         ]
@@ -105,7 +105,7 @@ class TestTheVisionFeatureGate:
     def test_an_administrator_with_the_flag_on_gets_engine_files_in_setup(self):
         assert _labels(admin=True, posture="open", features=frozenset({"vision"})) == [
             "Models", "Library", "Chat", "Job execution", "Engine files",
-            "Install guides"]
+            "Install guides", "Deleted"]
 
     def test_a_member_does_not_get_it_even_with_the_flag_on(self):
         """ADMIN gate first, feature gate second -- either refusing is

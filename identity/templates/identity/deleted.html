@@ -1,0 +1,94 @@
+{% extends "_settings.html" %}
+{% comment %}
+"Deleted" (deletion semantics, 2026-09-21): a person's own deleted
+items, with the date each will be destroyed and the two controls that
+change that.
+
+TWO SECTIONS, NOT TABS WITH STATE. The page is short, the second half is
+a log, and a disclosure that had to remember which half was open would be
+client state this box does not keep. Both render, always.
+
+NO HOLD CONTROL, IN ANY POSTURE, and nothing here mentions a records
+obligation: the enterprise behaviour is deferred (spec section 10.10) and
+this page must not imply a guarantee that is not built.
+
+EVERY SENTENCE COMES FROM `identity/contracts/retention.py` through the
+`copy` context key -- user-facing strings are declared once in Python,
+never typed into a template.
+
+THE WORD "PURGE" NEVER APPEARS HERE. `copy.ACTION_PURGE` says "Delete
+permanently" and `copy.purge_on_line` says "Purge on <date>" -- the one
+place the word survives, because it names a promise a person can check
+against a calendar, not a mechanism. The URL path segment and the route
+names are not rendered copy and stay as they are.
+
+The delete confirm is a native `<details>`, modelled on
+`chat/_thread_actions.html` and `vision/_delete_control.html`: no
+`confirm()`/`alert()`/`prompt()` anywhere on this box.
+{% endcomment %}
+{% block title %}{{ copy.PAGE_TITLE }} &mdash; farabunker{% endblock %}
+{% block side_current_deleted %}current{% endblock %}
+{% block extra_style %}{{ block.super }}
+  .item { display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap;
+          padding: .5rem 0; border-top: 1px solid var(--border); }
+  .item:first-of-type { border-top: 0; }
+  .item .grow { flex: 1 1 12rem; min-width: 0; overflow-wrap: anywhere; }
+  .item form { display: inline; }
+  .confirm { display: flex; align-items: baseline; gap: .6rem;
+             flex-wrap: wrap; padding: .4rem 0 .2rem; }
+  .event { font-size: .85rem; color: var(--muted); padding: .2rem 0; }
+{% endblock %}
+{% block settings_content %}
+<main>
+  <h1>{{ copy.PAGE_TITLE }}</h1>
+  <p class="tagline">Everything you have deleted, and the date each one will be destroyed. Until that date you can put it back.</p>
+
+  {% include "_messages.html" %}
+
+  <section class="settings" id="deleted-items">
+    <h2>{{ copy.PAGE_TITLE }}</h2>
+    {% for row in tickets %}
+    <div class="item">
+      <span class="grow">
+        <strong>{{ row.kind_label }}</strong>
+        {% if row.ticket.label %}&mdash; {{ row.ticket.label }}{% endif %}
+      </span>
+      <span class="muted">{{ row.purge_on_line }}</span>
+      <form method="post" action="{% url 'identity-deleted-restore' row.ticket.pk %}{{ assistant.open_query }}">
+        {% csrf_token %}
+        <button type="submit" class="secondary">{{ copy.ACTION_RESTORE }}</button>
+      </form>
+      {% if row.may_purge %}
+      <details>
+        <summary>{{ copy.ACTION_PURGE }}</summary>
+        <div class="confirm">
+          <span class="muted">Destroy this now, before its date? This cannot be undone.</span>
+          <form method="post" action="{% url 'identity-deleted-purge' row.ticket.pk %}{{ assistant.open_query }}">
+            {% csrf_token %}
+            <button type="submit" class="danger">Yes, {{ copy.ACTION_PURGE|lower }}</button>
+          </form>
+        </div>
+      </details>
+      {% endif %}
+    </div>
+    {% empty %}
+    <p class="muted">Nothing deleted.</p>
+    {% endfor %}
+  </section>
+
+  <section class="settings" id="deletion-log">
+    <h2>{{ copy.TAB_LOG }}</h2>
+    <p class="helptext">A record of what was deleted, restored and destroyed &mdash; who, what kind, and when. It never contains the deleted words.</p>
+    {% for event in events %}
+    <p class="event">
+      {{ event.kind_label }} {{ event.key }}
+      {% if event.label %}&mdash; {{ event.label }}{% endif %}
+      &middot; {{ event.verb }} by {{ event.actor_label }}
+      &middot; {{ event.at|date:"j M Y H:i" }}
+    </p>
+    {% empty %}
+    <p class="muted">Nothing yet.</p>
+    {% endfor %}
+  </section>
+</main>
+{% endblock %}

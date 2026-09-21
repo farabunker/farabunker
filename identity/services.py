@@ -310,11 +310,14 @@ def set_posture(actor, *, posture: str | None = None, library_posture: str | Non
                 audit_detail: bool | None = None,
                 source: str = SOURCE_WEB) -> IdentitySettings:
     """Write the posture row, with one audit event per AUDITED field
-    changed -- `posture`, `library_posture` and `admin_sees_content`.
-    `session_idle_minutes` carries no catalogue action of its own (it is
-    an operational tuning knob, not a change to who can see what) and is
-    applied silently -- said here so this docstring does not quietly
-    promise more than the audit trail records.
+    changed -- `posture`, `library_posture`, `admin_sees_content`, and
+    the three retention fields (`retention_days`, `queue_retention_days`,
+    `audit_detail`), each of which writes under the one
+    `RETENTION_POLICY_CHANGED` action. `session_idle_minutes` carries no
+    catalogue action of its own (it is an operational tuning knob, not a
+    change to who can see what) and is applied silently -- said here so
+    this docstring does not quietly promise more than the audit trail
+    records.
 
     A SWITCH, NOT A MIGRATION: this writes columns on one row and
     nothing else. It does not create, delete or rewrite any user; it

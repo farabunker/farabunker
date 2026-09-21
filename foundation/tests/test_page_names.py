@@ -85,6 +85,10 @@ _NAMES = {
     "chat-tool-entitlements": "Tool access",
     "chat-agent-entitlements": "Agent access",
     "identity-settings": "Identity & security",
+    # Class A, gated EVERYONE (`identity/routes.py`) -- an anonymous
+    # visitor on an open box renders it like every other Setup entry, so
+    # it stays out of `_ADMIN_ONLY` below.
+    "identity-deleted": "Deleted",
 }
 if "vision" in django_settings.FARABUNKER_FEATURES:
     _NAMES["vision-create"] = "Image generation"

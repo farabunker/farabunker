@@ -1,0 +1,240 @@
+"""The Deleted page: a checkable promise, in every posture."""
+from __future__ import annotations
+
+import datetime
+
+import pytest
+from django.urls import reverse
+from django.utils import timezone
+
+from identity.contracts import cascades as cascades_module
+from identity.contracts import retention as copy
+from identity.contracts.actions import CONTENT_PURGED, CONTENT_RESTORED
+from identity.contracts.cascades import RetentionHandler, register_retention_handler
+from identity.models import AuditEvent, DeletionTicket, IdentitySettings
+from identity.tests._helpers import (
+    make_admin, make_conversation, make_user, posture, sign_in, user_principal,
+)
+from identity import retention as service
+
+pytestmark = pytest.mark.django_db
+
+
+def noop(key: str) -> int:
+    return 0
+
+
+@pytest.fixture(autouse=True)
+def _isolated_registry():
+    """Save, clear, register, restore -- `identity/tests/
+    test_cascades.py::_isolated_registry`'s shape and its reason: the
+    registry is a module-level dict with no reset path, and a
+    registration escaping this module would reach every later purge in
+    the same pytest process. Both collection orders are the gate."""
+    saved = dict(cascades_module._RETENTION)
+    cascades_module._RETENTION.clear()
+    register_retention_handler(RetentionHandler(
+        kind=copy.KIND_ASK, key="t.page", label="Ask records",
+        handler=f"{__name__}.noop"))
+    yield
+    cascades_module._RETENTION.clear()
+    cascades_module._RETENTION.update(saved)
+
+
+def _ticket_for(user, *, key="1", label="A question"):
+    item = make_conversation(owner_kind="user", owner_key=str(user.pk))
+    return service.delete_content(user_principal(user), kind=copy.KIND_ASK,
+                                  key=key, owner=item, label=label)
+
+
+class TestTheDeletedTab:
+    def test_it_lists_the_viewers_own_items_with_the_promised_date(self, client):
+        with posture("personal"):
+            user = make_user()
+            sign_in(client, user)
+            ticket = _ticket_for(user)
+            body = client.get(reverse("identity-deleted")).content.decode()
+        assert copy.KIND_LABELS[copy.KIND_ASK] in body
+        assert copy.purge_on_line(ticket.purge_on) in body
+        assert copy.ACTION_RESTORE in body
+        assert copy.ACTION_PURGE in body
+
+    def test_a_member_does_not_see_somebody_elses(self, client):
+        with posture("personal"):
+            mine, theirs = make_user(), make_user()
+            _ticket_for(theirs, key="2", label="Their question")
+            sign_in(client, mine)
+            body = client.get(reverse("identity-deleted")).content.decode()
+        assert "Their question" not in body
+
+    def test_an_open_box_shows_everyones_because_there_is_nobody_to_hide_from(self, client):
+        with posture("open"):
+            _ticket_for(make_user(), label="A question")
+            body = client.get(reverse("identity-deleted")).content.decode()
+        assert "A question" in body
+
+    def test_the_page_renders_no_hold_control_in_any_posture(self, client):
+        """SCOPED TO THIS PAGE'S OWN CONTENT BLOCK, not the whole
+        response: the settings shell, the sidebar and the assistant
+        panel are shared markup this page does not own, and a substring
+        assertion over them would fail for a word some other surface
+        introduced. The enterprise BEHAVIOUR is deferred (spec section
+        10.10) and this page must not imply a guarantee that is not
+        built."""
+        for box in ("open", "personal", "enterprise"):
+            with posture(box):
+                user = make_user()
+                sign_in(client, user)
+                _ticket_for(user)
+                body = client.get(reverse("identity-deleted")).content.decode()
+            main = body.split("<main>", 1)[1].split("</main>", 1)[0].lower()
+            assert "hold" not in main, box
+
+    def test_a_get_purges_anything_whose_date_has_passed_before_listing(self, client):
+        with posture("open"):
+            user = make_user()
+            ticket = _ticket_for(user)
+            DeletionTicket.objects.filter(pk=ticket.pk).update(
+                purge_on=timezone.localdate() - datetime.timedelta(days=1))
+            body = client.get(reverse("identity-deleted")).content.decode()
+        assert DeletionTicket.objects.count() == 0
+        assert "A question" not in body
+
+    def test_an_empty_page_says_so_and_never_500s(self, client):
+        with posture("open"):
+            response = client.get(reverse("identity-deleted"))
+        assert response.status_code == 200
+
+
+class TestThePurgedTab:
+    def test_it_shows_content_free_events_with_the_toggle_off(self, client):
+        with posture("open"):
+            user = make_user()
+            ticket = _ticket_for(user, label="A secret question")
+            client.post(reverse("identity-deleted-purge", args=[ticket.pk]))
+            body = client.get(reverse("identity-deleted")).content.decode()
+        assert "A secret question" not in body
+        assert copy.KIND_LABELS[copy.KIND_ASK] in body
+
+    def test_with_the_toggle_on_the_labels_appear(self, client):
+        with posture("open"):
+            row = IdentitySettings.get_solo()
+            row.audit_detail = True
+            row.save()
+            user = make_user()
+            _ticket_for(user, label="A named question")
+            body = client.get(reverse("identity-deleted")).content.decode()
+        assert "A named question" in body
+
+
+class TestRestoreAndPurge:
+    def test_restore_removes_the_ticket_and_records_the_event(self, client):
+        with posture("personal"):
+            user = make_user()
+            sign_in(client, user)
+            ticket = _ticket_for(user)
+            response = client.post(
+                reverse("identity-deleted-restore", args=[ticket.pk]))
+        assert response.status_code == 302
+        assert DeletionTicket.objects.count() == 0
+        assert AuditEvent.objects.filter(action=CONTENT_RESTORED).count() == 1
+
+    def test_purge_destroys_the_content_in_the_request_that_handled_the_click(self, client):
+        with posture("personal"):
+            user = make_user()
+            sign_in(client, user)
+            ticket = _ticket_for(user)
+            client.post(reverse("identity-deleted-purge", args=[ticket.pk]))
+        assert DeletionTicket.objects.count() == 0
+        assert AuditEvent.objects.filter(action=CONTENT_PURGED).count() == 1
+
+    def test_the_enterprise_posture_behaves_exactly_as_personal_does(self, client):
+        """Asserted rather than left untested: the enterprise BEHAVIOUR
+        is a deferred slice (spec section 10.10), and until it is built
+        the item's owner may purge before the cliff here too."""
+        with posture("enterprise"):
+            user = make_user()
+            sign_in(client, user)
+            ticket = _ticket_for(user)
+            response = client.post(
+                reverse("identity-deleted-purge", args=[ticket.pk]))
+        assert response.status_code == 302
+        assert DeletionTicket.objects.count() == 0
+
+    @pytest.mark.parametrize("route",
+                             ["identity-deleted-restore", "identity-deleted-purge"])
+    def test_a_forged_id_is_404_never_500(self, client, route):
+        with posture("personal"):
+            sign_in(client, make_user())
+            assert client.post(reverse(route, args=[999999])).status_code == 404
+
+    @pytest.mark.parametrize("route",
+                             ["identity-deleted-restore", "identity-deleted-purge"])
+    def test_somebody_elses_ticket_is_404_never_403(self, client, route):
+        with posture("personal"):
+            mine, theirs = make_user(), make_user()
+            ticket = _ticket_for(theirs, key="2")
+            sign_in(client, mine)
+            assert client.post(reverse(route, args=[ticket.pk])).status_code == 404
+
+    @pytest.mark.parametrize("exc_cls", [
+        "identity.services.ServiceRefused",
+        "identity.contracts.retention.RetentionRefused",
+    ])
+    def test_a_refusal_flashes_and_redirects_for_either_refusal_type(
+            self, client, monkeypatch, exc_cls):
+        """BOTH types, because the view catches both: this column's own
+        `ServiceRefused`, and the `RetentionRefused` a handler in a
+        column that may not import `identity.services` raises."""
+        from django.utils.module_loading import import_string
+        from identity import views
+        refusal = import_string(exc_cls)
+        monkeypatch.setattr(
+            views.retention, "purge_ticket",
+            lambda *a, **k: (_ for _ in ()).throw(
+                refusal("a worker holds this job")))
+        with posture("personal"):
+            user = make_user()
+            sign_in(client, user)
+            ticket = _ticket_for(user)
+            response = client.post(
+                reverse("identity-deleted-purge", args=[ticket.pk]), follow=True)
+        assert response.status_code == 200
+        assert "a worker holds this job" in response.content.decode()
+        assert DeletionTicket.objects.count() == 1
+
+
+class TestTheQueryCost:
+    def test_the_page_costs_the_same_queries_at_one_ticket_and_at_many(self, client):
+        """THE FLAT-QUERY PIN. `deleted_page` reads `IdentitySettings`
+        once and threads that SAME row through `principal_for_request`,
+        `visible_tickets` and every row's own `may_purge(...,
+        settings_row=row)` call -- so a row-per-ticket loop must not cost
+        a settings read per row.
+
+        NON-VACUOUS BY CONSTRUCTION: dropping `settings_row=row` from
+        the view's own `may_purge` call -- the obvious wrong
+        implementation, and the one this page had before `may_purge`
+        grew the keyword -- costs one extra settings-row read per
+        ticket, so ten tickets fails this equality by nine queries, not
+        by a rounding error.
+        """
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with posture("open"):
+            _ticket_for(make_user(), key="one")
+            client.get(reverse("identity-deleted"))  # warm the session reads
+            with CaptureQueriesContext(connection) as one_ticket:
+                assert client.get(reverse("identity-deleted")).status_code == 200
+            for index in range(1, 10):
+                _ticket_for(make_user(), key=f"many-{index}")
+            with CaptureQueriesContext(connection) as many_tickets:
+                body = client.get(reverse("identity-deleted")).content.decode()
+
+        assert len(many_tickets) == len(one_ticket), (
+            len(one_ticket), len(many_tickets), [q["sql"] for q in many_tickets])
+        # Really ten rendered rows, not two empty pages agreeing by
+        # accident: `copy.ACTION_PURGE` is offered per row an admin may
+        # act on, and this admin `sees_all_content` on an open box.
+        assert body.count(copy.ACTION_PURGE) == 10

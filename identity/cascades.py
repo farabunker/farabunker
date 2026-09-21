@@ -75,14 +75,17 @@ def run_retention(kind: str, key: str) -> dict[str, int]:
         handler = import_string(spec.handler)
         # A NESTED `transaction.atomic()` -- a SAVEPOINT -- around each
         # handler, the `agents.attachments.delete_attachments_for`
-        # discipline, WITH THE OPPOSITE CATCH POLICY, and the difference
-        # is the point.
+        # discipline: NEITHER SWALLOWS, and the savepoint is what makes
+        # that safe.
         #
-        # `delete_attachments_for` CATCHES, because a broken cleanup
-        # provider must not block a delete the actor already confirmed.
-        # A retention handler's exception is NOT caught, because a purge
-        # that reported success while leaving content behind is exactly
-        # the failure this whole feature exists to prevent.
+        # `delete_attachments_for` used to catch a broken cleanup
+        # provider's failure so it would not block a delete the actor had
+        # already confirmed -- but a delete now only writes a ticket, so
+        # that reasoning stopped applying once this cascade moved to
+        # running at PURGE time instead: it now LOGS and RE-RAISES,
+        # exactly like every retention handler here, because a purge that
+        # reported success while leaving content behind is exactly the
+        # failure this whole feature exists to prevent.
         #
         # The savepoint is still required. Without it, a DATABASE-level
         # error inside a handler poisons the Postgres connection for the

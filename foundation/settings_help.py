@@ -555,6 +555,47 @@ CARDS: tuple[HelpCard, ...] = (
             ),
         ),
     ),
+    # --- Your content ---------------------------------------------------
+    HelpCard(
+        route_name="identity-deleted",
+        title="Deleted",
+        gate=EVERYONE,
+        purpose=(
+            "A person's own deleted items -- conversations, documents, Ask records and "
+            "generated images -- each with the date it will be destroyed, and the one place "
+            "to put one back before that date."
+        ),
+        fields=(
+            HelpField(
+                name="Deleted items",
+                anchor="deleted-items",
+                meaning=(
+                    "Every item this viewer has deleted and can still see: what kind it is, "
+                    "and the date it will be permanently destroyed. The removal date is fixed "
+                    "at the moment something is deleted, so changing the retention setting on "
+                    "Identity & security governs future deletions only -- an item already here "
+                    "keeps the date it was given."
+                ),
+                effects=(
+                    "Restore puts the item back immediately, exactly as it was; nothing about "
+                    "it was ever changed by being deleted. Delete permanently, offered only to "
+                    "somebody who may act on that item, destroys it right now instead of "
+                    "waiting for its date, and cannot be undone."
+                ),
+            ),
+            HelpField(
+                name="Deletion log",
+                anchor="deletion-log",
+                meaning=(
+                    "A record of what was deleted, restored and permanently deleted on this "
+                    "box -- who acted, what kind of item it was, and when. Content-free by "
+                    "default: it names the kind, not the item's own title or words, unless "
+                    "Identity & security's \"Show item names in the deletion log\" is on."
+                ),
+                effects="Reading only. Nothing on this page writes to the log except by acting above.",
+            ),
+        ),
+    ),
     # --- Access -------------------------------------------------------
     HelpCard(
         route_name="identity-users",

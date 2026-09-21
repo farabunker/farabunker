@@ -306,6 +306,18 @@ ROUTE_RULES: dict[str, str] = {
     # row this principal has no standing over. Rename and delete re-check
     # `is_admin` inside `identity.services`.
     "identity-entitlement-edit": "R",
+
+    # --- /identity/deleted/ (deletion semantics, 2026-09-21) -----------
+    # A: the page lists the viewer's OWN tickets and addresses no row in
+    # its URL -- the identical shape `chat-all` carries. Gated EVERYONE
+    # in the settings area, because a member's own deleted items are
+    # exactly what a member needs.
+    "identity-deleted": "A",
+    # O: row-addressed mutations of OWNED content, refused with 404 for a
+    # principal with no standing -- the shape `chat-conversation-delete`
+    # already has.
+    "identity-deleted-restore": "O",
+    "identity-deleted-purge": "O",
 }
 
 # The only two classes that answer to something other than AUTHENTICATED

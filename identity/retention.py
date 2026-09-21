@@ -80,7 +80,7 @@ def visible_tickets(principal, *, settings_row=None):
     return qs.filter(owned_rows_q(principal, settings_row=settings_row))
 
 
-def may_purge(principal, ticket) -> bool:
+def may_purge(principal, ticket, *, settings_row=None) -> bool:
     """Whether `principal` may destroy this item's content now.
 
     The item's OWNER, or a `sees_all_content` principal -- the same
@@ -89,8 +89,14 @@ def may_purge(principal, ticket) -> bool:
     posture branch: in this delivery the enterprise posture behaves
     exactly as personal does, and the refusal that will differ is the
     deferred enterprise slice's (spec section 10.10), not this one's.
+
+    `settings_row`, OPTIONAL, THE SAME SHAPE `visible_tickets` ABOVE
+    TAKES: a page building one row per ticket already holds the one
+    `IdentitySettings` row for the request and passes it through here,
+    so listing many tickets costs one settings read rather than one per
+    row.
     """
-    if sees_all_content(principal):
+    if sees_all_content(principal, settings_row=settings_row):
         return True
     return may_read_owned_row(principal, ticket)
 
@@ -258,12 +264,12 @@ def sweep(*, limit: int = SWEEP_LIMIT, source: str = SOURCE_WEB) -> int:
     throughout -- and the ticket stays due for the next pass.
 
     A `RetentionRefused` IS NOT AN ERROR AND IS CAUGHT FIRST: it is a
-    handler saying "not now" for an operator-readable reason (today,
-    `models.queue.retention.forget_conversation` when a worker still
-    holds one of the conversation's jobs), so it is logged at
-    `logger.warning` -- one line, no traceback -- and every other
-    exception keeps `logger.exception`, which is the failure this batch
-    actually needs to be noisy about.
+    handler saying "not now" for an operator-readable reason -- a
+    handler may refuse, for example when a worker still holds one of
+    the conversation's jobs -- so it is logged at `logger.warning` --
+    one line, no traceback -- and every other exception keeps
+    `logger.exception`, which is the failure this batch actually needs
+    to be noisy about.
     """
     due = list(
         DeletionTicket.objects

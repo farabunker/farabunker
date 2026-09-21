@@ -401,6 +401,10 @@ blocks take the same width and their edges line up; see the
       {% endif %}
       <a href="{% url 'setup-index' %}{{ assistant.open_query }}" class="{% block side_current_guides %}{% endblock %}">Install guides</a>
     </div>
+    <div class="settings-group">
+      <span class="nav-group-label">Your content</span>
+      <a href="{% url 'identity-deleted' %}{{ assistant.open_query }}" class="{% block side_current_deleted %}{% endblock %}">Deleted</a>
+    </div>
     {% if identity_posture != "open" and identity_is_admin %}
     <div class="settings-group">
       <span class="nav-group-label">Access</span>
