@@ -15,6 +15,7 @@
 | `runtime/flowtool.py` | **P3 Task 13 — shipped** | The ONE registered `flow.run` tool and its per-turn narrowing. See "The tools this platform registers" and "Flows" below. |
 | `chat/` | **P3 — shipped** | Django app, label `chat`. The permanent chat product at `/chat/`: conversation list, thread, tool cards with thumbnails and citations, the 202-and-poll contract with a no-JS path, and flow rows reached through `flow.run`. See [`chat/README.md`](chat/README.md). |
 | `entitlements.py` + `labels.py` + `shares.py` | **Identity & Auth IA-2 — shipped** | `entitlements.py::tool_access_for` builds the pure `ToolAccess` (`agents/contracts/tools.py`) a turn's `granted_tools` call needs; `labels.py` reads/writes `ToolEntitlement`/`AgentEntitlement`/`FlowEntitlement` and supplies this column's two entitlement-delete cascade handlers (registered from `agents/apps.py`); `shares.py` reads/writes `Share` and answers `may_post_to`. See "The acting rule" and "The four visibility bodies get real filters" below. |
+| `visibility.py`'s `delete_conversation` | **Deletion semantics — Task 8 (delete side); `agents/retention.py`'s purge side is Task 9** | Deleting a conversation writes a `DeletionTicket` (`identity.retention.delete_content`) instead of erasing the row; `visible_conversations` excludes ticketed keys on the BASE queryset, before the `sees_all_content` early return. See "Deletion: a ticket, then a purge" below. |
 
 ## The data model
 
@@ -768,3 +769,48 @@ every column is nullable and every existing row already means "never".
 Design: `docs/superpowers/specs/2026-09-03-workstreams-design.md`. The
 rest of this app's design: `docs/superpowers/specs/
 2026-08-25-agents-and-tools-design.md`.
+
+### Deletion: a ticket, then a purge
+
+`agents.visibility.delete_conversation` no longer erases. It calls
+`identity.retention.delete_content` (a NAMED SEAM every column may
+import — `identity/retention.py`'s own docstring has the full reason),
+which writes one `DeletionTicket`, records a content-free
+`content.deleted` event, and returns the ticket. The conversation, its
+turns, its shares, its attachment claims and its chat-scoped documents
+all survive the request — nothing about them changes at delete time.
+The gate is unchanged: `may_manage_conversation`, exactly as before.
+
+`visible_conversations` excludes every ticketed key on the BASE
+queryset, BEFORE the `sees_all_content` early return — that ordering
+matters because `sees_all_content` is True for every principal on an
+open box, the posture most boxes run, so an exclusion on the restricted
+leg alone would leave a deleted conversation visible in exactly the
+posture where it matters most.
+
+`agents/chat/views/conversations.py::conversation_delete` reads the
+returned ticket's `purge_on` to choose its notice: "Conversation
+deleted. You can restore it from Settings → Deleted." ordinarily, or
+"Conversation deleted permanently." when `purge_on` is today or
+earlier — the box's own zero-day retention setting, under which
+`delete_content`'s own unconditional bounded sweep purges the ticket
+before the response returns. A notice that promised a restore door the
+box had already closed would be a lie the settings page's own "Keep
+deleted items for" control made possible.
+
+`agents/retention.py` (Task 9) is where the HARD side lands: the
+`purge_conversation` handler and its siblings, registered against
+`identity/cascades.py`'s retention registry, run at PURGE and destroy
+the conversation's turns, shares, attachment claims, chat-scoped
+documents and generated images together, in the one `transaction.
+atomic()` `identity.retention.purge_ticket` already opens. Until that
+task lands, a ticketed conversation's row survives even past its own
+purge date — the ticket is gone (nothing is registered yet to refuse
+it), but nothing has torn the row down. The artifact-purge slot and the
+tool-call audit trail's own scrub belong to that same task: a
+`ToolInvocation` is never reachable through a `Turn` in the first place
+(`Turn.invocation` is `SET_NULL`), and at purge time its text and error
+are blanked to a content-free shell — **scrubbed inline with the
+conversation delete's own purge, always, with no setting and no second
+date** — so a record that a tool ran outlives a conversation that named
+what it was asked, without ever repeating that content back.

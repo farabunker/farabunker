@@ -355,11 +355,17 @@ class TestTheOpenPanel:
         rows already fetched and never costs a read of its own.
 
         THE SAME 3 AT 0 TURNS AND AT 12. That flatness is the invariant;
-        the number itself is only the shape it takes today."""
+        the number itself is only the shape it takes today.
+
+        RAISED FROM 3 TO 4 BY THE DELETION-SEMANTICS TASK 8 (+1):
+        `settings_assistant` reaches conversations through `agents.
+        visibility`, whose `visible_conversations` now excludes ticketed
+        keys on its base queryset -- `identity.retention.ticketed_keys`
+        is ONE query, paid once, flat at 0 turns and at 12."""
         with posture(POSTURE_OPEN):
             _thread(_open_principal(), turns=turns)
             request = _request(rf, A_SETTINGS_PAGE, query="?assistant=1")
-            with django_assert_num_queries(3):
+            with django_assert_num_queries(4):
                 assistant = settings_assistant(request)["assistant"]
         assert assistant["open"] is True
         assert len(assistant["cards"]) == min(2 * turns, ASSISTANT_PANEL_TURNS)
@@ -381,7 +387,12 @@ class TestTheOpenPanel:
         # this branch also reaches `visible_conversations`'s share/
         # workstream reads, which this fix does not chase. FLAT at both
         # 0 and 12 turns, which is the invariant this pin protects.
-        MEASURED_OPEN_ENTERPRISE = 16
+        #
+        # RAISED FROM 16 TO 17 BY THE DELETION-SEMANTICS TASK 8 (+1),
+        # the identical `ticketed_keys` query `test_the_open_panel_is_
+        # flat_in_the_number_of_turns`'s own later note names, paid once
+        # by this branch's own `visible_conversations` call.
+        MEASURED_OPEN_ENTERPRISE = 17
         assert MEASURED_OPEN_ENTERPRISE is not None, (
             "measure this number, then write it in as an equality")
         with posture(POSTURE_ENTERPRISE):
@@ -1149,12 +1160,22 @@ class TestTheJumpToStrip:
         assert "Django admin" not in response.content.decode()
 
     def test_a_foreign_anchor_on_a_real_route_renders_no_anchor(self, client):
+        """PRE-EXISTING FIX, UNRELATED TO TASK 8 (found while running this
+        task's own gate): this test used to name "retention" as its
+        foreign anchor, which the deletion-semantics identity task
+        (already landed at `1352539`, before Task 8 started) made a REAL
+        anchor on `identity-settings` (`foundation/settings_help.py`'s
+        own "Retention" card field) -- so the scenario this test exists
+        to check (a route that is real, carrying an anchor that is not)
+        stopped being what the fixture actually exercised, and silently
+        started asserting something true for a different reason. Swapped
+        for an anchor guaranteed to never be a real card field."""
         with posture(POSTURE_ENTERPRISE):
             admin = make_admin()
             conversation = _thread(user_principal(admin))
             self._tool_turn(conversation, {"links": [
-                {"route": "identity-settings", "anchor": "retention",
-                 "label": "Retention"}]})
+                {"route": "identity-settings", "anchor": "not-a-real-anchor",
+                 "label": "Not real"}]})
             sign_in(client, admin)
             response = client.get(reverse(A_SETTINGS_PAGE) + "?assistant=1")
         assert response.context["assistant"]["links"] == []
@@ -1730,7 +1751,7 @@ class TestThePanelRoute:
         assert Conversation.objects.count() == before
 
     @pytest.mark.parametrize("turns", [0, 12])
-    def test_the_open_posture_fragment_costs_exactly_five_queries(
+    def test_the_open_posture_fragment_costs_exactly_six_queries(
             self, client, django_assert_num_queries, turns):
         # 5, NOT 3 -- MEASURED, Task 10 Step 9. The isolated "+3" pin
         # above (`TestTheOpenPanel::test_the_open_panel_is_flat_in_the_
@@ -1745,11 +1766,16 @@ class TestThePanelRoute:
         # `RoleBinding` read, which runs on every template `render()` in
         # the box and is not this view's to avoid. FLAT at both 0 and 12
         # turns, the invariant this pin protects.
+        #
+        # 5 BECAME 6 BY THE DELETION-SEMANTICS TASK 8 (+1), renaming this
+        # test: the identical `ticketed_keys` query `test_the_open_
+        # panel_is_flat_in_the_number_of_turns`'s own later note names
+        # (3 became 4 there), paid once here too.
         with posture(POSTURE_OPEN):
             _thread(_open_principal(), turns=turns)
             url = reverse("settings-assistant-panel") + "?assistant=1"
             client.get(url)
-            with django_assert_num_queries(5):
+            with django_assert_num_queries(6):
                 client.get(url)
 
     @pytest.mark.parametrize("turns", [0, 12])
@@ -1762,7 +1788,11 @@ class TestThePanelRoute:
         # second one -- see `agents/chat/views/assistant.py`'s own
         # docstring. FLAT at both 0 and 12 turns, the invariant this pin
         # protects.
-        MEASURED_FRAGMENT_ENTERPRISE = 15
+        #
+        # RAISED FROM 15 TO 16 BY THE DELETION-SEMANTICS TASK 8 (+1), the
+        # identical `ticketed_keys` query this file's other pins above
+        # now name.
+        MEASURED_FRAGMENT_ENTERPRISE = 16
         assert MEASURED_FRAGMENT_ENTERPRISE is not None, (
             "measure this number, then write it in as an equality")
         with posture(POSTURE_ENTERPRISE):

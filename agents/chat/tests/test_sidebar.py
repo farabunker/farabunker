@@ -966,7 +966,21 @@ class TestItCostsTheSameAtOneRowAndAtThirty:
     #: scale with row count. It moves again only if the sidebar (or
     #: `visible_workstreams`/`visible_conversations`) genuinely gains or
     #: loses a query.
-    EXPECTED_QUERIES = 12
+    #:
+    #: RAISED FROM 12 TO 13 BY THE DELETION-SEMANTICS TASK 8 (+1):
+    #: `visible_conversations` now excludes ticketed keys on its BASE
+    #: queryset (`agents/visibility.py`'s own "THE EXCLUSION GOES ON THE
+    #: BASE QUERYSET" comment) -- `identity.retention.ticketed_keys` is
+    #: ONE query, paid by the active list's single call into `visible_
+    #: conversations` (5 becomes 6, above), and by NOTHING else: the
+    #: archived count and the pinned list are `.filter()` clones of that
+    #: SAME already-built queryset, so `ticketed_keys` is not re-run for
+    #: either, and the Workstreams list is untouched (`identity.
+    #: contracts.retention.RETENTION_KINDS` has no `workstream` kind).
+    #: Flat at one row and at twenty-five for the identical reason the
+    #: other 12 already were: `ticketed_keys` costs ONE query whatever
+    #: the number of conversations or tickets.
+    EXPECTED_QUERIES = 13
 
     def _sidebar(self, owner, rows, django_assert_num_queries):
         agent = make_agent()
@@ -1388,7 +1402,16 @@ def test_the_sidebar_is_flat_in_the_number_of_workstreams(streams, django_assert
 # 2 do not repeat a second time either way).
 # `TestItCostsTheSameAtOneRowAndAtThirty.EXPECTED_QUERIES`'s own comment
 # has the full, current per-call breakdown (5 + 5 + 1 + 1 = 12).
-_SIDEBAR_BASELINE_QUERIES = 12
+#
+# RAISED FROM 12 TO 13 BY THE DELETION-SEMANTICS TASK 8 (+1), for the
+# identical reason `TestItCostsTheSameAtOneRowAndAtThirty.EXPECTED_
+# QUERIES`'s own later note gives: `visible_conversations`'s new
+# `ticketed_keys` exclusion is ONE query, paid once by the active
+# list's single call into that function (6 + 5 + 1 + 1 = 13) and by
+# nothing else -- the archived count and pinned list are `.filter()`
+# clones of the same base queryset, and `visible_workstreams` carries
+# no ticket kind at all.
+_SIDEBAR_BASELINE_QUERIES = 13
 
 
 @pytest.mark.parametrize("rows", [1, 25])
