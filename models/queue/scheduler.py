@@ -171,9 +171,11 @@ elsewhere in this module cites one of these numbers):
    the instant the machine is idle. THE AGING BOUND: a candidate whose
    `passed_over` count has reached `max_passovers` is PINNED and sorts
    strictly by id within its priority from then on, so within one
-   priority number a job can be passed over at most that many times;
-   across priority numbers nothing changed, so rule 9's honestly-scoped
-   starvation caveat is neither improved nor worsened. The believed-
+   priority number a job can be passed over at most that many ROUNDS --
+   the count is of OCCASIONS a job lost its turn, one per round however
+   many peers went ahead, not of peers. Across priority numbers nothing
+   changed, so rule 9's honestly-scoped starvation caveat is neither
+   improved nor worsened. The believed-
    resident set is a plain frozen set the CALLER hands in (the worker's
    last residency snapshot -- see `affinity_order`'s own docstring); this
    module never asks an engine anything and never touches a row.
@@ -268,8 +270,11 @@ class SchedCandidate:
     priority: int
     exclusive: bool
     models: tuple[SchedModel, ...]
-    # How many times a later-by-(priority, id) peer has been admitted
-    # ahead of this candidate (`InferenceJob.passed_over`). Durable, not
+    # How many admission ROUNDS this candidate has lost to model-affinity
+    # reordering -- rounds in which at least one later-by-(priority, id)
+    # peer was admitted ahead of it (`InferenceJob.passed_over`). ONE per
+    # round, however many peers went ahead: the aging bound counts
+    # occasions a job lost its turn, not peers (spec 3.6). Durable, not
     # in-memory: a worker restart must not reset a job's age. Trailing and
     # defaulted, so every existing construction of this dataclass is
     # unchanged.
@@ -389,7 +394,9 @@ def affinity_order(
     `max_passovers` is PINNED -- it sorts strictly by id within its
     priority and can never be reordered behind a peer again. Within one
     priority number a job can therefore be passed over at most that many
-    times; across priority numbers nothing changed, so the ADR's existing,
+    ROUNDS; `passed_over` counts OCCASIONS a job lost its turn, not peers,
+    so a round admitting four later peers ahead of it still costs it one.
+    Across priority numbers nothing changed, so the ADR's existing,
     honestly-scoped starvation caveat is neither improved nor worsened.
 
     "AFFINE" MEANS "WOULD LOAD NOTHING", not "would load less": every one

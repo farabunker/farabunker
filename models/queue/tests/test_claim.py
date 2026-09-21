@@ -772,6 +772,34 @@ class TestPassOverAccounting:
 
         assert InferenceJob.objects.filter(passed_over=1).count() == 4
 
+    def test_a_round_that_admits_several_peers_still_counts_once(self):
+        """Per ROUND, not per peer: the count is occasions a job lost its
+        turn, and one round is one occasion however many peers went ahead.
+
+        The only fixture here that leaves sequential mode, and the reason
+        it has to: with a budget, ONE round can admit several later peers
+        ahead of the same candidate, which is exactly where the two
+        readings of `passed_over` come apart. Both warm jobs share the one
+        model key, so the second costs no marginal bytes and the budget
+        never binds; `passed` declares no models, so it is effectively
+        exclusive (rule 2c) and the walk stops at it rather than admitting
+        it alongside them."""
+        ModelConnection.objects.create(
+            name="warm-conn", engine="ollama", endpoint="http://ollama.local:11434",
+            model_id="warm", measured_footprint_bytes=1024**3,
+        )
+        _set_budget(memory_budget_bytes=100 * 1024**3, max_concurrent_jobs=4)
+        passed = _job()
+        first_peer = self._warm_job()
+        second_peer = self._warm_job()
+
+        claimed = claim_and_admit("w", stale_after_seconds=120,
+                                  resident_keys=self._warm_keys())
+
+        assert sorted(d["id"] for d in claimed) == [first_peer.pk, second_peer.pk]
+        passed.refresh_from_db()
+        assert passed.passed_over == 1
+
     def test_a_pinned_job_is_admitted_ahead_of_an_affine_peer(self):
         """The aging bound, end to end: within one priority a job can be
         passed over at most MAX_PASSOVERS times before it is pinned and

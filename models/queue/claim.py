@@ -262,10 +262,17 @@ def claim_and_admit(
 
         # PASS-OVER ACCOUNTING (spec 3.6). A candidate is "passed over"
         # when a peer that is LATER by strict `(priority, id)` was admitted
-        # ahead of it. Derived by comparing the order `affinity_order`
-        # produced against strict order -- using the SAME helper
-        # `plan_admissions` walks, so the ordering and the accounting can
-        # never disagree about what happened.
+        # ahead of it. Derived from the admitted set ITSELF, not from a
+        # second ordering: `plan_admissions` already walked
+        # `affinity_order`, so the highest strict `(priority, id)` key it
+        # admitted is a high-water mark, and any non-admitted candidate
+        # below it is one a later peer was admitted ahead of. Nothing here
+        # can disagree with the order that was actually walked, because
+        # nothing here re-derives it.
+        #
+        # ONE per ROUND, not per peer: this is a single increment on a
+        # candidate the round went past, however many peers went past it.
+        # The aging bound counts occasions a job lost its turn.
         #
         # ONE BULK UPDATE inside the transaction already open. The count is
         # what the aging bound reads, and it is durable precisely so a
