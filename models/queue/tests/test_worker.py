@@ -2609,6 +2609,25 @@ class TestEviction:
 
         assert engine.unload_calls == []
 
+    def test_the_budget_pass_skips_a_protected_endpoint_scope_endpoint_whole(
+            self, worker, register_engine):
+        """`_unload_endpoint`'s endpoint-scope skip-whole rule, pinned on
+        the NON-exclusive tick that is now its only caller: an exclusive
+        admission never reaches it, because the protection refusal
+        (§3.3d(2)) declines the launch before any HTTP. Here no exclusive
+        job is admitted, nothing is refused, and one call at this endpoint
+        would still take the protected model with it."""
+        engine = register_engine(FakeEndpointScopeEngine("e", installed=[
+            _installed("needed", loaded=True, loaded_size=9 * GB),
+            _installed("spare", loaded=True, loaded_size=9 * GB),
+        ]))
+        _set_budget(memory_budget_bytes=1 * GB)
+        _running_job_holding("e", ENDPOINT, "needed")
+
+        worker._evict_to_match_plan([])
+
+        assert engine.unload_calls == []
+
     # --- reach ----------------------------------------------------------
 
     def test_an_exclusive_admission_sweeps_every_registered_endpoint(
@@ -2796,6 +2815,287 @@ class TestTheInFlightRefsMapNeverLeaks:
         worker._prune_finished_futures()
 
         assert ("e", ENDPOINT, "x:latest") not in worker._protected_keys()
+
+
+# --- the exclusive barrier ----------------------------------------------------
+
+
+def _refuse_once(worker, claimed, job):
+    """One eviction pass, with `job`'s row put back the way a re-claim
+    would leave it first: RUNNING, under this descriptor's own claim
+    token. A refused job is handed straight back to the queue, so a
+    SECOND refusal only ever happens because admission claimed it again
+    -- reproduced here because these tests call the pass directly rather
+    than through `tick()`, and both refusal writers are deliberately
+    token-conditional."""
+    InferenceJob.objects.filter(pk=job.pk).update(
+        state=RUNNING, claim_token=claimed[0]["claim_token"], claimed_by="test-worker",
+    )
+    return worker._evict_to_match_plan(claimed)
+
+
+@pytest.mark.django_db
+class TestTheExclusiveBarrier:
+    """Spec §3.3(d): an exclusive job does not start until the memory it
+    was promised has actually been released -- and `False` from the
+    barrier-polling adapter is ambiguous, so the rules about WHICH `False`
+    counts are the whole mechanism."""
+
+    def test_a_protected_endpoint_refuses_the_launch_before_any_http(
+            self, worker, register_engine):
+        """The fifth ordering rule: no `list_installed` may be called on a
+        tick refused for a protected endpoint -- otherwise the refusal
+        costs a full cross-engine probe every 0.5s for the whole life of
+        the protecting attempt."""
+        engine = register_engine(FakeEndpointScopeEngine("e", installed=[
+            _installed("someone-elses", loaded=True),
+        ]))
+        _running_job_holding("e", ENDPOINT, "someone-elses")
+        admitted = _admitted_exclusive("e", ENDPOINT, "mine")
+
+        refused = worker._evict_to_match_plan([admitted])
+
+        assert refused == {admitted["id"]}
+        assert engine.list_installed_calls == 0
+
+    def test_a_protection_refusal_never_counts_toward_the_failure_bound(
+            self, worker, register_engine, monkeypatch):
+        """An agent turn is planned exclusive, so counting these would fail
+        three consecutive chat turns for an ordinary long-running foreign
+        job the queue was CORRECTLY waiting for. The protection wait is
+        bounded by the live attempt's own end; the informative barrier
+        refusal is not."""
+        monkeypatch.setattr(worker_module, "MIN_BARRIER_REFUSAL_SPAN_SECONDS", 0)
+        register_engine(FakeEndpointScopeEngine("e", installed=[
+            _installed("someone-elses", loaded=True),
+        ]))
+        _running_job_holding("e", ENDPOINT, "someone-elses")
+        claimed = [_admitted_exclusive("e", ENDPOINT, "mine")]
+        job = InferenceJob.objects.get(pk=claimed[0]["id"])
+
+        for _ in range(4):
+            _refuse_once(worker, claimed, job)
+
+        job.refresh_from_db()
+        assert job.state == QUEUED
+        assert worker._barrier_refusals == {}
+
+    def test_a_believed_resident_false_blocks_the_launch_and_warns(
+            self, worker, register_engine, caplog):
+        engine = register_engine(FakeEngine("e", installed=[
+            _installed("mine", loaded=True), _installed("spare", loaded=True),
+        ]))
+        engine.unload_returns = False
+        claimed = [_admitted_exclusive("e", ENDPOINT, "mine")]
+
+        with caplog.at_level(logging.INFO, logger="models.queue.worker"):
+            refused = worker._evict_to_match_plan(claimed)
+
+        assert refused == {claimed[0]["id"]}
+        assert any(r.levelname == "WARNING" for r in caplog.records)
+
+    def test_a_precautionary_false_does_not_block_the_launch(
+            self, worker, register_engine, caplog):
+        """A cold, empty endpoint is the COMMON case after a restart, and
+        the adapter returns False there after burning its settle poll. A
+        rule that refused on it would make an exclusive job unlaunchable
+        not for one tick but for ever."""
+        engine = register_engine(FakeEndpointScopeEngine("e", installed=[]))
+        engine.unload_returns = False
+        claimed = [_admitted_exclusive("e", ENDPOINT, "mine")]
+
+        with caplog.at_level(logging.INFO, logger="models.queue.worker"):
+            refused = worker._evict_to_match_plan(claimed)
+
+        assert refused == set()
+        assert engine.unload_calls          # the precautionary call WAS made
+        assert all(r.levelname != "WARNING" for r in caplog.records)
+
+    def test_an_authoritative_empty_endpoint_gets_no_precautionary_call(
+            self, worker, register_engine):
+        """It actually knows nothing is resident: there is nothing to
+        barrier and nothing its answer could add. This narrowing is what
+        keeps a 30s no-rise poll off every chat turn."""
+        engine = register_engine(FakeEngine("e", installed=[]))   # residency_authority="endpoint"
+
+        worker._evict_to_match_plan([_admitted_exclusive("e", ENDPOINT, "mine")])
+
+        assert engine.unload_calls == []
+
+    def test_a_memo_backed_empty_endpoint_does_get_one(self, worker, register_engine):
+        """The safe default, pinned as its own case: absent or "memo" means
+        an empty answer may only mean this process forgot."""
+        engine = register_engine(FakeEndpointScopeEngine("e", installed=[]))
+
+        worker._evict_to_match_plan([_admitted_exclusive("e", ENDPOINT, "mine")])
+
+        assert engine.unload_calls == [(ENDPOINT, "mine")]
+
+    def test_an_endpoint_whose_snapshot_raised_gets_one_too(self, worker, register_engine):
+        """An absent entry in `installed_by_endpoint` means the belief here
+        is worth nothing, whether the engine never offered the method or
+        the call blew up -- the same precautionary call either way."""
+        engine = register_engine(FakeEngineListInstalledRaises("e"))
+
+        worker._evict_to_match_plan([_admitted_exclusive("e", ENDPOINT, "mine")])
+
+        assert engine.unload_calls == [(ENDPOINT, "mine")]
+
+    def test_a_foreign_endpoint_with_no_registered_model_id_is_not_barriered(
+            self, worker, register_engine, settings):
+        """The named residual (spec §11): the unload seam takes a model_id
+        and a configured endpoint with no connection row supplies none."""
+        settings.INFERENCE_DEFAULT_ENDPOINTS = {"ghost": "http://ghost:1"}
+        ghost = register_engine(FakeEndpointScopeEngine("ghost", installed=[]))
+        register_engine(FakeEndpointScopeEngine("e", installed=[]))
+
+        worker._evict_to_match_plan([_admitted_exclusive("e", ENDPOINT, "mine")])
+
+        assert ghost.unload_calls == []
+
+    # --- the refusal bound, count AND wall clock -------------------------
+
+    def test_three_informative_refusals_inside_the_span_do_not_fail_the_job(
+            self, worker, register_engine, monkeypatch):
+        monkeypatch.setattr(worker_module, "MIN_BARRIER_REFUSAL_SPAN_SECONDS", 10_000)
+        engine = register_engine(FakeEngine("e", installed=[
+            _installed("mine", loaded=True), _installed("spare", loaded=True),
+        ]))
+        engine.unload_returns = False
+        claimed = [_admitted_exclusive("e", ENDPOINT, "mine")]
+        job = InferenceJob.objects.get(pk=claimed[0]["id"])
+
+        for _ in range(3):
+            _refuse_once(worker, claimed, job)
+
+        job.refresh_from_db()
+        assert job.state == QUEUED
+
+    def test_both_bounds_together_fail_it_with_an_operator_readable_error(
+            self, worker, register_engine, monkeypatch):
+        monkeypatch.setattr(worker_module, "MIN_BARRIER_REFUSAL_SPAN_SECONDS", 0)
+        engine = register_engine(FakeEngine("e", installed=[
+            _installed("mine", loaded=True), _installed("spare", loaded=True),
+        ]))
+        engine.unload_returns = False
+        claimed = [_admitted_exclusive("e", ENDPOINT, "mine")]
+        job = InferenceJob.objects.get(pk=claimed[0]["id"])
+
+        for _ in range(worker_module.MAX_BARRIER_REFUSALS):
+            _refuse_once(worker, claimed, job)
+
+        job.refresh_from_db()
+        assert job.state == FAILED
+        # The specced sentence, not a substring that cannot fail: an
+        # earlier draft asserted `"e" in job.error`, which is true of
+        # almost any English sentence. Assert the engine NAME as the error
+        # actually renders it, the endpoint, and the count.
+        assert "did not release memory" in job.error
+        assert "engine 'e'" in job.error
+        assert ENDPOINT in job.error
+        assert "3 attempts" in job.error
+
+    def test_a_successful_barrier_resets_the_count(self, worker, register_engine):
+        engine = register_engine(FakeEngine("e", installed=[
+            _installed("mine", loaded=True), _installed("spare", loaded=True),
+        ]))
+        claimed = [_admitted_exclusive("e", ENDPOINT, "mine")]
+        worker._barrier_refusals[claimed[0]["id"]] = (2, time.monotonic())
+
+        refused = worker._evict_to_match_plan(claimed)
+
+        assert refused == set()
+        assert engine.unload_calls == [(ENDPOINT, "spare")]
+        assert worker._barrier_refusals.get(claimed[0]["id"]) is None
+
+    def test_a_refused_job_takes_a_holdoff_and_keeps_its_attempts(
+            self, worker, register_engine):
+        """It never ran: state back to queued, token cleared, attempts
+        untouched, `not_before` in the future."""
+        engine = register_engine(FakeEngine("e", installed=[
+            _installed("mine", loaded=True), _installed("spare", loaded=True),
+        ]))
+        engine.unload_returns = False
+        claimed = [_admitted_exclusive("e", ENDPOINT, "mine")]
+        job = InferenceJob.objects.get(pk=claimed[0]["id"])
+
+        _refuse_once(worker, claimed, job)
+
+        job.refresh_from_db()
+        assert job.state == QUEUED
+        assert job.claim_token is None
+        assert job.attempts == 0
+        assert job.not_before > timezone.now()
+
+    def test_every_refusal_path_pops_the_active_token(self, worker, register_engine):
+        """A refused descriptor NEVER reaches `_launch`, so no Future is
+        ever created for it and `_prune_finished_futures` can never clean
+        it up -- exactly what `_requeue_unlaunched`'s own docstring warns
+        about. Both refusal writers pop it first."""
+        engine = register_engine(FakeEngine("e", installed=[
+            _installed("mine", loaded=True), _installed("spare", loaded=True),
+        ]))
+        engine.unload_returns = False
+        claimed = [_admitted_exclusive("e", ENDPOINT, "mine")]
+        job = InferenceJob.objects.get(pk=claimed[0]["id"])
+        with worker._active_lock:
+            worker._active_tokens[job.pk] = claimed[0]["claim_token"]
+
+        _refuse_once(worker, claimed, job)
+
+        with worker._active_lock:
+            assert worker._active_tokens == {}
+
+    def test_a_failed_refusal_pops_the_active_token_too(
+            self, worker, register_engine, monkeypatch):
+        monkeypatch.setattr(worker_module, "MIN_BARRIER_REFUSAL_SPAN_SECONDS", 0)
+        engine = register_engine(FakeEngine("e", installed=[
+            _installed("mine", loaded=True), _installed("spare", loaded=True),
+        ]))
+        engine.unload_returns = False
+        claimed = [_admitted_exclusive("e", ENDPOINT, "mine")]
+        job = InferenceJob.objects.get(pk=claimed[0]["id"])
+
+        for _ in range(worker_module.MAX_BARRIER_REFUSALS):
+            with worker._active_lock:
+                worker._active_tokens[job.pk] = claimed[0]["claim_token"]
+            _refuse_once(worker, claimed, job)
+
+        job.refresh_from_db()
+        assert job.state == FAILED
+        with worker._active_lock:
+            assert worker._active_tokens == {}
+
+
+@pytest.mark.django_db(transaction=True)
+class TestARefusedJobIsNeverLaunched:
+    """`tick()`'s half of the contract, which needs a real claim round --
+    hence `transaction=True`, this module's documented rule for any test
+    that goes through `tick()`.
+
+    Refused through an INFORMATIVE barrier refusal rather than a
+    protected endpoint, deliberately: a protection refusal needs a live
+    foreign job at the endpoint, and `models.queue.scheduler` rule 3 would
+    then never admit the exclusive job in the first place, so the
+    assertion would pass for the wrong reason."""
+
+    def test_a_refused_job_is_never_launched_this_tick(self, worker, register_engine, monkeypatch):
+        launched = []
+        monkeypatch.setattr(worker, "_launch", lambda d: launched.append(d["id"]))
+        _register("test.echo")
+        engine = register_engine(FakeEngine("e", installed=[_installed("spare", loaded=True)]))
+        engine.unload_returns = False
+        _set_budget(memory_budget_bytes=None, max_concurrent_jobs=4)
+        job = _job(state=QUEUED, exclusive=True, model_refs=[
+            _ref(engine="e", endpoint=ENDPOINT, model_id="mine"),
+        ])
+
+        worker.tick()
+
+        assert launched == []
+        job.refresh_from_db()
+        assert job.state == QUEUED
+        assert job.not_before > timezone.now()
 
 
 # --- S6: one settings read per tick ------------------------------------------

@@ -99,6 +99,13 @@ def _set_budget(*, memory_budget_bytes=None, max_concurrent_jobs=4):
     settings.save()
 
 
+def _queued_job(*, priority: int = 100, **extra) -> InferenceJob:
+    """A plain queued row that can carry a `not_before` -- the hold-off's
+    admission-side tests are about the candidate query alone, so nothing
+    else about the row matters."""
+    return _job(priority=priority, state=QUEUED, **extra)
+
+
 def _running_job(*, kind: str, heartbeat_age_seconds: int) -> InferenceJob:
     """One RUNNING row whose heartbeat is `heartbeat_age_seconds` old --
     the only shape the orphan sweep's tests care about."""
@@ -633,3 +640,34 @@ class TestKindAwareStaleness:
 
         with django_assert_num_queries(1):
             _sweep_orphans(120)
+
+
+@pytest.mark.django_db
+class TestTheHoldOff:
+    """`not_before` (spec §3.3d), the ONE new admission-side filter this
+    track adds -- an extra `WHERE` on the existing candidate `SELECT`."""
+
+    def test_a_job_held_off_into_the_future_is_not_a_candidate(self):
+        _queued_job(not_before=timezone.now() + timedelta(seconds=60))
+
+        assert claim_and_admit("w", stale_after_seconds=120) == []
+
+    def test_it_becomes_a_candidate_again_once_the_time_passes(self):
+        job = _queued_job(not_before=timezone.now() - timedelta(seconds=1))
+
+        assert [d["id"] for d in claim_and_admit("w", stale_after_seconds=120)] == [job.pk]
+
+    def test_a_null_not_before_is_claimable_as_always(self):
+        job = _queued_job()
+
+        assert [d["id"] for d in claim_and_admit("w", stale_after_seconds=120)] == [job.pk]
+
+    def test_a_held_off_head_does_not_block_the_job_behind_it(self):
+        """Time-bounded and self-clearing: the exclusion is what makes the
+        deadlock proof survive (ADR amendment §3), so a peer may be
+        admitted ahead of a held-off job and the held-off job returns to
+        its own head position the moment the hold-off expires."""
+        _queued_job(priority=100, not_before=timezone.now() + timedelta(seconds=60))
+        behind = _queued_job(priority=100)
+
+        assert [d["id"] for d in claim_and_admit("w", stale_after_seconds=120)] == [behind.pk]

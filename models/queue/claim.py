@@ -158,6 +158,17 @@ def claim_and_admit(
        sets, resolve `footprint_for(engine, endpoint, model_id)` FRESH,
        right now -- never the row's stored/stamped snapshot, which is
        display/history data only (`scheduler.py`'s provenance contract).
+
+       `not_before` (spec §3.3d) is the ONE new admission-side filter this
+       track adds -- an extra `WHERE` on this same SELECT, not a second
+       statement. A job the worker refused to launch this tick is excluded
+       until its hold-off expires, so it cannot be re-claimed on every 0.5s
+       tick against an engine that is still holding memory. The no-backfill
+       deadlock proof survives because the exclusion is time-bounded and
+       SELF-CLEARING -- the job returns to its own head position the moment
+       the hold-off passes, and an effectively-exclusive head is still
+       admitted alone the instant the machine is idle -- so nothing can
+       wait behind it for ever.
     4. `plan_admissions(candidates, running, budget_bytes=<row>.
        memory_budget_bytes, max_concurrent=<row>.max_concurrent_jobs)`,
        `<row>` being the threaded `settings_row` or this function's own
@@ -204,9 +215,11 @@ def claim_and_admit(
             _sweep_orphans(stale_after_seconds)
 
         running_rows = list(InferenceJob.objects.filter(state=RUNNING))
+        now = timezone.now()
         candidate_rows = list(
             InferenceJob.objects.select_for_update(skip_locked=True)
             .filter(state=QUEUED)
+            .filter(Q(not_before__isnull=True) | Q(not_before__lte=now))
             .order_by("priority", "id")[:CANDIDATE_WINDOW]
         )
 

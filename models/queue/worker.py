@@ -50,6 +50,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import timedelta
 
 from django.db import close_old_connections
 from django.db import connection as db_connection
@@ -196,6 +197,28 @@ BOOT_SCHEMA_WAIT_SECONDS = 3.0
 _UNLOAD_SCOPES = ("model", "endpoint")
 _RESIDENCY_AUTHORITIES = ("endpoint", "memo")
 
+# How long a barrier-refused (or protection-refused) job waits before it
+# may be claimed again, written to `InferenceJob.not_before`. COMFORTABLY
+# LONGER THAN ONE UNLOAD TIMEOUT (30s on the engine that polls), so a
+# refused job is not re-claimed on every 0.5s tick and the retries the
+# refusal bound counts are genuinely spaced.
+BARRIER_HOLDOFF_SECONDS = 45
+
+# How many INFORMATIVE barrier refusals a job may accumulate before it is
+# failed -- and see the span below, which must ALSO be satisfied. A
+# PROTECTION refusal is deliberately not counted here: that wait is
+# bounded by the live attempt's own end, and since an agent turn is
+# planned exclusive, counting it would fail three consecutive chat turns
+# for an ordinary long-running foreign job at a shared endpoint.
+MAX_BARRIER_REFUSALS = 3
+
+# ...because counting refusals alone is a trap. An informative `False` is
+# exactly what a BUSY engine returns (the adapter withholds True while a
+# prompt is still running), so three refusals could elapse in barely more
+# than the time three unload calls take. A job is failed only once BOTH
+# bounds are met, so "three attempts" can never mean "a second and a half".
+MIN_BARRIER_REFUSAL_SPAN_SECONDS = 300
+
 
 class Worker:
     """One worker process: claims admitted jobs and runs them in a thread
@@ -317,6 +340,24 @@ class Worker:
         # every key there). Read by the capped budget pass immediately
         # after each call, on the tick thread alone.
         self._last_unload_calls = 0
+
+        # The believed-resident keys whose `unload()` call came back
+        # `False` during THIS eviction pass -- reset at the top of
+        # `_evict_to_match_plan` and read by `_barrier`. Spec §3.3d(4)
+        # honours `False` ONLY for a call made against a believed-resident
+        # model, and this set is exactly that population: a PRECAUTIONARY
+        # call's `False` never lands here, because the adapter cannot tell
+        # "nothing freed" from "nothing to free".
+        self._unload_refusals: set[tuple[str, str, str]] = set()
+
+        # {job_id: (informative refusal count, first refusal's monotonic
+        # reading)} -- the barrier's refusal bound, which is count AND
+        # wall clock (see `MAX_BARRIER_REFUSALS` /
+        # `MIN_BARRIER_REFUSAL_SPAN_SECONDS`). In-process on purpose: it
+        # is the bound on how long THIS worker keeps retrying, and the
+        # durable half of the mechanism is `InferenceJob.not_before`,
+        # which survives the restart this map does not.
+        self._barrier_refusals: dict[int, tuple[int, float]] = {}
 
         self._last_heartbeat_monotonic: float | None = None
 
@@ -523,14 +564,19 @@ class Worker:
             for descriptor in claimed:
                 self._active_tokens[descriptor["id"]] = descriptor["claim_token"]
 
-        self._evict_to_match_plan(claimed, settings_row=settings_row)
+        refused = self._evict_to_match_plan(claimed, settings_row=settings_row)
         self._maybe_heartbeat()
 
         if self._stopping.is_set():
-            self._requeue_unlaunched(claimed)
+            # A refused descriptor has already been handed back (and its
+            # token popped) by the refusal writers -- requeueing it twice
+            # would clobber the hold-off just written to it.
+            self._requeue_unlaunched([d for d in claimed if d["id"] not in refused])
             return
 
         for descriptor in claimed:
+            if descriptor["id"] in refused:
+                continue
             self._launch(descriptor)
 
     def _requeue_unlaunched(self, claimed: list[dict]) -> None:
@@ -1538,6 +1584,10 @@ class Worker:
             if unload(endpoint, model.model_id):
                 released.add(key)
             else:
+                # An INFORMATIVE refusal: the call was made against a
+                # model this snapshot says is resident, so `False` means
+                # what it says (§3.3d(4)) and the barrier may honour it.
+                self._unload_refusals.add(key)
                 logger.warning(
                     "worker: eviction unload refused for %s at %s (%s)",
                     model.model_id, endpoint, engine_name,
@@ -1579,6 +1629,10 @@ class Worker:
         accepted = unload(endpoint, addressed)
         self._maybe_heartbeat()
         if not accepted:
+            # Informative for every key here, not only the one addressed:
+            # at this scope the call was made against the whole
+            # believed-resident set (§3.3d(4)).
+            self._unload_refusals |= keys
             logger.warning(
                 "worker: eviction unload refused for %s at %s (%s)",
                 addressed, endpoint, engine_name,
@@ -1670,6 +1724,273 @@ class Worker:
             remaining -= self._last_unload_calls
         return released
 
+    # --- the exclusive barrier (spec §3.3d) ---------------------------------
+
+    def _protection_refusal(
+        self, claimed: list[dict], endpoints: set[tuple[str, str]],
+        protected_keys: set[tuple[str, str, str]],
+        own_keys_by_job: dict[int, set[tuple[str, str, str]]],
+    ) -> set[int]:
+        """PART 2 of the barrier (§3.3d(2)): an admitted EXCLUSIVE job is
+        not launched this tick if ANY endpoint in the swept set holds a
+        protected key that is not its own. Returns the job ids refused,
+        having already handed each one back to the queue.
+
+        BEFORE ANY HTTP -- `_evict_to_match_plan`'s FIFTH ORDERING RULE,
+        and the ordering is about cost, not taste: `protected_keys` comes
+        from database rows and this process's own maps and needs no
+        network at all, while evaluating it AFTER the residency snapshot
+        would pay a full cross-engine probe on every 0.5s tick for the
+        entire life of the protecting attempt -- a cold load measured in
+        minutes on this hardware.
+
+        THE §3.3(c) EXCEPTION IS INCLUDED, which is why `own_keys_by_job`
+        is a parameter: the admitted job's OWN key at its OWN endpoint
+        does not refuse its own launch. Anything else does, at either
+        unload scope -- a model-scope endpoint can spare the protected
+        model, but the memory it occupies is memory the exclusive job was
+        promised and is not going to get this tick.
+
+        NEVER TOUCHES `self._barrier_refusals` (review M6). Spec §3.3d(5)
+        counts INFORMATIVE refusals; this wait is bounded by the live
+        attempt's own end, and since an agent turn is planned exclusive,
+        counting it would fail three consecutive chat turns for an
+        ordinary long-running foreign job at a shared endpoint -- a job
+        the queue was correctly waiting for.
+        """
+        refused: set[int] = set()
+        for descriptor in claimed:
+            own_keys = own_keys_by_job.get(descriptor["id"])
+            if own_keys is None:
+                continue
+            blocking = sorted(
+                key for key in protected_keys
+                if (key[0], key[1]) in endpoints and key not in own_keys
+            )
+            if not blocking:
+                continue
+            engine_name, endpoint, _model_id = blocking[0]
+            logger.warning(
+                "worker: not launching exclusive job %s this tick -- %s at %s (engine %r) "
+                "is protected by live work; the job is queued again for %ss",
+                descriptor["id"], ", ".join(key[2] for key in blocking), endpoint,
+                engine_name, BARRIER_HOLDOFF_SECONDS,
+            )
+            self._requeue_refused(descriptor)
+            refused.add(descriptor["id"])
+        return refused
+
+    def _barrier(
+        self, claimed: list[dict], endpoints: set[tuple[str, str]],
+        installed_by_endpoint: dict[tuple[str, str], list],
+        model_ids_by_endpoint: dict[tuple[str, str], tuple[str, ...]],
+        protected_keys: set[tuple[str, str, str]],
+        own_keys_by_job: dict[int, set[tuple[str, str, str]]],
+    ) -> set[int]:
+        """PARTS 3 AND 4 of the barrier: the PRECAUTIONARY calls, and then
+        reading what the unload calls actually said. Returns the job ids
+        refused by an INFORMATIVE `False`, having already handed each one
+        back to the queue (or failed it, once both bounds are met).
+
+        Runs AFTER `_evict_exclusive_endpoints`, whose calls against
+        believed-resident models are the ones whose answers count -- they
+        arrive here through `self._unload_refusals`.
+
+        A PRECAUTIONARY CALL is issued at an endpoint where the belief is
+        worth nothing: either `installed_by_endpoint` has no entry for it
+        (the snapshot was unavailable or raised) or the entry has no
+        loaded model AND the engine declares -- or defaults to --
+        `residency_authority="memo"`. An engine declaring
+        `residency_authority="endpoint"` that reports nothing gets NO
+        call: it actually knows nothing is resident, so there is nothing
+        to barrier and nothing its answer could add, and that narrowing is
+        what keeps a 30s no-rise poll off every chat turn.
+
+        A PRECAUTIONARY `False` IS INFO AND DOES NOT REFUSE (§3.3d(4)):
+        the adapter cannot tell "nothing freed" from "nothing to free",
+        and a cold, empty endpoint is the common case after a restart --
+        a rule that refused there would make an exclusive job
+        unlaunchable not for one tick but for ever.
+        """
+        for endpoint_key in sorted(endpoints):
+            engine_name, endpoint = endpoint_key
+            installed = installed_by_endpoint.get(endpoint_key)
+            if installed is not None and any(model.loaded for model in installed):
+                continue
+            engine_obj = self._get_engine_or_none(engine_name)
+            if engine_obj is None:
+                continue
+            if installed is not None and self._residency_authority(engine_obj) == "endpoint":
+                continue
+            unload = getattr(engine_obj, "unload", None)
+            if unload is None:
+                self._warn_missing_method_once(engine_name, "unload")
+                continue
+            addressed = self._barrier_address(endpoint_key, claimed, model_ids_by_endpoint)
+            if addressed is None:
+                logger.info(
+                    "worker: no precautionary barrier call at %s (%s) -- nothing registered "
+                    "there supplies a model id to address the unload with",
+                    endpoint, engine_name,
+                )
+                continue
+
+            # THE PRECAUTIONARY CALL DOES NOT ROUTE THROUGH
+            # `_unload_endpoint`, and cannot: there is no
+            # believed-resident model to iterate. `_unload_endpoint` is
+            # the one place a BELIEVED-RESIDENT model is unloaded; this
+            # is the one place a call is made precisely because the
+            # belief is worth nothing. Its `False` is INFO and does not
+            # refuse (§3.3d(4)).
+            accepted = unload(endpoint, addressed)
+            self._maybe_heartbeat()
+            logger.info(
+                "worker: unload %s at %s (%s), scope %s, precautionary barrier -- %s",
+                addressed, endpoint, engine_name, self._unload_scope(engine_obj),
+                "accepted" if accepted else "refused",
+            )
+
+        if not self._unload_refusals:
+            # A SUCCESSFUL barrier resets the count -- an engine that
+            # released its memory this time has not been failing for
+            # three spaced attempts.
+            for job_id in own_keys_by_job:
+                self._barrier_refusals.pop(job_id, None)
+            return set()
+
+        engine_name, endpoint, _model_id = sorted(self._unload_refusals)[0]
+        refused: set[int] = set()
+        for descriptor in claimed:
+            job_id = descriptor["id"]
+            if job_id not in own_keys_by_job:
+                continue
+            logger.warning(
+                "worker: not launching exclusive job %s this tick -- engine %r at %s refused "
+                "to release %s; the job is queued again for %ss",
+                job_id, engine_name, endpoint,
+                ", ".join(sorted(key[2] for key in self._unload_refusals)),
+                BARRIER_HOLDOFF_SECONDS,
+            )
+            if self._record_barrier_refusal(job_id):
+                count, first = self._barrier_refusals.get(job_id, (MAX_BARRIER_REFUSALS, 0.0))
+                self._fail_barrier_refused(
+                    descriptor, engine_name, endpoint, time.monotonic() - first,
+                )
+            else:
+                self._requeue_refused(descriptor)
+            refused.add(job_id)
+        return refused
+
+    @staticmethod
+    def _barrier_address(
+        endpoint_key: tuple[str, str], claimed: list[dict],
+        model_ids_by_endpoint: dict[tuple[str, str], tuple[str, ...]],
+    ) -> str | None:
+        """SOME model id to address a precautionary unload at this
+        endpoint with, or `None` when nothing supplies one.
+
+        The admitted exclusive job's OWN ref wins where the endpoint is
+        its own -- that is the model it is about to load, named in the
+        spelling the job itself uses. Otherwise the endpoint's registered
+        connection ids, from `registered_endpoints()`. A CONFIGURED
+        endpoint with no connection row yields neither, and is simply not
+        barriered: a named residual (spec §11), never papered over with a
+        synthetic id the engine would not recognise.
+        """
+        for descriptor in claimed:
+            if not descriptor.get("exclusive"):
+                continue
+            for ref in descriptor["model_refs"]:
+                if (ref["engine"], norm_endpoint(ref["endpoint"])) == endpoint_key:
+                    return ref["model_id"]
+        model_ids = model_ids_by_endpoint.get(endpoint_key) or ()
+        return model_ids[0] if model_ids else None
+
+    def _record_barrier_refusal(self, job_id: int) -> bool:
+        """Count one INFORMATIVE refusal for `job_id`, and answer whether
+        the job should now be FAILED -- `True` only once BOTH bounds are
+        met: `MAX_BARRIER_REFUSALS` refusals AND
+        `MIN_BARRIER_REFUSAL_SPAN_SECONDS` elapsed since the first.
+
+        Both, because counting refusals alone is a trap: an informative
+        `False` is exactly what a BUSY engine returns, so three of them
+        could elapse in barely more than the time three unload calls
+        take, and "three attempts" would mean "a second and a half".
+        """
+        count, first = self._barrier_refusals.get(job_id, (0, time.monotonic()))
+        count += 1
+        self._barrier_refusals[job_id] = (count, first)
+        return (
+            count >= MAX_BARRIER_REFUSALS
+            and (time.monotonic() - first) >= MIN_BARRIER_REFUSAL_SPAN_SECONDS
+        )
+
+    def _requeue_refused(self, descriptor: dict) -> None:
+        """Hand a REFUSED descriptor back to the queue with a hold-off.
+
+        POPS `self._active_tokens[job_id]` UNDER THE LOCK FIRST, before
+        the conditional UPDATE, matching `_requeue_unlaunched`'s shape and
+        for the reason that method's own docstring gives: a refused
+        descriptor never reaches `_launch`, so no `Future` exists for it
+        and `_prune_finished_futures` can never clean it up; a lingering
+        token would have `_maybe_heartbeat` refreshing a row that is
+        `queued` again, for ever.
+
+        `attempts` IS DELIBERATELY UNTOUCHED -- the job never ran. What
+        is written is the durable half of the mechanism: `not_before =
+        now + BARRIER_HOLDOFF_SECONDS`, which the candidate query honours
+        (`models.queue.claim`), so the job is not re-claimed on every
+        0.5s tick against an engine that is still holding memory.
+        Token-conditional for the same reason every other writeback in
+        this module is.
+        """
+        job_id = descriptor["id"]
+        with self._active_lock:
+            self._active_tokens.pop(job_id, None)
+        InferenceJob.objects.filter(
+            pk=job_id, state=RUNNING, claim_token=descriptor["claim_token"],
+        ).update(
+            state=QUEUED, claimed_by="", claim_token=None,
+            started_at=None, heartbeat_at=None,
+            not_before=timezone.now() + timedelta(seconds=BARRIER_HOLDOFF_SECONDS),
+        )
+
+    def _fail_barrier_refused(
+        self, descriptor: dict, engine_name: str, endpoint: str, span_seconds: float,
+    ) -> None:
+        """Fail a job that has now met BOTH refusal bounds, with an error
+        an operator can act on: which engine, at which address, refused to
+        release memory, how many attempts, over how long (owner decision
+        6 -- an honest job failure, never a silent forever-wait).
+
+        Pops the active token under the lock FIRST, exactly like
+        `_requeue_refused`, and schedules the kind's `on_terminal` hook
+        with `transaction.on_commit` the way
+        `models.queue.claim._sweep_orphans`'s second-orphaning branch
+        does -- a feature-app hook is arbitrary code and never runs inline
+        on this path.
+        """
+        job_id = descriptor["id"]
+        minutes = max(1, round(span_seconds / 60)) if span_seconds >= 30 else 0
+        error = (
+            "engine '%s' at %s did not release memory for this exclusive job after "
+            "%s attempts over %s minutes; it was not retried again"
+            % (engine_name, endpoint, MAX_BARRIER_REFUSALS, minutes)
+        )
+        with self._active_lock:
+            self._active_tokens.pop(job_id, None)
+        failed = InferenceJob.objects.filter(
+            pk=job_id, state=RUNNING, claim_token=descriptor["claim_token"],
+        ).update(state=FAILED, finished_at=timezone.now(), error=error)
+        self._barrier_refusals.pop(job_id, None)
+        if not failed:
+            return
+        logger.warning("worker: job %s failed -- %s", job_id, error)
+        transaction.on_commit(
+            lambda kind=descriptor["kind"], payload=descriptor["payload"]:
+            invoke_on_terminal(kind, payload, "failed")
+        )
+
     def _evict_to_match_plan(
         self, claimed: list[dict], *, settings_row: JobSettings | None = None,
     ) -> set[int]:
@@ -1678,8 +1999,9 @@ class Worker:
         machine's ACTUAL resident memory match that plan before any newly
         admitted job's handler starts -- called once per tick, right
         after `claim_and_admit`, before any of `claimed` is launched.
-        Returns the set of job ids this tick REFUSED to launch (empty
-        until the barrier lands).
+        Returns the set of job ids this tick REFUSED to launch -- each
+        already handed back to the queue with a hold-off (or failed, once
+        both refusal bounds are met); `tick()` simply skips them.
 
         `settings_row` (S6) is `tick()`'s own already-fetched row,
         threaded in so the tick pays ONE `JobSettings` read rather than
@@ -1714,6 +2036,17 @@ class Worker:
            verdict.
         4. Pass 1, the exclusive pass, uncapped; then pass 2, the capped
            budget-driven pass, only when the budget says so.
+
+        FIVE ORDERING RULES, and none of them is optional: phase 1
+        answering `None` is what stops phase 2 probing an engine for
+        nothing; phase 2's `over_budget` is what gates pass 2 and nothing
+        else; pass 1 must run before pass 2 so an exclusive endpoint is
+        emptied uncapped rather than nibbled at under the cap; the
+        barrier's answers can only be read after pass 1 has made the
+        calls; and -- THE FIFTH -- the protection check runs BEFORE the
+        residency snapshot, because it needs no network and evaluating it
+        after would pay a full cross-engine probe on every 0.5s tick for
+        the entire life of the protecting attempt.
 
         Exclusive-endpoint eviction is UNCAPPED -- deliberately NOT
         subject to `MAX_UNLOADS_PER_TICK` (review finding, T4 round 3).
@@ -1754,13 +2087,28 @@ class Worker:
         """
         row = settings_row if settings_row is not None else JobSettings.get_solo()
         budget_bytes = row.memory_budget_bytes
+        self._unload_refusals = set()
 
         targets = self._eviction_targets(claimed)
         if targets is None:
             return set()
-        endpoints, own_endpoints, _model_ids_by_endpoint = targets
+        endpoints, own_endpoints, model_ids_by_endpoint = targets
 
         protected_keys = self._protected_keys()
+        own_keys_by_job = self._own_keys_by_job(claimed)
+
+        # THE FIFTH ORDERING RULE (§3.3d(2)): protection is evaluated
+        # BEFORE phase 2's residency snapshot, and the reason is cost
+        # rather than taste -- see `_protection_refusal`'s own docstring.
+        # A tick refused here has made no HTTP call at all, which is what
+        # keeps a refusal from costing a full cross-engine probe every
+        # 0.5s for the whole life of the protecting attempt.
+        refused = self._protection_refusal(
+            claimed, endpoints, protected_keys, own_keys_by_job,
+        )
+        if refused:
+            return refused
+
         installed_by_endpoint, believed_resident, over_budget = self._residency_snapshot(
             endpoints, claimed, budget_bytes,
         )
@@ -1769,11 +2117,15 @@ class Worker:
         swept_exclusively: set[tuple[str, str]] = set()
         if own_endpoints:
             own_keys: set[tuple[str, str, str]] = set()
-            for keys in self._own_keys_by_job(claimed).values():
+            for keys in own_keys_by_job.values():
                 own_keys |= keys
             swept_exclusively = endpoints
             released |= self._evict_exclusive_endpoints(
                 endpoints, installed_by_endpoint, protected_keys, own_keys,
+            )
+            refused = self._barrier(
+                claimed, endpoints, installed_by_endpoint, model_ids_by_endpoint,
+                protected_keys, own_keys_by_job,
             )
 
         if over_budget:
@@ -1792,7 +2144,7 @@ class Worker:
         # set, written and read on the tick thread alone: no lock and no
         # pruning contract.
         self._resident_keys = frozenset(believed_resident - released)
-        return set()
+        return refused
 
     _warned_missing_methods: set[tuple[str, str]] = set()
 
