@@ -2451,3 +2451,39 @@ the replayed corpus grows: when a turn is queued, and when it finishes. The poll
 body carries three integers and nothing else. The window, the bands and every
 sentence stay with the page, which is the only place that knows the picker's
 current selection.
+
+## The agent pages
+
+`/chat/agents/` lists the agents this principal may edit; `/settings/agents/` lists
+every agent on the box, for an administrator. **One edit route serves both** —
+`agents/chat/views/agents.py`, rendering `chat/_agent_form.html` from
+`agents/chat/agentform.py::agent_form_context`. Nothing about editing an agent is
+written twice; the two mounts differ only in which rows they list and who may open
+them.
+
+### Audience is two controls, not one radio
+
+**Reach** — "the people I give it to" / "everyone on this box" — writes
+`Agent.box_wide` and **touches no labels at all**. It is administrators-only, and
+the POST re-checks that rather than trusting the render.
+
+**Entitlement labels** — the same two-pane transfer panel `/chat/access/` renders,
+posting through the same `parse_entitlement_diff` → `set_agent_labels` path. It is
+an **add/remove operation over what is there now**, never a whole submitted set: a
+label the actor may not label with is never in `choices`, therefore never in either
+pane, therefore never in `submitted`, so it survives both directions untouched. An
+administrator's label stands whatever a member does with their own.
+
+The two **compose**. `visible_agents` is `(owned | box_wide | shared) AND
+label_permitted_q`, which is a truth table, not an exclusive choice — a box-wide
+agent narrowed to a department is the useful fourth row. Because both panes are
+built from what the actor may label with, a member cannot see a label an
+administrator set; the form says **how many** such restrictions the row carries and
+never which, except for ones the reader already holds. That silence is the
+entitlement non-disclosure gate, and the route matrix sweeps these routes for it.
+
+`agent_form_context` computes the how-many sentence whenever `agent` is not
+`None`, whatever this actor may label with — a member who owns no entitlements at
+all still needs to be told their row carries an administrator-set restriction; only
+the transfer panel itself is conditioned on there being something to offer
+(`choices` non-empty).
