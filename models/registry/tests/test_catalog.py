@@ -154,6 +154,12 @@ class TestFind:
         assert entry is not None
         assert entry.capability == "vision"
 
+    def test_find_installed_vision_language_model(self):
+        entry = find("qwen2.5vl:7b")
+        assert entry is not None
+        assert entry.accepts == ("image",)
+        assert entry.capability == "vision"
+
     def test_find_miss_returns_none(self):
         entry = find("does-not-exist:latest")
         assert entry is None
