@@ -70,7 +70,11 @@ QUEUE_RETENTION_DAYS_MAX = 3650
 # are the same word because they name the same thing, and two constants
 # holding "Deleted" would be two places for it to stop being the same.
 PAGE_TITLE = "Deleted"
-TAB_PURGED = "Purged"
+# The page's second section: the content-free log of items deleted,
+# restored and permanently deleted -- the same "deletion log"
+# `LABEL_AUDIT_DETAIL` names, so the tab heading and the setting that
+# controls what it shows use one word for one thing.
+TAB_LOG = "Deletion log"
 ACTION_RESTORE = "Restore"
 ACTION_PURGE = "Delete permanently"
 LABEL_RETENTION_DAYS = "Keep deleted items for"

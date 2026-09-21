@@ -63,13 +63,16 @@ class TestTheShippedDefaults:
         assert retention.QUEUE_RETENTION_DAYS_DEFAULT == 1
 
     def test_the_bounds_are_named_here_not_typed_at_a_call_site(self):
+        assert retention.RETENTION_DAYS_MIN == 0
         assert retention.RETENTION_DAYS_MAX == 3650
         assert retention.QUEUE_RETENTION_DAYS_MIN == 1
+        assert retention.QUEUE_RETENTION_DAYS_MAX == 3650
 
 
 class TestTheCopyIsDeclaredOnceInPython:
     def test_the_seven_strings_read_as_plain_words(self):
         assert retention.PAGE_TITLE == "Deleted"
+        assert retention.TAB_LOG == "Deletion log"
         assert retention.ACTION_RESTORE == "Restore"
         assert retention.ACTION_PURGE == "Delete permanently"
         assert retention.LABEL_RETENTION_DAYS == "Keep deleted items for"
@@ -81,9 +84,9 @@ class TestTheCopyIsDeclaredOnceInPython:
 
     def test_the_copy_never_says_ticket_cliff_or_sweep(self):
         words = " ".join([
-            retention.PAGE_TITLE, retention.ACTION_RESTORE, retention.ACTION_PURGE,
-            retention.LABEL_RETENTION_DAYS, retention.LABEL_QUEUE_RETENTION_DAYS,
-            retention.LABEL_AUDIT_DETAIL,
+            retention.PAGE_TITLE, retention.TAB_LOG, retention.ACTION_RESTORE,
+            retention.ACTION_PURGE, retention.LABEL_RETENTION_DAYS,
+            retention.LABEL_QUEUE_RETENTION_DAYS, retention.LABEL_AUDIT_DETAIL,
             retention.purge_on_line(datetime.date(2026, 10, 21)),
         ]).lower()
         for jargon in ("ticket", "cliff", "sweep", "cascade", "retention"):
