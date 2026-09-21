@@ -570,7 +570,25 @@ class TestTheAttachDoorDoesNotPayForAStreamItWillNotOffer:
         """NON-VACUOUS, and the other half of the claim: the fix is "read
         the FK exactly where the old code did", not "never read it". The
         stream's owner gets `attach_workstream` -- the scope chooser needs
-        the row -- so exactly one such read happens, and only one."""
+        the row.
+
+        ZERO STANDALONE READS, as of the context meter (2026-09-21):
+        `agents.chat.service.visible_conversation_or_404` now
+        `select_related`s `workstream` on every `/chat/` row-addressed
+        render (that task's own docstring names the same review-R2
+        precedent this class's own docstring already cites for
+        `visible_turn`'s poll path). The single-row FK fetch this test
+        was written to pin still happens exactly once, in the sense that
+        matters -- the ROW is still read -- but it now arrives as part of
+        the conversation's own LEFT JOIN rather than as its own
+        `SELECT ... FROM "agents_workstream" WHERE "agents_workstream".
+        "id" = ...`, so `_stream_row_reads` (which deliberately matches
+        only that standalone shape) counts zero, not one. The class's own
+        `test_a_viewer_who_may_not_upload_never_dereferences_the_stream_fk`
+        is unaffected: that render was never doing this fetch at all, and
+        still is not -- the JOIN costs the SAME conversation query
+        whether or not this principal may upload, which is the entire
+        point of widening it."""
         owner = make_user()
         stream = _workstream(user_principal(owner))
         agent = make_agent(resident=True)
@@ -578,7 +596,7 @@ class TestTheAttachDoorDoesNotPayForAStreamItWillNotOffer:
             conversation = create_conversation(
                 user_principal(owner), agent, workstream=stream)
         captured = self._render(client, owner, conversation)
-        assert self._stream_row_reads(captured) == 1
+        assert self._stream_row_reads(captured) == 0
 
 
 class TestPasteIsAttach:

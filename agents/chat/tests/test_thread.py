@@ -2028,3 +2028,272 @@ class TestTheWallOnAConversationOnlyShare:
 
         assert f'<option value="{inside.pk}"' in body
         assert f'<option value="{outside.pk}"' not in body
+
+
+class TestTheContextMeter:
+    """Feature A on the page: the line, the bar, the disclosure and the
+    two clauses. Server-rendered, inside `.composer-block`, above the
+    thread actions row."""
+
+    def _long_prompt_agent(self, chars):
+        return make_agent(slug=f"meter-{chars}", system_prompt="x" * chars)
+
+    def test_the_line_renders_with_a_value_a_ceiling_and_a_percentage(
+        self, client, bound_chat_role
+    ):
+        from agents.usage import CHARS_PER_TOKEN
+
+        bound_chat_role.context_window = 1000
+        bound_chat_role.save()
+        agent = self._long_prompt_agent(CHARS_PER_TOKEN * 410)
+        conversation = make_conversation(agent=agent)
+        body = client.get(reverse("chat-conversation", args=[conversation.id])).content.decode()
+        assert "Context ~" in body
+        assert "of 1,000 tokens" in body
+        assert 'id="context-tokens"' in body
+        assert 'id="context-percent"' in body
+        assert "estimate" in body
+
+    def test_the_disclosure_is_a_details_element_carrying_the_method(
+        self, client, bound_chat_role
+    ):
+        from agents.usage import DISCLOSURE_BODY, DISCLOSURE_SUMMARY
+
+        conversation = make_conversation(agent=make_agent(slug="meter-disclosure"))
+        body = client.get(reverse("chat-conversation", args=[conversation.id])).content.decode()
+        assert DISCLOSURE_SUMMARY in body
+        assert DISCLOSURE_BODY[:60] in body
+
+    def test_the_bar_width_comes_from_the_server_never_the_client(
+        self, client, bound_chat_role
+    ):
+        from agents.usage import CHARS_PER_TOKEN
+
+        bound_chat_role.context_window = 100
+        bound_chat_role.save()
+        agent = self._long_prompt_agent(CHARS_PER_TOKEN * 41)
+        conversation = make_conversation(agent=agent)
+        body = client.get(reverse("chat-conversation", args=[conversation.id])).content.decode()
+        assert "--context-fill: 41%" in body
+        assert 'data-window="100"' in body
+
+    def test_the_truncation_clause_is_present_but_hidden_when_nothing_is_dropped(
+        self, client, bound_chat_role
+    ):
+        conversation = make_conversation(agent=make_agent(slug="meter-short"))
+        make_turn(conversation=conversation, text="hi", state=Turn.State.DONE)
+        body = client.get(reverse("chat-conversation", args=[conversation.id])).content.decode()
+        assert 'id="context-truncation"' in body
+        assert "no longer sent" in body
+        marker = body[body.index('id="context-truncation"'):]
+        assert "hidden" in marker[:200]
+
+    def test_the_truncation_clause_is_unhidden_on_a_long_conversation(
+        self, client, bound_chat_role
+    ):
+        from agents.limits import HISTORY_TURNS
+
+        conversation = make_conversation(agent=make_agent(slug="meter-long"))
+        for _ in range(HISTORY_TURNS + 3):
+            make_turn(conversation=conversation, text="hi", state=Turn.State.DONE)
+        body = client.get(reverse("chat-conversation", args=[conversation.id])).content.decode()
+        marker = body[body.index('id="context-truncation"'):]
+        assert "hidden" not in marker[:200]
+        assert f"the oldest 3 of {HISTORY_TURNS + 3} messages are no longer sent" in body
+
+    def test_at_ninety_percent_the_page_says_what_to_do_about_it(
+        self, client, bound_chat_role
+    ):
+        # REVIEW FIX (task-3 review, finding 1): `{{ context_full_clause }}`
+        # renders through Django's default autoescape -- no `|safe`, per
+        # the repo's own gate against opting out of it on a rendered path
+        # (`tools/rag/tests/test_views_upload_and_settings.py::
+        # test_question_and_answer_are_escaped`). `FULL_CLAUSE` carries a
+        # literal apostrophe, so the body holds `&#x27;`, not `'`; pinned
+        # here through `django.utils.html.escape`, the same helper that
+        # test uses, rather than hand-escaping or dropping the apostrophe.
+        from django.utils.html import escape
+
+        from agents.usage import CHARS_PER_TOKEN, FULL_CLAUSE
+
+        bound_chat_role.context_window = 100
+        bound_chat_role.save()
+        agent = self._long_prompt_agent(CHARS_PER_TOKEN * 95)
+        conversation = make_conversation(agent=agent)
+        body = client.get(reverse("chat-conversation", args=[conversation.id])).content.decode()
+        assert escape(FULL_CLAUSE) in body
+        assert 'data-band="full"' in body
+
+    def test_below_ninety_percent_it_does_not(self, client, bound_chat_role):
+        # REVIEW FIX (task-3 review, finding 1): same escaped-form pin as
+        # the ninety-percent test above, and just as load-bearing here --
+        # pinning the raw (unescaped) `FULL_CLAUSE` would make this
+        # negative assertion vacuously true forever, since the raw form
+        # never appears in autoescaped output.
+        from django.utils.html import escape
+
+        from agents.usage import CHARS_PER_TOKEN, FULL_CLAUSE
+
+        bound_chat_role.context_window = 100
+        bound_chat_role.save()
+        agent = self._long_prompt_agent(CHARS_PER_TOKEN * 10)
+        conversation = make_conversation(agent=agent)
+        body = client.get(reverse("chat-conversation", args=[conversation.id])).content.decode()
+        assert escape(FULL_CLAUSE) not in body
+        assert 'data-band="ok"' in body
+
+    def test_a_refusal_that_still_has_a_binding_still_shows_a_ceiling(
+        self, client, bound_chat_role, monkeypatch
+    ):
+        """`preflight_turn`'s NO_TOOL_CALLING leg returns `ok=False`
+        with a REAL `resolved`. The branch is `check.resolved is None`,
+        never `check.ok` (spec review m1)."""
+        from agents.runtime.preflight import Preflight, preflight_turn
+
+        bound_chat_role.context_window = 4096
+        bound_chat_role.save()
+        conversation = make_conversation(agent=make_agent(slug="meter-refused"))
+        real = preflight_turn
+
+        def refusing(agent, connection, **kwargs):
+            check = real(agent, connection, **kwargs)
+            return Preflight(False, "no_tool_calling",
+                             "The bound model cannot call this agent's tools.",
+                             check.resolved, check.answered_by, ())
+
+        monkeypatch.setattr("agents.chat.views.thread.preflight_turn", refusing)
+        body = client.get(reverse("chat-conversation", args=[conversation.id])).content.decode()
+        assert "of 4,096 tokens" in body
+
+    def test_with_no_model_bound_the_page_is_200_with_a_ceiling_free_line(self, client):
+        conversation = make_conversation(agent=make_agent(slug="meter-unbound"))
+        response = client.get(reverse("chat-conversation", args=[conversation.id]))
+        body = response.content.decode()
+        assert response.status_code == 200
+        assert "Context ~" in body
+        assert "no limit set for this connection" not in body
+
+    def test_the_engine_default_sentence_is_admin_only_and_never_built_for_a_member(
+        self, client, bound_chat_role
+    ):
+        # REVIEW FIX (task-3 review, finding 1): `ENGINE_DEFAULT_SENTENCE`
+        # also carries a literal apostrophe (`engine's`), autoescaped the
+        # same way as `FULL_CLAUSE` above -- both assertions pinned
+        # through `escape(...)`, the negative one included, for the same
+        # vacuous-pass reason.
+        from django.utils.html import escape
+
+        from agents.usage import ENGINE_DEFAULT_SENTENCE
+
+        member = make_user()
+        with posture(POSTURE_ENTERPRISE, admin_sees_content=True):
+            conversation = make_conversation(
+                agent=make_agent(slug="meter-default"),
+                **owner_fields(user_principal(member)))
+            sign_in(client, member)
+            member_body = client.get(
+                reverse("chat-conversation", args=[conversation.id])).content.decode()
+            assert escape(ENGINE_DEFAULT_SENTENCE) not in member_body
+            client.logout()
+            sign_in(client, make_admin())
+            admin_body = client.get(
+                reverse("chat-conversation", args=[conversation.id])).content.decode()
+        assert escape(ENGINE_DEFAULT_SENTENCE) in admin_body
+
+    def test_the_script_count_is_unchanged(self, client, bound_chat_role):
+        conversation = make_conversation(agent=make_agent(slug="meter-scripts"))
+        body = client.get(reverse("chat-conversation", args=[conversation.id])).content.decode()
+        assert body.count("<script") == 4
+
+    def test_the_meter_costs_the_same_on_a_short_and_a_long_conversation(
+        self, client, bound_chat_role
+    ):
+        """Equality under scale -- the pin this feature's query budget is
+        actually made of. A new CONSTANT query is allowed here; a
+        per-turn one is not."""
+        from agents.limits import HISTORY_TURNS
+
+        agent = make_agent(slug="meter-scale")
+        short = make_conversation(agent=agent)
+        make_turn(conversation=short, text="hi", state=Turn.State.DONE)
+        long_one = make_conversation(agent=agent)
+        for _ in range(HISTORY_TURNS * 3):
+            make_turn(conversation=long_one, text="hi", state=Turn.State.DONE)
+        client.get(reverse("chat-conversation", args=[short.id]))   # warm-up, unmeasured
+        with CaptureQueriesContext(connection) as one:
+            assert client.get(reverse("chat-conversation", args=[short.id])).status_code == 200
+        with CaptureQueriesContext(connection) as many:
+            assert client.get(
+                reverse("chat-conversation", args=[long_one.id])).status_code == 200
+        assert len(many) == len(one)
+
+    def test_a_reader_who_may_not_upload_pays_no_extra_query_for_the_stream(
+        self, client, bound_chat_role
+    ):
+        """`visible_conversations` only `select_related("agent")`, and
+        `thread_context` dereferences `conversation.workstream` ONLY on
+        its `may_upload_here` branch -- so without
+        `visible_conversation_or_404`'s widened read this render would
+        pay a lazy FK read that the spec's own query budget did not
+        allow for."""
+        stream = _workstream(name="Meter stream", instructions="be brief")
+        loose = make_conversation(agent=make_agent(slug="meter-loose"))
+        in_stream = make_conversation(agent=make_agent(slug="meter-stream"),
+                                      workstream=stream)
+        client.get(reverse("chat-conversation", args=[loose.id]))   # warm-up, unmeasured
+        with CaptureQueriesContext(connection) as loose_queries:
+            client.get(reverse("chat-conversation", args=[loose.id]))
+        with CaptureQueriesContext(connection) as stream_queries:
+            client.get(reverse("chat-conversation", args=[in_stream.id]))
+
+        # THE ONE EXCLUDED SHAPE IS PRE-EXISTING AND UNRELATED TO THIS
+        # TASK: `thread_context`'s own `stream_scope =
+        # scope_for_conversation(...)` call (present before this task;
+        # it also decides `may_upload_here`, the wall, and the
+        # attachments corpus) runs a real AUTHORIZATION check --
+        # `workstream_scope` -> `_visible_row` ->
+        # `visible_workstreams(principal).filter(pk=...).first()` -- for
+        # any IN-STREAM conversation, whatever this task does. Its
+        # shape, `... ORDER BY "agents_workstream"."updated_at" DESC
+        # LIMIT 1`, is a `.first()` call, and it is DISTINCT from the
+        # LAZY FK READ this task's Step 3 exists to remove: an
+        # unguarded `conversation.workstream` dereference is a
+        # `.get()`-shaped fetch, `... LIMIT 21`, with no `ORDER BY`.
+        # Verified by temporarily reverting `visible_conversation_or_
+        # 404`'s `select_related("workstream")`: the `LIMIT 21` read
+        # reappears in the stream case and only there -- confirming it
+        # is exactly what widening the read removes, and that the
+        # `LIMIT 1` read survives regardless, because it was never this
+        # task's lazy-FK defect to begin with.
+        _EXCLUDED_SHAPE = 'order by "agents_workstream"."updated_at" desc limit 1'
+
+        def _standalone_stream_reads(captured):
+            # Excluding only that one known shape keeps this pin honest:
+            # it still fails the moment `context_usage`'s own
+            # dereference regresses into a NEW standalone read.
+            return sum(
+                1 for q in captured.captured_queries
+                if "agents_workstream" in q["sql"].lower()
+                and " join " not in q["sql"].lower()
+                and _EXCLUDED_SHAPE not in q["sql"].lower()
+            )
+
+        # REVIEW FIX (task-3 review, finding 3): the exclusion above is a
+        # negative string match, which would silently swallow a SECOND,
+        # different authorization read too. Pin the assumption it
+        # actually rests on -- exactly one pre-existing `scope_for_
+        # conversation` read on the in-stream render, none on the loose
+        # one (a loose conversation's `workstream_id` is `None`, and
+        # `scope_for_conversation` returns `None` without querying) --
+        # so a future second read is caught here rather than excluded.
+        excluded_in_stream = [q for q in stream_queries.captured_queries
+                              if _EXCLUDED_SHAPE in q["sql"].lower()]
+        excluded_in_loose = [q for q in loose_queries.captured_queries
+                             if _EXCLUDED_SHAPE in q["sql"].lower()]
+        assert len(excluded_in_stream) == 1, (
+            "exactly one pre-existing scope_for_conversation read expected")
+        assert len(excluded_in_loose) == 0, (
+            "a loose conversation should never run scope_for_conversation's query")
+
+        assert _standalone_stream_reads(stream_queries) == _standalone_stream_reads(
+            loose_queries)

@@ -2413,3 +2413,36 @@ No models, no migration, no `ready()`. `agents/chat/apps.py` explains
 why in full; the short version is that `agents/chat` holds no schema, so
 it needs none of the machinery that exists to keep a schema safe across
 a package move.
+
+## What the context line means
+
+Below the composer, the thread page renders one line: the estimated size of the
+prompt the **next** turn will carry, the ceiling that prompt will be given, and
+the percentage between them.
+
+It is an **estimate**, and the page says so every time it is shown. There is no
+tokenizer on this box and no per-render engine call; the number is characters
+over four, and the `<details>` beside the line discloses exactly that.
+
+It measures **what is sent, not what the conversation holds.** Only the last
+`agents/limits.py::HISTORY_TURNS` replayable turns reach the prompt, so a long
+conversation's meter plateaus — and the line then says how many of how many
+messages are no longer sent. That clause is the first place this platform tells
+a reader their conversation is already being shortened before it is sent.
+
+Six things it does not count, every one an under-count; `agents/usage.py`'s
+module docstring names them all. The two a reader can act on — files attached to
+a message, and what a tool was asked and answered — are named in the disclosure
+on the page.
+
+The ceiling is the **operative** window: what the engine will actually be asked
+to allocate. An operator's own per-connection value when there is one, the engine
+adapter's bounded default otherwise — with a sentence saying so that only an
+administrator's render builds. Nothing probes an engine for an architecture
+maximum.
+
+The line refreshes live through the page's existing poller, at the two moments
+the replayed corpus grows: when a turn is queued, and when it finishes. The poll
+body carries three integers and nothing else. The window, the bands and every
+sentence stay with the page, which is the only place that knows the picker's
+current selection.

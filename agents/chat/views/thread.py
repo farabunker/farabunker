@@ -33,10 +33,16 @@ from agents.entitlements import tool_access_for, wall_for
 from agents.models import Share
 from agents.runtime.preflight import dropped_tool_notes, preflight_turn
 from agents.shares import shares_for
+from agents.usage import (
+    BAND_FULL, DISCLOSURE_BODY, DISCLOSURE_SUMMARY, ENGINE_DEFAULT_SENTENCE, FULL_CLAUSE,
+    WINDOW_SOURCE_ENGINE_DEFAULT, WINDOW_SOURCE_UNBOUND, context_usage, meter_segments,
+    truncation_clause,
+)
 from agents.visibility import may_post_to, may_read_conversation_shares
 from agents.workstreams import scope_for_conversation
-from identity.access import accounts_on, share_subjects
+from identity.access import accounts_on, is_admin, share_subjects
 from identity.request import principal_for_request, settings_row_for
+from models.contracts.bindings import effective_context_window
 
 
 def thread_context(request, conversation, *, selected: str | None = None) -> dict:
@@ -172,6 +178,35 @@ def thread_context(request, conversation, *, selected: str | None = None) -> dic
     check = preflight_turn(conversation.agent, selected, actor=principal,
                            conversation=conversation, wall=wall,
                            tool_access=rag_tool_access)
+    # THE PAGE PAYS NOTHING FOR THE CEILING. `check.resolved` is the
+    # `ResolvedModel` for this turn's bound model -- the PICKED
+    # connection when the operator used the picker, this agent's role
+    # binding otherwise -- and the preflight above already holds it.
+    #
+    # THE BRANCH IS `check.resolved is None`, NEVER `check.ok` (spec
+    # review m1). `preflight_turn`'s NO_TOOL_CALLING leg returns a
+    # refusal carrying a real `ResolvedModel`: a turn that cannot run
+    # because the bound model will not call tools still has a known
+    # ceiling, and the meter shows it. Only a genuinely absent binding
+    # -- an unbound role, an unregistered pick, a label refusal --
+    # renders the ceiling-free line, beside the `unavailable` banner
+    # this page already carries.
+    if check.resolved is None:
+        window, window_source = 0, WINDOW_SOURCE_UNBOUND
+    else:
+        window, window_source = effective_context_window(check.resolved)
+    context_meter_usage = context_usage(conversation, conversation.agent,
+                                        window=window, window_source=window_source)
+    # RENDER-VS-GATE: this sentence names OPERATOR CONFIGURATION, so a
+    # non-admin's render never BUILDS it -- it is not a template `{% if
+    # %}` over a string that was computed anyway. `settings_row` is the
+    # one already fetched for this render.
+    engine_default_sentence = (
+        ENGINE_DEFAULT_SENTENCE
+        if context_meter_usage.window_source == WINDOW_SOURCE_ENGINE_DEFAULT
+        and is_admin(principal, settings_row=settings_row)
+        else ""
+    )
     # `?pending=` is a raw query-string read, never validated by the URL
     # resolver the way a path segment is -- a caller can send anything
     # (`?pending=abc`, `?pending=-1`). Accepted only when it is a bare
@@ -237,6 +272,17 @@ def thread_context(request, conversation, *, selected: str | None = None) -> dic
         # queued right now, which `_unavailable.html`'s `{% if %}`
         # treats as "nothing to show".
         "unavailable": check.message if not check.ok else "",
+        # FEATURE A. The line is server-rendered in full; the poller
+        # rewrites two number spans and unhides one pre-rendered clause,
+        # and composes no prose at all (spec decisions 21-22).
+        "context_usage": context_meter_usage,
+        "context_meter": meter_segments(context_meter_usage),
+        "context_truncation_clause": truncation_clause(context_meter_usage),
+        "context_full_clause": (FULL_CLAUSE if context_meter_usage.band == BAND_FULL
+                                else ""),
+        "context_engine_default_sentence": engine_default_sentence,
+        "context_disclosure_summary": DISCLOSURE_SUMMARY,
+        "context_disclosure_body": DISCLOSURE_BODY,
         # A granted tool that is not registered on this install is a
         # NOTE, not a refusal (spec section 8.3 step 3's tolerant
         # half) -- `dropped_tool_notes` (`agents/runtime/preflight.py`)

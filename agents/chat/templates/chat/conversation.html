@@ -238,6 +238,21 @@ tag needs no truncation logic of its own.
     for free, the same way it does for `.chat-wrap`'s own `overflow-y`
     one level up.
     {% endcomment %}
+    {% comment %}
+    THE CONTEXT METER (feature A). Page-only selectors: its one
+    consumer is this page's own body. Colour tokens are the shell's
+    own; no new token is declared here.
+    {% endcomment %}
+    .context-meter { margin-top: .5rem; font-size: .85rem; }
+    .context-meter .context-line { margin: 0; color: var(--muted); }
+    .context-bar { height: 3px; border-radius: 2px; background: var(--border);
+                   margin: .3rem 0; overflow: hidden; }
+    .context-bar > span { display: block; height: 100%;
+                          width: var(--context-fill, 0%); background: var(--ok); }
+    .context-meter[data-band="high"] .context-bar > span { background: var(--accent); }
+    .context-meter[data-band="full"] .context-bar > span { background: var(--danger); }
+    .context-meter details { margin-top: .25rem; }
+    .context-meter details > summary { cursor: pointer; color: var(--muted); }
 {% endblock %}
 {% comment %}
 UI-3b: the same sidebar the index renders, from the same context
@@ -386,6 +401,32 @@ screen comment already documents for `.thread-scroll`.
   <p class="muted">This conversation was shared with you to read. Ask its owner for
     &ldquo;can view and post&rdquo; access to reply in it.</p>
   {% endif %}
+
+  {% comment %}
+  THE CONTEXT METER. Every sentence here is declared once in
+  `agents/usage.py` and handed in by `thread_context`; this template
+  concatenates the segments around two number spans and types no word
+  of its own. `data-window` is written by the SERVER and is the only
+  denominator the poller's script may read -- it never uses a number the
+  response supplied, and the window never travels to the poll endpoint
+  at all (spec decision 21).
+  {% endcomment %}
+  <div class="context-meter" id="context-meter" data-band="{{ context_usage.band }}"
+       {% if context_usage.window %}data-window="{{ context_usage.window }}"{% endif %}
+       style="--context-fill: {{ context_usage.percent|default_if_none:0 }}%;">
+    <p class="context-line">{{ context_meter.lead }}<span id="context-tokens">{{ context_usage.estimated_tokens }}</span>{{ context_meter.middle }}{% if context_meter.has_percent %}<span id="context-percent">{{ context_usage.percent }}</span>{% endif %}{{ context_meter.tail }}</p>
+    <div class="context-bar" aria-hidden="true"><span></span></div>
+    <p class="context-line" id="context-truncation"{% if not context_usage.truncated %} hidden{% endif %}>{{ context_truncation_clause }}</p>
+    {% if context_full_clause %}<p class="context-line">{{ context_full_clause }}</p>{% endif %}
+    {% if context_engine_default_sentence %}
+    <p class="context-line">{{ context_engine_default_sentence }}
+      <a href="{{ setup_url }}">Models</a></p>
+    {% endif %}
+    <details>
+      <summary>{{ context_disclosure_summary }}</summary>
+      <p>{{ context_disclosure_body }}</p>
+    </details>
+  </div>
 
   {% include "chat/_thread_actions.html" %}
 </div>

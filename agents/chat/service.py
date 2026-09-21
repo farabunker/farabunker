@@ -549,8 +549,24 @@ def visible_conversation_or_404(principal, conversation_id):
     `visible_conversations(principal).filter(agent__slug=...)`, the
     un-narrowed gate -- so there is no escape-hatch keyword here and
     nothing needs one.
+
+    THE WORKSTREAM RIDES ALONG (context meter, 2026-09-21).
+    `agents.visibility.visible_conversations` `select_related`s the
+    AGENT only, and `agents.chat.views.thread.thread_context`
+    dereferences `conversation.workstream` on its `may_upload_here`
+    branch alone -- its own comment says so. So every reader who may not
+    upload (a `view`-share recipient; a stream recipient who may not
+    manage it) would pay a LAZY FK READ the moment
+    `agents.usage.context_usage` asked for the stream's instructions.
+    One more LEFT JOIN on a query this path already runs, scoped to the
+    row-addressed `/chat/` views and to nothing else -- the same fix
+    review R2 made for `visible_turn`'s poll path, applied here. The
+    LIST pages are untouched.
     """
-    return get_object_or_404(chat_surface_conversations(principal), pk=conversation_id)
+    return get_object_or_404(
+        chat_surface_conversations(principal).select_related("workstream"),
+        pk=conversation_id,
+    )
 
 
 def composer_attachment_fields(request) -> dict:
