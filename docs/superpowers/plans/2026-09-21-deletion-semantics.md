@@ -2525,9 +2525,9 @@ Re-pins identity/tests/test_settings_page.py and identity/tests/test_services.py
 - Test: `agents/chat/tests/test_visibility.py` (extend), `agents/chat/tests/test_delete.py` (re-pin + extend)
 
 **Held tests — read each before editing, and name each in the commit message:**
-- `agents/chat/tests/test_delete.py::TestConversationAndTurnsAreGone::test_the_conversation_and_its_turns_are_deleted` — pins that the rows are gone the instant the POST returns. **Re-pin:** the rows survive; the conversation is absent from `visible_conversations` and a `DeletionTicket` exists.
-- `::TestConversationAndTurnsAreGone::test_the_index_shows_a_deleted_notice` — the notice text changes to name the Deleted page.
-- `::TestAttachmentRowsGoWithTheConversation::test_deleting_a_conversation_removes_its_attachment_rows` and `::test_a_different_conversations_attachment_row_is_untouched` — the attachment teardown moves from delete time to **purge** time (Task 9). **Re-pin:** these assert the rows survive a soft delete and go on purge; move the purge half into Task 9's own test module and leave the soft-delete half here.
+- `agents/chat/tests/test_delete.py::TestTheRowsSurviveADelete::test_the_conversation_and_its_turns_survive_and_a_ticket_hides_them` — pins that the rows are gone the instant the POST returns. **Re-pin:** the rows survive; the conversation is absent from `visible_conversations` and a `DeletionTicket` exists.
+- `::TestTheRowsSurviveADelete::test_the_index_shows_a_deleted_notice` — the notice text changes to name the Deleted page.
+- `::TestAttachmentRowsSurviveADelete::test_deleting_a_conversation_leaves_its_attachment_rows` and `::test_a_different_conversations_attachment_row_is_untouched` — the attachment teardown moves from delete time to **purge** time (Task 9). **Re-pin:** these assert the rows survive a soft delete and go on purge; move the purge half into Task 9's own test module and leave the soft-delete half here.
 - `::TestConversationDeleteCascadesChatScopedDocuments::test_a_chat_scoped_documents_delete_document_is_called` and `::test_a_universal_documents_attachment_row_is_removed_but_the_document_survives` — same move, same reason.
 - `::TestTheCleanupSavepoint::test_a_database_error_in_cleanup_does_not_block_the_delete` — the cleanup provider no longer runs inside `delete_conversation`. **Re-pin:** move it to Task 9's module, against `purge_conversation`.
 - `::TestTheAuditSurvives::*` — unchanged and must stay green: a soft delete still touches no `ToolInvocation`.
@@ -2538,7 +2538,7 @@ Re-pins identity/tests/test_settings_page.py and identity/tests/test_services.py
 
 **Interfaces:**
 - Consumes: `identity.retention.ticketed_keys`, `delete_content` (Task 5); `identity.contracts.retention.KIND_CONVERSATION` (Task 1).
-- Produces: `agents.visibility.delete_conversation(principal, conversation) -> bool` — unchanged signature, now writes a ticket.
+- Produces: `agents.visibility.delete_conversation(principal, conversation) -> DeletionTicket | None` — unchanged signature, now hands back the `DeletionTicket` it wrote (`None` when `principal` may not delete), so a truthy check still reads as "did it go" for every existing caller, and `conversation_delete` can read `ticket.purge_on` to choose the honest notice (controller addition, Task 8 review — see Step 6).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2628,7 +2628,8 @@ class TestDeleteWritesATicketAndHidesTheThread:
         conversation = _a_conversation_with_a_turn()
         response = client.post(
             reverse("chat-conversation-delete", args=[conversation.id]), follow=True)
-        assert "Deleted" in response.content.decode()
+        body = response.content.decode()
+        assert "Conversation deleted. You can restore it from Settings → Deleted." in body
 
     def test_a_second_delete_of_the_same_thread_is_a_404_not_a_second_ticket(self, client):
         conversation = _a_conversation_with_a_turn()
@@ -2637,6 +2638,29 @@ class TestDeleteWritesATicketAndHidesTheThread:
             reverse("chat-conversation-delete", args=[conversation.id]))
         assert second.status_code == 404
         assert DeletionTicket.objects.count() == 1
+
+    def test_the_notice_names_permanent_deletion_when_the_grace_period_is_zero(
+        self, client
+    ):
+        """CONTROLLER ADDITION (Task 8 review): the notice must not
+        promise a restore the box cannot keep. With `retention_days = 0`
+        the ticket `delete_content` hands back has ALREADY been purged
+        by the time the view runs -- its `purge_on` is today
+        (`identity.retention.delete_content`'s own unconditional bounded
+        sweep) -- so the notice reads "Conversation deleted
+        permanently." instead of naming a restore door that is already
+        closed."""
+        row = IdentitySettings.get_solo()
+        row.retention_days = 0
+        row.save()
+
+        conversation = _a_conversation_with_a_turn()
+        response = client.post(
+            reverse("chat-conversation-delete", args=[conversation.id]), follow=True)
+
+        body = response.content.decode()
+        assert "Conversation deleted permanently." in body
+        assert "Conversation deleted. You can restore it from Settings → Deleted." not in body
 ```
 
 `_a_conversation_with_a_turn` is that module's existing helper — reuse it by name; do not add a second one.
@@ -2727,17 +2751,24 @@ Work through the list in this task's header. Each one either (a) changes its ass
 
 - [ ] **Step 6: Change the affordance copy and the notice**
 
-`agents/chat/views/conversations.py::conversation_delete` — update its docstring (the turns no longer go with it at delete time; the audit asymmetry paragraph moves to `agents/retention.py`'s scrub) and the notice:
+`agents/chat/views/conversations.py::conversation_delete` — update its docstring (the turns no longer go with it at delete time; the audit asymmetry paragraph moves to `agents/retention.py`'s scrub) and the notice. **THE NOTICE MUST NOT PROMISE A RESTORE THE BOX CANNOT KEEP (controller addition, Task 8 review):** `delete_conversation` now hands back the `DeletionTicket` it wrote, and with `retention_days = 0` that ticket has already been purged by the time this view runs (its `purge_on` is today — `identity.retention.delete_content`'s own unconditional bounded sweep). The view reads `ticket.purge_on` to choose between the two sentences rather than printing one unconditionally:
 
 ```python
-    messages.info(request, "Conversation deleted. You can restore it from Settings → Deleted.")
+    ticket = delete_conversation(principal, conversation)
+    if not ticket:
+        raise Http404(f"Conversation {conversation_id} does not exist.")
+    if ticket.purge_on <= timezone.localdate():
+        messages.info(request, "Conversation deleted permanently.")
+    else:
+        messages.info(
+            request, "Conversation deleted. You can restore it from Settings → Deleted.")
 ```
 
 `_thread_actions.html` and `_sidebar_row.html` — replace the confirm sentence in both. The two say the same thing because they are the same affordance in two places:
 
 ```html
         <span class="muted">Delete this conversation? It moves to Settings → Deleted,
-          where you can restore it until its purge date.</span>
+          where you can restore it until the date shown there.</span>
 ```
 
 Update each fragment's surrounding `{% comment %}` to say the same, and drop the now-wrong "Its tool-call audit trail is kept" line — after a purge the tool-call records' words are blanked and only the content-free shell survives, which Task 9 documents in `agents/README.md`.
@@ -2759,7 +2790,7 @@ git add agents/visibility.py agents/chat/views/conversations.py \
         agents/chat/templates/chat/_sidebar_row.html agents/README.md agents/chat/tests/
 git commit -m "feat(agents): deleting a conversation writes a ticket, not an erasure
 
-Re-pins agents/chat/tests/test_delete.py::TestConversationAndTurnsAreGone, ::TestAttachmentRowsGoWithTheConversation, ::TestConversationDeleteCascadesChatScopedDocuments, ::TestTheCleanupSavepoint and agents/chat/tests/test_visibility.py::TestTheOpenBranchIsFirst::test_an_open_box_asks_the_user_table_nothing (2 queries become 3, the third being the ticket read), ::TestSharingAConversation::test_deleting_a_conversation_deletes_its_shares."
+Re-pins agents/chat/tests/test_delete.py::TestTheRowsSurviveADelete, ::TestAttachmentRowsSurviveADelete, ::TestConversationDeleteCascadesChatScopedDocuments, ::TestTheCleanupSavepoint and agents/chat/tests/test_visibility.py::TestTheOpenBranchIsFirst::test_an_open_box_asks_the_user_table_nothing (2 queries become 3, the third being the ticket read), ::TestSharingAConversation::test_deleting_a_conversation_deletes_its_shares."
 ```
 
 ---
@@ -6674,10 +6705,10 @@ Every existing test this plan changes, with the task that changes it. A change t
 | `foundation/ops/tests/test_import_law.py::test_the_allowlist_closes_a_module_added_after_it_was_written` (must stay green) | 5 |
 | `foundation/ops/tests/test_import_law.py::test_identity_testing_is_closed_to_production_by_the_same_mechanism` (must stay green) | 5 |
 | `foundation/ops/tests/test_column_boundaries.py` (the `AuditEvent.objects` AST guard — must stay green) | 3, 13 |
-| `agents/chat/tests/test_delete.py::TestConversationAndTurnsAreGone::test_the_conversation_and_its_turns_are_deleted` | 8 |
-| `agents/chat/tests/test_delete.py::TestConversationAndTurnsAreGone::test_the_index_shows_a_deleted_notice` | 8 |
-| `agents/chat/tests/test_delete.py::TestAttachmentRowsGoWithTheConversation::test_deleting_a_conversation_removes_its_attachment_rows` | 8 → 9 |
-| `agents/chat/tests/test_delete.py::TestAttachmentRowsGoWithTheConversation::test_a_different_conversations_attachment_row_is_untouched` | 8 → 9 |
+| `agents/chat/tests/test_delete.py::TestTheRowsSurviveADelete::test_the_conversation_and_its_turns_survive_and_a_ticket_hides_them` | 8 |
+| `agents/chat/tests/test_delete.py::TestTheRowsSurviveADelete::test_the_index_shows_a_deleted_notice` | 8 |
+| `agents/chat/tests/test_delete.py::TestAttachmentRowsSurviveADelete::test_deleting_a_conversation_leaves_its_attachment_rows` | 8 → 9 |
+| `agents/chat/tests/test_delete.py::TestAttachmentRowsSurviveADelete::test_a_different_conversations_attachment_row_is_untouched` | 8 → 9 |
 | `agents/chat/tests/test_delete.py::TestConversationDeleteCascadesChatScopedDocuments::test_a_chat_scoped_documents_delete_document_is_called` | 8 → 9 |
 | `agents/chat/tests/test_delete.py::TestConversationDeleteCascadesChatScopedDocuments::test_a_universal_documents_attachment_row_is_removed_but_the_document_survives` | 8 → 9 |
 | `agents/chat/tests/test_delete.py::TestTheCleanupSavepoint::test_a_database_error_in_cleanup_does_not_block_the_delete` | 8 → 9 |
@@ -6787,3 +6818,4 @@ Checked end to end: `ticketed_keys` / `visible_tickets` / `may_purge` / `delete_
 - **Execution amendment (Task 5 review), 2026-09-21:** Task 5's `test_it_is_bounded_by_the_limit` interleaved four `delete_content` creates with four one-at-a-time backdates, which the unconditional prune-on-write sweep at the end of every `delete_content` call (spec section 3.9) correctly defeats — each later create's own sweep purged the previous iteration's already-overdue ticket before the test's own explicit `sweep` ran. The implementer's first pass gated that sweep on the just-created ticket's own due date to make the test pass; the controller overruled that as a fix to the wrong side: the spec is explicit that prune-on-write runs on every delete, unconditionally, so a box on the shipped 30-day default keeps itself clean with no scheduler. `identity/retention.py::delete_content` stays exactly as this plan's Step 3 prints it (`if created: sweep()`, unconditional); the test was re-shaped instead — create all four tickets first, backdate all four together in one queryset update, then assert the bounded sweep — and the behaviour the reshaped test no longer exercises (an unrelated delete purging a ticket that independently fell due) is now pinned by its own new test, `test_deleting_anything_purges_what_has_already_fallen_due`, added beside it in `TestTheSweep`. Both are reflected in Task 5's test code block above.
 - **Execution amendment (Task 6 review), 2026-09-21:** Task 6: the `_overdue` helper re-shaped to create-all-then-backdate for the same reason as Task 5's limit test; command code unchanged from the brief.
 - **Execution amendment (Task 5 review, round 2), 2026-09-21:** three Minor findings, all in `identity/retention.py` with tests in `identity/tests/test_retention_service.py`: already-gone purge is a no-op (`purge_ticket` re-reads the row under `select_for_update()` inside its transaction and returns `{}` with nothing run and nothing written when it is already gone); restore logs only what it removed (`restore_content` deletes by queryset and writes `content.restored` only when a row was actually removed); refusals are warnings (`sweep` catches `RetentionRefused` before the generic `except Exception` and logs it at `logger.warning` with no traceback, leaving `logger.exception` for every other failure). Reflected in Task 5's code and test blocks above.
+- **Execution amendment (Task 8 review), 2026-09-21:** confirm copy no longer says purge; zero-day notice; soft-delete document pin restored; four tests renamed.
