@@ -115,6 +115,14 @@ _LLAMA32VISION = CatalogEntry(
     accepts=("image",),
 )
 
+_QWEN25VL = CatalogEntry(
+    name="Qwen 2.5 VL 7B",
+    engine="ollama",
+    model_id="qwen2.5vl:7b",
+    capability="vision",
+    accepts=("image",),
+)
+
 CATALOG: list[CatalogEntry] = [
     _QWEN,
     _LLAMA31,
@@ -123,6 +131,7 @@ CATALOG: list[CatalogEntry] = [
     _MXBAI,
     _LLAVA,
     _LLAMA32VISION,
+    _QWEN25VL,
 ]
 
 # `find()` below is the catalog's one consumer surface (connection-form/
