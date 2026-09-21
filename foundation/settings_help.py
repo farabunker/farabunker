@@ -796,11 +796,11 @@ CARDS: tuple[HelpCard, ...] = (
                     "removes it straight away, with no grace period."
                 ),
                 effects=(
-                    "The purge date is fixed at the moment something is deleted, so changing "
+                    "The removal date is fixed at the moment something is deleted, so changing "
                     "this setting governs future deletions only -- anything already deleted "
                     "keeps the date it was given. Backups are a separate layer this setting "
                     "does not reach: a deleted item can still exist in an earlier backup after "
-                    "its purge date has passed."
+                    "that date has passed."
                 ),
             ),
             HelpField(
@@ -808,13 +808,13 @@ CARDS: tuple[HelpCard, ...] = (
                 anchor="queue-retention",
                 meaning=(
                     "How many days a finished job record stays on the Queue page. Left BLANK, "
-                    "there is no age cliff and only the queue's own row limit (Job execution's "
+                    "there is no age limit and only the queue's own row limit (Job execution's "
                     "\"Keep the most recent\") bounds how many finished jobs are kept."
                 ),
                 effects=(
-                    "The purge date is fixed when a job finishes, so changing this setting "
-                    "governs future completions only. It never touches a job that is still "
-                    "running or waiting."
+                    "Applies to finished jobs already on the Queue page too, the next time the "
+                    "queue tidies up (which happens whenever a new job is added). It never "
+                    "touches a job that is still running or waiting."
                 ),
             ),
             HelpField(
@@ -826,8 +826,8 @@ CARDS: tuple[HelpCard, ...] = (
                 ),
                 effects=(
                     "Off by default: the deletion log stays content-free. Turning it on adds "
-                    "the item's own label to future deletion, restore and purge entries; it "
-                    "does not rewrite entries already written."
+                    "the item's own label to future deletion, restore and permanent-deletion "
+                    "entries; it does not rewrite entries already written."
                 ),
             ),
         ),
