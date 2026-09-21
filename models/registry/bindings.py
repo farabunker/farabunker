@@ -538,3 +538,74 @@ def _record_footprint(
         connection.save(update_fields=[bytes_field, at_field])
     except (ProgrammingError, OperationalError):
         return
+
+
+def registered_endpoints(
+    connections: "list[ModelConnection] | None" = None,
+) -> list[tuple[str, str, tuple[str, ...]]]:
+    """Every engine endpoint this box knows about:
+    `(engine, normalized endpoint, model_ids registered there)`.
+
+    THE ONE NOTION OF "every engine endpoint" IN THIS REPOSITORY. The
+    execution queue's cross-engine eviction sweep
+    (`models.queue.worker.Worker._evict_to_match_plan`, spec §3.3e) and
+    the console's own per-engine discovery map
+    (`models.registry.views._engine_endpoints`) both read it, so a
+    freshly-installed engine cannot be visible to one and invisible to
+    the other.
+
+    THE UNION MATTERS: the configured default endpoints
+    (`settings.INFERENCE_DEFAULT_ENDPOINTS`) PLUS every connection row's
+    endpoint, per engine. Deriving the set from connection rows alone
+    would miss a second engine running at its configured address with no
+    registered connection yet -- exactly the case the queue's sweep exists
+    for.
+
+    THE THIRD ELEMENT IS NOT DECORATION. A barrier call at a FOREIGN
+    endpoint has to be addressed with SOME `model_id` (the unload seam's
+    signature takes one), and a configured endpoint with no connection row
+    yields an empty tuple -- an endpoint the barrier therefore cannot
+    address at all. That is a named residual (spec §11), never something
+    to paper over with a synthetic id.
+
+    `connections` is the caller's OWN already-fetched rows, threaded in
+    rather than re-fetched -- the same "read it once per unit of work"
+    shape `claim_and_admit`'s `settings_row` uses. The console page holds
+    its rows already and is pinned at a fixed query count; fetching here
+    unconditionally would add a query to every render. `None` fetches,
+    tolerating a `ProgrammingError`/`OperationalError` from the table not
+    existing yet (mid-`migrate`) by falling back to the configured
+    defaults alone -- the tolerance idiom `_bound_connection` and
+    `footprint_for` already use.
+    """
+    from django.conf import settings
+
+    from models.registry.discovery import norm_endpoint
+    from models.registry.models import ModelConnection
+
+    if connections is None:
+        from django.db import OperationalError, ProgrammingError
+
+        try:
+            connections = list(ModelConnection.objects.all())
+        except (ProgrammingError, OperationalError):
+            connections = []
+
+    by_key: dict[tuple[str, str], list[str]] = {}
+
+    def _add(engine: str, endpoint: str, model_id: str = "") -> None:
+        if not engine or not endpoint:
+            return
+        bucket = by_key.setdefault((engine, norm_endpoint(endpoint)), [])
+        if model_id and model_id not in bucket:
+            bucket.append(model_id)
+
+    for engine_name, default in settings.INFERENCE_DEFAULT_ENDPOINTS.items():
+        _add(engine_name, default)
+    for connection in connections:
+        _add(connection.engine, connection.endpoint, connection.model_id)
+
+    return [
+        (engine, endpoint, tuple(model_ids))
+        for (engine, endpoint), model_ids in by_key.items()
+    ]

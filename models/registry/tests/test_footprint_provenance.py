@@ -341,3 +341,88 @@ class TestTheEngineReportedRowRenders:
             "<dt>Memory footprint</dt><dd>4.7 GB — from the engine&#x27;s residency "
             "snapshot on March 4, 2026</dd>" in disclosure_html
         )
+
+
+from models.registry.bindings import registered_endpoints
+
+
+@pytest.mark.django_db
+class TestRegisteredEndpoints:
+    """The endpoint set the queue's cross-engine sweep walks. Derived
+    from connection rows ALONE it would miss a freshly-installed second
+    engine running at its configured address with no registered
+    connection yet -- which is precisely the Q4 scenario (a model left
+    warm on an engine nothing is currently using)."""
+
+    def test_the_configured_defaults_are_present_with_no_rows_at_all(self, settings):
+        settings.INFERENCE_DEFAULT_ENDPOINTS = {"ollama": "http://host:1/"}
+
+        assert ("ollama", "http://host:1", ()) in registered_endpoints()
+
+    def test_a_connection_row_contributes_its_endpoint_and_model_id(self, settings):
+        settings.INFERENCE_DEFAULT_ENDPOINTS = {}
+        ModelConnection.objects.create(
+            name="c", engine="ollama", endpoint="http://other:2/", model_id="m",
+        )
+
+        assert ("ollama", "http://other:2", ("m",)) in registered_endpoints()
+
+    def test_one_entry_per_normalized_endpoint_carrying_every_model_id(self, settings):
+        settings.INFERENCE_DEFAULT_ENDPOINTS = {"ollama": "http://host:1"}
+        for model_id in ("a", "b"):
+            ModelConnection.objects.create(
+                name=model_id, engine="ollama", endpoint="http://host:1/", model_id=model_id,
+            )
+
+        entries = [e for e in registered_endpoints() if e[1] == "http://host:1"]
+
+        assert len(entries) == 1
+        assert set(entries[0][2]) == {"a", "b"}
+
+    def test_two_engines_at_one_address_stay_two_entries(self, settings):
+        settings.INFERENCE_DEFAULT_ENDPOINTS = {
+            "ollama": "http://host:1", "comfyui": "http://host:1",
+        }
+
+        engines = {engine for engine, _endpoint, _ids in registered_endpoints()}
+
+        assert {"ollama", "comfyui"} <= engines
+
+    def test_a_missing_table_degrades_to_the_configured_defaults(self, settings, monkeypatch):
+        from django.db import ProgrammingError
+
+        settings.INFERENCE_DEFAULT_ENDPOINTS = {"ollama": "http://host:1"}
+        monkeypatch.setattr(
+            ModelConnection.objects, "all",
+            lambda: (_ for _ in ()).throw(ProgrammingError("no such table")),
+        )
+
+        assert registered_endpoints() == [("ollama", "http://host:1", ())]
+
+    def test_a_supplied_connection_list_is_used_without_a_query(
+            self, settings, django_assert_num_queries):
+        settings.INFERENCE_DEFAULT_ENDPOINTS = {}
+        rows = [ModelConnection(engine="ollama", endpoint="http://x:9", model_id="m")]
+
+        with django_assert_num_queries(0):
+            entries = registered_endpoints(connections=rows)
+
+        assert entries == [("ollama", "http://x:9", ("m",))]
+
+
+@pytest.mark.django_db
+class TestTheConsoleStillPaysNoExtraQuery:
+    """`_engine_endpoints` now delegates to `registered_endpoints`, which
+    CAN fetch -- the console hands it the rows it already holds, so the
+    page's pinned query count is unchanged. The two existing pins
+    (`test_views_machine_add_and_dropdowns.py::TestConsoleViewQueryCount`
+    and `test_console_override_query_count.py`) remain the authority on the
+    number; this pins the delegation path itself."""
+
+    def test_engine_endpoints_asks_for_no_connections_of_its_own(
+            self, django_assert_num_queries):
+        from models.registry.views import _engine_endpoints
+
+        rows = [ModelConnection(engine="ollama", endpoint="http://x:9", model_id="m")]
+        with django_assert_num_queries(0):
+            _engine_endpoints(rows, "http://viewed:1")

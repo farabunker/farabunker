@@ -147,7 +147,7 @@ from identity.access import is_admin, labelling_entitlements
 from identity.contracts import actions
 from identity.contracts.principals import payload_fields
 from identity.request import principal_for_request, settings_row_for, user_for_request
-from models.registry.bindings import resolved_from_connection
+from models.registry.bindings import registered_endpoints, resolved_from_connection
 from models.registry.discovery import discover, norm_endpoint, norm_tag, scan_for_servers
 from models.registry.labels import (
     SetRefused, attach, create_set, delete_set, detach, rename_set, set_delete_counts,
@@ -214,11 +214,10 @@ def _engine_endpoints(connections: list[ModelConnection], endpoint: str) -> dict
     at the one viewed address) as a superset, so an override still scans
     for every engine.
 
-    The defaults pass reads the settings map itself rather than
-    `ENGINES`, so an engine whose default address is configured but whose
-    adapter is not registered yet still gets a bucket; `discover()` only
-    ever polls engines that ARE registered (it iterates `ENGINES` and
-    looks the name up here), so an unused key costs nothing.
+    The defaults-union-connections half is `models.registry.bindings.
+    registered_endpoints` -- ONE implementation, shared with the execution
+    queue's cross-engine sweep (spec §3.3e). This page's own connections
+    are handed straight in, so delegating costs no extra query.
 
     De-anchored by construction: no engine name, port, or path is written
     here -- keys come off the settings map, the connections, and each
@@ -233,10 +232,16 @@ def _engine_endpoints(connections: list[ModelConnection], endpoint: str) -> dict
         if all(norm_endpoint(candidate) != norm_endpoint(seen) for seen in bucket):
             bucket.append(candidate)
 
-    for engine_name, default in settings.INFERENCE_DEFAULT_ENDPOINTS.items():
-        _add(engine_name, default)
-    for connection in connections:
-        _add(connection.engine, connection.endpoint)
+    # The defaults-union-connections half is `models.registry.bindings.
+    # registered_endpoints` -- ONE implementation, shared with the
+    # execution queue's cross-engine sweep (spec §3.3e). The rows this
+    # page already holds are handed straight in, so this costs no query.
+    for engine_name, endpoint_value, _model_ids in registered_endpoints(connections=connections):
+        _add(engine_name, endpoint_value)
+    # Still this page's own behaviour, and not the queue's: the address
+    # currently being VIEWED is polled for every REGISTERED engine, which
+    # preserves the pre-D11 superset an operator's `?endpoint=` override
+    # depends on.
     for engine in ENGINES.values():
         _add(engine.name, endpoint)
 
