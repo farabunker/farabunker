@@ -15,12 +15,15 @@ audit is evidence. Where the two disagree, the brief wins.
 page), `agents/` (one contract slot, one retention module), `tools/rag`, `tools/vision`,
 `models/queue` (a payload-keyed handler, an age condition on the existing prune, one new
 non-creating read across the identity seam — **no migration**) + `models/contracts/queue.py`
-(one passthrough), `foundation/` (three registration tables).
-**Migrations:** **exactly one**, in `identity/` — the ticket table plus the four retention
+(one passthrough), `foundation/` (three registration tables, and one new coverage gate, §7).
+**Migrations:** **exactly one**, in `identity/` — the ticket table plus the three retention
 policy fields on `IdentitySettings` (§4). `models/queue` gains no column at all.
-**Lands as:** three slices on one branch off `origin/dev`, in the brief's order.
-**Open questions:** none. Every call is made; §11 lists the ones the owner may want to overrule,
-and §11.1 is an owner ruling that already overrode the author's first draft.
+**Lands as:** two slices on one branch off `origin/dev`, in the brief's order.
+**What a maintainer sets up to get this:** nothing. Three optional settings, all with working
+defaults, in one section of a page that already exists (§4).
+**Open questions:** none. Every call is made; §11 lists the ones the owner may want to overrule.
+§11.1 is an owner ruling that already overrode the author's first draft, and §11.8 is the
+owner's cost/benefit ruling that cut three mechanisms out of the design (§3, §10).
 
 No model or vendor names appear in this document. No absolute paths appear in this document;
 `<repo>` stands for the checkout root.
@@ -56,13 +59,19 @@ Verbatim intent, from the brief:
 Four owner rulings bind the design and are implemented where named:
 
 1. **Tool-call records** (`agents.models.ToolInvocation`'s `args` / `text` / `error`) are
-   SCRUBBED at the item's retention cliff by default; a setting allows a LONGER retention for
-   them (extra days after the item's purge; default 0). → §3.6, §3.8.
+   SCRUBBED inline with their conversation's purge, always. The owner first asked for an
+   OPTIONAL LONGER RETENTION for these records — extra days after the item's own purge, off by
+   default — and then **withdrew that request on 2026-09-21 under the cost/benefit ruling**
+   (§11.8): it would have bought three nullable fields on the ticket, a second due-condition on
+   the sweep, a ticket state in which an item is neither restorable nor gone, and a fourth
+   setting, in exchange for a retention nobody on any box has asked for yet. There is one
+   cliff, and the tool records go over it with the conversation. → §3.6, §3.8; the withdrawn
+   option is named in §10.9 so a real need can pick it back up cheaply.
 2. **Queue rows for a deleted conversation are DELETED**, in the same request — after the
    queue's own cancel path has closed any row that is not terminal yet (§3.6). The queue also
    gets a natural cliff of its own — finished rows older than the queue's retention (default
    one day) go regardless. That number is `IdentitySettings.queue_retention_days`, one of the
-   four fields of the single centralised retention policy (**owner ruling, §11.1**); the queue
+   three fields of the single centralised retention policy (**owner ruling, §11.1**); the queue
    reads it, it does not own it. → §3.6, §3.11, §11.1.
 3. **Existing residue** is handled by that queue cliff; no one-shot purge command. Ask history
    rows simply become deletable. → §3.11, §9.
@@ -209,15 +218,34 @@ Field range limits live in the writer, never as a database constraint
 
 ## 3. The design
 
+### 3.0 The design principle this whole section is held to
+
+**A maintainer installs this and has to set up NOTHING.** Every option has a working default;
+there are as few options as the feature can honestly have. That is the owner's ruling of
+2026-09-21 (§11.8), in his own words:
+
+> I want to make sure we achieve a good cost/benefit associated with our changes/complexity,
+> and that we don't add so many features/options it paralyses the maintainer because they have
+> to set up so many options.
+
+Read as a test the rest of this document must pass: a box that is installed and never
+configured deletes content correctly, purges it thirty days later, keeps a content-free audit
+trail, and shows a Deleted page — with no field filled in, no command scheduled, and no posture
+decided. Three optional settings exist (§4) and every one of them is a number somebody might
+want to change, not a number somebody must supply. Where this design could have offered a
+fourth knob, a second mode or a second cliff, §10 names what was left out and what it would
+cost to add if a real need appears.
+
 ### 3.1 Shape in one paragraph
 
 Deleting anything writes ONE row in ONE new identity table — the deletion ticket — and an audit
 event. Every column's existing visibility function excludes ticketed keys, so the item vanishes
 from every surface immediately. The ticket carries the date the content will actually be
-destroyed. On that date — or the moment a person clicks "Delete permanently", where the posture
-allows it — the kind's registered handlers run through the EXISTING cascade registry, the
-content is gone, the ticket is gone, and a content-free audit event remains. No per-model
-soft-delete column, no second registry, no scheduler, no cache.
+destroyed. On that date — or the moment a person clicks "Delete permanently" — the kind's
+registered handlers run through the EXISTING cascade registry, the content is gone, the ticket
+is gone, and a content-free audit event remains. **A ticket exists exactly while the item is
+restorable**: there is no purged-but-pending state, no second cliff and no ticket that outlives
+its content. No per-model soft-delete column, no second registry, no scheduler, no cache.
 
 ### 3.2 The deletion ticket
 
@@ -236,11 +264,17 @@ page in two.
 | `label` | `CharField(255)`, blank | The item's title AT DELETE TIME, for the Deleted page only. Content, and treated as such: never copied into an audit event unless `audit_detail` is on (§3.12), and destroyed with the ticket at purge. |
 | `deleted_at` | `DateTimeField(auto_now_add=True)` | — |
 | `purge_on` | `DateField`, `db_index=True` | A DATE, not a datetime: "Purge on 21 October 2026" is the promise the page prints, and a date is what a person can check. Computed once at create (§3.3) and never recomputed (§5). |
-| `hold_by_kind` / `hold_by_key` | `CharField`, blank | Set = the cliff is suspended. Enterprise only (§3.10). Slice 3. |
-| `hold_note` | `TextField`, blank | Why. Operator prose, not content. |
-| `purged_at` | `DateTimeField`, null | Set = the content is already gone and only the deferred tool-record scrub is outstanding (§3.8). A ticket with this set can never be restored. |
-| `tool_purge_on` | `DateField`, null | `purge_on + tool_record_extra_days`, when that setting is non-zero. Null = nothing deferred. |
-| `deferred_ids` | `JSONField`, default `list` | The `ToolInvocation` ids whose scrub is deferred to `tool_purge_on` (§3.8). Empty in the default configuration. **Ids, never content** — the same discipline the audit trail keeps. |
+| `hold_by_kind` / `hold_by_key` | `CharField`, blank | Set = the cliff is suspended. **The FIELDS ship in this delivery; the BEHAVIOUR that sets them does not** — see the box below. |
+| `hold_note` | `TextField`, blank | Why. Operator prose, not content. Same: field now, behaviour later. |
+
+**The hold fields ship empty, and the sweep already honours them.** Nothing in this delivery
+writes `hold_by_kind`, `hold_by_key` or `hold_note` — the control that would set them is the
+deferred enterprise slice (§10.10). They are created by the one migration anyway, and the
+sweep's due-condition already excludes a held ticket (§3.9), for one reason: the alternative is
+a second migration later against a table that by then holds live tickets, to add three blank
+columns. Three blank columns cost nothing; a migration on live deletion bookkeeping is a risk
+with a maintenance window attached. This is the only place in the design where something is
+built before it is used, and it is stated here rather than discovered in the model file.
 
 **Uniqueness.** `UniqueConstraint(fields=["kind", "key"], name="uniq_deletion_ticket")`. One
 ticket per item, so a second delete of the same item is a no-op rather than a duplicate row, and
@@ -270,14 +304,15 @@ ticketed_keys(kind) -> list[str]
   (§3.9). When `retention_days == 0`, `purge_on` is today, the sweep the same call runs picks
   the ticket up, and the content is gone before the request returns. **Zero stays expressible**
   — the audit's constraint 9 — and it is the posture-independent way to say "no grace period".
-- **Restore** = refuse when `purged_at` is set or a hold forbids it, delete the ticket,
-  `record(actor, CONTENT_RESTORED, …)`. Nothing else: the item was never modified, so there is
-  nothing to put back. That is the whole return on not adding per-model columns.
-- **Purge** = inside one `transaction.atomic()`: run the kind's registered handlers with
-  `commit=True` (§3.5), then either delete the ticket or — when a tool-record deferral is
-  outstanding — stamp `purged_at` and leave it for the sweep (§3.8), then
-  `record(actor, CONTENT_PURGED, removed=counts)`. The counts are per-handler integers:
-  content-free by construction.
+- **Restore** = delete the ticket, `record(actor, CONTENT_RESTORED, …)`. Nothing else: the item
+  was never modified, so there is nothing to put back. That is the whole return on not adding
+  per-model columns. **Every ticket that exists is restorable** — the ticket and the item live
+  and die together — so restore has exactly one refusal to make, and it is not made in this
+  delivery: a held ticket, once the deferred enterprise slice (§10.10) can set a hold.
+- **Purge** = inside one `transaction.atomic()`: run the kind's registered handlers (§3.5),
+  delete the ticket, `record(actor, CONTENT_PURGED, removed=counts)`. The counts are the
+  per-handler integers the handlers returned: content-free by construction. The ticket row is
+  destroyed by the same transaction that destroys the content, so the two can never disagree.
 
 **Refusals** raise `identity.services.ServiceRefused`, the sentence-carrying exception this
 column already uses, so every view keeps its never-500 shape.
@@ -340,7 +375,7 @@ constraint 2 says the same thing ("Reuse this — do not invent a second registr
 class RetentionHandler:
     kind: str       # which ticket kind this answers for
     key: str        # "agents.conversation", stable identifier
-    label: str      # "Conversation and turns" — what the count line prints
+    label: str      # "Conversation and turns" — the key in the audit event's `removed` map
     handler: str    # "package.module.function"
     order: int = ORDER_ROWS
 
@@ -348,12 +383,26 @@ register_retention_handler(spec) -> None
 retention_handlers(kind) -> list[RetentionHandler]   # sorted by (order, registration index)
 ```
 
-Handler signature: `(key: str, *, commit: bool) -> int`. Identical in shape to
-`EntitlementCascade`'s, and identical in meaning: `commit=False` counts what this column WOULD
-remove (the Deleted page's per-item count line, and the confirmation copy), `commit=True`
-removes it and returns the same count. One handler, two modes, for the reason the existing
-dataclass docstring already gives — two registrations would be two things to keep in agreement
-about what "affected" means.
+**Handler signature: `(key: str) -> int`. One mode.** It removes this column's share of the
+item and returns how many things it removed. That integer has exactly one consumer: the
+content-free `removed={label: count}` detail on the `content.purged` audit event (§3.12).
+There is no count-only mode, no `commit` flag, no count shown before a confirmation, and no
+per-item count line on the Deleted page.
+
+**Why this departs from `EntitlementCascade`'s two-mode shape**, since that registry is the
+one being extended and a reader will notice the difference. `EntitlementCascade` needs
+`commit=False` because deleting an entitlement is irreversible the instant it is confirmed —
+the count IS the confirmation, the only chance the operator gets to see how much a delete
+reaches before it happens. A deletion ticket has a better confirmation than any number: **the
+Deleted page itself**, where the item sits, named and restorable, for as many days as
+`retention_days` says. A person who wants to know what "Delete permanently" will destroy can
+restore the item and look at it. Adding a dry-run mode here would double every handler's
+surface, double its tests, and buy a number nobody needs to read — precisely the kind of
+complexity the owner's ruling (§11.8, §3.0) told this design to leave out.
+
+What does NOT change with the mode: **every retention handler must still be IDEMPOTENT**, and
+the ROWS/FILES order bands below are unchanged. Idempotence carries more weight now, not less
+— it is the whole recovery story for a purge that failed part-way.
 
 **Ordering, as two named bands** (constants in the same pure module):
 
@@ -378,9 +427,9 @@ does: it reads `Turn.artifacts` before it deletes the turns) registers in the FI
 does its own reads before its own writes, internally. That keeps the registry's ordering rule to
 one field with two values instead of a general dependency graph nothing else needs.
 
-**Failure semantics.** `identity/cascades.py` gains `retention_counts(kind, key)` and
-`run_retention(kind, key)`, sharing one `_run_retention` — exactly `_run`'s shape. It **never
-swallows**: a handler that cannot be imported, or that raises, takes the whole purge down,
+**Failure semantics.** `identity/cascades.py` gains ONE runner, `run_retention(kind, key)`,
+built on one private `_run_retention` — `_run`'s shape, with `_run`'s two-mode branch gone. It
+**never swallows**: a handler that cannot be imported, or that raises, takes the whole purge down,
 inside `purge_ticket`'s `transaction.atomic()`, so nothing is half-purged at the row level and
 the ticket survives to be retried. Each handler is invoked inside a NESTED `transaction.atomic()`
 — the `agents/attachments.py::delete_attachments_for` savepoint discipline — but with the
@@ -430,11 +479,13 @@ three additions. In order, inside the runner's savepoint:
    registered cleanup seam — chat-scoped documents are deleted outright there, universal and
    contained ones keep only their claim removed); then `conversation.delete()`, and `Turn` goes
    by CASCADE.
-4. **The tool-record scrub** (§3.8), on the invocation ids collected in step 1 — collected
-   FIRST because `Turn.invocation` is `SET_NULL`, so after step 3 there is no path from the
-   conversation to its invocations at all. That `SET_NULL` is deliberate (the 2026-08-27
-   addendum's consequence 3: an audit row is not owned by the conversation table) and it is not
-   being changed; the scrub empties the content fields and leaves the shell.
+4. **The tool-record scrub** (§3.8), inline, on the invocation ids collected in step 1 —
+   collected FIRST because `Turn.invocation` is `SET_NULL`, so after step 3 there is no path
+   from the conversation to its invocations at all. That `SET_NULL` is deliberate (the
+   2026-08-27 addendum's consequence 3: an audit row is not owned by the conversation table)
+   and it is not being changed; the scrub empties the content fields and leaves the shell. It
+   happens in this transaction, on this date, every time — there is no deferral and no setting
+   that moves it (§1 ruling 1, §10.9).
 
 `tools/rag/retention.py::purge_conversation_notes` removes `<data>/notes/<conversation-uuid>.md`
 — the deterministic path `tools/rag/jobs.py` writes — and deletes any `Document` whose
@@ -525,7 +576,8 @@ register_artifact_purge(dotted_path: str) -> None
 artifact_purge() -> str | None
 ```
 
-Handler signature `(refs: Sequence[str], generation_ids: Sequence[str], *, commit: bool) -> int`.
+Handler signature `(refs: Sequence[str], generation_ids: Sequence[str]) -> int` — one mode,
+like every other retention handler and for the reason §3.5 gives.
 A single slot, not a per-kind dict, matching `agents/contracts/attachments.py::
 register_attachment_cleanup`'s own single-slot shape for the same situation: the agents column
 computes values and one tool column knows what they mean. `tools/vision/apps.py` registers it;
@@ -592,9 +644,9 @@ keeping the row for its timings and `model_refs`; the ruling is that a finished 
 bookkeeping is not worth a table of half-erased rows, and the queue's own cliff removes finished
 rows on an age basis anyway (§3.11), so a scrub would only defer the same delete.
 
-### 3.8 The tool-record scrub, and the extra-days rule
+### 3.8 The tool-record scrub
 
-`agents/retention.py::scrub_tool_records(invocation_ids, *, commit)` sets `args={}`, `text=""`,
+`agents/retention.py::scrub_tool_records(invocation_ids)` sets `args={}`, `text=""`,
 `error=""` on those `ToolInvocation` rows in one `update()`. The shell — principal, agent slug,
 tool key, outcome, timings, `queue_job_id` — stays, because that shell IS the machine audit
 trail `identity/contracts/actions.py`'s own docstring points at when it explains why tool calls
@@ -602,23 +654,18 @@ are absent from the `AuditEvent` catalogue: *"tool calls already have a better r
 `agents.models.ToolInvocation`… the first must be kept and the second must be prunable."*
 Scrubbing the words and keeping the record is that sentence, implemented.
 
-**The extra-days rule, without a new column on `ToolInvocation`.** When
-`IdentitySettings.tool_record_extra_days` is 0 — the default, and the demo path — the scrub runs
-inline in step 4 of the conversation handler and the ticket is deleted at the end of the purge.
-When it is non-zero, the purge instead:
+**One cliff, no second date, no setting.** The scrub runs inline in step 4 of the conversation
+handler, inside the purge's own transaction, and the ticket is deleted at the end of the same
+purge. A conversation's words and its tool records go over the same cliff on the same day,
+which is also the date the Deleted page printed.
 
-- runs every other handler as normal (the conversation's own content is gone on its promised
-  date — the extra days buy time for the tool records, never for the conversation);
-- stamps the ticket `purged_at=now`, `tool_purge_on = purge_on + tool_record_extra_days`, and
-  `deferred_ids = [<invocation ids>]` — ids only, never the words they point at;
-- is picked up again by the sweep on `tool_purge_on`, which runs the scrub and deletes the
-  ticket.
-
-A ticket in that state is **not** restorable (§5) and is not listed on the Deleted page's first
-tab — its content is already gone; it is bookkeeping the sweep will finish. Ids are not content.
-
-This is why the ticket carries `purged_at` and `tool_purge_on` at all, and it is the reason a
-second table was rejected: one row, two dates, one sweep.
+The owner considered an optional longer retention for these records and withdrew it (§1 ruling
+1, §11.8). What that decision buys this design is worth naming, because it is the difference
+between a mechanism and a knob: the ticket loses three nullable fields, the sweep loses a
+second due-condition, the Deleted page loses a row state it would have had to explain ("purged,
+but not finished"), restore loses its only impossible case, and `IdentitySettings` loses a
+fourth field. §10.9 records exactly what it would take to add back — three nullable ticket
+fields and one sweep condition — if a box ever turns up that needs it.
 
 ### 3.9 The sweep
 
@@ -626,11 +673,16 @@ second table was rejected: one row, two dates, one sweep.
 never a literal at a call site.
 
 ```
-tickets due = (purged_at IS NULL AND purge_on <= today AND no hold)
-              OR (purged_at IS NOT NULL AND tool_purge_on <= today)
+tickets due = purge_on <= today AND no hold
 order by purge_on, pk
 [:limit]
 ```
+
+**ONE due-condition.** A ticket is due when its promised date has arrived and nothing holds it.
+There is no second clause, because there is no second cliff (§3.8) and no ticket that outlives
+its content (§3.1). The hold half of the condition is written now and is always true now —
+nothing in this delivery sets a hold (§3.2) — and it is in the query so that the deferred
+enterprise slice (§10.10) is a control and a refusal, not a change to the sweep.
 
 Each is purged in its own transaction, so one failing ticket does not block the rest of the
 batch; the failure is logged with its kind and key (structural, never content — the shape
@@ -640,7 +692,7 @@ batch; the failure is logged with its kind and key (structural, never content �
 triggered it. A sweep that ran under the acting principal would write "this member purged
 somebody else's conversation" into the audit trail for a cliff nobody clicked; the cliff is the
 box's own act, and the event says so. Only an explicit click — Delete, Restore, Delete
-permanently, Hold — carries a real actor.
+permanently — carries a real actor.
 
 **Three callers, no scheduler and no new job kind:**
 
@@ -661,25 +713,38 @@ where nothing is ever deleted has nothing to purge.
 `identity/access.py::posture()` keys the table; `is_admin`, `sees_all_content` and
 `owned_entitlement_ids` are the predicates, unchanged.
 
-| | `open` | `personal` | `enterprise` |
-|---|---|---|---|
-| Who may delete an item | whoever may manage it today — `may_manage_conversation`, `may_administer_document`, `may_read_job`, and the item's owner for an Ask record | same | same |
-| What "Delete" does | ticket + cliff | ticket + cliff | ticket + cliff |
-| The cliff | `retention_days`, default 30; `0` purges inline | same | operator-set on the settings page; the enterprise box's own number |
-| Restore, until the cliff | the item's owner, or `sees_all_content` | same | same |
-| "Delete permanently" (purge now) | yes — the item's owner or `sees_all_content`. `is_admin` is True for everybody here, and there is nobody for anything to be hidden from | yes, same rule | **no. Nobody, before the cliff.** The control is not rendered and the POST refuses with its own sentence |
-| Hold (suspend the cliff) | not offered — no accounts, no owner role to gate it | not offered | an owner-role holder of one of the item's entitlements (`owned_entitlement_ids`) or a superuser |
-| Whose tickets a viewer sees | everyone's — `sees_all_content` is True | own, plus everyone's for an administrator with the content setting on | same as personal |
+**What this delivery actually builds, stated before the table so the table cannot be misread:
+enterprise behaves exactly as personal does.** The enterprise column below is what the design
+holds, not what ships here. The hold control, the owner-set cliff, the refusal of an early
+"Delete permanently" and the held-row copy are a named, deferred slice (§10.10), to be built
+when a box runs the enterprise posture. Until then, an enterprise box gets the personal
+behaviour: the item's owner may purge it before the cliff, and nothing can be held. **This spec
+does not claim a records guarantee it has not built**, and neither may the help text, the ADR
+or the Deleted page (§3.13).
 
-The enterprise row is the whole reason the policy is posture-keyed: on a box with a records
-obligation, a user's delete must be a request, not an erasure, and the person who could override
-that is the entitlement's owner. Everywhere else, delete means delete.
+| | `open` | `personal` | `enterprise` — **built** | `enterprise` — **deferred (§10.10)** |
+|---|---|---|---|---|
+| Who may delete an item | whoever may manage it today — `may_manage_conversation`, `may_administer_document`, `may_read_job`, and the item's owner for an Ask record | same | same | same |
+| What "Delete" does | ticket + cliff | ticket + cliff | ticket + cliff | unchanged |
+| The cliff | `retention_days`, default 30; `0` purges inline | same | same — the one box-wide number | operator-set with an enterprise floor |
+| Restore, until the cliff | the item's owner, or `sees_all_content` | same | same | same, unless held |
+| "Delete permanently" (purge now) | yes — the item's owner or `sees_all_content`. `is_admin` is True for everybody here, and there is nobody for anything to be hidden from | yes, same rule | **yes, same rule as personal — this is the honest statement of what is built** | **no. Nobody, before the cliff.** Control not rendered; the POST refuses with its own sentence |
+| Hold (suspend the cliff) | not offered — no accounts, no owner role to gate it | not offered | **not offered.** The ticket's three hold columns exist and stay empty (§3.2) | an owner-role holder of one of the item's entitlements (`owned_entitlement_ids`) or a superuser |
+| Whose tickets a viewer sees | everyone's — `sees_all_content` is True | own, plus everyone's for an administrator with the content setting on | same as personal | same |
+
+The deferred column is the whole reason the ticket is posture-ready rather than
+posture-branching: on a box with a records obligation, a user's delete must be a request, not an
+erasure, and the person who could override that is the entitlement's owner. Everywhere else —
+and everywhere in this delivery — delete means delete. What makes the deferral safe to state
+in a table rather than to build now is that the fields are already there (§3.2) and the sweep
+already excludes a held ticket (§3.9); the slice is a control, a refusal and one audit action,
+against a data model that will not have to move.
 
 ### 3.11 The queue's age cliff — identity's number, the queue's prune — and today's orphans
 
 **`JobSettings` gains no field.** The queue's age cliff is `IdentitySettings.
-queue_retention_days` — `PositiveIntegerField(null=True, blank=True, default=1)`, the fourth
-field of the one centralised retention policy (§4, **owner ruling §11.1**). Null means **no age
+queue_retention_days` — `PositiveIntegerField(null=True, blank=True, default=1)`, the second
+of the three fields of the one centralised retention policy (§4, **owner ruling §11.1**). Null means **no age
 cliff** (the FIFO `retention_limit` alone), the same "honestly unknown, never silently assumed"
 convention `memory_budget_bytes` and `max_queued_per_principal` already document on
 `JobSettings`; `1` is the shipped default the brief sets. The queue READS this number; it does
@@ -752,8 +817,8 @@ pointing at the retention section of Identity & security, and that is all it say
 
 **The bound is validated in the identity settings writer**, not in the queue and not in the
 database: `identity/services.py::set_posture` (the one writer for that row, whose refusals are
-`ServiceRefused` sentences and whose audit events are `identity/audit.py`'s) validates all four
-retention fields, through `foundation/settings_bounds.py::exceeds_field_ceiling` with
+`ServiceRefused` sentences and whose audit events are `identity/audit.py`'s) validates all
+three retention fields, through `foundation/settings_bounds.py::exceeds_field_ceiling` with
 `POSITIVE_INT_FIELD_MAX` — the same ceiling helper `models/queue/views.py` uses for
 `retention_limit` today — plus the per-field range check (`queue_retention_days`: 1–3650, or
 blank for null), with the form field on `identity/forms.py::PostureForm` beside
@@ -766,7 +831,7 @@ that existed only to fix a historical state is a command nobody deletes afterwar
 
 ### 3.12 Audit actions, and the detail toggle
 
-Four names added to the closed tuple in `identity/contracts/actions.py`, in a `content.`
+THREE names added to the closed tuple in `identity/contracts/actions.py`, in a `content.`
 namespace — naming what changed, not which table, the convention that module's own comments
 already argue for:
 
@@ -774,8 +839,14 @@ already argue for:
 CONTENT_DELETED  = "content.deleted"
 CONTENT_RESTORED = "content.restored"
 CONTENT_PURGED   = "content.purged"
-CONTENT_HELD     = "content.held"
 ```
+
+A fourth content action for a hold is NOT added here. The action tuple is closed and
+`AuditEvent.save()` raises on anything unlisted, so an unused name would be an action nothing
+can write — and the deferred enterprise slice (§10.10) adds its own name in its own commit,
+beside the control that writes it. With `identity.retention_policy_changed` (§4) that makes
+**four new action names in this delivery**, three of them content actions and one a settings
+action.
 
 Written through `identity/audit.py::record()`, the only permitted writer, with
 `target_type=<ticket kind>` and `target_key=<item key>`. `detail` carries the kind and, on a
@@ -824,13 +895,17 @@ Chat, Ask, Document library, Ask history and Queue unconditionally).
 **Two tabs.**
 
 - **Deleted** — open tickets, newest first: what it was (kind and label), who deleted it, when,
-  and **"Purge on 21 October 2026"**. Per row: **Restore**, and **Delete permanently** where the
-  posture and the principal allow it (§3.10). Enterprise adds **Hold** for an owner-role holder,
-  and a held row reads "On hold — the purge date is suspended" instead of a date.
+  and **"Purge on 21 October 2026"**. Per row: **Restore**, and **Delete permanently** for the
+  item's owner or a `sees_all_content` principal. Every ticket on this tab is restorable, in
+  every posture — that is what a ticket means (§3.1) — so there is no second row state to
+  render and no per-row count of what a purge would reach (§3.5). **No Hold control is rendered
+  in any posture, including enterprise**, and the page says nothing about holds or about a
+  purge an owner cannot perform: the enterprise behaviour is deferred (§3.10, §10.10) and the
+  page must not imply a guarantee that is not built.
 - **Purged** — content-free audit events, `by_action((CONTENT_PURGED, CONTENT_DELETED,
-  CONTENT_RESTORED, CONTENT_HELD))`, rendered as "Conversation 59608c35-… deleted at 14:32" and
-  visible in every posture with the toggle in either position. With `audit_detail` on, the same
-  lines carry the labels.
+  CONTENT_RESTORED))`, rendered as "Conversation 59608c35-… deleted at 14:32" and visible in
+  every posture with the toggle in either position. With `audit_detail` on, the same lines
+  carry the labels.
 
 **Copy is plain, and declared once in Python** (the house rule): "Deleted", "Restore", "Delete
 permanently", "Purge on <date>". The word *purge* appears in code, in this spec, and in the date
@@ -856,7 +931,8 @@ The demo requirement, stated as the mechanism that delivers it:
   gone, not merely hidden by `may_read_job_content`), its chat-scoped documents and their chunks
   and bytes are gone, its generated images and their files are gone, its Ask-history rows —
   where the person deleted those too — are gone, its tool-call words are blanked, its staging
-  note file is unlinked, and one content-free event stands on the Purged tab.
+  note file is unlinked, its ticket is gone from the Deleted tab, and one content-free event
+  stands on the Purged tab.
 
 ---
 
@@ -865,25 +941,46 @@ The demo requirement, stated as the mechanism that delivers it:
 **Exactly one migration.**
 
 **`identity/migrations/0004_deletion_ticket_and_retention_settings.py`** — creates
-`DeletionTicket` (§3.2) and adds **four** fields to `IdentitySettings`, the whole retention
-policy on one row (**owner ruling, §11.1**):
+`DeletionTicket` (§3.2) and adds **exactly three** policy fields to `IdentitySettings`, the
+whole retention policy on one row (**owner ruling, §11.1**). **Every one is optional and every
+one has a working default, so a maintainer who never opens this page gets correct behaviour**
+(§3.0):
 
-| Field | Type | Default | Bound (in the writer) |
-|---|---|---|---|
-| `retention_days` | `PositiveIntegerField` | `30` | 0–3650; `0` is legal and means purge on delete |
-| `queue_retention_days` | `PositiveIntegerField(null=True, blank=True)` | `1` | 1–3650, or blank for null = no age cliff (§3.11) |
-| `tool_record_extra_days` | `PositiveIntegerField` | `0` | 0–3650 |
-| `audit_detail` | `BooleanField` | `False` | — |
+| Field | Label a person reads | Type | Default | Bound (in the writer) |
+|---|---|---|---|---|
+| `retention_days` | **"Keep deleted items for"** | `PositiveIntegerField` | `30` | 0–3650; `0` is legal and means delete immediately |
+| `queue_retention_days` | **"Keep finished queue jobs for"** | `PositiveIntegerField(null=True, blank=True)` | `1` | 1–3650, or blank for null = no age cliff (§3.11); `0` is ILLEGAL — blank is how "no cliff" is said |
+| `audit_detail` | **"Show item names in the deletion log"** | `BooleanField` | `False` | — |
 
-All four are edited in ONE settings section on `identity-settings` (Identity & security), which
-is where the posture and `admin_sees_content` already live, and all four are audited under ONE
-new action, `RETENTION_POLICY_CHANGED = "identity.retention_policy_changed"`, with `detail`
-carrying `field` and `to`. That follows `LIBRARY_SETTINGS_UPDATED`'s recorded rule — one action
-per settings DOMAIN, the literal column in `detail` — rather than the three-way split
+The labels above are the interface copy, in plain words, declared once in Python like every
+other label in this repository (§3.13's house rule). A person reading that page is not asked to
+understand a ticket, a cliff, a sweep or a purge; they are asked how long to keep things and
+whether to show names.
+
+**Three fields, and no fourth.** The design deliberately stops here. A longer retention for
+tool-call records was asked for and withdrawn (§1 ruling 1, §10.9); a per-user override is out
+of scope (§10.4); the enterprise cliff floor belongs to the deferred slice (§10.10). Where a
+number could be a setting or a constant, this document says which and why, once — see the
+queue cliff below.
+
+**The queue cliff stays a setting, on the owner's earlier instruction.** Making
+`queue_retention_days` a fixed constant in `identity/contracts/retention.py` instead of a
+settings field was considered under the same cost/benefit principle — it would remove one knob
+and one bound check — and it is kept as a setting because the owner instructed (§11.1) that
+the whole retention policy live in one editable place; should that ever be revisited, it is a
+two-line change (drop the field from the form and the writer, read the constant the fallback
+already names).
+
+All three are edited in ONE **"Retention"** section of the EXISTING `identity-settings` page
+(Identity & security), which is where the posture and `admin_sees_content` already live — no
+new settings page, no new group for them — and all three are audited under ONE new action,
+`RETENTION_POLICY_CHANGED = "identity.retention_policy_changed"`, with `detail` carrying
+`field` and `to`. That follows `LIBRARY_SETTINGS_UPDATED`'s recorded rule — one action per
+settings DOMAIN, the literal column in `detail` — rather than the three-way split
 `POSTURE_CHANGED` / `LIBRARY_POSTURE_CHANGED` / `ADMIN_CONTENT_ACCESS_CHANGED` uses, because
-those three are semantically distinct security postures and these four are one retention policy
-expressed as four knobs. That makes five new action names in total, one of them a settings
-action rather than a content one; §11 records the choice.
+those three are semantically distinct security postures and these three are one retention
+policy expressed as three knobs. That makes **four** new action names in total (§3.12), one of
+them a settings action rather than a content one; §11 records the choice.
 
 **`models/queue` gets no migration and no new column.** The queue's age cliff is
 `queue_retention_days` above, read across the identity seam at prune time (§3.11). There is no
@@ -892,9 +989,9 @@ steward's branch, because this feature adds no queue migration to sequence.
 
 **No per-model soft-delete columns, and the reasons are three.** (a) Four tables in three columns
 means four migrations and four places to forget an exclusion; the ticket means one table and one
-exclusion function. (b) A cliff, a hold, an actor and a deferred second cliff are facts about the
-DELETION, not about the conversation — a `deleted_at` column on `Conversation` would need four
-companions, and then the same five on `Document`. (c) The Deleted page is one query over one
+exclusion function. (b) A cliff, an actor, a label and a hold are facts about the DELETION, not
+about the conversation — a `deleted_at` column on `Conversation` would need the same companions,
+and then all of them again on `Document`. (c) The Deleted page is one query over one
 table; with per-model columns it is a union over four querysets in three columns that
 `identity/` may not import. The cost is the join §3.4 pays — a bounded materialised key list per
 visibility call — and that cost is stated, budgeted and tested rather than hidden.
@@ -911,13 +1008,13 @@ design deletes through them.
 |---|---|---|
 | The file is already gone (note, store dir, generated dir) | Not an error. Every file removal is best-effort and idempotent: `store.remove_document_files`, `store.remove_job_files` and `store.remove_engine_files` already are, and `purge_conversation_notes` uses `missing_ok`. A purge that failed because somebody had already cleaned up would be a purge nobody could finish. | §3.5, §3.6 |
 | A handler raises mid-purge | The runner does not swallow. The savepoint restores the connection, the outer `transaction.atomic()` rolls back every ROW change, the ticket survives, and the view renders the refusal sentence. Files already removed by an earlier FILES-band handler stay removed — named, not hidden — which is why handlers must be idempotent and why the next sweep completes the purge. | §3.5 |
-| Restore after a partial purge | **Impossible, and refused explicitly.** Once `purged_at` is set the content is gone and there is nothing to restore; `restore_content` raises with "This item has already been deleted permanently and cannot be restored." The ticket remains only until the deferred tool-record scrub completes. A purge that rolled back before setting `purged_at` leaves the ticket restorable, which is correct: no rows were lost. | §3.3, §3.8 |
-| A hold on a ticket past its cliff | The hold wins. The sweep's due-query excludes held tickets outright, so a held ticket sits past its date indefinitely and the page reads "On hold" instead of a date. Clearing the hold makes it due on the next sweep — which the page's own prune-on-read runs. | §3.9, §3.10 |
+| Restore after a partial purge | **A purge that rolled back leaves the ticket, and the ticket is restorable** — no rows were lost, so the item is exactly as it was. **A purge that completed has no ticket**, so there is nothing to restore and nothing to refuse: the Deleted page simply no longer lists the item. Those are the only two outcomes, because the ticket is deleted by the same transaction that destroys the content (§3.3). Files a FILES-band handler already removed before a later handler raised are gone — named in the row above — and the next sweep completes the purge. | §3.3, §3.5 |
+| A hold on a ticket past its cliff | The sweep's due-query excludes held tickets outright (§3.9), so a held ticket would sit past its date indefinitely. **Nothing in this delivery can set a hold**, so this case cannot arise yet; it is specified because the columns and the query clause ship now and the control is the deferred enterprise slice. | §3.2, §3.9, §10.10 |
 | The cliff is changed after tickets exist | **`purge_on` is NOT recomputed.** It is computed once, at delete time, from the setting in force then. The page printed a date and that date is a promise; silently moving it — in either direction — would make the promise worthless, and moving it EARLIER would destroy content sooner than the person was told. A changed `retention_days` governs future deletes only, and the settings page says so in its help text. | §3.2, §8 |
-| A posture switch with tickets pending | Tickets are posture-independent data; nothing is migrated. Switching TO enterprise withdraws "Delete permanently" from every pending ticket and offers Hold; switching AWAY from enterprise leaves existing holds standing (a hold is a recorded decision, not a posture artefact) and lets an administrator clear one. `identity/services.py::set_posture` gains no retention branch at all. | §3.10 |
+| A posture switch with tickets pending | Tickets are posture-independent data; nothing is migrated, and in THIS delivery nothing changes at all — every posture behaves the same way (§3.10), so a switch to or from enterprise leaves every pending ticket exactly as it was. `identity/services.py::set_posture` gains no retention branch. When the deferred enterprise slice lands it inherits that property: a hold is a recorded decision, not a posture artefact. | §3.10, §10.10 |
 | Deleting a conversation whose documents are shared universally | The documents survive. Only `scope=conversation` documents die with their conversation — the invariant `tools/rag/access.py::delete_attachments` already depends on (exactly one attachment row, for that conversation). A universal or stream-contained document loses only its attachment CLAIM, exactly as today. | §3.4, §3.6 |
 | Workstream delete | **Unchanged.** It still refuses while the stream holds conversations (`PROTECT`), still deletes shares and pins, still audits `WORKSTREAM_DELETED`. Streams are not a ticket kind (§10). | §10 |
-| A `sees_all_content` principal viewing tickets | Sees every ticket, including other people's, and may restore or permanently delete them where the posture allows — the same predicate that already lets them read the content. On an open box that is every principal, which is correct: there is nobody for anything to be hidden from. An administrator with the content setting OFF sees only their own, and the labels on the Purged tab stay empty for them regardless of `audit_detail`. | §3.10 |
+| A `sees_all_content` principal viewing tickets | Sees every ticket, including other people's, and may restore or permanently delete them in every posture this delivery builds — the same predicate that already lets them read the content. On an open box that is every principal, which is correct: there is nobody for anything to be hidden from. An administrator with the content setting OFF sees only their own, and the labels on the Purged tab stay empty for them regardless of `audit_detail`. | §3.10 |
 | **A conversation is permanently deleted while one of its turns is still queued or running** | The SOFT delete always succeeds — the ticket is written, the conversation vanishes from every surface immediately (§3.4), and the in-flight turn's own behaviour is exactly today's: `delete_conversation` never touched queue rows and could not (import-law rule 2), so the job simply runs to its end. The PURGE is where the two states differ. A still-QUEUED row is CANCELLED through `models/queue/backend.py::cancel_job` — preserving its `on_terminal` scheduling, so `agents/runtime/jobs.py::on_turn_terminal` runs its one conditional `UPDATE` on commit and no-ops against turns that are already gone — and then deleted. A RUNNING row is never deleted: `forget_conversation` refuses, the purge aborts with the ticket and every row and byte intact (that handler is `ORDER_ROWS` and runs first), the view shows the refusal sentence, and the next sweep — or the next click — completes it once the worker is done. Deleting a live row would make the job vanish under the turn's own poller (`agents/chat/views/turns.py` calling `get_job` each tick), which reads as a database fault rather than as a delete. | §3.6, §3.7 |
 | The identity settings row is unreadable when the queue prunes | Not an error, and never a crash. The prune's read of `queue_retention_days` goes through `identity/access.py`, is NON-CREATING (`.first()`, never `get_solo`'s `get_or_create` — a worker must not materialise the posture singleton), and its caller catches `ProgrammingError`/`OperationalError` and falls back to the documented default of one day. An exception escaping the worker's `tick()` is read by `run_forever` as a crash and ends in `os._exit(1)`; a racing `migrate` must not be able to cause that. The precedent is `enqueue`'s existing tolerance of its own `JobSettings.get_solo()`. | §3.11 |
 | Two deletes of the same item race | `get_or_create` on `(kind, key)`, backed by the unique constraint: the second is a no-op returning the first ticket, and writes no second audit event. | §3.2 |
@@ -965,8 +1062,10 @@ because this is identity, posture and visibility work in every column it touches
   `get_or_create` no-op with no second audit event.
 - `delete_content` with `retention_days=30` writes a ticket with `purge_on` 30 days out and
   purges nothing; with `retention_days=0` the content is gone before the call returns.
-- `restore_content` deletes the ticket and writes `CONTENT_RESTORED`; it refuses a ticket with
-  `purged_at` set, with that exact sentence.
+- `restore_content` deletes the ticket and writes `CONTENT_RESTORED`.
+- **A completed purge leaves NO ticket** — asserted directly, because it is the invariant the
+  whole "a ticket means restorable" reading rests on (§3.1) — and a purge that rolled back
+  leaves a ticket that `restore_content` still accepts.
 - The registry: registration is idempotent (the sibling registries' rule), handlers sort ROWS
   before FILES regardless of registration order, and a handler registered with a non-dotted path
   raises at registration.
@@ -976,8 +1075,10 @@ because this is identity, posture and visibility work in every column it touches
 - Re-running a purge after a mid-purge failure completes it (idempotence, as a contract test
   every column's handler is run against).
 - `ticketed_keys` costs one query and its result is a list, not a queryset.
-- The sweep: bounded at `SWEEP_LIMIT`; skips held tickets; picks up `tool_purge_on`; one failing
-  ticket does not stop the batch; `manage.py purge_deleted` writes `source="cli"` events.
+- The sweep: **one due-condition** — bounded at `SWEEP_LIMIT`, picks up a ticket whose
+  `purge_on` has arrived, skips a ticket with a hold set (constructed directly in the test,
+  since nothing in this delivery writes one), one failing ticket does not stop the batch, and
+  `manage.py purge_deleted` writes `source="cli"` events.
 
 **`agents/`.**
 - `purge_conversation` removes shares, attachments, the conversation and its turns; collects
@@ -1047,14 +1148,68 @@ because this is identity, posture and visibility work in every column it touches
   no-op for an id that does not exist.
 
 **`identity/` — the retention policy fields.**
-- `set_posture` writes all four retention fields, refuses each out-of-range value with its own
+- `set_posture` writes all three retention fields, refuses each out-of-range value with its own
   sentence before `.save()` (including `queue_retention_days=0`, which is NOT legal — blank is
   how "no age cliff" is expressed), and writes one `identity.retention_policy_changed` event per
   field CHANGED, with the field named in `detail`. Unchanged fields write no event.
+- **A box that configures nothing behaves correctly** (§3.0): with a freshly migrated
+  `IdentitySettings` row and no field ever written, a delete tickets with `purge_on` thirty
+  days out, the queue cliff is one day, and the audit trail carries no labels — asserted
+  against the model's declared defaults, so a later default change has to be deliberate.
 - `identity/access.py::queue_retention_days()` returns the row's value, returns the documented
   default when no row exists, and creates nothing in either case.
 - `retention_days=0` and `queue_retention_days=None` are both round-trippable through the form
   and the writer — the "zero stays expressible" constraint, now for two fields.
+
+**The deletion-coverage gate — one NEW cross-column guard.**
+
+`foundation/ops/tests/test_deletion_coverage.py`, beside `test_import_law.py` and
+`test_column_boundaries.py`, because `foundation.ops` is the app that already reaches across
+every column by design and this is a repo-wide structural assertion (that module's own recorded
+reason for living there).
+
+**In plain words: a future feature that stores content somewhere new must wire it into
+deletion, or the build fails.** This design's weakest point is not any mechanism in it — it is
+the year after it merges, when somebody adds a table that holds what a person typed and nobody
+remembers that deletion is a registry you have to join. A test is the only form of that
+reminder that cannot be forgotten.
+
+The test holds **one closed list**, written from §2.1's inventory: every model carrying user
+content, mapped to the ticket kind whose registered handlers reach it —
+
+| Model | Kind whose handlers reach it |
+|---|---|
+| `agents.Conversation`, `agents.Turn`, `agents.ToolInvocation` | `conversation` |
+| `tools.rag.Document`, `tools.rag.DocumentRow`, `tools.rag.DocumentAttachment` | `document` (and `conversation`, for a chat-scoped document) |
+| `tools.rag.AskRecord` | `ask` |
+| `tools.vision.GenerationJob`, `tools.vision.JobInput`, `tools.vision.GeneratedOutput` | `vision_job` |
+| `models.queue.InferenceJob` | `conversation` and `document` (payload-keyed, §3.7) |
+
+and it FAILS on either of two conditions:
+
+- **(a)** a listed model has **no registered retention handler for its kind** —
+  `retention_handlers(kind)` is empty, or no registered handler's dotted path resolves, which
+  catches a handler deleted, renamed or dropped from an `AppConfig.ready()`;
+- **(b)** a model carrying the **owner columns** exists that is in neither the covered list nor
+  an explicit, reasoned exemption list. The marker is the `owner_kind` / `owner_key` PAIR —
+  verified against `identity/access.py::owner_fields`, which is the one definition of how
+  ownership is stamped in this codebase (`return {"owner_kind": principal.kind, "owner_key":
+  principal.key}`) and whose docstring says it was moved there so every owned table in every
+  column shares ONE definition. The test discovers the pair by walking `apps.get_models()` and
+  asking each for both field names, so it sees a new owned table the day it is added, with no
+  list to update first.
+
+**The exemption list is explicit, reasoned in one line each, and short.** As written today it
+holds the owned tables that are configuration or containers rather than content:
+`agents.Agent` and `agents.Flow` (an agent definition and a flow definition are settings a
+person authored, not content a person's deletion reaches — they are deleted directly, by their
+own pages), and `agents.Workstream` (a container, deliberately not a ticket kind — §10.2, where
+the reason is argued). An exemption is a sentence somebody has to write and a reviewer has to
+read; that is the point of making it a list rather than a default.
+
+What the gate does NOT do: it does not run a purge, does not touch the database beyond model
+introspection, and does not assert that a handler is correct — §7's per-column tests do that.
+It asserts that the wiring EXISTS, which is the failure mode that arrives silently.
 
 **Guards that must stay green, each asserted after the change.**
 - `foundation/ops/tests/test_column_boundaries.py`'s AST audit guard: `identity/audit.py` is
@@ -1068,7 +1223,10 @@ because this is identity, posture and visibility work in every column it touches
   `foundation/tests/test_page_names.py`, and `identity/tests/test_route_matrix.py` classifying
   all three new names with drivers for each.
 - Never-500 on a forged ticket id, a ticket belonging to somebody else, and a POST to
-  `identity-deleted-purge` in the enterprise posture.
+  `identity-deleted-purge` for a ticket the principal has no standing on — 404, the class-O
+  shape (§3.13). The enterprise-posture refusal is not tested here because it is not built
+  here (§3.10, §10.10); the same POST in the enterprise posture succeeds, exactly as it does in
+  personal, and one test asserts that rather than leaving the posture untested.
 
 **The demo, as one end-to-end test** (`identity/tests/test_deletion_demo.py`), personal posture,
 in this order, asserting at each step:
@@ -1079,7 +1237,8 @@ in this order, asserting at each step:
 3. **Delete permanently** → in the same response cycle: absent from the chat list; **zero**
    `InferenceJob` rows naming that conversation; the generated image's row, files and queue row
    gone; the chat-scoped document, its chunks and its bytes gone; `ToolInvocation.args`/`text`
-   empty with the row still present; the note file gone.
+   empty with the row still present — **scrubbed inline, in this transaction, with no setting
+   touched**; the note file gone; and **no `DeletionTicket` row left for that conversation**.
 4. The Ask record is deleted on its own and is absent from `HistoryView`'s context.
 5. A `content.purged` event is on the Purged tab with the kind, the key, the actor and the time
    — **with `audit_detail` OFF**, and with `target_label` empty; flipping the toggle and
@@ -1094,13 +1253,14 @@ Same commit as the code it describes, per non-negotiable 1.
 | Document | What it gains |
 |---|---|
 | `docs/OPERATIONS.md` | The "Deleted content and your backups" section (§6), and one line in the retention discussion pointing at `manage.py purge_deleted` for an operator who wants a cron rather than relying on prune-on-write |
-| `docs/adr/0019-deletion-and-retention.md` | **The next number** (the record runs to `0018-settings-assistant.md`). The policy decision: delete means delete; one ticket table rather than per-model columns; the retention namespace on the existing cascade registry; posture-keyed policy; the content/audit split; backups as their own layer; the named residue (§10) |
-| `docs/EXTENDING.md` | A new recipe, **"Registering a retention handler"**, beside "Adding an entitlement axis": the `RetentionHandler` fields, the two order bands and when to use each, the `(key, *, commit) -> int` signature, the idempotence obligation, the one-line `AppConfig.ready()` registration, and the two tests a new handler owes (count-then-commit agreement, and re-run-after-failure) |
-| `identity/README.md` | The ticket table, **the four-field retention policy on `IdentitySettings` and the new non-creating `identity/access.py::queue_retention_days` seam** (what it returns when there is no row, and why it is not `settings_row()`), the orchestration, the Deleted page, and the sentence that identity answers "which keys are deleted", never "which conversations" |
-| `agents/README.md` | `agents/retention.py`, the new artifact-purge slot, and the tool-record scrub's rule |
+| `docs/adr/0019-deletion-and-retention.md` | **The next number** (the record runs to `0018-settings-assistant.md`). The policy decision: delete means delete; one ticket table rather than per-model columns; the retention namespace on the existing cascade registry; the content/audit split; backups as their own layer; the named residue (§10); **and the owner's cost/benefit principle (§3.0) with what it cut — no dry-run mode, no second cliff for tool records, enterprise behaviour deferred while its fields ship** |
+| `docs/EXTENDING.md` | A new recipe, **"Registering a retention handler"**, beside "Adding an entitlement axis": the `RetentionHandler` fields, the two order bands and when to use each, the one-mode `(key: str) -> int` signature (and one line on why it is not two-mode like `EntitlementCascade`), the idempotence obligation, the one-line `AppConfig.ready()` registration, the one test a new handler owes (re-run-after-failure), **and the deletion-coverage gate: a new model that holds user content must be added to `foundation/ops/tests/test_deletion_coverage.py`'s covered list with a handler that reaches it, or to its exemption list with a reason — the test fails until one of the two is done** |
+| `identity/README.md` | The ticket table **and the fact that a ticket exists only while the item is restorable**, the three-field retention policy on `IdentitySettings` with its plain-words labels, **the new non-creating `identity/access.py::queue_retention_days` seam** (what it returns when there is no row, and why it is not `settings_row()`), the orchestration, the Deleted page, and the sentence that identity answers "which keys are deleted", never "which conversations" |
+| `agents/README.md` | `agents/retention.py`, the new artifact-purge slot, and the tool-record scrub's rule — scrubbed inline with the conversation, always |
 | `tools/rag/README.md`, `tools/vision/README.md` | Their handlers, and what each one does and does not reach |
 | `models/README.md` | The payload-keyed queue handler and its cancel-before-delete rule; the age cliff **and the fact that its number is identity's, read across the `identity.access` seam non-creatingly and tolerantly, with `JobSettings` gaining nothing**; and `forget_jobs` on the contracts seam |
-| `foundation/settings_help.py` | The Deleted page's `HelpCard` — what the page is for, what Restore and Delete permanently do, that the purge date is fixed at delete time and a changed setting governs future deletes only, and that backups are a separate layer. **The Queue settings card gains one sentence** saying the finished-job cliff is part of the retention policy on Identity & security, since the number is not editable on the Queue page (§3.11) |
+| `foundation/settings_help.py` | The Deleted page's `HelpCard` — what the page is for, what Restore and Delete permanently do, that the purge date is fixed at delete time and a changed setting governs future deletes only, and that backups are a separate layer. It says nothing about holds or records obligations, because none are built (§3.10). **The Queue settings card gains one sentence** saying the finished-job cliff is part of the retention policy on Identity & security, since the number is not editable on the Queue page (§3.11) |
+| `foundation/ops/tests/test_deletion_coverage.py` | Not a document, but its module docstring carries the maintenance rationale in the same words the `EXTENDING.md` recipe uses: **this gate exists so a feature that starts storing content somewhere new cannot ship without joining the deletion registry.** The two failure conditions, the `owner_kind`/`owner_key` marker and its source (`identity/access.py::owner_fields`), and the rule that an exemption is a line of prose somebody writes and a reviewer reads (§7) |
 
 No document names a model or a vendor; `test_docs_model_names.py` walks the planning archive
 too, so this spec is inside its reach.
@@ -1112,26 +1272,31 @@ too, so this spec is inside its reach.
 Branch off `origin/dev`, pull request into `dev`, merged on the owner's word, with the
 merge-readiness gate's whole-feature UAT walked by hand on this branch's preview stack.
 
-### Slices, exactly as the brief has them
+### Two slices
 
 **Slice 1 — personal-posture hard purge, conversation kind, end to end.**
-The identity ticket, the four retention policy fields and their one settings section, the
-non-creating `queue_retention_days` seam, the retention namespace on the cascade registry,
-the runner, the audit actions and the audit reader; the agents handler (turn/share/attachment
-rows, the tool-record scrub, the artifact collection and the vision hand-off); the rag notes
-handler; the vision artifact-purge registration; the Deleted page with both tabs; the sweep and
-the management command; and the documentation set (`OPERATIONS.md` backups section, ADR 0019,
-the column READMEs, the `EXTENDING.md` recipe, the help card). **The queue half is a separate,
-late task inside this slice** (below).
+The identity ticket (including its three hold columns, written by nothing — §3.2), the three
+retention policy fields and their one "Retention" settings section, the non-creating
+`queue_retention_days` seam, the retention namespace on the cascade registry, the one-mode
+runner, the three content audit actions plus the settings action, and the audit reader; the
+agents handler (turn/share/attachment rows, the inline tool-record scrub, the artifact
+collection and the vision hand-off); the rag notes handler; the vision artifact-purge
+registration; the Deleted page with both tabs; the sweep and the management command; **the
+deletion-coverage gate (§7)**; and the documentation set (`OPERATIONS.md` backups section, ADR
+0019, the column READMEs, the `EXTENDING.md` recipe, the help card). **The queue half is a
+separate, late task inside this slice** (below).
 
-**Slice 2 — documents and Ask history.**
+**Slice 2 — documents, Ask history and the gallery, routed through the retention service.**
 The library delete becomes a ticketing delete; an Ask-history delete route and the affordance on
 `HistoryView`'s page (which stops being read-only for the first time, and its docstring says so);
 both kinds' rows on the Deleted page; the gallery's own delete and bulk delete routed through the
-retention service for the `vision_job` kind.
+retention service for the `vision_job` kind. The coverage gate's covered list reaches its full
+shape here, and the `document`, `ask` and `vision_job` entries are what make it pass.
 
-**Slice 3 — enterprise.**
-Hold, the owner-set cliff, no early purge, and the `audit_detail` labels.
+**There is no third slice in this delivery.** The enterprise behaviour that used to be one is a
+named, deferred slice in §10.10, to be built when a box runs the enterprise posture. The
+`audit_detail` toggle is NOT deferred with it — it is one of the three shipped settings (§4)
+and lands in slice 1 with the rest of the policy.
 
 ### Sequencing constraints
 
@@ -1148,7 +1313,7 @@ Hold, the owner-set cliff, no early purge, and the `audit_detail` labels.
   sentence, and `forget_jobs` on `models/contracts/queue.py`. It is isolated as its own task (or
   two) at the end of slice 1, and until it lands the conversation purge is complete in every
   column but the queue — a state the task's own tests assert rather than leave ambiguous. The
-  identity half — the four fields, the settings section, the writer and its bounds — carries no
+  identity half — the three fields, the settings section, the writer and its bounds — carries no
   such constraint and lands with the rest of slice 1.
 - **The queue steward's four binding conditions are carried in the design, not in the task
   brief**: boot tolerance and no worker-side `get_or_create` (§3.11, §5), one read per prune
@@ -1185,9 +1350,12 @@ Downward only, through `identity → foundation → models → agents → tools`
 | `models/queue/backend.py` (amended: the prune's age condition) | models | `identity.access.queue_retention_days`, `identity.contracts.retention` for the default constant — the same direction `models/queue/visibility.py` already takes with `identity.access.is_admin`/`sees_all_content` | **`identity.models`**, which is outside `IDENTITY_PERMITTED`; the row read happens on identity's side of the seam |
 | `identity/access.py` (one new non-creating reader) | identity | `identity.models` (intra-column) | `agents`, `tools`, `models` |
 | `models/contracts/queue.py` (one passthrough) | models | unchanged | `models.queue.models` |
+| `foundation/ops/tests/test_deletion_coverage.py` (new, §7) | foundation | `django.apps`, `identity.contracts.cascades`, `identity.access` — the reach `foundation/ops`' other repo-wide gates already have by design | nothing new; it introspects models, it does not import any column's models module |
 
-Every cross-column reach in this feature is either a dotted-path registration resolved at run
-time or an existing sanctioned seam. **No new import crosses a boundary in a direction the law
+**No module disappears** with the cuts of §11.8: `identity/cascades.py` keeps its runner (one
+instead of two), `agents/retention.py` keeps its scrub (one argument instead of two), and every
+row above stands as written. Every cross-column reach in this feature is either a dotted-path
+registration resolved at run time or an existing sanctioned seam. **No new import crosses a boundary in a direction the law
 forbids, and no Django signal is used anywhere** — `delete_conversation`'s own docstring already
 records why (*"this repository uses no Django signals anywhere"*), and a `post_delete` receiver
 would be exactly the wrong mechanism for a delete that must be explicit, counted and audited.
@@ -1206,7 +1374,7 @@ would be exactly the wrong mechanism for a delete that must be explicit, counted
    `/engine/input` and `/engine/output` are bind mounts this platform tracks with no row at all;
    the Engine files admin page remains the manual door, and its `ENGINE_FILE_DELETED` audit
    action is untouched.
-4. **Per-user retention overrides.** The whole retention policy — all four fields — is a box
+4. **Per-user retention overrides.** The whole retention policy — all three fields — is a box
    policy on the `IdentitySettings` row (§11.1). A
    per-person or per-entitlement cliff needs a second table and a precedence rule; not now.
 5. **Export before delete.** No "download your data" step. Delete is delete, and an export
@@ -1218,29 +1386,66 @@ would be exactly the wrong mechanism for a delete that must be explicit, counted
 8. **`Turn.tool_call`'s replayed args as a separate scrub target.** They die with the turn by
    CASCADE; there is no case where a turn survives its conversation.
 
+The last three were cut by the owner's cost/benefit ruling of 2026-09-21 (§11.8, §3.0), and
+each is named with what it would cost to build so a real need can pick it up without
+re-deriving the design:
+
+9. **Optional longer retention for tool-call records: three nullable ticket fields and one
+   sweep condition if a real need appears.** The owner asked for this and withdrew it (§1
+   ruling 1). Concretely, should a box ever need it: `purged_at` (datetime, null),
+   `tool_purge_on` (date, null) and `deferred_ids` (JSON list of `ToolInvocation` ids, never
+   content) on `DeletionTicket`; a second `OR` clause on the sweep's due-query; a fourth
+   settings field; and one honest page state to explain — an item whose content is gone but
+   whose bookkeeping is not finished, which is neither restorable nor absent. Today tool
+   records are scrubbed inline with their conversation, always (§3.8).
+10. **The enterprise posture's BEHAVIOUR — a named, deferred slice, to be built when a box runs
+    the enterprise posture.** It is: the Hold control on the Deleted page for an owner-role
+    holder of one of the item's entitlements (`owned_entitlement_ids`) or a superuser; the
+    refusal of "Delete permanently" before the cliff in that posture, with the control not
+    rendered and the POST refusing in its own sentence; an owner-set cliff with an enterprise
+    floor; a `CONTENT_HELD` audit action added to the closed tuple in the same commit as the
+    control that writes it; and the held-row copy ("On hold — the purge date is suspended").
+    **Its FIELDS ship now** — `hold_by_kind`, `hold_by_key`, `hold_note` on the ticket (§3.2) —
+    and the sweep's due-condition already excludes a held ticket (§3.9), so the slice needs no
+    migration against a live ticket table. Until it is built, **the enterprise posture behaves
+    exactly as personal does and this spec, the help text, the ADR and the Deleted page all say
+    so** (§3.10, §3.13, §8).
+11. **A dry-run count of what a purge would remove.** No handler counts without removing, no
+    count is shown before a confirmation, and the Deleted page has no per-item count line
+    (§3.5). The confirmation a deletion gets is the Deleted page itself, where the item sits
+    named and restorable for as long as `retention_days` says. Adding it back would mean a
+    `commit` flag on every retention handler and on the artifact-purge slot, a second code path
+    per handler and a count-then-commit agreement test per column — which is what the
+    `EntitlementCascade` registry pays for its own confirmation count, and it needs one.
+
 ---
 
 ## 11. Decisions the author made
 
-Each is a place the brief left a choice, with what was chosen and why. **Decision 1 is no longer
-the author's**: the owner ruled on it on 2026-09-21 and that ruling stands in its place, marked
-as such. The rest are the author's and are open to the same treatment. Nothing is renumbered.
+Each is a place the brief left a choice, with what was chosen and why. **Two entries are not the
+author's.** Decision 1 is an owner ruling of 2026-09-21 that stands in place of the author's
+first draft, and decision 8 is the owner's cost/benefit ruling of the same date, which cut three
+mechanisms out of this design and added one gate to it — both marked as such. **Decision 5 was
+withdrawn** by that second ruling and is kept, empty of a choice, at its own number. The rest
+are the author's and are open to the same treatment. Nothing is renumbered.
 
 1. **The retention policy is CENTRALISED on `IdentitySettings`. `JobSettings` gains no field.**
    *(Owner ruling, 2026-09-21 — **overrides the author's first draft**, which put
    `queue_retention_days` on `JobSettings` beside the queue's own writer and prune.)*
 
-   All four policy fields live on the existing `IdentitySettings` row, beside the posture:
-   `retention_days` (default 30, `0` allowed), `queue_retention_days` (default 1; null = no age
-   cliff, the FIFO `retention_limit` alone), `tool_record_extra_days` (default 0) and
-   `audit_detail` (default False). One settings section on the identity settings page edits all
-   four; one audit action (`identity.retention_policy_changed`, with the field named in
+   All policy fields live on the existing `IdentitySettings` row, beside the posture. As
+   shipped that is THREE — `retention_days` (default 30, `0` allowed), `queue_retention_days`
+   (default 1; null = no age cliff, the FIFO `retention_limit` alone) and `audit_detail`
+   (default False); the fourth this ruling originally covered, `tool_record_extra_days`, was
+   withdrawn by the owner's later cost/benefit ruling (§11.8) and the centralisation principle
+   is unaffected by its absence. One "Retention" section on the identity settings page edits
+   all three; one audit action (`identity.retention_policy_changed`, with the field named in
    `detail`) records every change; one writer validates every bound.
 
-   **The owner's reason, in plain words:** one retention policy with four numbers belongs in one
-   place. Two settings pages means two places to look, two writers to validate, and a real
-   chance the content cliff is changed while the queue silently keeps its own. The extra
-   single-row read in the prune step is negligible on a single-box install.
+   **The owner's reason, in plain words:** one retention policy belongs in one place. Two
+   settings pages means two places to look, two writers to validate, and a real chance the
+   content cliff is changed while the queue silently keeps its own. The extra single-row read
+   in the prune step is negligible on a single-box install.
 
    **What this costs the queue, and why it is affordable.** `models/queue/backend.py::
    _prune_finished_jobs` reads the number at prune time across the `identity.access` seam —
@@ -1268,10 +1473,13 @@ as such. The rest are the author's and are open to the same treatment. Nothing i
    the page is the promise; moving it earlier would destroy content sooner than the person was
    told, and moving it later would make the page's own history a lie. The setting governs future
    deletes only, and the help card says so.
-5. **The deferred tool-record scrub is carried on the ticket (`purged_at`, `tool_purge_on`,
-   `deferred_ids`), not on `ToolInvocation`.** A per-row scrub date would be a fifth column on a
-   table this design otherwise only updates, and a third migration. One row with two dates keeps
-   the "no per-model columns" rule intact and gives the sweep a single due-query.
+5. **WITHDRAWN under the owner's cost/benefit ruling (§11.8).** This decision chose WHERE to
+   carry a deferred tool-record scrub — on the ticket rather than on `ToolInvocation`. The
+   owner then withdrew the deferral itself, so there is nothing to place: tool-call records are
+   scrubbed inline with their conversation's purge, always (§1 ruling 1, §3.8). The entry is
+   kept at its number, and empty of a choice, because the rest are numbered around it and
+   because a decision withdrawn is a different fact from a decision never made. What it would
+   cost to reinstate is in §10.9.
 6. **The Deleted page is gated `EVERYONE` in a new "Your content" settings group, route class
    A.** Every existing settings entry is `ADMIN` or `ACCOUNTS_ADMIN`; this page is a person's own
    deleted items, so a member must reach it. The consequence on the one public settings page is
@@ -1279,5 +1487,48 @@ as such. The rest are the author's and are open to the same treatment. Nothing i
 7. **Settings writes for the retention policy are audited under one new action
    (`identity.retention_policy_changed`) with the field in `detail`**, following
    `LIBRARY_SETTINGS_UPDATED`'s "one action per settings domain" rule rather than splitting three
-   knobs into three actions the way the three security postures are split. That makes five new
-   action names, not four; the fifth is a settings action, not a content one.
+   knobs into three actions the way the three security postures are split. That makes four new
+   action names, not three; the fourth is a settings action, not a content one (§3.12).
+8. **Three mechanisms are CUT and one coverage gate is ADDED — owner ruling, 2026-09-21.**
+   *(Not the author's. This is the owner's decision, recorded here in the same place the
+   author's are so that a reader of §11 sees the whole shape of the design's choices.)*
+
+   The principle, in the owner's own words:
+
+   > I want to make sure we achieve a good cost/benefit associated with our changes/complexity,
+   > and that we don't add so many features/options it paralyses the maintainer because they
+   > have to set up so many options.
+
+   Held as a test the whole document must pass (§3.0): **a maintainer installs this and has to
+   set up NOTHING; every option has a working default; there are as few options as the feature
+   can honestly have.**
+
+   **What it cut, and where each is now recorded:**
+
+   - **The optional longer retention for tool-call records** — asked for by the owner first,
+     then withdrawn by him. It would have cost three nullable ticket fields, one extra sweep
+     condition, a fourth setting and a page state nobody could explain in one sentence. Tool
+     records are scrubbed inline with their conversation, always. → §1 ruling 1, §3.8, §10.9;
+     it replaces decision 5 above.
+   - **The dry-run count mode on retention handlers** — `(key: str) -> int`, one mode. No
+     `commit` flag on a retention handler or on the artifact-purge slot, no count before a
+     confirmation, no per-item count line on the Deleted page, and no count-then-commit
+     agreement test. The departure from `EntitlementCascade`'s two-mode shape is explained
+     where a reader meets it: that registry needs a confirmation count because its delete is
+     irreversible on click; a deletion's confirmation is the Deleted page itself, where the item
+     sits restorable. → §3.5, §10.11.
+   - **The enterprise BEHAVIOUR** — deferred to a named slice, built when a box runs the
+     enterprise posture. Its FIELDS ship now, in the one migration, so no later migration is
+     needed and the sweep's due-condition already honours a hold. In this delivery enterprise
+     behaves as personal does, and the spec, the page, the help card and the ADR say so rather
+     than implying a guarantee that is not built. → §3.2, §3.9, §3.10, §3.13, §9, §10.10.
+
+   **What it added: one coverage gate** (`foundation/ops/tests/test_deletion_coverage.py`, §7),
+   holding a closed list of every model carrying user content mapped to the ticket kind whose
+   handlers reach it, and failing when a listed model has no registered handler for its kind or
+   when a model carrying the `owner_kind`/`owner_key` pair is in neither that list nor an
+   explicit, reasoned exemption list. In plain words: **a future feature that stores content
+   somewhere new must wire it into deletion or the build fails.** That is the one piece of
+   complexity this ruling ADDED, and it is the kind the principle favours — a cost paid once,
+   by the author, that a maintainer never has to configure and a future contributor cannot
+   forget. → §7, §8, §9.
