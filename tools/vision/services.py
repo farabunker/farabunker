@@ -1384,6 +1384,44 @@ def delete_job(job: GenerationJob) -> None:
     store.remove_engine_files(job_id)
 
 
+def delete_jobs(job_ids) -> int:
+    """Delete every `GenerationJob` named by `job_ids` (each through
+    `delete_job`, so its files and its best-effort engine sweep go too)
+    and return how many were actually deleted.
+
+    THE ONE UNSCOPED READ OF `GenerationJob.objects` A RETENTION PURGE
+    NEEDS, and it lives here rather than in `tools.vision.retention` on
+    purpose: that module maps a conversation's artifact references and
+    generation ids to job ids, and `tools/vision`'s own IA-1 rule
+    (`foundation/ops/tests/test_column_boundaries.py`'s closed set of
+    two) is that only `visibility.py` and this module may query the job
+    table directly -- a THIRD site is exactly the drift that gate
+    exists to catch, and `visibility.py` is the wrong home regardless,
+    since it answers "who may see this", and a purge must reach a
+    ticketed job, or a job owned by somebody else, that nobody may see
+    at all.
+
+    DELIBERATELY NOT VISIBILITY-SCOPED: unlike `visibility.visible_jobs`,
+    this reads every matching row regardless of owner or ticket, because
+    the whole point of a purge is to finish what a ticket already
+    started.
+
+    Catches nothing: a failure deleting one job's rows or files
+    propagates, so the retention runner's own transaction rolls back and
+    the ticket stays due for the next sweep. `delete_job`'s own
+    engine-side sweep is the one documented best-effort exception, and
+    it already lives inside `delete_job` -- there is no second one here.
+
+    Idempotent: an empty or already-gone id in `job_ids` simply matches
+    no row and contributes nothing.
+    """
+    deleted = 0
+    for job in GenerationJob.objects.filter(pk__in=job_ids):
+        delete_job(job)
+        deleted += 1
+    return deleted
+
+
 def _fail(job: GenerationJob, error: str, failure_kind: str) -> GenerationJob:
     """Mark `job` failed with `error` and `failure_kind`, stamping the
     finish time.

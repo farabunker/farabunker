@@ -85,3 +85,13 @@ class VisionConfig(AppConfig):
 
         register_owned_rows(
             OwnedRows("vision.generationjob", "Generated images", "vision.GenerationJob"))
+
+        # THIS COLUMN'S ANSWER TO "THIS CONVERSATION'S IMAGES ARE GOING".
+        # A dotted-path string on the single artifact-purge slot, for the
+        # same import-law reason every other registration in this method
+        # has: `agents/` may not import `tools/` at all. INSIDE the
+        # feature gate, so a box with "vision" off carries no
+        # registration naming a model whose app registered nothing else.
+        from agents.contracts.artifacts import register_artifact_purge
+
+        register_artifact_purge("tools.vision.retention.purge_artifacts")

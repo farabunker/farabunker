@@ -19,11 +19,17 @@ them rather than restating the rule.
 from __future__ import annotations
 
 from identity.access import may_read_owned_row, owned_rows_q, sees_all_content
+from identity.contracts.retention import KIND_VISION_JOB
+from identity.retention import ticketed_keys
 from tools.vision.models import GenerationJob
 
 
 def visible_jobs(principal):
-    qs = GenerationJob.objects.all()
+    # THE EXCLUSION IS ON THE BASE QUERYSET, BEFORE the
+    # `sees_all_content` early return: that branch is every principal on
+    # an open box, so an exclusion on the restricted leg alone would
+    # leave deleted generations fully visible in the common posture.
+    qs = GenerationJob.objects.exclude(pk__in=ticketed_keys(KIND_VISION_JOB))
     if sees_all_content(principal):
         return qs
     return qs.filter(owned_rows_q(principal))
@@ -54,5 +60,12 @@ def known_job_uuids() -> set[str]:
     this one and `services.py`), so a THIRD module querying the table
     directly is exactly what this function exists to keep from
     happening.
+
+    NOT narrowed by `ticketed_keys` the way `visible_jobs` is: this is
+    the Engine files page's box-inventory accounting seam, not a
+    content listing, and a deleted-but-not-yet-purged job's engine-side
+    files are still accounted for here, not orphaned -- the row still
+    exists, only hidden from `visible_jobs`, until the day its ticket
+    is purged and this set stops naming it.
     """
     return {str(pk) for pk in GenerationJob.objects.values_list("id", flat=True)}

@@ -497,6 +497,11 @@ raises this one specifically rather than folding it into the role's own
   no request thread sits blocked on a generation.
 - **`delete_job(job)`** — deletes the DB rows (cascading to `JobInput`/`GeneratedOutput`)
   and the job's whole directory (`store.remove_job_files`).
+- **`delete_jobs(job_ids) -> int`** — `delete_job` for every id in `job_ids`, by pk,
+  returning how many were actually deleted. This is the one place outside
+  `visibility.py` that queries `GenerationJob.objects` directly (IA-1's closed set of
+  two), which is what lets the retention purge below reach a job it must destroy
+  regardless of who owns it or whether anyone may currently see it.
 - **`stage_upload(param_key, uploaded) -> "input:<id>"`** — records a browser
   upload as a stored input that has no job yet, and returns the ordinary
   reference for it. This is what lets the page enqueue: a queue payload is JSON
@@ -949,6 +954,40 @@ flag-guarded on `"vision"` in `FARABUNKER_FEATURES` — with the feature off
 there is no `/vision/` route at all (`config/urls.py`), so the sidebar must
 not try to `reverse()` it either (`foundation/settings_area.py::Entry.
 feature`, `foundation/templates/_settings.html`).
+
+## Deletion
+
+A ticketed generation (spec: deletion semantics) is excluded from
+`visible_jobs` the moment its ticket exists — see "Visibility" above —
+and its rows and files are destroyed when the ticket's date arrives, or
+on an explicit "Delete permanently".
+
+`tools/vision/retention.py::purge_artifacts` is this column's registered
+answer to `agents.contracts.artifacts.register_artifact_purge`
+(`tools/vision/apps.py::VisionConfig.ready()`, inside the feature gate).
+A deleted conversation's own purge hands it two things it already
+collected before deleting a single row of its own: the `output:<id>`/
+`input:<id>` artifact references its turns carried, and the generation
+ids sitting in `Turn.data["id"]`. `purge_artifacts` maps both to the
+`GenerationJob`s behind them — an `output`/`input` reference is one FK
+hop from its job, and several outputs share one job, so the mapping
+dedupes by job — and hands the resulting job ids to `services.
+delete_jobs`, never querying `GenerationJob.objects` itself (see
+`delete_jobs` above). **That is also the only reach this platform has
+into `/engine/output` and `/engine/input`**: `delete_job`'s best-effort
+engine-side sweep (`store.remove_engine_files`, which never raises) is
+what it triggers, once per job, and those two directories are tracked by
+no row at all — the Engine files page (above) remains the operator's own
+manual door onto them, for whatever a sweep never reached.
+
+**Accepted residue.** A generation whose tool turn was never written at
+all — the job row was created and the chat turn died before it (a
+crash, a kill, a cancelled turn) — carries no artifact reference and no
+`Turn.data["id"]` anywhere a conversation purge can read. It is not lost:
+it stays visible to its own owner in the gallery, where deleting it
+directly writes the same `vision_job` ticket and reaches the same purge
+path. It is simply not reachable *through a conversation's own delete*,
+which is the residue spec section 10.7 records rather than papers over.
 
 ## The poll-driven page and its no-JS fallback
 
