@@ -15,15 +15,39 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+from datetime import timedelta
 
 import pytest
 from django.db import transaction
+from django.utils import timezone
 
 from models.registry.models import ModelConnection
-from models.queue.claim import CANDIDATE_WINDOW, claim_and_admit
+from models.queue.claim import CANDIDATE_WINDOW, _sweep_orphans, claim_and_admit
 from models.queue.models import QUEUED, RUNNING, InferenceJob, JobSettings
+from models.queue.tests._helpers import registry_reset_fixture  # noqa: F401 -- re-exported
+from models.contracts import jobkinds
+from models.contracts.jobkinds import JobKind, register_job_kind
 
 STALE_AFTER = 120  # arbitrary for tests that don't exercise the sweep itself
+
+MODULE = "models.queue.tests.test_claim"
+
+reset_registry = registry_reset_fixture(jobkinds, "_JOB_KINDS")
+
+
+# --- test job kinds' planner/handler/summarizer -----------------------------
+
+
+def plan_no_models(payload):
+    return ([], False)
+
+
+def echo_handler(payload, models, ctx):
+    return {"echo": payload}
+
+
+def summarize_noop(payload):
+    return "test job"
 
 
 def _ref(
@@ -45,9 +69,9 @@ def _ref(
     }
 
 
-def _job(*, priority=100, state=QUEUED, model_refs=None, exclusive=False, **extra) -> InferenceJob:
+def _job(*, kind="test.kind", priority=100, state=QUEUED, model_refs=None, exclusive=False, **extra) -> InferenceJob:
     return InferenceJob.objects.create(
-        kind="test.kind",
+        kind=kind,
         priority=priority,
         state=state,
         model_refs=model_refs if model_refs is not None else [],
@@ -61,6 +85,18 @@ def _set_budget(*, memory_budget_bytes=None, max_concurrent_jobs=4):
     settings.memory_budget_bytes = memory_budget_bytes
     settings.max_concurrent_jobs = max_concurrent_jobs
     settings.save()
+
+
+def _running_job(*, kind: str, heartbeat_age_seconds: int) -> InferenceJob:
+    """One RUNNING row whose heartbeat is `heartbeat_age_seconds` old --
+    the only shape the orphan sweep's tests care about."""
+    row = _job(kind=kind, state=RUNNING)
+    InferenceJob.objects.filter(pk=row.pk).update(
+        claim_token=uuid.uuid4(),
+        heartbeat_at=timezone.now() - timedelta(seconds=heartbeat_age_seconds),
+    )
+    row.refresh_from_db()
+    return row
 
 
 @pytest.mark.django_db
@@ -270,12 +306,31 @@ class TestOrphanSweep:
         `claim_and_admit`'s own `atomic()` block (see that function's
         docstring for why it must never run inside the advisory-lock
         window itself) -- this fires it without needing a real DB commit.
+
+        Registers `rag.ingest` explicitly, with the exact fields
+        `tools/rag/apps.py` registers it with at startup, rather than
+        relying on that app-ready registration surviving into the test
+        body: `TestKindAwareStaleness` (below) needs this module's own
+        `reset_registry` fixture, and that fixture -- shared with
+        `test_worker.py`/`test_backend.py` (`models.contracts.testing.
+        registry_reset_fixture`) -- is autouse for every test in this
+        file, real kinds included, the moment this module defines it.
         """
         from datetime import timedelta
 
         from django.utils import timezone
 
         from tools.rag.models import Document
+
+        register_job_kind(JobKind(
+            key="rag.ingest",
+            label="Ingest a document",
+            planner="tools.rag.jobs.plan_ingest",
+            handler="tools.rag.jobs.run_ingest",
+            summarizer="tools.rag.jobs.summarize_ingest",
+            default_priority=200,
+            on_terminal="tools.rag.jobs.on_ingest_terminal",
+        ))
 
         doc = Document.objects.create(
             title="stranded.txt",
@@ -491,3 +546,83 @@ class TestSkipLocked:
         assert free_job.state == RUNNING
         locked_job.refresh_from_db()
         assert locked_job.state == QUEUED
+
+
+class TestKindAwareStaleness:
+    """A global 120s cutoff cannot be right for both a sub-second embed
+    and a kind that cold-loads a large model for sixteen minutes. A kind
+    declares its own threshold in CODE (it is a property of what the
+    work does, like `default_priority`), and the sweep honours it."""
+
+    @pytest.mark.django_db
+    def test_a_kind_declaring_a_long_threshold_is_not_swept_early(self, reset_registry):
+        register_job_kind(JobKind(
+            key="test.slow", label="Slow", planner=f"{MODULE}.plan_no_models",
+            handler=f"{MODULE}.echo_handler", summarizer=f"{MODULE}.summarize_noop",
+            stale_after_seconds=3600,
+        ))
+        job = _running_job(kind="test.slow", heartbeat_age_seconds=600)
+
+        claim_and_admit("w", stale_after_seconds=120)
+
+        job.refresh_from_db()
+        assert job.state == RUNNING
+        assert job.attempts == 0
+
+    @pytest.mark.django_db
+    def test_a_kind_declaring_nothing_falls_back_to_the_global(self, reset_registry):
+        register_job_kind(JobKind(
+            key="test.plain", label="Plain", planner=f"{MODULE}.plan_no_models",
+            handler=f"{MODULE}.echo_handler", summarizer=f"{MODULE}.summarize_noop",
+        ))
+        # `max_concurrent_jobs=0` (scheduler.py's own "admits nothing" rule
+        # for a non-positive cap) holds this round's admission to zero, so
+        # the row the sweep just requeued is observed QUEUED rather than
+        # immediately re-admitted back to RUNNING in the same transaction
+        # -- the same transient-state visibility `test_first_orphan_is_
+        # requeued_with_attempts_one` above notes for its own blocker.
+        _set_budget(memory_budget_bytes=None, max_concurrent_jobs=0)
+        job = _running_job(kind="test.plain", heartbeat_age_seconds=600)
+
+        claim_and_admit("w", stale_after_seconds=120)
+
+        job.refresh_from_db()
+        assert job.state == QUEUED
+        assert job.attempts == 1
+
+    @pytest.mark.django_db
+    def test_an_unregistered_kind_falls_back_to_the_global(self, reset_registry):
+        """A row whose kind was deregistered since it was enqueued is
+        still swept, on the global threshold -- never left running for ever
+        because nothing declares a number for it."""
+        _set_budget(memory_budget_bytes=None, max_concurrent_jobs=0)  # see comment above
+        job = _running_job(kind="test.gone", heartbeat_age_seconds=600)
+
+        claim_and_admit("w", stale_after_seconds=120)
+
+        job.refresh_from_db()
+        assert job.state == QUEUED
+
+    @pytest.mark.django_db
+    def test_sweep_orphans_false_skips_the_sweep_entirely(self, reset_registry):
+        job = _running_job(kind="test.plain", heartbeat_age_seconds=600)
+
+        claim_and_admit("w", stale_after_seconds=120, sweep_orphans=False)
+
+        job.refresh_from_db()
+        assert job.state == RUNNING
+
+    @pytest.mark.django_db
+    def test_the_sweep_reads_the_running_set_once_however_many_thresholds(
+            self, reset_registry, django_assert_num_queries):
+        """Grouped by distinct threshold into ONE query, not one per kind
+        -- pinned so a later kind cannot quietly make the sweep N+1."""
+        for index, seconds in enumerate((30, 300, 3000)):
+            register_job_kind(JobKind(
+                key=f"test.k{index}", label="K", planner=f"{MODULE}.plan_no_models",
+                handler=f"{MODULE}.echo_handler", summarizer=f"{MODULE}.summarize_noop",
+                stale_after_seconds=seconds,
+            ))
+
+        with django_assert_num_queries(1):
+            _sweep_orphans(120)

@@ -243,6 +243,15 @@ class JobKind:
             that can ever leave a stranded side-effect behind (nothing
             external to fix up once a job never ran at all) correctly
             leaves this `None`.
+        stale_after_seconds: How long this kind's running job may go without
+            a heartbeat before the orphan sweep reclaims it, or `None` to
+            use the worker's own global cutoff. CODE-DECLARED, never
+            operator-editable: a kind's staleness is a property of what the
+            work DOES -- a sub-second embed and a job that cold-loads a
+            large model for minutes cannot share one number -- in the same
+            spirit as `default_priority` above. Read by
+            `models.queue.claim._sweep_orphans`, which resolves the whole
+            kind->threshold map itself; nothing else branches on it.
     """
 
     key: str
@@ -252,6 +261,7 @@ class JobKind:
     summarizer: str
     default_priority: int | None = None
     on_terminal: str | None = None
+    stale_after_seconds: int | None = None
 
 
 _JOB_KINDS: dict[str, JobKind] = {}

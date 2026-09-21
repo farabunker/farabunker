@@ -57,13 +57,14 @@ import zlib
 from datetime import timedelta
 
 from django.db import connection, transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from models.registry.bindings import footprint_for
 from models.registry.discovery import norm_endpoint, norm_tag
 from models.queue.models import FAILED, QUEUED, RUNNING, InferenceJob, JobSettings
 from models.queue.scheduler import SchedCandidate, SchedModel, plan_admissions
-from models.contracts.jobkinds import invoke_on_terminal
+from models.contracts.jobkinds import all_job_kinds, invoke_on_terminal
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,8 @@ CANDIDATE_WINDOW = 200
 
 
 def claim_and_admit(
-    worker_id: str, *, stale_after_seconds: int, settings_row: JobSettings | None = None,
+    worker_id: str, *, stale_after_seconds: int, sweep_orphans: bool = True,
+    settings_row: JobSettings | None = None,
 ) -> list[dict]:
     """Claim and admit newly-runnable jobs for `worker_id`, one round.
 
@@ -112,6 +114,14 @@ def claim_and_admit(
     `claim_and_admit` -- importing back would be circular). Passing it in
     keeps the orphan sweep itself testable in isolation too, with an
     arbitrarily short threshold, no monkeypatching required.
+
+    `sweep_orphans` (spec §3.4c) lets the caller skip step 2 for ONE round.
+    The worker passes `False` for a grace period after it detects that the
+    HOST SLEPT -- on wake every running row looks stale at once, because
+    wall-clock hours passed while the process's monotonic clock barely
+    advanced, and a sweep at that instant mass-orphans healthy work. It is
+    a deliberate one-round skip, never a mode: the very next tick sweeps
+    normally.
 
     Returns a list of claimed job descriptors, each `{"id", "kind",
     "payload", "model_refs", "claim_token", "exclusive", "checkpoint",
@@ -190,7 +200,8 @@ def claim_and_admit(
         if not acquired:
             return []
 
-        _sweep_orphans(stale_after_seconds)
+        if sweep_orphans:
+            _sweep_orphans(stale_after_seconds)
 
         running_rows = list(InferenceJob.objects.filter(state=RUNNING))
         candidate_rows = list(
@@ -284,32 +295,61 @@ def _sched_candidate(row: InferenceJob, resolved: list[tuple[dict, int | None]])
     return SchedCandidate(job_id=row.pk, priority=row.priority, exclusive=row.exclusive, models=models)
 
 
-def _sweep_orphans(stale_after_seconds: int) -> None:
-    """Requeue-or-fail every `running` job whose heartbeat has gone stale
-    (`heartbeat_at < now - stale_after_seconds`) -- runs INSIDE
-    `claim_and_admit`'s advisory-lock transaction, before the running set
-    is read for planning (see that function's docstring, step 2).
+def _kind_stale_thresholds(default_stale_seconds: int) -> dict[str, int]:
+    """`{job kind key: staleness threshold}` for every REGISTERED kind,
+    with `default_stale_seconds` standing in for any kind that declares
+    none.
 
-    First orphaning (`attempts == 0`): requeue (state=queued, claimed_by=
-    "", claim_token=NULL, attempts=1, started_at=NULL, heartbeat_at=NULL)
-    -- the job gets exactly one more try, on whichever worker claims it
-    next. Second orphaning (`attempts >= 1`): permanently `failed`, with an
-    operator-readable error naming exactly why, no third attempt, and (T9.5
-    audit §5) `kind`'s registered `on_terminal` hook scheduled via
-    `transaction.on_commit` -- see that branch's own comment below for why
-    on_commit specifically.
-
-    Each row's actual UPDATE re-checks `state=running AND heartbeat_at <
-    cutoff` atomically (not a blind write keyed off the earlier read) --
-    if that worker's heartbeat writer lands a fresh `heartbeat_at` in the
-    narrow window between this function's read and its own write, the
-    conditional UPDATE simply matches zero rows and the job is correctly
-    left alone, never double-orphaned.
+    Resolved HERE, in the claim module, rather than threaded in from the
+    worker: this module already imports the job-kind registry, the sweep
+    runs inside this module's own advisory-lock transaction, and the
+    worker owns only the global cadence constant it passes in (it may not
+    be imported from here -- it imports this module).
     """
-    cutoff = timezone.now() - timedelta(seconds=stale_after_seconds)
-    stale = list(InferenceJob.objects.filter(state=RUNNING, heartbeat_at__lt=cutoff))
+    thresholds: dict[str, int] = {}
+    for kind in all_job_kinds():
+        declared = getattr(kind, "stale_after_seconds", None)
+        thresholds[kind.key] = declared if declared else default_stale_seconds
+    return thresholds
+
+
+def _sweep_orphans(default_stale_seconds: int) -> None:
+    """Requeue-or-fail every `running` job whose heartbeat has gone stale
+    -- now against THAT KIND's own threshold (spec §3.4b) rather than one
+    global cutoff, which could never be right for both a sub-second embed
+    and a job that cold-loads a large model for minutes.
+
+    ONE QUERY, grouped by DISTINCT threshold (a handful of kinds, bounded
+    and pinned by a query-count test) -- never one query per kind. A kind
+    the registry does not know (deregistered since the row was enqueued)
+    falls to `default_stale_seconds`, so no row is ever left running for
+    ever merely because nothing declares a number for it.
+
+    Everything below this point is unchanged: first orphaning requeues
+    with `attempts=1`, a second fails permanently and schedules the kind's
+    `on_terminal` hook via `transaction.on_commit`, and each row's own
+    UPDATE re-checks `state=running AND heartbeat_at < <that row's own
+    cutoff>` atomically so a heartbeat landing in the window between read
+    and write leaves the job correctly alone.
+    """
+    now = timezone.now()
+    thresholds = _kind_stale_thresholds(default_stale_seconds)
+
+    by_threshold: dict[int, list[str]] = {}
+    for kind_key, seconds in thresholds.items():
+        by_threshold.setdefault(seconds, []).append(kind_key)
+
+    condition = Q(
+        ~Q(kind__in=list(thresholds)),
+        heartbeat_at__lt=now - timedelta(seconds=default_stale_seconds),
+    )
+    for seconds, kind_keys in by_threshold.items():
+        condition |= Q(kind__in=kind_keys, heartbeat_at__lt=now - timedelta(seconds=seconds))
+
+    stale = list(InferenceJob.objects.filter(Q(state=RUNNING) & condition))
 
     for job in stale:
+        cutoff = now - timedelta(seconds=thresholds.get(job.kind, default_stale_seconds))
         if job.attempts == 0:
             # `progress`/`checkpoint` are deliberately NOT in this field
             # list (T3) -- their preservation across a requeue IS the

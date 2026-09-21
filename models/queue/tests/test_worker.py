@@ -942,7 +942,7 @@ class TestHeartbeat:
         worker._last_heartbeat_monotonic = None  # force the throttle to allow a write
 
         worker._maybe_heartbeat()
-        _sweep_orphans(stale_after_seconds=1)
+        _sweep_orphans(default_stale_seconds=1)
 
         job.refresh_from_db()
         assert job.state == RUNNING  # the fresh heartbeat saved it from the sweep
