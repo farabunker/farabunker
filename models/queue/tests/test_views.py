@@ -1317,3 +1317,65 @@ class TestTheQueueSettingsFormsAreAdminOnlyOnThePage:
         `is_admin`, which an open box answers True for everybody."""
         assert reverse("jobs-settings-update").encode() in \
             client.get(reverse("jobs-settings")).content
+
+
+# --- T13: a held-off row says why it is waiting -----------------------------
+
+
+@pytest.mark.django_db
+class TestHoldOffReading:
+    """A job the queue is deliberately declining to consider for the next
+    forty-five seconds is a stronger case of an unexplained delay than a
+    reordering, and it would otherwise surface only as a log line -- which
+    fails this track's own observability thesis."""
+
+    def test_a_future_hold_off_renders_on_the_waiting_row(self, client):
+        make_queue_job(kind="test.k", not_before=timezone.now() + timedelta(minutes=2))
+
+        body = client.get(reverse("jobs-queue")).content.decode()
+
+        assert "waiting for engine memory" in body
+        assert "retries at" in body
+
+    def test_a_past_hold_off_renders_nothing(self, client):
+        make_queue_job(kind="test.k", not_before=timezone.now() - timedelta(minutes=2))
+
+        body = client.get(reverse("jobs-queue")).content.decode()
+
+        assert "waiting for engine memory" not in body
+
+    def test_an_unheld_job_renders_nothing(self, client):
+        make_queue_job(kind="test.k")
+
+        assert "waiting for engine memory" not in client.get(
+            reverse("jobs-queue")).content.decode()
+
+    def test_the_reading_costs_no_extra_query(self, client, django_assert_num_queries):
+        """It comes off the row `queue_snapshot` already loaded.
+
+        A LITERAL, never a computed baseline: an earlier draft called a
+        `_queue_page_query_count(client)` helper (which does not exist)
+        and asserted against its own answer -- a test that passes whatever
+        the page does, which the plan's own Global Constraints forbid.
+        Fill the number from the first red run and write it in."""
+        for index in range(3):
+            make_queue_job(kind="test.k%d" % index,
+                           not_before=timezone.now() + timedelta(minutes=2))
+
+        with django_assert_num_queries(10):
+            client.get(reverse("jobs-queue"))
+
+    def test_the_reading_does_not_grow_with_the_number_of_held_off_rows(
+            self, client, django_assert_num_queries):
+        """The non-vacuous half: three held-off rows cost the same as
+        one. Without this, the literal above would pass a reading that
+        secretly queried per row."""
+        make_queue_job(kind="test.only", not_before=timezone.now() + timedelta(minutes=2))
+
+        with django_assert_num_queries(10):
+            client.get(reverse("jobs-queue"))
+
+    def test_the_page_never_500s_on_a_row_with_a_hold_off(self, client):
+        make_queue_job(kind="test.unregistered", not_before=timezone.now() + timedelta(minutes=2))
+
+        assert client.get(reverse("jobs-queue")).status_code == 200

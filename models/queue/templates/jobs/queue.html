@@ -283,6 +283,9 @@ error message is content too (it can quote payload back).
               · {% for name in row.model_names %}{{ name }}{% if not forloop.last %}, {% endif %}{% endfor %}
               · {{ row.footprint_human|default:"size not measured" }}
               · submitted {{ row.created_at }}
+              {% if row.hold_off_until %}
+              · waiting for engine memory — retries at {{ row.hold_off_until|time:"H:i" }}
+              {% endif %}
             </div>
             <div class="job-actions">
               <form method="post" action="{% url 'jobs-queue-cancel' row.id %}">

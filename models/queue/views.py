@@ -296,6 +296,14 @@ def _present_row(row: QueueRow, principal, settings_row=None) -> dict:
     row, threaded through to `may_read_job_content` so a page with N
     rows costs one settings read, not N (`identity.access.
     sees_all_content`'s own `settings_row=` docstring).
+
+    T13 (spec §3.6, R3-2 ruling): `hold_off_until` reads `row.not_before`
+    straight off the already-loaded row -- no query, no script -- but
+    only while it is still in the FUTURE. A past `not_before` is a
+    hold-off that has already expired; rendering it would read as a
+    delay still in force, which it no longer is, so it is withheld to
+    `None` (the template's `{% if %}` then renders nothing) exactly like
+    a job that was never held off at all.
     """
     content_visible = may_read_job_content(principal, row.payload, settings_row=settings_row)
     summary, kind_label = summarize_job(row.kind, row.payload)
@@ -305,6 +313,15 @@ def _present_row(row: QueueRow, principal, settings_row=None) -> dict:
         progress_text, progress_percent = _progress_text_and_percent(row.progress)
     except (TypeError, ValueError, ZeroDivisionError, OverflowError, AttributeError):
         progress_text, progress_percent = None, None
+    # THE HOLD-OFF READING (spec §3.6, R3-2 ruling). `not_before` is only
+    # interesting while it is still in the FUTURE: a past value is just a
+    # hold-off that has expired, and rendering it would read as a delay
+    # that is still in force. Display only -- this row was already loaded
+    # by `queue_snapshot`, so the reading costs no query and needs no
+    # script.
+    hold_off_until = (
+        row.not_before if row.not_before and row.not_before > timezone.now() else None
+    )
     return {
         "id": row.id,
         "kind": row.kind,
@@ -322,6 +339,7 @@ def _present_row(row: QueueRow, principal, settings_row=None) -> dict:
         "error": "" if not content_visible else row.error,
         "progress_text": progress_text,
         "progress_percent": progress_percent,
+        "hold_off_until": hold_off_until,
     }
 
 
