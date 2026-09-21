@@ -27,19 +27,20 @@ Every task's requirements implicitly include this section.
 
 - **Worktree.** All work happens in the worktree **directory** `.claude/worktrees/single-repo-docs`, which holds the **branch** `deletion-semantics` (off `origin/dev`). The repository root checkout is production and is never read, written, tested or deployed from.
 - **Tests and documentation ship in the same commit as the change.** Not a follow-up, not a separate PR. A column's README ships in that column's own task; only `OPERATIONS.md`, the ADR and `EXTENDING.md` are deferred to the one cross-cutting docs task.
-- **The four runs are the gate**, in both feature-flag states and both collection orders, against **the session's private test database** (`DATABASE_URL` pointing at this branch's own preview Postgres, with a database name nobody else is using — never a bare shared `test_farabunker`, and never a database URL, port or absolute path written into this plan or into any committed file):
+- **The four runs plus the two posture sweeps are the BRANCH gate**, in both feature-flag states and both collection orders, against **the session's private test database** (`DATABASE_URL` pointing at this branch's own preview Postgres, with a database name nobody else is using — never a bare shared `test_farabunker`, and never a database URL, port or absolute path written into this plan or into any committed file). This is identity, posture and visibility work in every column it touches (`AGENTS.md`, "The working loop"), so the branch gate always includes the posture sweeps, not just the four flag/scope runs. **Run it at the slice-one gate (after Task 15), and again before the pull request, after pinging the queue steward** — this machine runs a cap of two concurrent suites, so a whole-repo run is coordinated, not opportunistic:
   ```bash
   FARABUNKER_FEATURES='vision,media' .venv/bin/pytest -q
   FARABUNKER_FEATURES='vision'       .venv/bin/pytest -q
   FARABUNKER_FEATURES='vision,media' .venv/bin/pytest -q scripts identity agents foundation models tools
   FARABUNKER_FEATURES='vision'       .venv/bin/pytest -q scripts identity agents foundation models tools
   ```
-- **Plus the two posture sweeps, on every task in this plan** — this is identity, posture and visibility work in every column it touches (`AGENTS.md`, "The working loop"). They are the same command with `FARABUNKER_TEST_POSTURE` set to `personal` and then to `enterprise` (the variable is read only by `identity/testing.py::seed_sweep_posture`, never by production code):
+  The two posture sweeps are the same command with `FARABUNKER_TEST_POSTURE` set to `personal` and then to `enterprise` (the variable is read only by `identity/testing.py::seed_sweep_posture`, never by production code):
   ```bash
   FARABUNKER_TEST_POSTURE=personal   FARABUNKER_FEATURES='vision,media' .venv/bin/pytest -q
   FARABUNKER_TEST_POSTURE=enterprise FARABUNKER_FEATURES='vision,media' .venv/bin/pytest -q
   ```
   One pytest process per session, native, foreground, never in a container, never two runs against one database name.
+- **Each task's own pre-commit gate is narrower than the branch gate above**: its focused test modules (the ones its brief names) plus the structural gates its brief names — import law, column boundaries, agent standards, docs model names, and any other gate the task's own files touch — run in both feature-flag states. Do not run the whole-repo four-plus-two branch gate per task; it is the slice-one and pre-PR checkpoint, not a per-task requirement.
 - **Import-law placement of every new module** (spec §9, verbatim; downward only through `identity → foundation → models → agents → tools`):
 
   | New or amended | Column | May import | Must not |
@@ -69,7 +70,7 @@ Every task's requirements implicitly include this section.
   4. **terminal rows only** for the age prune, and **cancel-before-delete with a refusal on `"already_running"`** for a live turn's job in `forget_conversation`.
 - **The vision steward's notes**, carried verbatim: the exclusion goes on `tools/vision/visibility.py::visible_jobs`; `output:<id>` / `input:<id>` references are `GeneratedOutput` / `JobInput` primary keys, each **one FK hop** from its job, so the mapping **dedupes by job**; generation ids come from `Turn.data["id"]` (`tools/vision/services.py::job_json`'s first key), which is what catches a job that **failed and minted no output at all**; `delete_job`'s best-effort engine-side sweep (`store.remove_engine_files`, which never raises) is **said once**, in `tools/vision/README.md`, and not restated at every call site.
 - **The exclusion is applied to the BASE queryset, BEFORE each visibility function's `sees_all_content` early return.** `sees_all_content` is True for every principal on an open box — the posture most boxes run — so an exclusion bolted onto the restricted leg alone would leave deleted items fully visible exactly where it matters most.
-- **Plain user-facing copy, declared once in Python** (`AGENTS.md` house style), in `identity/contracts/retention.py`: `"Deleted"`, `"Restore"`, `"Delete permanently"`, `"Purge on <date>"`, `"Keep deleted items for"`, `"Keep finished queue jobs for"`, `"Show item names in the deletion log"`. The word *purge* appears in code, in the spec and in the date line's verb — and nowhere else a person reads. No "purge queue", no "retention cliff", no "ticket".
+- **Plain user-facing copy, declared once in Python** (`AGENTS.md` house style), in `identity/contracts/retention.py`: `"Deleted"`, `"Deletion log"`, `"Restore"`, `"Delete permanently"`, `"Purge on <date>"`, `"Keep deleted items for"`, `"Keep finished queue jobs for"`, `"Show item names in the deletion log"`. The word *purge* appears in code, in the spec and in the date line's verb — and nowhere else a person reads. No "purge queue", no "retention cliff", no "ticket".
 - **Purge is synchronous, inside the request.** "Delete permanently" calls `purge_ticket`, which runs every registered handler inside one `transaction.atomic()` and returns before the redirect. No queue job, no worker hop, no `on_commit` hook, no cache.
 - **Exactly ONE migration**, in `identity/`: `identity/migrations/0004_deletion_ticket_and_retention_settings.py` — the ticket table (including the three hold columns, written by nothing) plus the three retention fields on `IdentitySettings`. `identity/migrations/` ends at `0003_entitlement_and_grant.py`, verified in the tree. **`models/queue` gains no migration and no column.**
 - **Four new audit action names**, and no fifth: `CONTENT_DELETED = "content.deleted"`, `CONTENT_RESTORED = "content.restored"`, `CONTENT_PURGED = "content.purged"`, `RETENTION_POLICY_CHANGED = "identity.retention_policy_changed"`. No `CONTENT_HELD` — the action tuple is closed and `AuditEvent.save()` raises on anything unlisted, so an unused name would be an action nothing can write.
@@ -424,7 +425,11 @@ QUEUE_RETENTION_DAYS_MAX = 3650
 # are the same word because they name the same thing, and two constants
 # holding "Deleted" would be two places for it to stop being the same.
 PAGE_TITLE = "Deleted"
-TAB_PURGED = "Purged"
+# The page's second section: the content-free log of items deleted,
+# restored and permanently deleted -- the same "deletion log"
+# `LABEL_AUDIT_DETAIL` names, so the tab heading and the setting that
+# controls what it shows use one word for one thing.
+TAB_LOG = "Deletion log"
 ACTION_RESTORE = "Restore"
 ACTION_PURGE = "Delete permanently"
 LABEL_RETENTION_DAYS = "Keep deleted items for"
@@ -4289,7 +4294,7 @@ The delete confirm is a native `<details>`, modelled on
   </section>
 
   <section class="settings">
-    <h2>{{ copy.TAB_PURGED }}</h2>
+    <h2>{{ copy.TAB_LOG }}</h2>
     <p class="helptext">A record of what was deleted, restored and destroyed &mdash; who, what kind, and when. It never contains the deleted words.</p>
     {% for event in events %}
     <p class="event">
@@ -6569,8 +6574,8 @@ Walked by hand, in a browser, on this branch's preview stack — not a green ter
 - [ ] Delete the conversation from the thread page. It leaves the sidebar, the conversations browser and the Queue page's readable rows immediately.
 - [ ] Settings → Deleted: the row is there, named, with **"Purge on ‹date›"** thirty days out. No "hold", no "ticket", no "cliff" anywhere on the page.
 - [ ] Restore it. It is back in the sidebar, with its turns and its attachment.
-- [ ] Delete it again, then **Delete permanently**. After the redirect: absent from the chat list, absent from the Queue page, the generated image gone from the gallery, the attached chat-scoped file gone from the library, the Deleted tab empty, and one content-free line on the Purged tab.
-- [ ] Set **Keep deleted items for** to `0`. Delete a second conversation: it is gone immediately, with no row on the Deleted tab and one event on the Purged tab.
+- [ ] Delete it again, then **Delete permanently**. After the redirect: absent from the chat list, absent from the Queue page, the generated image gone from the gallery, the attached chat-scoped file gone from the library, the Deleted tab empty, and one content-free line on the Deletion log.
+- [ ] Set **Keep deleted items for** to `0`. Delete a second conversation: it is gone immediately, with no row on the Deleted tab and one event on the Deletion log.
 - [ ] Turn **Show item names in the deletion log** on, delete a third item, and confirm the label appears on that line only.
 - [ ] Delete a library document, an Ask-history row and a gallery image. Each leaves its own page and appears on Deleted.
 - [ ] Start a long turn and delete its conversation while it is **running**; click Delete permanently. The page shows the refusal sentence, the item stays invisible, and a click after the job finishes completes it.
@@ -6634,3 +6639,4 @@ Checked end to end: `ticketed_keys` / `visible_tickets` / `may_purge` / `delete_
 
 - Round 1 (2026-09-21): AMEND — 4 blockers (coverage gate vs the new ticket table; `owner_fields` shape; held audit-catalogue counts; no registry isolation), 4 major, 3 moderate, 5 cuts under the owner's cost/benefit principle; author decisions 1, 2, 5 upheld, 3 and 4 overruled (no `_DEFERRED` list; `RetentionRefused` in `identity.contracts.retention`). All applied.
 - Round 2 (2026-09-21): CLEAN — every amendment verified against the real source (registry isolation complete across all registering test modules; the demo test sees the real handlers; held re-pins exact); no new findings.
+- **Execution amendment (Task 1 review), 2026-09-21:** two fixes ordered by the controller during Task 1's own review, applied to both the code and this plan. (1) `TAB_PURGED = "Purged"` contradicted this plan's own copy constraint that the word *purge* appears nowhere a person reads — resolved toward the setting's own wording: the constant is now `TAB_LOG = "Deletion log"`, the same phrase `LABEL_AUDIT_DETAIL` ("Show item names in the deletion log") already names, so the tab heading and the setting that controls its detail share one word. Every rendered/asserted occurrence in this plan (the constant declaration, the template's `<h2>`, the smoke checklist's two "Purged tab" lines) was updated to match; prose nicknames that are neither rendered nor asserted (docstrings, a test class name) were left as-is per the same ruling. (2) The gate bullets read as if the four runs plus two posture sweeps were a per-task requirement, which is not what any task's own brief actually asked implementers to run and is not workable at the scale of 23 tasks on a machine with a cap of two concurrent suites. Reworded, commands unchanged: the four runs plus the two posture sweeps are the **branch** gate, run at the slice-one gate (after Task 15) and again before the pull request (after pinging the queue steward); each task's own pre-commit gate is its focused test modules plus the structural gates its brief names, in both feature-flag states — matching `AGENTS.md`'s "the four runs are the gate" as a branch-level statement, not a per-task one.
