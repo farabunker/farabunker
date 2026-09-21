@@ -7,15 +7,12 @@ and its six attachment seams.
 """
 from __future__ import annotations
 
-import logging
 import uuid
 
 from django.conf import settings
 
 from tools.rag import services
 from tools.rag.models import Document
-
-logger = logging.getLogger(__name__)
 
 
 def purge_conversation_notes(key: str) -> int:
@@ -31,13 +28,25 @@ def purge_conversation_notes(key: str) -> int:
     `services.delete_document`, which already tears down chunks, the
     managed store directory and the row together.
 
-    A MISSING FILE IS NOT AN ERROR (`missing_ok=True`): every file
-    removal in this feature is best-effort and idempotent, because a
-    purge that failed because somebody had already cleaned up would be a
-    purge nobody could finish.
+    A MISSING FILE IS NOT AN ERROR (`missing_ok=True`): the ONE
+    best-effort case this function forgives is "somebody already cleaned
+    this up" -- a purge that failed for that reason would be a purge
+    nobody could ever finish.
 
-    Idempotent: a second run finds no file and no document and returns
-    zero.
+    ANY OTHER FAILURE TO REMOVE THE FILE IS RAISED, NOT SWALLOWED. The
+    `Document` row is the only remaining handle on the file; deleting
+    that row while the file itself is still stuck on disk (a
+    permissions problem, a full or read-only volume, any other genuine
+    `OSError`) would report a purge that never actually happened --
+    leaving a person's notes sitting on disk with nothing left pointing
+    at them. Left to propagate, the caller that runs every registered
+    handler (`identity/cascades.py::run_retention`, which never swallows
+    either) fails the whole purge: the deletion ticket survives, and the
+    next sweep retries this handler from the top rather than reporting a
+    false success.
+
+    Idempotent: once the file really is gone, a re-run finds no file and
+    no document and returns zero.
     """
     try:
         conversation_id = uuid.UUID(str(key))
@@ -49,20 +58,13 @@ def purge_conversation_notes(key: str) -> int:
     # READ BEFORE THE UNLINK: `missing_ok=True` returns nothing whether
     # or not the file was there, and the count has to distinguish "one
     # note removed" from "nothing to remove" -- the test asserts 2 for a
-    # note plus a document, and 0 for a re-run.
+    # note plus a document, and 0 for a re-run. A NON-MISSING failure
+    # (any other `OSError`) is NOT caught here -- it propagates, and the
+    # row below is never touched.
     existed = path.exists()
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        # Structural, never content -- the logging shape this column
-        # uses throughout. A file this box cannot unlink is an operator
-        # problem, not a reason to leave the rows standing.
-        logger.exception(
-            "tools.rag.retention: could not remove the staging note for %s",
-            conversation_id)
-    else:
-        if existed:
-            removed += 1
+    path.unlink(missing_ok=True)
+    if existed:
+        removed += 1
 
     for document in Document.objects.filter(notes_conversation_id=conversation_id):
         services.delete_document(document)

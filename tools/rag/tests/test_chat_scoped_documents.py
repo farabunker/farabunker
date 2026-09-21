@@ -31,11 +31,15 @@ from llama_index.core.vector_stores.types import (
 
 from agents.contracts.workstreams import WorkstreamScope
 from agents.visibility import delete_conversation
+from identity.contracts.actions import SOURCE_WEB
 from identity.contracts.principals import OPEN_PRINCIPAL
+from identity.contracts.retention import KIND_DOCUMENT
 from identity.models import DeletionTicket
+from identity.retention import delete_content
 from tools.rag import retrieval
 from tools.rag.access import (
-    DocumentVisibility, attached_documents, listable_documents, readable_documents,
+    DocumentVisibility, _deleted_document_ids, attached_documents, listable_documents,
+    readable_documents,
 )
 from tools.rag.models import Document, DocumentAttachment
 from tools.rag.tests._helpers import (
@@ -61,6 +65,19 @@ def _matches(filters, metadata: dict) -> bool:
             held = value if isinstance(value, list) else [value]
             wanted = filters.value if isinstance(filters.value, list) else [filters.value]
             return bool(set(held) & set(wanted))
+        if filters.operator == FilterOperator.NIN:
+            # Deletion semantics: `file_id NOT IN (...)`. Mirrors
+            # Postgres's own three-valued `NOT IN` logic: a NULL column
+            # value makes the whole comparison NULL, which a `WHERE`
+            # clause treats as non-matching -- never true just because
+            # the value happens to be absent. A chunk always carries
+            # `file_id` in practice (ingest stamps it on every chunk),
+            # so this branch is never exercised by a real chunk, only by
+            # this evaluator's own honesty about what the operator means.
+            if value is None:
+                return False
+            wanted = filters.value if isinstance(filters.value, list) else [filters.value]
+            return value not in wanted
         raise NotImplementedError(f"test evaluator: unhandled operator {filters.operator!r}")
     combine = all if filters.condition == FilterCondition.AND else any
     return combine(_matches(child, metadata) for child in filters.filters)
@@ -574,3 +591,74 @@ class TestAChatScopedDocumentFollowsItsConversation:
                 purge_on=timezone.localdate())
             assert document not in readable_documents(principal)
             assert document not in listable_documents(principal)
+
+
+class TestTheDeletionExclusionReachesRetrieval:
+    """A deleted item disappears from every surface at once -- retrieval
+    included, not merely the row surfaces `TestAChatScopedDocumentFollows
+    ItsConversation` above already covers. `tools.rag.retrieval.
+    retrieve_nodes` threads `tools.rag.access._deleted_document_ids()`
+    into `_visibility_filters` on every call; proven here at the chunk-
+    metadata level through `_matches` (this module's own evaluator, now
+    NIN-aware), the same way the conversation-scope rule above it is."""
+
+    def _open_unrestricted(self):
+        return DocumentVisibility(unrestricted=True, entitlement_ids=frozenset(),
+                                  unlabelled_allowed=True)
+
+    def test_a_chat_scoped_documents_chunk_is_excluded_once_its_conversation_is_ticketed(self):
+        with posture("open"):
+            principal = user_principal(make_user())
+            conversation = make_conversation()
+            document = _chat_scoped_document_attached_to(conversation)
+            delete_conversation(principal, conversation)
+            filters = retrieval._visibility_filters(
+                None, self._open_unrestricted(), _deleted_document_ids())
+            assert not _matches(filters, {"file_id": str(document.pk)})
+
+    def test_a_directly_ticketed_documents_chunk_is_excluded(self):
+        """The KIND_DOCUMENT half -- written through the real service,
+        never a hand-inserted `DeletionTicket` row, so this also proves
+        `_deleted_document_ids()` reads a ticket `delete_content` itself
+        wrote."""
+        with posture("open"):
+            document = make_document()
+            delete_content(OPEN_PRINCIPAL, kind=KIND_DOCUMENT, key=str(document.pk),
+                           owner=document, source=SOURCE_WEB)
+            filters = retrieval._visibility_filters(
+                None, self._open_unrestricted(), _deleted_document_ids())
+            assert not _matches(filters, {"file_id": str(document.pk)})
+
+    def test_an_untouched_documents_chunk_still_matches_in_the_same_query(self):
+        """ONE `_deleted_document_ids()` call, covering BOTH kinds of
+        ticket at once, checked against three different chunks' metadata
+        through the SAME built filters object -- "the same query", not
+        three separate filter builds each seeing only its own ticket."""
+        with posture("open"):
+            principal = user_principal(make_user())
+            conversation = make_conversation()
+            chat_scoped = _chat_scoped_document_attached_to(conversation)
+            delete_conversation(principal, conversation)
+            ticketed = make_document()
+            delete_content(OPEN_PRINCIPAL, kind=KIND_DOCUMENT, key=str(ticketed.pk),
+                           owner=ticketed, source=SOURCE_WEB)
+            untouched = make_document()
+
+            filters = retrieval._visibility_filters(
+                None, self._open_unrestricted(), _deleted_document_ids())
+
+            assert not _matches(filters, {"file_id": str(chat_scoped.pk)})
+            assert not _matches(filters, {"file_id": str(ticketed.pk)})
+            assert _matches(filters, {"file_id": str(untouched.pk)})
+
+    def test_with_nothing_ticketed_the_filter_is_unchanged(self):
+        with posture("open"):
+            untouched = make_document()
+            deleted_ids = _deleted_document_ids()
+            assert deleted_ids == []
+            filters = retrieval._visibility_filters(
+                None, self._open_unrestricted(), deleted_ids)
+            assert _matches(filters, {"file_id": str(untouched.pk)})
+            without_the_parameter_at_all = retrieval._visibility_filters(
+                None, self._open_unrestricted())
+            assert filters == without_the_parameter_at_all

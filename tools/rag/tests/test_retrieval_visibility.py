@@ -53,12 +53,24 @@ def _settings_row():
     return RagSettings.get_solo()
 
 
-def _filters(visibility, category=None):
+def _filters(visibility, category=None, deleted_ids=()):
     """The `MetadataFilters` `retrieve_nodes` would build, without
     building an index: the filter construction is factored into
     `retrieval._visibility_filters` precisely so it can be asserted
     directly rather than through a live vector store."""
-    return retrieval._visibility_filters(category, visibility)
+    return retrieval._visibility_filters(category, visibility, deleted_ids)
+
+
+def _flat(filters):
+    """Every leaf `MetadataFilter` in a possibly-nested `MetadataFilters`
+    tree, flattened -- `tools/rag/tests/test_workstream_corpus.py`'s own
+    helper of the same name and shape, needed again here so a test can
+    assert on a leaf's key without caring how deep this function's own
+    nesting goes."""
+    out = []
+    for f in filters.filters:
+        out.extend(_flat(f) if hasattr(f, "filters") else [f])
+    return out
 
 
 class TestTheDangerousLine:
@@ -197,6 +209,46 @@ class TestTheFilterShape:
         assert built.condition == FilterCondition.AND
         assert isinstance(built.filters[0], MetadataFilter)      # the category
         assert isinstance(built.filters[1], MetadataFilters)     # the visibility group
+
+
+class TestTheDeletedIdsClause:
+    """Deletion semantics: the same `_deleted_document_ids()` list
+    `tools.rag.access.readable_documents` excludes from the row surfaces
+    is threaded into this filter too, as a `file_id NOT IN (...)` leg --
+    the chunk-level twin of that exclusion, never derived from a live
+    query."""
+
+    def test_no_deleted_ids_adds_no_clause_at_all(self):
+        """`()` -- every caller before this round -- must add NOTHING:
+        an empty `NOT IN (...)` is not valid SQL, and "nothing is
+        deleted" is the overwhelmingly common case, so it must cost no
+        extra clause, not merely an inert one."""
+        v = DocumentVisibility(unrestricted=True, entitlement_ids=frozenset(),
+                               unlabelled_allowed=True)
+        with_none = _filters(v)
+        without_deletion = retrieval._visibility_filters(None, v)
+        assert with_none == without_deletion
+        assert all(f.key != "file_id" for f in _flat(with_none))
+
+    def test_deleted_ids_add_a_top_level_NOT_IN_clause_of_decimal_strings(self):
+        v = DocumentVisibility(unrestricted=True, entitlement_ids=frozenset(),
+                               unlabelled_allowed=True)
+        built = _filters(v, deleted_ids=[3, 7])
+        clause = built.filters[-1]
+        assert clause.key == "file_id"
+        assert clause.operator == FilterOperator.NIN
+        assert clause.value == ["3", "7"]
+
+    def test_the_exclusion_applies_regardless_of_category_or_restriction(self):
+        """Never nested inside the corpus/entitlement composition -- a
+        deleted document's chunks are excluded on every leg, including
+        a restricted principal's entitlement-gated one and a
+        category-narrowed search."""
+        restricted = DocumentVisibility(False, frozenset({3}), False)
+        built = _filters(restricted, category="Finance", deleted_ids=[9])
+        clause = built.filters[-1]
+        assert (clause.key, clause.operator, clause.value) == (
+            "file_id", FilterOperator.NIN, ["9"])
 
 
 class TestTheConversationLeg:

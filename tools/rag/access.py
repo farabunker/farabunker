@@ -333,8 +333,17 @@ def _deleted_document_ids() -> list[int]:
 
 def readable_documents(principal, *, workstream_id=None, settings_row=None,
                        deleted_ids=None):
-    """Documents whose CONTENT this principal may reach -- the bytes, the
-    transcript, and the chunks retrieval may return.
+    """Documents whose CONTENT this principal may reach -- the bytes and
+    the transcript. The chunks retrieval may return are governed by the
+    SAME rule, expressed a second time at the chunk-metadata level
+    (`tools.rag.retrieval._visibility_filters`, the two-expressions-of-
+    one-rule split `test_workstream_corpus.py` asserts agree) rather
+    than derived from this queryset -- but the deletion exclusion below
+    is not merely mirrored, it is the SAME `_deleted_document_ids()`
+    call, threaded once into `retrieve_nodes` (`tools.rag.retrieval.
+    retrieve_nodes`'s own "DELETION SEMANTICS" docstring paragraph), so
+    a ticketed item disappears from retrieval at the same instant it
+    disappears here.
 
     `DocumentVisibility.permits()` IS THE ROW HALF this queryset must
     agree with, axis for axis (containment, conversation scope, labels/

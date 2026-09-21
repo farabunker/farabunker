@@ -929,6 +929,14 @@ consolidated, and the ingested `Document` copy found by `notes_conversation_id` 
 by value, never a foreign key — `tools/rag` may not import `agents.models`). A missing file is
 not an error; a second run finds nothing and removes nothing.
 
+A file that fails to remove for any OTHER reason (a permissions problem, a read-only or full
+volume) is a genuine failure, not forgiven the way a missing file is: the handler raises rather
+than logging and carrying on, and the `Document` row — the only remaining handle on that file —
+is left standing. `identity/cascades.py::run_retention` never swallows a handler's exception, so
+this failure takes the whole purge down: the deletion ticket survives, and the next sweep retries
+this handler from the top instead of a false success being reported while the file itself sits
+untouched on disk.
+
 What it does **not** reach is everything else a deleted conversation might have touched in this
 column, because that is already handled elsewhere: `agents.retention.purge_conversation`'s own
 row deletes reach `tools.rag.access.delete_attachments`, which deletes a chat-scoped document
@@ -959,6 +967,17 @@ the state the design should be cheap in, not the rarer one. `readable_documents`
 `listable_documents` and `attached_documents` each accept a keyword-only `deleted_ids=None` so a
 caller already holding the list — `attached_documents` computes it once and threads it into its
 own `chat_scoped` query and both of its `readable_documents` calls — never pays for it twice.
+
+**Retrieval applies the same exclusion, not a second copy of it.** `tools/rag/retrieval.py::
+retrieve_nodes` calls `_deleted_document_ids()` once per retrieval call and threads the result
+into `_visibility_filters`, which turns it into one `file_id NOT IN (...)` clause alongside the
+category and visibility clauses it already builds — so a deleted item's chunks stop reaching a
+fresh answer at the same instant its row stops reaching the library pages, rather than surviving
+until its own purge handler runs. Nothing is added to the filter when nothing is ticketed: an
+empty exclusion list adds no clause at all, matching the ordinary case exactly as it did before
+this exclusion existed. The cost lands on `retrieve_nodes` itself — the same two-or-three-query
+shape described above, paid once per call, never once per filter leg and never once per retrieved
+chunk.
 
 ## Tools
 
