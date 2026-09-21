@@ -16,6 +16,17 @@
 | `chat/` | **P3 — shipped** | Django app, label `chat`. The permanent chat product at `/chat/`: conversation list, thread, tool cards with thumbnails and citations, the 202-and-poll contract with a no-JS path, and flow rows reached through `flow.run`. See [`chat/README.md`](chat/README.md). |
 | `entitlements.py` + `labels.py` + `shares.py` | **Identity & Auth IA-2 — shipped** | `entitlements.py::tool_access_for` builds the pure `ToolAccess` (`agents/contracts/tools.py`) a turn's `granted_tools` call needs; `labels.py` reads/writes `ToolEntitlement`/`AgentEntitlement`/`FlowEntitlement` and supplies this column's two entitlement-delete cascade handlers (registered from `agents/apps.py`); `shares.py` reads/writes `Share` and answers `may_post_to`. See "The acting rule" and "The four visibility bodies get real filters" below. |
 
+- **`agents/usage.py`** — what the next turn's prompt will carry, as an
+  estimate, and the declared sentences that say it. At the column root for the
+  same reason `visibility.py` and `labels.py` are: a future management command
+  or MCP edge needs the same answer without being a view. It holds the one
+  token arithmetic on this platform (`estimate_tokens`); chat compaction, when
+  it is built, consumes this rather than growing a second, drifting counter —
+  which is exactly what `agents/limits.py::HISTORY_TURNS`' own docstring warns
+  against. Its estimate is a deliberate **under-count**, with six named
+  exclusions in the module docstring and a disclosure on the page that names
+  the two a reader can act on.
+
 ## The data model
 
 | Model | What it is |
