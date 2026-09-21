@@ -304,6 +304,14 @@ def _present_row(row: QueueRow, principal, settings_row=None) -> dict:
     delay still in force, which it no longer is, so it is withheld to
     `None` (the template's `{% if %}` then renders nothing) exactly like
     a job that was never held off at all.
+
+    T14 (spec 3.6): `passed_over` is carried through RAW, the same way --
+    straight off the already-loaded row, no query and no re-derivation.
+    The count is the only honest answer to "why is this older job still
+    below a newer one": model-affinity batching put a later peer ahead of
+    it, that many times. Wording (once/twice/a number) is the template's,
+    since it is one `{% if %}` over a value this function does not
+    otherwise shape.
     """
     content_visible = may_read_job_content(principal, row.payload, settings_row=settings_row)
     summary, kind_label = summarize_job(row.kind, row.payload)
@@ -340,6 +348,7 @@ def _present_row(row: QueueRow, principal, settings_row=None) -> dict:
         "progress_text": progress_text,
         "progress_percent": progress_percent,
         "hold_off_until": hold_off_until,
+        "passed_over": row.passed_over,
     }
 
 

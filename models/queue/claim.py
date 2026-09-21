@@ -57,7 +57,7 @@ import zlib
 from datetime import timedelta
 
 from django.db import connection, transaction
-from django.db.models import Q
+from django.db.models import F, Q
 from django.utils import timezone
 
 from models.registry.bindings import footprint_for
@@ -84,7 +84,7 @@ CANDIDATE_WINDOW = 200
 
 def claim_and_admit(
     worker_id: str, *, stale_after_seconds: int, sweep_orphans: bool = True,
-    settings_row: JobSettings | None = None,
+    settings_row: JobSettings | None = None, resident_keys: frozenset = frozenset(),
 ) -> list[dict]:
     """Claim and admit newly-runnable jobs for `worker_id`, one round.
 
@@ -122,6 +122,17 @@ def claim_and_admit(
     advanced, and a sweep at that instant mass-orphans healthy work. It is
     a deliberate one-round skip, never a mode: the very next tick sweeps
     normally.
+
+    `resident_keys` (spec 3.6) is the CALLER'S believed-resident model-key
+    set -- `models.queue.worker.Worker._resident_keys`, the snapshot its
+    last eviction pass took with that pass's own unloads subtracted. It is
+    handed straight to `plan_admissions` as rule 10's ordering preference
+    and is used for nothing else: deliberately stale (minutes old in
+    sequential mode, since snapshots are only taken on ticks that admit),
+    so a wrong guess costs one suboptimal ordering decision and never a
+    wrong admission or a wrong eviction. The default empty set is the
+    fresh-worker fallback and what keeps this function callable on its own
+    -- with no snapshot, `affinity_order` is plain `(priority, id)` order.
 
     Returns a list of claimed job descriptors, each `{"id", "kind",
     "payload", "model_refs", "claim_token", "exclusive", "checkpoint",
@@ -170,9 +181,14 @@ def claim_and_admit(
        admitted alone the instant the machine is idle -- so nothing can
        wait behind it for ever.
     4. `plan_admissions(candidates, running, budget_bytes=<row>.
-       memory_budget_bytes, max_concurrent=<row>.max_concurrent_jobs)`,
-       `<row>` being the threaded `settings_row` or this function's own
-       fallback fetch (see above).
+       memory_budget_bytes, max_concurrent=<row>.max_concurrent_jobs,
+       resident_keys=resident_keys)`, `<row>` being the threaded
+       `settings_row` or this function's own fallback fetch (see above).
+       Then PASS-OVER ACCOUNTING: one bulk `UPDATE` incrementing
+       `passed_over` on every candidate a later-by-`(priority, id)` peer
+       was admitted ahead of (spec 3.6) -- see the inline note at that
+       statement for why it is derived from the same helper
+       `plan_admissions` itself walked.
     5. For each admitted id: one conditional `UPDATE` -- state=running,
        claimed_by=worker_id, a FRESH `claim_token` (uuid4, one per job),
        started_at=now, heartbeat_at=now, attempts unchanged, and
@@ -239,9 +255,35 @@ def claim_and_admit(
             running,
             budget_bytes=job_settings.memory_budget_bytes,
             max_concurrent=job_settings.max_concurrent_jobs,
+            resident_keys=resident_keys,
         )
 
         rows_by_id = {row.pk: row for row in candidate_rows}
+
+        # PASS-OVER ACCOUNTING (spec 3.6). A candidate is "passed over"
+        # when a peer that is LATER by strict `(priority, id)` was admitted
+        # ahead of it. Derived by comparing the order `affinity_order`
+        # produced against strict order -- using the SAME helper
+        # `plan_admissions` walks, so the ordering and the accounting can
+        # never disagree about what happened.
+        #
+        # ONE BULK UPDATE inside the transaction already open. The count is
+        # what the aging bound reads, and it is durable precisely so a
+        # worker restart cannot reset a job's age.
+        admitted_set = set(admitted_ids)
+        latest_admitted = max(
+            ((rows_by_id[job_id].priority, job_id) for job_id in admitted_set), default=None,
+        )
+        if latest_admitted is not None:
+            passed_over_ids = [
+                row.pk for row in candidate_rows
+                if row.pk not in admitted_set and (row.priority, row.pk) < latest_admitted
+            ]
+            if passed_over_ids:
+                InferenceJob.objects.filter(pk__in=passed_over_ids).update(
+                    passed_over=F("passed_over") + 1,
+                )
+
         now = timezone.now()
         descriptors: list[dict] = []
         for job_id in admitted_ids:
@@ -297,7 +339,10 @@ def _sched_candidate(row: InferenceJob, resolved: list[tuple[dict, int | None]])
     `(ref, footprint)` pairs. `key` is normalized per `scheduler.py`'s
     provenance contract: `norm_endpoint()` for the endpoint segment,
     `norm_tag()` for the model_id segment -- built here, the one place
-    a `SchedModel.key` is ever constructed for live rows."""
+    a `SchedModel.key` is ever constructed for live rows.
+
+    `passed_over` is carried straight off the row: the aging bound reads
+    a DURABLE count, so a worker restart cannot reset a job's age."""
     models = tuple(
         SchedModel(
             key=(ref["engine"], norm_endpoint(ref["endpoint"]), norm_tag(ref["model_id"])),
@@ -305,7 +350,10 @@ def _sched_candidate(row: InferenceJob, resolved: list[tuple[dict, int | None]])
         )
         for ref, footprint in resolved
     )
-    return SchedCandidate(job_id=row.pk, priority=row.priority, exclusive=row.exclusive, models=models)
+    return SchedCandidate(
+        job_id=row.pk, priority=row.priority, exclusive=row.exclusive, models=models,
+        passed_over=row.passed_over,
+    )
 
 
 def _kind_stale_thresholds(default_stale_seconds: int) -> dict[str, int]:

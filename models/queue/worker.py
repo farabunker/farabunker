@@ -562,6 +562,12 @@ class Worker:
             stale_after_seconds=STALE_AFTER_SECONDS,
             settings_row=settings_row,
             sweep_orphans=sweep,
+            # THE AFFINITY SNAPSHOT (spec 3.6): what the last eviction
+            # pass believed was resident once its own unloads were
+            # subtracted. An ordering PREFERENCE and nothing else -- empty
+            # on a fresh worker, which simply gives admission plain
+            # `(priority, id)` order.
+            resident_keys=self._resident_keys,
         )
         if not claimed:
             return

@@ -36,6 +36,7 @@ from django.utils import timezone
 from models.registry.models import ModelConnection
 from models.queue.claim import CANDIDATE_WINDOW, _sweep_orphans, claim_and_admit
 from models.queue.models import QUEUED, RUNNING, InferenceJob, JobSettings
+from models.queue.scheduler import MAX_PASSOVERS
 from models.queue.tests._helpers import registry_reset_fixture  # noqa: F401 -- re-exported
 from models.contracts import jobkinds
 from models.contracts.jobkinds import JobKind, register_job_kind
@@ -671,3 +672,130 @@ class TestTheHoldOff:
         behind = _queued_job(priority=100)
 
         assert [d["id"] for d in claim_and_admit("w", stale_after_seconds=120)] == [behind.pk]
+
+
+@pytest.mark.django_db
+class TestPassOverAccounting:
+    """`passed_over` (spec 3.6), the aging bound's durable half: a job is
+    counted once per round in which a peer that is LATER by strict
+    `(priority, id)` was admitted ahead of it, and at `MAX_PASSOVERS` it
+    is pinned to id order for ever after.
+
+    Every fixture here runs in SEQUENTIAL mode (`memory_budget_bytes=None`,
+    the shipped default), which is both the posture batching matters most
+    in and the smallest one that can produce a pass-over at all: exactly
+    one job is admitted per round, so whichever candidate the affinity
+    order puts first is the whole round.
+
+    The COLD candidates deliberately declare NO model refs. That makes
+    them genuinely un-affine (a job declaring no models is never affine)
+    and it keeps the fresh `footprint_for` resolution -- one query per ref
+    -- out of the query-count pin below, which has to hold at one
+    passed-over candidate and at four.
+    """
+
+    @staticmethod
+    def _warm_keys() -> frozenset:
+        """The believed-resident set the affinity ordering reads -- whatever
+        keys the fixture's warm candidates hold, so at least one candidate
+        sorts ahead of a later-by-(priority, id) peer and there is
+        something to count.
+
+        `:latest` is not decoration: `claim.py` builds every
+        `SchedModel.key` through `norm_tag()`, which reads a bare
+        `model_id` as `name:latest`, so this is what a `_ref(model_id=
+        "warm")` row actually presents to the scheduler."""
+        return frozenset({("ollama", "http://ollama.local:11434", "warm:latest")})
+
+    @staticmethod
+    def _warm_job() -> InferenceJob:
+        """A candidate whose single model key is in `_warm_keys()` -- and,
+        created last, one that is LATER by `(priority, id)` than every
+        cold peer, so admitting it is a real reordering."""
+        return _job(model_refs=[_ref(model_id="warm")])
+
+    def test_a_job_a_later_peer_was_admitted_ahead_of_is_counted(self):
+        _set_budget(memory_budget_bytes=None, max_concurrent_jobs=4)
+        passed = _job()
+        warm = self._warm_job()
+
+        claimed = claim_and_admit("w", stale_after_seconds=120,
+                                  resident_keys=self._warm_keys())
+
+        assert [d["id"] for d in claimed] == [warm.pk]
+        passed.refresh_from_db()
+        assert passed.passed_over == 1
+
+    def test_a_job_nothing_was_admitted_ahead_of_is_not_counted(self):
+        """The head of the round is not passed over by its own admission,
+        and neither is the job BEHIND the head -- nothing later than it
+        was admitted, it simply has not had its turn yet."""
+        _set_budget(memory_budget_bytes=None, max_concurrent_jobs=4)
+        head = _job()
+        untouched = _job()
+
+        claimed = claim_and_admit("w", stale_after_seconds=120,
+                                  resident_keys=self._warm_keys())
+
+        assert [d["id"] for d in claimed] == [head.pk]
+        untouched.refresh_from_db()
+        assert untouched.passed_over == 0
+        head.refresh_from_db()
+        assert head.passed_over == 0
+
+    def test_the_increment_is_one_bulk_update_however_many_jobs_were_passed_over(
+            self, django_assert_num_queries):
+        """ONE `UPDATE ... SET passed_over = passed_over + 1` inside the
+        transaction already open -- never one per job. NON-VACUOUS: the
+        same literal has to hold with one passed-over candidate and with
+        four, or a per-row implementation would sail through.
+
+        The number is a LITERAL, filled from the first red run. This is a
+        NEW pin: `test_claim.py` had no query-count assertion around
+        `claim_and_admit` before this task."""
+        _set_budget(memory_budget_bytes=None, max_concurrent_jobs=4)
+        _job()
+        self._warm_job()
+
+        with django_assert_num_queries(10):
+            claim_and_admit("w", stale_after_seconds=120, resident_keys=self._warm_keys())
+
+        assert InferenceJob.objects.filter(passed_over=1).count() == 1
+
+        InferenceJob.objects.all().delete()
+        for _ in range(4):
+            _job()
+        self._warm_job()
+
+        with django_assert_num_queries(10):
+            claim_and_admit("w", stale_after_seconds=120, resident_keys=self._warm_keys())
+
+        assert InferenceJob.objects.filter(passed_over=1).count() == 4
+
+    def test_a_pinned_job_is_admitted_ahead_of_an_affine_peer(self):
+        """The aging bound, end to end: within one priority a job can be
+        passed over at most MAX_PASSOVERS times before it is pinned and
+        ordered by insertion."""
+        _set_budget(memory_budget_bytes=None, max_concurrent_jobs=4)
+        not_yet_pinned = _job(passed_over=MAX_PASSOVERS - 1)
+        warm = self._warm_job()
+
+        claimed = claim_and_admit("w", stale_after_seconds=120,
+                                  resident_keys=self._warm_keys())
+
+        # One short of the bound, affinity still wins -- and the loss is
+        # what carries the job TO the bound.
+        assert [d["id"] for d in claimed] == [warm.pk]
+        not_yet_pinned.refresh_from_db()
+        assert not_yet_pinned.passed_over == MAX_PASSOVERS
+
+        InferenceJob.objects.all().delete()
+        pinned = _job(passed_over=MAX_PASSOVERS)
+        warm = self._warm_job()
+
+        claimed = claim_and_admit("w", stale_after_seconds=120,
+                                  resident_keys=self._warm_keys())
+
+        assert [d["id"] for d in claimed] == [pinned.pk]
+        warm.refresh_from_db()
+        assert warm.passed_over == 0

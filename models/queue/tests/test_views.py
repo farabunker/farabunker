@@ -1379,3 +1379,35 @@ class TestHoldOffReading:
         make_queue_job(kind="test.unregistered", not_before=timezone.now() + timedelta(minutes=2))
 
         assert client.get(reverse("jobs-queue")).status_code == 200
+
+
+# --- T14: a passed-over row says so -----------------------------------------
+
+
+@pytest.mark.django_db
+class TestPassedOverReading:
+    """The other half of "why is this job still waiting": affinity
+    batching can put a later peer ahead of an older job, and a count
+    nobody can see is exactly the unexplained delay this track exists to
+    remove. Read off the row `queue_snapshot` already loaded -- no query,
+    no script."""
+
+    def test_a_passed_over_job_says_so_on_the_waiting_row(self, client):
+        make_queue_job(kind="test.k", passed_over=2)
+
+        assert "passed over twice" in client.get(reverse("jobs-queue")).content.decode()
+
+    def test_one_pass_over_reads_once(self, client):
+        make_queue_job(kind="test.k", passed_over=1)
+
+        assert "passed over once" in client.get(reverse("jobs-queue")).content.decode()
+
+    def test_above_two_it_is_a_number(self, client):
+        make_queue_job(kind="test.k", passed_over=5)
+
+        assert "passed over 5 times" in client.get(reverse("jobs-queue")).content.decode()
+
+    def test_a_job_never_passed_over_renders_nothing(self, client):
+        make_queue_job(kind="test.k")
+
+        assert "passed over" not in client.get(reverse("jobs-queue")).content.decode()

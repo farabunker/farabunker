@@ -286,6 +286,9 @@ error message is content too (it can quote payload back).
               {% if row.hold_off_until %}
               · waiting for engine memory — retries at {{ row.hold_off_until|time:"H:i" }}
               {% endif %}
+              {% if row.passed_over %}
+              · passed over {% if row.passed_over == 1 %}once{% elif row.passed_over == 2 %}twice{% else %}{{ row.passed_over }} times{% endif %}
+              {% endif %}
             </div>
             <div class="job-actions">
               <form method="post" action="{% url 'jobs-queue-cancel' row.id %}">
