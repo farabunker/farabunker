@@ -7,9 +7,11 @@ from __future__ import annotations
 import json
 
 import pytest
+from django.db import OperationalError
 from django.urls import reverse
 from django.utils import timezone
 
+from agents.chat.views import turns as turns_module
 from agents.chat.tests._helpers import (   # noqa: F401 -- the import IS the registration
     fake_queued_job, fake_running_job, make_admin, make_agent, make_conversation, make_turn,
     make_user, posture, sign_in, user_principal,
@@ -396,3 +398,46 @@ class TestReconciliationOnThePollPath:
         turn = _assistant_turn(state=Turn.State.QUEUED, queue_job_id=4242, age_seconds=1)
         _code, body = _status(client, turn)
         assert body["state"] == "queued"
+
+
+class TestTheRetryable503:
+    """TWO DIFFERENT 503s. One says "try again", the other says "go
+    configure the queue" -- and the poller acts on the difference."""
+
+    def test_a_momentarily_unavailable_database_answers_retryable(self, client,
+                                                                  monkeypatch):
+        """BEST-EFFORT, and the view's own docstring says so: the guard
+        wraps the whole view body because principal resolution and turn
+        visibility both touch the database before any body builder runs,
+        and session middleware touches it before the view is entered at
+        all. Patched at `visible_turn` because that is inside the guard
+        and a real recovering database would raise there first."""
+        monkeypatch.setattr(
+            turns_module, "visible_turn",
+            lambda *a, **k: (_ for _ in ()).throw(OperationalError("server closed")),
+        )
+
+        response = client.get(reverse("chat-turn-status", args=[1]))
+
+        assert response.status_code == 503
+        assert response.json()["retryable"] is True
+
+    def test_the_configuration_503_stays_terminal_and_keeps_its_setup_link(
+        self, client, monkeypatch
+    ):
+        """Two different 503s: one says "try again", the other says "go
+        configure the queue". Conflating them would either spin on a
+        misconfigured box or give up on a recovering one."""
+        monkeypatch.setattr(
+            "agents.chat.views.turns.get_job",
+            lambda job_id: (_ for _ in ()).throw(QueueUnavailable("no tables")),
+        )
+        turn = make_turn(role=Turn.Role.ASSISTANT, state=Turn.State.QUEUED,
+                         queue_job_id=1)
+
+        response = client.get(reverse("chat-turn-status", args=[turn.pk]))
+
+        assert response.status_code == 503
+        body = response.json()
+        assert body.get("retryable") is not True
+        assert "setup_url" in body

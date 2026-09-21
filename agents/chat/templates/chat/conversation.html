@@ -613,10 +613,13 @@ screen comment already documents for `.thread-scroll`.
   // On "done" the group is swapped a final time and the form
   // re-enabled. On "failed"/"cancelled" the card shows `data.error`
   // plus a link to `data.setup_url` when one is given. On 404 the card
-  // says the turn is gone. On 503 the card says the queue is not ready
-  // and polling stops. An UNRECOGNIZED state keeps polling rather than
-  // stranding the page -- ask.html's own rule for a forward-compatible
-  // state added later.
+  // says the turn is gone. On a TERMINAL 503 the card says the queue is
+  // not ready and polling stops; a RETRYABLE 503 (a database that is
+  // recovering, not one that is missing) is retried instead. An
+  // UNRECOGNIZED state still keeps polling rather than stranding the
+  // page -- ask.html's own rule for a forward-compatible state added
+  // later -- but it is COUNTED against the transport ceiling while it
+  // does, so no answer this page cannot act on can tick for ever.
   function poll(statusUrl, card, turnId) {
     var transportFailures = 0;
     var startedAt = Date.now();
@@ -659,13 +662,44 @@ screen comment already documents for `.thread-scroll`.
         })
         .then(function (result) {
           if (result === null) { return; }
-          transportFailures = 0;
           var data = result.data;
           if (result.status === 503) {
+            if (data.retryable) {
+              // A database that is recovering, not one that is missing
+              // (`turn_status`'s retryable 503). Counted like any other
+              // unusable answer, so this cannot tick for ever either.
+              transportFailures += 1;
+              if (transportFailures > MAX_TRANSPORT_RETRIES) {
+                showCardError(card, "Lost contact with the server — reload this page.", "");
+                return;
+              }
+              setTimeout(tick, POLL_INTERVAL_MS);
+              return;
+            }
             showCardError(card, data.error || "The queue isn't ready yet.", data.setup_url);
             return;
           }
+          if (result.status >= 500) {
+            // A 5xx whose body DID parse. Its unparseable twin already
+            // lands in `.catch()` and is counted there; this one used to
+            // fall through to the state branches below with no state to
+            // match, and re-tick in silence.
+            transportFailures += 1;
+            if (transportFailures > MAX_TRANSPORT_RETRIES) {
+              showCardError(card, "Lost contact with the server — reload this page.", "");
+              return;
+            }
+            setTimeout(tick, POLL_INTERVAL_MS);
+            return;
+          }
+          // `transportFailures = 0` lives INSIDE the recognized-state
+          // branches, never here: a reset at this point would run on the
+          // same tick the final `else` below increments, so the ceiling
+          // could never be reached and the loop this task closes would
+          // still be unbounded. Only an answer this page can ACT on
+          // clears the count.
           if (data.state === "queued" || data.state === "running") {
+            transportFailures = 0;
             if (data.html && data.html !== lastHtml) {
               lastHtml = data.html;
               // Owner-requested chat layout fix: read BEFORE the swap
@@ -692,6 +726,11 @@ screen comment already documents for `.thread-scroll`.
             );
             setTimeout(tick, POLL_INTERVAL_MS);
           } else if (data.state === "done") {
+            // The other branch that can keep ticking (a still-ingesting
+            // attachment, below), so the reset belongs here too. The
+            // "failed" and "cancelled" branches below stop polling
+            // outright, which is why neither carries one.
+            transportFailures = 0;
             // Same before/after ordering as the queued/running branch
             // above, for the same reason.
             var wasNearBottom = isNearThreadBottom();
@@ -729,6 +768,19 @@ screen comment already documents for `.thread-scroll`.
           } else if (data.state === "cancelled") {
             showCardError(card, data.error || "This turn was cancelled.", "");
           } else {
+            // A RESPONSE THIS PAGE CANNOT ACT ON IS A FAILURE, AND IT IS
+            // COUNTED. A parseable body with no recognized state used to
+            // fall through here and re-tick in silence until
+            // MAX_POLL_DURATION_MS gave up, hours later -- the actual
+            // shape of the two post-crash turns that polled for ever at
+            // "Queued — waiting…". Forward compatibility is still honoured
+            // (an unknown state is retried, not treated as an error on the
+            // first tick); what it no longer buys is an unbounded loop.
+            transportFailures += 1;
+            if (transportFailures > MAX_TRANSPORT_RETRIES) {
+              showCardError(card, "Lost contact with the server — reload this page.", "");
+              return;
+            }
             setTimeout(tick, POLL_INTERVAL_MS);
           }
         })

@@ -20,6 +20,7 @@ degrade-to-`None` a different caller chose for a different reason.
 from __future__ import annotations
 
 from django.contrib import messages
+from django.db import OperationalError
 from django.http import Http404, HttpResponseForbidden, JsonResponse
 from django.shortcuts import redirect, render
 from django.template.loader import render_to_string
@@ -415,16 +416,43 @@ def turn_status(request, turn_id: int) -> JsonResponse:
     CONVERSATION, never by bare pk, and answers `None` for an unknown id
     and an invisible one alike, so this view cannot tell them apart
     either -- both are this same 404.
+
+    TWO DIFFERENT 503s, and the poller acts on the difference. The
+    terminal one keeps its `setup_url`; the retryable one carries
+    `"retryable": true`. The retryable half is BEST-EFFORT and cannot be
+    a guard around the body builders alone: principal resolution and
+    turn visibility touch the database BEFORE any builder runs, and
+    session middleware touches it before this view is entered at all, so
+    a truly unavailable database can still produce a non-JSON 5xx that
+    only the loop's own counting handles.
     """
-    principal = principal_for_request(request)
-    turn = visible_turn(principal, turn_id)
-    if turn is None:
-        raise Http404(f"Turn {turn_id} does not exist.")
     try:
+        principal = principal_for_request(request)
+        turn = visible_turn(principal, turn_id)
+        if turn is None:
+            # Http404 is neither of the two exceptions below, so it
+            # passes through this guard untouched -- the 404 behaviour
+            # is byte-identical to before the guard existed, pinned by
+            # `TestTheTwoNon200s::test_an_unknown_turn_is_404`.
+            raise Http404(f"Turn {turn_id} does not exist.")
         body = _BODY_BUILDERS[turn.state](turn, request)
     except QueueUnavailable:
+        # TERMINAL: the queue is not configured. Keeps its setup link, and
+        # the loop stops -- retrying would spin for ever on a box that
+        # needs an operator, not another request.
         return JsonResponse(
             {"error": QUEUE_UNAVAILABLE, "setup_url": reverse("inference-console")},
+            status=503,
+        )
+    except OperationalError:
+        # RETRYABLE: the database was momentarily unavailable (a restart,
+        # a recovery). The loop counts this answer against the same
+        # bounded transport ceiling a dropped connection uses, so a
+        # database that never comes back cannot make the page tick for
+        # ever either.
+        return JsonResponse(
+            {"error": "The queue is briefly unavailable; this will retry.",
+             "retryable": True},
             status=503,
         )
     return JsonResponse(body)
