@@ -126,17 +126,23 @@ def delete_content(actor, *, kind: str, key, owner, label: str = "",
     and moving it earlier would destroy content sooner than the person
     was told.
 
-    THE SWEEP AT THE END IS WHAT MAKES `retention_days = 0` SYNCHRONOUS:
-    when the setting in force is 0, the ticket this call just wrote is
-    due TODAY, so it calls `sweep()` before returning and the content is
-    gone before the response returns. ONLY THEN: a delete with any grace
-    period must not incidentally purge some unrelated ticket that has
-    since fallen due -- that is the sweep's own job, on its own cliff or
-    its own click, not a side effect of a caller who asked to delete one
-    different item. The prune-on-write pattern `tools.rag.services.
-    record_ask` and `models.queue.backend.enqueue` already use still
-    applies; it is scoped to the one case where "prune" and "the write
-    just made" are the same ticket.
+    THE BOUNDED SWEEP AT THE END OF EVERY DELETE IS PRUNE-ON-WRITE
+    (spec section 3.9, "Three callers"), unconditionally -- not only
+    when this call's own ticket is due. It is what makes `retention_days
+    = 0` a synchronous purge: the ticket this call just wrote is due
+    today, so the same sweep purges it and the content is gone before
+    the response returns. It is ALSO what keeps a box that is used at
+    all clean, with no scheduler and no cron requirement: any other
+    ticket that has already fallen due -- created by an earlier delete,
+    on the ordinary default policy -- is purged as a side effect of THIS
+    unrelated delete, exactly the prune-on-write pattern `tools.rag.
+    services.record_ask` and `models.queue.backend.enqueue` already use.
+    A box on the shipped 30-day default therefore never needs anybody to
+    open the Deleted page, or a cron job, for "Purge on <date>" to stay
+    a promise actually kept. The sweep stays BOUNDED (`SWEEP_LIMIT`) and
+    purges each due ticket in its own transaction, always as the SERVICE
+    principal -- never the principal that triggered this call -- exactly
+    as `sweep` below documents.
     """
     if kind not in RETENTION_KINDS:
         raise ValueError(f"{kind!r} is not a retention kind.")
@@ -159,7 +165,7 @@ def delete_content(actor, *, kind: str, key, owner, label: str = "",
                          target_key=str(key),
                          target_label=label if row.audit_detail else "",
                          source=source, kind=kind)
-    if created and purge_on <= timezone.localdate():
+    if created:
         sweep()
     return ticket
 

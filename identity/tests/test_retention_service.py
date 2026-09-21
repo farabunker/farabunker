@@ -194,13 +194,25 @@ class TestTheSweep:
         assert DeletionTicket.objects.count() == 1
 
     def test_it_is_bounded_by_the_limit(self):
+        """All four tickets are created FIRST, while none of them is due
+        (the shipped default is 30 days), and backdated together in ONE
+        queryset update AFTER every create has already run. Interleaving
+        a create with a backdate, one ticket at a time, would let each
+        later `delete_content`'s own unconditional prune-on-write sweep
+        purge the earlier, now-overdue ticket before this test ever
+        calls `sweep` itself -- exactly the behaviour
+        `test_deleting_anything_purges_what_has_already_fallen_due`
+        below pins on purpose. This test is about the LIMIT, so its own
+        fixtures must not be eaten by the thing it is not testing."""
         user = make_user()
         item = _owner(user)
-        for index in range(4):
-            ticket = service.delete_content(user_principal(user), kind=KIND_ASK,
-                                            key=str(index), owner=item)
-            DeletionTicket.objects.filter(pk=ticket.pk).update(
-                purge_on=timezone.localdate() - datetime.timedelta(days=1))
+        tickets = [
+            service.delete_content(user_principal(user), kind=KIND_ASK,
+                                   key=str(index), owner=item)
+            for index in range(4)
+        ]
+        DeletionTicket.objects.filter(pk__in=[t.pk for t in tickets]).update(
+            purge_on=timezone.localdate() - datetime.timedelta(days=1))
         assert service.sweep(limit=2) == 2
         assert DeletionTicket.objects.count() == 2
 
@@ -229,6 +241,33 @@ class TestTheSweep:
         service.sweep()
         purged = AuditEvent.objects.filter(action=CONTENT_PURGED).first()
         assert (purged.actor_kind, purged.actor_key) == ("service", "local")
+
+    def test_deleting_anything_purges_what_has_already_fallen_due(self):
+        """Prune-on-write (spec section 3.9, "Three callers"): the
+        shipped default keeps a box that is used at all clean with no
+        scheduler, because `delete_content` runs a bounded `sweep()`
+        unconditionally, not only when the item it just deleted is
+        itself due. `a` sits on the ordinary 30-day policy, already
+        overdue by the time anybody deletes `b` -- a different item,
+        with nothing else in common -- and `a`'s content is gone
+        (purged, not merely swept up) as a side effect of that unrelated
+        call, while `b`'s own ticket, freshly written and nowhere near
+        its own cliff, stands untouched."""
+        user = make_user()
+        item = _owner(user)
+        stale = service.delete_content(user_principal(user), kind=KIND_ASK,
+                                       key="a", owner=item)
+        DeletionTicket.objects.filter(pk=stale.pk).update(
+            purge_on=timezone.localdate() - datetime.timedelta(days=1))
+
+        fresh = service.delete_content(user_principal(user), kind=KIND_ASK,
+                                       key="b", owner=item)
+
+        assert not DeletionTicket.objects.filter(pk=stale.pk).exists()
+        assert DeletionTicket.objects.filter(pk=fresh.pk).exists()
+        assert AuditEvent.objects.filter(action=CONTENT_PURGED,
+                                         target_key="a").exists()
+        assert REMOVED == ["a"]
 
 
 class TestStanding:
