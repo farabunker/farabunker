@@ -309,10 +309,25 @@ def visible_turn(principal, turn_id):
     where it closes. `None` for an unknown id as well as an invisible
     one -- the view answers 404 to both, and the caller cannot tell them
     apart, which is the point.
+
+    THE `select_related` CARRIES THE AGENT AND THE WORKSTREAM, not the
+    conversation alone (context meter, spec review R2).
+    `agents.chat.views.turns`' queued and done bodies call
+    `agents.usage.context_usage(turn.conversation, ...)`, which reads
+    `agent.system_prompt` and `conversation.workstream.instructions` --
+    neither of which is loaded on this path. Without these two JOINs the
+    poll path would pay TWO LAZY FK READS on every tick of every open
+    tab, for the price of two more JOINs on a query it already runs (a
+    nullable FK, which Django resolves with a LEFT JOIN). The thread
+    page is unaffected -- there both rows are genuinely already in hand.
+    `agents/chat/tests/test_thread.py::TestTheContextMeterOnThePollPath
+    ::test_the_select_related_is_wide_enough_to_keep_the_budget_honest`
+    is what turns red if a later reader narrows it back.
     """
     return Turn.objects.filter(
         pk=turn_id, conversation__in=visible_conversations(principal)
-    ).select_related("conversation").first()
+    ).select_related("conversation", "conversation__agent",
+                     "conversation__workstream").first()
 
 
 def latest_completed_turn_index(conversation) -> int | None:

@@ -38,6 +38,7 @@ from agents.chat.service import (
 from agents.chat.views.thread import thread_context
 from agents.limits import TURN_TIMEOUT_ADMIN_HINT, TURN_TIMEOUT_ERROR
 from agents.models import Turn
+from agents.usage import WINDOW_SOURCE_UNBOUND, context_usage
 from agents.visibility import may_post_to, visible_turn
 from agents.workstreams import scope_for_conversation
 from models.contracts.queue import QueueUnavailable, get_job
@@ -221,15 +222,44 @@ def _carrying_user_turn_id(turn):
     return user_turn.pk if user_turn is not None else None
 
 
+def _context_body(turn) -> dict:
+    """THREE INTEGERS AND NOTHING ELSE -- no window, no percentage, no
+    sentence (spec decisions 21-22, review M3).
+
+    This endpoint holds NO conversation-level render context: no
+    `settings_row`, no wall, no `ToolAccess`, no `Preflight`, and
+    critically NO PICKED CONNECTION, because the picker's selection
+    lives in the thread page's `?connection=` query string, which
+    nothing on this path ever sees. A body that computed its own
+    denominator would have to run `preflight_turn` on every tick of
+    every open tab -- the exact inverse of "the page pays nothing for
+    it" -- and would answer with the AGENT's role binding where the page
+    answered with the PICKED connection, so the ceiling would silently
+    change mid-thread for anyone using the picker.
+
+    So the window stays with the page. `window=0` here is not a value
+    anybody renders: only `estimated_tokens`, `replayed_turns` and
+    `total_turns` are read off the result, and the page's own
+    server-written `data-window` is the only denominator that exists.
+    """
+    usage = context_usage(turn.conversation, turn.conversation.agent,
+                          window=0, window_source=WINDOW_SOURCE_UNBOUND)
+    return {
+        "estimated_tokens": usage.estimated_tokens,
+        "replayed_turns": usage.replayed_turns,
+        "total_turns": usage.total_turns,
+    }
+
+
 def _queued_body(turn, request) -> dict:
-    """`{"state", "position", "priority", "html"}` -- the queue's own
-    view of the still-waiting job (`None` for both when the queue
-    cannot place it; see the module docstring on why `QueueUnavailable`
-    is not caught here and is left to propagate to `turn_status`'s own
-    503), plus the same rendered group `_done_body` carries (D1): the
-    script's swap needs the user's own bubble at EVERY poll tick, not
-    only the final one, or a requeued poll after an earlier swap would
-    have nothing to re-anchor to.
+    """`{"state", "position", "priority", "html", "context"}` -- the
+    queue's own view of the still-waiting job (`None` for both when the
+    queue cannot place it; see the module docstring on why
+    `QueueUnavailable` is not caught here and is left to propagate to
+    `turn_status`'s own 503), plus the same rendered group `_done_body`
+    carries (D1): the script's swap needs the user's own bubble at
+    EVERY poll tick, not only the final one, or a requeued poll after
+    an earlier swap would have nothing to re-anchor to.
     """
     job = get_job(turn.queue_job_id)
     return {
@@ -237,6 +267,17 @@ def _queued_body(turn, request) -> dict:
         "position": job.position if job is not None else None,
         "priority": job.priority if job is not None else None,
         "html": _group_html(turn, request),
+        # TWO BODIES CARRY THE KEY, NOT ONE (spec review m7).
+        # `agents.chat.service.start_turn` writes the USER turn DONE in
+        # the SAME transaction as the QUEUED placeholder, so the
+        # replayed corpus grows at QUEUE time, not at finish -- a meter
+        # that waited for `done` would be stale for the whole in-flight
+        # window, which is exactly when the reader is deciding whether
+        # to compact, and is the same shape as round 13's stale-strip
+        # lesson. `_running_body`, `_failed_body` and `_cancelled_body`
+        # do NOT carry it: the corpus does not change between queue and
+        # finish, and a failed or cancelled turn adds no replayable text.
+        "context": _context_body(turn),
     }
 
 
@@ -257,8 +298,9 @@ def _running_body(turn, request) -> dict:
 
 
 def _done_body(turn, request) -> dict:
-    """The whole exchange this job wrote, not one card (M6, extended by
-    D1 to include the USER turn that provoked it).
+    """`{"state", "html", "attachments_pending", "context"}` -- the whole
+    exchange this job wrote, not one card (M6, extended by D1 to include
+    the USER turn that provoked it).
 
     A finished turn is the USER message, the TOOL cards the loop wrote,
     PLUS the answer, and a poller that swapped in less than that would
@@ -288,6 +330,17 @@ def _done_body(turn, request) -> dict:
     return {
         "state": turn.state, "html": _group_html(turn, request, by_turn),
         "attachments_pending": pending,
+        # TWO BODIES CARRY THE KEY, NOT ONE (spec review m7).
+        # `agents.chat.service.start_turn` writes the USER turn DONE in
+        # the SAME transaction as the QUEUED placeholder, so the
+        # replayed corpus grows at QUEUE time, not at finish -- a meter
+        # that waited for `done` would be stale for the whole in-flight
+        # window, which is exactly when the reader is deciding whether
+        # to compact, and is the same shape as round 13's stale-strip
+        # lesson. `_running_body`, `_failed_body` and `_cancelled_body`
+        # do NOT carry it: the corpus does not change between queue and
+        # finish, and a failed or cancelled turn adds no replayable text.
+        "context": _context_body(turn),
     }
 
 

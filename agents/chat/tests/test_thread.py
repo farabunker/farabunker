@@ -11,8 +11,9 @@ from django.urls import NoReverseMatch, reverse
 from django.utils import timezone
 
 from agents.chat.tests._helpers import (   # noqa: F401
-    bound_chat_role, grant, make_admin, make_agent, make_conversation, make_entitlement,
-    make_thread, make_turn, make_user, posture, sign_in, user_principal,
+    bound_chat_role, fake_queued_job, fake_running_job, grant, make_admin, make_agent,
+    make_conversation, make_entitlement, make_thread, make_turn, make_user, posture,
+    sign_in, user_principal,
 )
 from agents.models import Share, ToolEntitlement, ToolInvocation, Turn, WorkstreamScopeEntitlement
 from agents.tests._helpers import _workstream, make_document
@@ -2297,3 +2298,296 @@ class TestTheContextMeter:
 
         assert _standalone_stream_reads(stream_queries) == _standalone_stream_reads(
             loose_queries)
+
+
+class TestTheContextMeterOnThePollPath:
+    """Three integers, on two of the five bodies, with no binding
+    resolved anywhere on this path (spec review M3, m7, R2)."""
+
+    def _queued_pair(self):
+        conversation = make_conversation(agent=make_agent(slug="poll-meter"))
+        make_turn(conversation=conversation, text="hello", state=Turn.State.DONE)
+        assistant = make_turn(conversation=conversation, role=Turn.Role.ASSISTANT,
+                              text="", state=Turn.State.QUEUED, queue_job_id=1)
+        return conversation, assistant
+
+    def test_a_queued_body_carries_the_three_integers_and_nothing_else(
+        self, client, fake_queued_job
+    ):
+        _conversation, assistant = self._queued_pair()
+        body = client.get(reverse("chat-turn-status", args=[assistant.pk])).json()
+        assert set(body["context"]) == {"estimated_tokens", "replayed_turns", "total_turns"}
+        assert all(isinstance(value, int) for value in body["context"].values())
+
+    def test_the_corpus_grows_at_QUEUE_time_not_only_at_finish(
+        self, client, fake_queued_job
+    ):
+        """`agents.chat.service.start_turn` writes the USER turn DONE in
+        the same transaction as the QUEUED placeholder, so a meter that
+        waited for `done` would be stale for the whole in-flight window
+        -- precisely when the reader is deciding whether to compact."""
+        _conversation, assistant = self._queued_pair()
+        body = client.get(reverse("chat-turn-status", args=[assistant.pk])).json()
+        assert body["context"]["replayed_turns"] == 1
+        assert body["context"]["estimated_tokens"] > 0
+
+    def test_a_done_body_carries_it_too(self, client):
+        conversation = make_conversation(agent=make_agent(slug="poll-done"))
+        make_turn(conversation=conversation, text="hello", state=Turn.State.DONE)
+        assistant = make_turn(conversation=conversation, role=Turn.Role.ASSISTANT,
+                              text="the answer", state=Turn.State.DONE, queue_job_id=2)
+        body = client.get(reverse("chat-turn-status", args=[assistant.pk])).json()
+        assert body["context"]["replayed_turns"] == 2
+
+    def test_no_window_no_percentage_and_no_sentence_ever_travel(self, client):
+        """DEVIATION FROM THE BRIEF: the brief's own `assert "estimate"
+        not in serialized` cannot pass alongside the interface's own
+        mandated key name -- `"estimated_tokens"` starts with the
+        eight letters "estimate", so the substring is present in EVERY
+        legal body, including the one `_context_body`'s own docstring
+        and `test_a_queued_body_carries_the_three_integers_and_nothing_
+        else` require. Re-pinned to the assertion's real intent -- no
+        rendered SENTENCE (a "~30% estimate" clause, the page's own
+        prose) rides the JSON body -- by counting occurrences: "estimate"
+        may appear only as the fixed prefix of the key name itself,
+        never as a free word a second time."""
+        conversation = make_conversation(agent=make_agent(slug="poll-window"))
+        assistant = make_turn(conversation=conversation, role=Turn.Role.ASSISTANT,
+                              text="a", state=Turn.State.DONE, queue_job_id=3)
+        serialized = str(client.get(
+            reverse("chat-turn-status", args=[assistant.pk])).json())
+        assert "window" not in serialized
+        assert "percent" not in serialized
+        assert serialized.count("estimate") == serialized.count("estimated_tokens")
+
+    def test_a_running_body_carries_no_context_key(self, client, fake_running_job):
+        conversation = make_conversation(agent=make_agent(slug="poll-running"))
+        assistant = make_turn(conversation=conversation, role=Turn.Role.ASSISTANT,
+                              text="", state=Turn.State.RUNNING, queue_job_id=4)
+        assert "context" not in client.get(
+            reverse("chat-turn-status", args=[assistant.pk])).json()
+
+    def test_a_failed_and_a_cancelled_body_carry_no_context_key(self, client):
+        conversation = make_conversation(agent=make_agent(slug="poll-terminal"))
+        failed = make_turn(conversation=conversation, role=Turn.Role.ASSISTANT, text="",
+                           state=Turn.State.FAILED, error="nope", queue_job_id=5)
+        cancelled = make_turn(conversation=conversation, role=Turn.Role.ASSISTANT, text="",
+                              state=Turn.State.CANCELLED, error="stopped", queue_job_id=6)
+        assert "context" not in client.get(
+            reverse("chat-turn-status", args=[failed.pk])).json()
+        assert "context" not in client.get(
+            reverse("chat-turn-status", args=[cancelled.pk])).json()
+
+    def test_no_binding_is_resolved_on_the_poll_path(self, client, monkeypatch):
+        """No `preflight_turn`, no `resolve_chat`, no wall read, no
+        tool-access read. The inverse of "the page pays nothing for it"
+        would be every open tab paying for it every two seconds.
+
+        PATCHED AT THE LEAF, NOT AT A NAME THIS MODULE NEVER IMPORTS.
+        `agents/chat/views/turns.py`'s import block does not carry
+        `preflight_turn` at all, so patching THAT name intercepts
+        nothing and the assertion holds whatever the implementation
+        does -- a test that pins nothing.
+        `models.contracts.bindings.resolve` is what `resolve_chat`
+        really reaches, and the query sweep beside it is the second
+        belt: a binding resolution cannot happen without touching a
+        `models_`-prefixed table."""
+        called = []
+        monkeypatch.setattr("models.contracts.bindings.resolve",
+                            lambda *a, **k: called.append("resolve"))
+        conversation = make_conversation(agent=make_agent(slug="poll-nobind"))
+        assistant = make_turn(conversation=conversation, role=Turn.Role.ASSISTANT,
+                              text="a", state=Turn.State.DONE, queue_job_id=7)
+        with CaptureQueriesContext(connection) as captured:
+            client.get(reverse("chat-turn-status", args=[assistant.pk]))
+        assert called == []
+        assert [q for q in captured.captured_queries
+                if "models_" in q["sql"].lower()] == []
+
+    def test_the_context_key_costs_exactly_the_two_reads_it_budgets(self, client):
+        """THE ABSOLUTE-DELTA PIN spec §9 asks for, re-budgeted from one
+        read to two (see "Deviations from the spec", §1).
+
+        Equality-under-scale alone cannot notice a THIRD constant query
+        arriving later, which is exactly the regression this pin exists
+        to catch. `_context_body` is asked DIRECTLY, over a turn loaded
+        the way `visible_turn` loads it, so the number is the feature's
+        own rather than the surrounding body's."""
+        from agents.chat.views.turns import _context_body
+
+        conversation = make_conversation(agent=make_agent(slug="poll-delta"))
+        make_turn(conversation=conversation, text="hello", state=Turn.State.DONE)
+        turn = make_turn(conversation=conversation, role=Turn.Role.ASSISTANT, text="a",
+                         state=Turn.State.DONE, queue_job_id=13)
+        turn = Turn.objects.select_related(
+            "conversation", "conversation__agent", "conversation__workstream").get(
+                pk=turn.pk)
+        with CaptureQueriesContext(connection) as captured:
+            body = _context_body(turn)
+        assert set(body) == {"estimated_tokens", "replayed_turns", "total_turns"}
+        assert len(captured) == 2, [q["sql"] for q in captured.captured_queries]
+
+    def test_the_select_related_is_wide_enough_to_keep_the_budget_honest(self, client):
+        """THE PIN THAT PROVES `visible_turn`'s widened `select_related`
+        (spec review R2). Narrowing it back to `("conversation",)` -- or
+        narrowing it PARTIALLY, dropping only one of the two JOINs --
+        adds a lazy FK read to every tick of every open tab, and this
+        pin is what turns red rather than quietly costing them.
+
+        DEVIATION FROM THE BRIEF (task-4 review, ruling 2 + finding 5):
+        the brief's own assertion is bare equality
+        (`len(stream_queries) == len(loose_queries)`), which this
+        endpoint has never satisfied -- `_attachments_by_turn`'s own
+        `scope_for_conversation` call (round 13, present since before
+        this task) resolves an in-stream conversation's wall through
+        `workstream_scope`, at a real, pre-existing, five-query cost
+        (one `agents_workstream` `.first()` authorization read, three
+        `identity_identitysettings` ownership reads, one
+        `rag_workstreampin` read) that is not reachable from
+        `agents/visibility.py` or `agents/chat/views/turns.py`, the only
+        two production files this task touches -- SEE THE WHOLE-BRANCH
+        BACKLOG ITEM BELOW. A first re-pin fixed that gap at the magic
+        constant 5, which worked but coupled this task's OWN regression
+        pin to a cost this task does not own: any future change to
+        `_attachments_by_turn`/`attachments_for` would turn this red for
+        the wrong reason. Re-expressed instead in the SAME shape terms
+        `TestTheContextMeter::test_a_reader_who_may_not_upload_pays_no_
+        extra_query_for_the_stream` (task 3) already established for
+        this exact ambiguity: a lazy FK fetch is a `.get()`-shaped
+        query, `... LIMIT 21`, no `ORDER BY`; the pre-existing
+        authorization read is a `.first()`-shaped query, `... ORDER BY
+        "agents_workstream"."updated_at" DESC LIMIT 1`. Counting
+        STANDALONE (non-JOIN) reads of EACH shape, on EACH table
+        (`agents_agent` for the `conversation__agent` JOIN,
+        `agents_workstream` for `conversation__workstream`), asserts
+        zero lazy reads on both sides without needing to know or state
+        the authorization surcharge's size at all -- so a future change
+        to that unrelated code path can move the total query count
+        however it likes without touching this pin.
+
+        Verified by temporarily narrowing `visible_turn`'s own
+        `select_related` twice and restoring it after each: dropping
+        `"conversation__agent"` alone puts a `... FROM "agents_agent"
+        WHERE "agents_agent"."id" = <id> LIMIT 21` read on BOTH the
+        loose and the stream side (the FK is non-null, so both turns
+        pay it) -- caught by the `agents_agent` half below. Dropping
+        `"conversation__workstream"` alone puts a `... FROM
+        "agents_workstream" WHERE "agents_workstream"."id" = <id> LIMIT
+        21` read on the STREAM side only (a loose conversation's
+        `workstream_id` is `None`, so Django resolves `None` with no
+        query) -- caught by the `agents_workstream` half below, which
+        the `_EXCLUDED_SHAPE` guard keeps distinct from the pre-existing
+        `.first()` authorization read so narrowing this JOIN turns the
+        test red instead of hiding behind that read's own presence.
+        """
+        stream = _workstream(name="Poll stream", instructions="be brief")
+        loose = make_conversation(agent=make_agent(slug="poll-loose"))
+        in_stream = make_conversation(agent=make_agent(slug="poll-stream"),
+                                      workstream=stream)
+        loose_turn = make_turn(conversation=loose, role=Turn.Role.ASSISTANT, text="a",
+                               state=Turn.State.DONE, queue_job_id=8)
+        stream_turn = make_turn(conversation=in_stream, role=Turn.Role.ASSISTANT, text="a",
+                                state=Turn.State.DONE, queue_job_id=9)
+        client.get(reverse("chat-turn-status", args=[loose_turn.pk]))   # warm-up
+        with CaptureQueriesContext(connection) as loose_queries:
+            client.get(reverse("chat-turn-status", args=[loose_turn.pk]))
+        with CaptureQueriesContext(connection) as stream_queries:
+            client.get(reverse("chat-turn-status", args=[stream_turn.pk]))
+
+        # `.first()`-shaped: the pre-existing, task-unrelated
+        # `scope_for_conversation` authorization read (round 13) --
+        # named here, not fixed at a count, because THIS test does not
+        # own its size. WHOLE-BRANCH BACKLOG (task-4 review, finding 4):
+        # spec review R2's intent is that the poll path pays NOTHING
+        # extra for an in-stream conversation, and today it pays this
+        # authorization read plus its own downstream ownership/pin
+        # reads on every tick of every open in-stream tab -- a real gap
+        # against R2, not this task's file list to close.
+        _EXCLUDED_SHAPE = 'order by "agents_workstream"."updated_at" desc limit 1'
+
+        def _standalone_lazy_reads(captured, table: str) -> int:
+            # `.get()`-shaped: `... LIMIT 21`, no `ORDER BY` -- the lazy
+            # FK fetch a narrowed `select_related` would reintroduce.
+            # Never a JOIN (part of the SAME query the view already
+            # runs) and never the excluded `.first()` authorization
+            # shape above.
+            return sum(
+                1 for q in captured.captured_queries
+                if table in q["sql"].lower()
+                and " join " not in q["sql"].lower()
+                and _EXCLUDED_SHAPE not in q["sql"].lower()
+            )
+
+        # THE COUNTED-EXCLUSION GUARD (same discipline as task 3's own
+        # `test_a_reader_who_may_not_upload_pays_no_extra_query_for_the_
+        # stream`, review fix finding 3 there): a bare negative string
+        # match would silently swallow a SECOND, different `.first()`-
+        # shaped authorization read too. Pin the assumption
+        # `_standalone_lazy_reads` actually rests on -- exactly one
+        # pre-existing `scope_for_conversation` read on the in-stream
+        # tick, none on the loose one (a loose conversation's
+        # `workstream_id` is `None`, and `scope_for_conversation`
+        # returns `None` without querying) -- so a future second read is
+        # caught here rather than excluded away.
+        excluded_in_stream = [q for q in stream_queries.captured_queries
+                              if _EXCLUDED_SHAPE in q["sql"].lower()]
+        excluded_in_loose = [q for q in loose_queries.captured_queries
+                             if _EXCLUDED_SHAPE in q["sql"].lower()]
+        assert len(excluded_in_stream) == 1, (
+            "exactly one pre-existing scope_for_conversation read expected")
+        assert len(excluded_in_loose) == 0, (
+            "a loose conversation should never run scope_for_conversation's query")
+
+        for table in ("agents_agent", "agents_workstream"):
+            assert _standalone_lazy_reads(loose_queries, table) == 0, (
+                f"a loose conversation's poll tick should read no standalone {table} row")
+            assert _standalone_lazy_reads(stream_queries, table) == 0, (
+                f"an in-stream conversation's poll tick should read no standalone "
+                f"lazy {table} row (the excluded .first() authorization read aside)")
+
+    def test_the_poll_cost_does_not_scale_with_the_conversations_length(self, client):
+        from agents.limits import HISTORY_TURNS
+
+        agent = make_agent(slug="poll-scale")
+        short = make_conversation(agent=agent)
+        long_one = make_conversation(agent=agent)
+        for _ in range(HISTORY_TURNS * 3):
+            make_turn(conversation=long_one, text="hi", state=Turn.State.DONE)
+        short_turn = make_turn(conversation=short, role=Turn.Role.ASSISTANT, text="a",
+                               state=Turn.State.DONE, queue_job_id=10)
+        long_turn = make_turn(conversation=long_one, role=Turn.Role.ASSISTANT, text="a",
+                              state=Turn.State.DONE, queue_job_id=11)
+        client.get(reverse("chat-turn-status", args=[short_turn.pk]))   # warm-up
+        with CaptureQueriesContext(connection) as one:
+            client.get(reverse("chat-turn-status", args=[short_turn.pk]))
+        with CaptureQueriesContext(connection) as many:
+            client.get(reverse("chat-turn-status", args=[long_turn.pk]))
+        assert len(many) == len(one)
+
+    def test_the_page_and_a_poll_tick_cannot_disagree_about_the_ceiling(
+        self, client, bound_chat_role
+    ):
+        """The regression spec review M3 names: a poll body that computed
+        its own denominator would answer with the AGENT's role binding
+        where the page answered with the PICKED connection. The window
+        never travels, so the page's `data-window` is the only one there
+        is, and a tick cannot contradict it."""
+        from models.registry.models import ModelConnection
+
+        picked = ModelConnection.objects.create(
+            name="picked", engine="ollama", endpoint="http://localhost:11434",
+            model_id="another-chat-model", capabilities=["chat"], context_window=2048)
+        conversation = make_conversation(agent=make_agent(slug="poll-picked"))
+        assistant = make_turn(conversation=conversation, role=Turn.Role.ASSISTANT, text="a",
+                              state=Turn.State.DONE, queue_job_id=12)
+        page = client.get(
+            f"{reverse('chat-conversation', args=[conversation.id])}?connection={picked.pk}"
+        ).content.decode()
+        body = client.get(reverse("chat-turn-status", args=[assistant.pk])).json()
+        assert 'data-window="2048"' in page
+        assert "window" not in str(body)
+
+    def test_the_script_count_is_still_unchanged(self, client, bound_chat_role):
+        conversation = make_conversation(agent=make_agent(slug="poll-scripts"))
+        body = client.get(reverse("chat-conversation", args=[conversation.id])).content.decode()
+        assert body.count("<script") == 4

@@ -584,6 +584,31 @@ screen comment already documents for `.thread-scroll`.
     }
   }
 
+  // THE CONTEXT METER'S LIVE HALF. No prose is composed here: the
+  // server rendered every sentence, and this writes `textContent` on
+  // two number spans, toggles `hidden` on one pre-rendered clause, and
+  // sets the band and the bar width. No `innerHTML` -- the same rule
+  // `showCardError` already keeps for text the page did not build. The
+  // denominator is `data-window`, WRITTEN BY THE SERVER, never a number
+  // the response supplied.
+  function applyContext(context) {
+    var meter = document.getElementById("context-meter");
+    if (!meter || !context) { return; }
+    var tokens = document.getElementById("context-tokens");
+    if (tokens) { tokens.textContent = context.estimated_tokens.toLocaleString(); }
+    var ceiling = parseInt(meter.getAttribute("data-window") || "", 10);
+    var percentSpan = document.getElementById("context-percent");
+    if (percentSpan && ceiling > 0) {
+      var percent = Math.round((100 * context.estimated_tokens) / ceiling);
+      percentSpan.textContent = String(percent);
+      meter.setAttribute("data-band",
+                         percent >= 90 ? "full" : (percent >= 70 ? "high" : "ok"));
+      meter.style.setProperty("--context-fill", percent + "%");
+    }
+    var truncation = document.getElementById("context-truncation");
+    if (truncation) { truncation.hidden = context.total_turns <= context.replayed_turns; }
+  }
+
   // D1 (chat-polish P3.1). `html` is a server-rendered `chat/
   // _turn_block.html` fragment -- `rendering.turn_group_cards`'s own
   // group, the user's own message included -- parsed into real nodes
@@ -706,6 +731,7 @@ screen comment already documents for `.thread-scroll`.
             showCardError(card, data.error || "The queue isn't ready yet.", data.setup_url);
             return;
           }
+          applyContext(data.context);
           if (data.state === "queued" || data.state === "running") {
             if (data.html && data.html !== lastHtml) {
               lastHtml = data.html;
