@@ -8,7 +8,7 @@ this column exists to keep visible in the tree.
 Each folder is a Django app and is COLUMN-PRIVATE (import law rule 2):
 `tools.rag` does not import `tools.vision`, and neither is importable
 from `models/`, `agents/`, or `foundation/`. The sanctioned cross-column
-imports a `tools/*` app may make are exactly these nine, each a named
+imports a `tools/*` app may make are exactly these ten, each a named
 seam with a live call site -- nothing else in `models.*`, `agents.*` or
 `identity.*` is legal from here:
 
@@ -18,6 +18,8 @@ seam with a live call site -- nothing else in `models.*`, `agents.*` or
 - `identity.access`          -- `tools/rag/views.py:48`
 - `identity.request`         -- `tools/rag/views.py:50`
 - `identity.audit`           -- `tools/rag/jobs.py:75`
+- `identity.retention`       -- deletion semantics: `ticketed_keys` excludes deleted
+  items from a `tools/*` visibility function's base queryset
 - `agents.contracts`         -- `tools/rag/access.py:18`
 - `agents.entitlements`      -- IA-2 tool-access door (`tools/rag/views.py:784`, lazy)
 - `agents.workstreams`       -- the workstream seam (`tools/rag/access.py:629`, lazy)

@@ -452,6 +452,71 @@ window is short and every attempt is audited either way. There is no unlock comm
 `docs/OPERATIONS.md`'s accounts section): waiting out the window is the only way to clear a
 lockout, deliberately, because an unlock command is a second authentication path.
 
+## 9. Deletion semantics: the fifth seam
+
+`identity.retention` (`identity/retention.py`) is the fifth module every
+column may import — `foundation/ops/tests/test_import_law.py::
+IDENTITY_PERMITTED` names it beside the four in section 2, and for the
+same shape of reason: it answers a PRINCIPAL-shaped question, "which
+keys of my kind are deleted", never "which conversations" — identity
+still cannot build that queryset (rule 4). Each column turns the answer
+into an exclusion on its own base queryset.
+
+**`DeletionTicket` exists exactly while the item is restorable.** One
+table, not a `deleted_at` column on four models in three columns: a
+cliff, an actor, a label and a hold are facts about the DELETION, not
+about the conversation, and the Deleted page is one query over one table
+rather than a union over four querysets in three columns identity may
+not import. There is no purged-but-pending state and no ticket that
+outlives its content — `purge_ticket` destroys the ticket in the same
+transaction that destroys the content, so the two can never disagree.
+That single invariant is what lets restore be "delete the ticket" and
+nothing else.
+
+**Three retention fields on `IdentitySettings`, one "Retention" section,
+zero required setup**: `retention_days` (`LABEL_RETENTION_DAYS`, "Keep
+deleted items for", default 30, may be 0 for no grace period),
+`queue_retention_days` (`LABEL_QUEUE_RETENTION_DAYS`, "Keep finished
+queue jobs for", default 1, read by `models/queue` across this same
+seam and never 0 — blank means "no age cliff" there), and `audit_detail`
+(`LABEL_AUDIT_DETAIL`, "Show item names in the deletion log", default
+off). `identity/contracts/retention.py` declares every one of those
+sentences once, in Python, with the shipped defaults beside them — the
+owner's principle (spec §3.0): a maintainer installs this and sets up
+nothing.
+
+**Why the orchestration lives here.** `identity/retention.py::
+delete_content`/`restore_content`/`purge_ticket`/`sweep` run inside
+`identity/`, not in a shared "deletion" package, because the import law
+makes that the only place a single item's purge can ever reach every
+column's own bookkeeping in one transaction: `agents/` may not import
+`models.queue` (rule 2), so a delete initiated inside `agents/` could
+never also clear a conversation's queue rows. Identity sits below every
+column, so `purge_ticket` resolves each registered handler by dotted
+path (`identity/cascades.py::run_retention`, over the registry in
+`identity/contracts/cascades.py`) and runs all of them without importing
+any of the columns that registered them.
+
+`purge_on` is stamped ONCE, at `delete_content` time, from the setting
+in force then, and is never recomputed — a changed setting governs
+future deletes only. `retention_days = 0` makes deletion synchronous:
+`delete_content` calls `sweep()` at the end of the same call, the ticket
+it just wrote is due today, and the content is gone before the response
+returns — the same prune-on-write shape `tools.rag.services.record_ask`
+and `models.queue.backend.enqueue` already use, with no scheduler and no
+cron requirement. `sweep()` always acts as `SERVICE_PRINCIPAL`, whoever
+triggered it, and purges each due ticket in its OWN transaction, so one
+handler that raises (logged, never content) leaves that ticket standing
+for the next pass instead of blocking the rest of the batch.
+
+Every audit write for this feature goes through `identity/audit.py::
+record` (`CONTENT_DELETED`, `CONTENT_RESTORED`, `CONTENT_PURGED`), and
+every one is content-free by construction: the item's own title reaches
+`target_label` only when `audit_detail` is on, and a purge's `removed`
+detail is `{handler label: count}` — integers, never rows. `queue_
+retention_days`'s own seam paragraph and the Deleted page itself ship
+with their own tasks' code, not here.
+
 ## Tests
 
 `identity/tests/` covers every module above, plus two whole-repo

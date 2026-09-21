@@ -607,6 +607,15 @@ def test_agents_reaches_models_registry_through_bindings_and_nothing_else():
 # the exact same mechanism as `identity.services` or `identity.models`.
 IDENTITY_PERMITTED = (
     "identity.contracts", "identity.access", "identity.request", "identity.audit",
+    # Deletion semantics (2026-09-21): `identity.retention` is the fifth
+    # seam, and it is one for the same reason the four above are. A
+    # column asks it a PRINCIPAL-shaped question -- "which keys of my
+    # kind are deleted" -- and turns the answer into an exclusion on its
+    # own queryset; identity could not answer "which conversations" even
+    # if it wanted to (rule 4). Three visibility functions in three
+    # columns call `ticketed_keys`, and three delete surfaces call
+    # `delete_content`. Nothing else under `identity/` is opened.
+    "identity.retention",
 )
 
 # `identity/` itself is excluded, for the same intra-column reason
@@ -694,6 +703,7 @@ def test_the_identity_private_module_gate_would_catch_a_violation():
         "from identity.audit import record\n"
         "from identity.request import principal_for_request\n"
         "from identity.contracts.principals import Principal\n"
+        "from identity.retention import ticketed_keys\n"
     )
     assert _identity_forbidden_imports(permitted) == []
 
