@@ -1178,7 +1178,7 @@ scripts/preview reset model-management-framework --yes
 `data/preview/<branch>/{postgres,documents,inbox}` if this is the branch's
 first preview, then runs `docker compose -p farabunker-preview-<branch> up
 -d --build` and waits for the web container to answer before printing the
-URL. When no main repo `.env` exists to copy, that seed falls back to
+URL. When no root repo `.env` exists to copy, that seed falls back to
 `.env.example` — set `POSTGRES_PASSWORD` in the new `.env` before running
 any compose command, since compose refuses to start with it unset. The
 preview's database starts **empty** (not a copy of the primary
