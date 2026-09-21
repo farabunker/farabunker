@@ -2157,6 +2157,12 @@ class Worker:
             claimed, endpoints, protected_keys, own_keys_by_job,
         )
         if refused:
+            # No snapshot was taken, so there is no belief to cache -- and
+            # a STALE one is worse than none: this path repeats every tick
+            # for the life of the protecting attempt, which the spec
+            # measures in minutes, so §3.6's ordering preference would
+            # spend all of it preferring keys nothing re-checked.
+            self._resident_keys = frozenset()
             return refused
 
         installed_by_endpoint, believed_resident, over_budget = self._residency_snapshot(

@@ -18,6 +18,10 @@ WHY A FACTORY AND NOT A FIXTURE. Five test modules carried a
 snapshot-clear-yield-restore fixture: four over `jobkinds._JOB_KINDS` and
 one over `roles._ROLES`. The bodies are identical in shape and differ in
 which dict they hold, so what is shared is the mechanism, not the fixture.
+`hermetic_engine_endpoints` below is a plain fixture rather than a
+factory for the same reason read the other way: it has nothing to
+parameterise, so there is no mechanism to hand out -- only the fixture
+itself, imported by name.
 """
 from __future__ import annotations
 
@@ -63,3 +67,45 @@ def registry_reset_fixture(module, attribute: str, *, autouse: bool = True):
         registry.clear()
         registry.update(original)
     return _reset
+
+
+@pytest.fixture(autouse=True)
+def hermetic_engine_endpoints(settings):
+    """NO CONFIGURED ENGINE ENDPOINTS for the duration of a test, unless
+    that test declares its own.
+
+    THE HAZARD, concretely. The execution queue's eviction pass widens
+    its swept endpoint set on any tick that admits an EXCLUSIVE job
+    (`models.queue.worker.Worker._eviction_targets`, spec §3.3e): it
+    unions the running jobs' own endpoints with
+    `models.registry.bindings.registered_endpoints()`, which reads
+    `settings.INFERENCE_DEFAULT_ENDPOINTS`. Those values are REAL
+    addresses (`config/settings.py` defaults them to localhost ports),
+    and the adapters registered against them at import time are the REAL
+    adapters. So a test that drives `tick()` -- or the pass directly --
+    with an exclusive admission will probe whatever engine happens to be
+    listening on the developer's own machine and then call `unload()`
+    against it, dropping a warm model mid-run while the suite reports
+    all green.
+
+    IMPORT IT BY NAME into every test module that drives `Worker.tick()`,
+    `Worker._evict_to_match_plan()` or `run_jobs --once`::
+
+        from models.contracts.testing import hermetic_engine_endpoints  # noqa: F401
+
+    It is `autouse=True`, so the import alone fences the module; the
+    `noqa` is because nothing references the name afterwards.
+    `foundation/ops/tests/test_engine_endpoint_fence.py` is the gate that
+    stops a future module forgetting -- a plain importable fixture rather
+    than a `conftest.py` (the repo forbids those anywhere), so the fence
+    is visible in the file it protects instead of applying invisibly to
+    the whole tree.
+
+    BLANKING THE MAP, NOT STUBBING THE REGISTRY, deliberately: the swept
+    set's real engine resolution (`_get_engine_or_none`) stays under
+    test, which is what the widened sweep's own tests and its query-count
+    pin both depend on. A test that genuinely wants addresses assigns
+    `settings.INFERENCE_DEFAULT_ENDPOINTS` itself, and that assignment
+    wins -- this fixture only sets the default.
+    """
+    settings.INFERENCE_DEFAULT_ENDPOINTS = {}

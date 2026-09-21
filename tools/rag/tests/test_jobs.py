@@ -21,6 +21,7 @@ from django.conf import settings
 from models.contracts.bindings import ResolvedModel
 from models.contracts.jobkinds import ModelRef
 from models.contracts.roles import RAG_ANSWER_ROLE, RAG_EMBED_ROLE, RAG_EXTRACT_ROLE, RAG_TRANSCRIBE_ROLE
+from models.contracts.testing import hermetic_engine_endpoints  # noqa: F401 -- autouse fence
 from identity.contracts.postures import POSTURE_OPEN
 from identity.contracts.principals import OPEN_PRINCIPAL, SERVICE_PRINCIPAL
 from tools.rag import ingest, jobs

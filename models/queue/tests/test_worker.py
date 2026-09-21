@@ -31,6 +31,7 @@ import models.queue.worker as worker_module
 from models.registry.models import ModelConnection
 from models.queue.claim import claim_and_admit
 from models.queue.models import FAILED, QUEUED, RUNNING, SUCCEEDED, InferenceJob, JobSettings
+from models.contracts.testing import hermetic_engine_endpoints  # noqa: F401 -- autouse fence
 from models.queue.tests._helpers import registry_reset_fixture  # noqa: F401 -- re-exported
 from models.queue.worker import Worker
 from models.contracts import jobkinds
@@ -210,22 +211,6 @@ def _admitted_exclusive(engine: str, endpoint: str, model_id: str) -> dict:
         "claim_token": uuid.uuid4(), "exclusive": True,
         "checkpoint": None, "attempts": 0,
     }
-
-
-@pytest.fixture(autouse=True)
-def hermetic_engine_endpoints(settings):
-    """No CONFIGURED engine endpoints, unless a test declares its own.
-
-    The eviction pass's widened sweep (spec §3.3e) unions the running
-    jobs' endpoints with `registered_endpoints()`, which reads
-    `settings.INFERENCE_DEFAULT_ENDPOINTS` -- whose real values point at
-    whatever engines happen to be listening on the developer's own
-    machine. Left alone, a test that admits an exclusive job would probe
-    those addresses for real and, worse, call `unload()` against them.
-    Autouse and module-wide, so no future eviction test has to remember;
-    a test about the sweep sets the map it wants and that assignment
-    wins."""
-    settings.INFERENCE_DEFAULT_ENDPOINTS = {}
 
 
 @pytest.fixture
@@ -2610,13 +2595,18 @@ class TestEviction:
         assert engine.unload_calls == []
 
     def test_the_budget_pass_skips_a_protected_endpoint_scope_endpoint_whole(
-            self, worker, register_engine):
+            self, worker, register_engine, caplog):
         """`_unload_endpoint`'s endpoint-scope skip-whole rule, pinned on
         the NON-exclusive tick that is now its only caller: an exclusive
         admission never reaches it, because the protection refusal
         (§3.3d(2)) declines the launch before any HTTP. Here no exclusive
         job is admitted, nothing is refused, and one call at this endpoint
-        would still take the protected model with it."""
+        would still take the protected model with it.
+
+        THE WARNING IS ASSERTED HERE TOO, and it is the only place that
+        asserts it: §3.3(g) names the protected-endpoint line as one of
+        the four operator-actionable WARNINGs, and without this half a
+        downgrade to INFO would leave the whole suite green."""
         engine = register_engine(FakeEndpointScopeEngine("e", installed=[
             _installed("needed", loaded=True, loaded_size=9 * GB),
             _installed("spare", loaded=True, loaded_size=9 * GB),
@@ -2624,9 +2614,12 @@ class TestEviction:
         _set_budget(memory_budget_bytes=1 * GB)
         _running_job_holding("e", ENDPOINT, "needed")
 
-        worker._evict_to_match_plan([])
+        with caplog.at_level("WARNING", logger="models.queue.worker"):
+            worker._evict_to_match_plan([])
 
         assert engine.unload_calls == []
+        assert any("protected" in r.getMessage() for r in caplog.records)
+        assert all(r.levelname == "WARNING" for r in caplog.records)
 
     # --- reach ----------------------------------------------------------
 
@@ -2843,12 +2836,24 @@ class TestEviction:
 class TestTheWidenedSweepDoesNotQueryPerEndpoint:
     """Spec §5 names a query-count pin for the widened sweep.
 
-    WHAT IT ACTUALLY COSTS, measured rather than assumed: a FIXED number
-    of queries per exclusive-admitting tick -- `_eviction_targets` calls
-    `registered_endpoints()` with no `connections=`, so that helper
+    WHAT IT ACTUALLY COSTS, measured rather than assumed: a number that
+    does NOT grow with the number of endpoints swept -- `_eviction_targets`
+    calls `registered_endpoints()` with no `connections=`, so that helper
     fetches the connection rows itself, once, however many endpoints come
-    back. The rest of the sweep's cost is `list_installed` HTTP, which no
-    query counter sees.
+    back. Most of the rest of the sweep's cost is `list_installed` HTTP,
+    which no query counter sees.
+
+    WHAT IS *NOT* FIXED, and this pin deliberately holds it at zero rather
+    than pretending it does not exist: the rung-3 footprint harvest
+    (`models.queue.worker.Worker._residency_snapshot` ->
+    `record_engine_reported_footprint`) issues a connection lookup, and
+    possibly a save, PER LOADED MODEL THAT REPORTS A SIZE. A production
+    exclusive-admitting tick therefore costs this literal plus O(resident
+    sized models), which is bounded by how many models can physically be
+    loaded at once, not by how many endpoints exist. No `_installed(...)`
+    below carries a `loaded_size`, so the harvest contributes nothing here
+    and the endpoint count is the only variable under test -- which is the
+    variable this pin is about.
 
     SO THE FACT WORTH PINNING IS THE SHAPE, NOT THE ZERO: the obvious way
     to build the swept set is to look up each endpoint's connection rows
@@ -2983,10 +2988,16 @@ class TestTheExclusiveBarrier:
         _running_job_holding("e", ENDPOINT, "someone-elses")
         admitted = _admitted_exclusive("e", ENDPOINT, "mine")
 
+        worker._resident_keys = frozenset({("e", ENDPOINT, "stale:latest")})
+
         refused = worker._evict_to_match_plan([admitted])
 
         assert refused == {admitted["id"]}
         assert engine.list_installed_calls == 0
+        # No snapshot was taken, so the affinity cache must not keep an
+        # older pass's belief: this path repeats every tick for the whole
+        # life of the protecting attempt.
+        assert worker._resident_keys == frozenset()
 
     def test_a_protection_refusal_never_counts_toward_the_failure_bound(
             self, worker, register_engine, monkeypatch):
