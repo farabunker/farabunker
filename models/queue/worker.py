@@ -341,6 +341,12 @@ class Worker:
         # after each call, on the tick thread alone.
         self._last_unload_calls = 0
 
+        # `(actual resident bytes, admitted marginal bytes)` from the last
+        # residency snapshot -- the two figures the pass's own INFO line
+        # renders (§3.3g). Beside the snapshot's return rather than in
+        # it: they are how the budget verdict was reached, not part of it.
+        self._last_snapshot_bytes: tuple[int, int] = (0, 0)
+
         # The believed-resident keys whose `unload()` call came back
         # `False` during THIS eviction pass -- reset at the top of
         # `_evict_to_match_plan` and read by `_barrier`. Spec §3.3d(4)
@@ -1441,8 +1447,15 @@ class Worker:
             try:
                 installed = list_installed(endpoint)
             except Exception:  # noqa: BLE001 - eviction must never block a launch
-                logger.warning(
-                    "worker: eviction could not list installed models at %s (%s)",
+                # A SKIP a human would otherwise have to infer from an
+                # eviction that simply never happened (§3.3g). INFO, not
+                # WARNING: there is nothing an operator does about one
+                # engine being briefly unreachable, and the barrier
+                # already treats this absence as "the belief here is
+                # worth nothing".
+                logger.info(
+                    "worker: eviction could not list installed models at %s (%s) -- "
+                    "that endpoint is skipped this tick",
                     endpoint, engine_name,
                 )
                 continue
@@ -1502,6 +1515,11 @@ class Worker:
             budget_bytes is not None
             and actual_resident_bytes + admitted_marginal > budget_bytes
         )
+        # The two numbers the pass's own INFO line renders (§3.3g),
+        # reported beside the three-element return rather than folded
+        # into it -- they are how the verdict was reached, not part of
+        # the verdict.
+        self._last_snapshot_bytes = (actual_resident_bytes, admitted_marginal)
         return installed_by_endpoint, believed_resident, over_budget
 
     def _unload_endpoint(
@@ -1581,17 +1599,18 @@ class Worker:
                 continue
             issued += 1
             self._last_unload_calls += 1
-            if unload(endpoint, model.model_id):
+            accepted = unload(endpoint, model.model_id)
+            if accepted:
                 released.add(key)
             else:
                 # An INFORMATIVE refusal: the call was made against a
                 # model this snapshot says is resident, so `False` means
                 # what it says (§3.3d(4)) and the barrier may honour it.
+                # INFO here, not WARNING: the line an operator can act on
+                # is `_barrier`'s, which knows whether this refusal
+                # actually blocked a launch.
                 self._unload_refusals.add(key)
-                logger.warning(
-                    "worker: eviction unload refused for %s at %s (%s)",
-                    model.model_id, endpoint, engine_name,
-                )
+            self._log_unload(engine_name, endpoint, model.model_id, "model", reason, accepted)
             # After EVERY call, never once around the loop -- see this
             # method's docstring. `_maybe_heartbeat`'s own
             # `HEARTBEAT_SECONDS` throttle bounds this to at most one
@@ -1628,17 +1647,40 @@ class Worker:
         self._last_unload_calls += 1
         accepted = unload(endpoint, addressed)
         self._maybe_heartbeat()
+        self._log_unload(engine_name, endpoint, addressed, "endpoint", reason, accepted)
         if not accepted:
             # Informative for every key here, not only the one addressed:
             # at this scope the call was made against the whole
             # believed-resident set (§3.3d(4)).
             self._unload_refusals |= keys
-            logger.warning(
-                "worker: eviction unload refused for %s at %s (%s)",
-                addressed, endpoint, engine_name,
-            )
             return set()
         return keys
+
+    @staticmethod
+    def _log_unload(
+        engine_name: str, endpoint: str, model_id: str, scope: str, reason: str, accepted: bool,
+    ) -> None:
+        """ONE INFO LINE PER UNLOAD ATTEMPT, in the stable vocabulary spec
+        §3.3(g) fixes: who (engine, endpoint, model), at what granularity
+        (`model` / `endpoint`), WHY (`not needed at an exclusive endpoint`
+        / `over budget` / `precautionary barrier` -- `_unload_endpoint`'s
+        `reason`), and the RESULT (`accepted` / `refused`; `unavailable`
+        is the third result and belongs to an engine offering no
+        `unload()` at all, said once per engine+method by
+        `_warn_missing_method_once`).
+
+        Deliberately not a WARNING even when refused: a successful
+        eviction used to be silent and a `False` was the only thing this
+        pass ever logged, which is precisely the asymmetry that left an
+        operator watching a host fill up unable to tell "nothing needed
+        evicting" from "everything was skipped". WARNING is reserved for
+        what an operator can act on, and whether a refusal is actionable
+        is `_barrier`'s question, not this one's."""
+        logger.info(
+            "worker: unload %s at %s (%s), scope %s, %s -- %s",
+            model_id, endpoint, engine_name, scope, reason,
+            "accepted" if accepted else "refused",
+        )
 
     def _evict_exclusive_endpoints(
         self,
@@ -1722,6 +1764,15 @@ class Worker:
             # would charge one call several times over. That is why the
             # count comes back beside the key set rather than in it.
             remaining -= self._last_unload_calls
+        if remaining < 1:
+            # A SKIP a human would otherwise have to infer (§3.3g): an
+            # eviction that stopped short looks identical to one that had
+            # nothing left to do.
+            logger.info(
+                "worker: budget-driven eviction hit its cap of %s unload calls this tick; "
+                "whatever is left is picked up on a later admitting tick",
+                MAX_UNLOADS_PER_TICK,
+            )
         return released
 
     # --- the exclusive barrier (spec §3.3d) ---------------------------------
@@ -1844,10 +1895,9 @@ class Worker:
             # refuse (§3.3d(4)).
             accepted = unload(endpoint, addressed)
             self._maybe_heartbeat()
-            logger.info(
-                "worker: unload %s at %s (%s), scope %s, precautionary barrier -- %s",
-                addressed, endpoint, engine_name, self._unload_scope(engine_obj),
-                "accepted" if accepted else "refused",
+            self._log_unload(
+                engine_name, endpoint, addressed, self._unload_scope(engine_obj),
+                "precautionary barrier", accepted,
             )
 
         if not self._unload_refusals:
@@ -2144,6 +2194,26 @@ class Worker:
         # set, written and read on the tick thread alone: no lock and no
         # pruning contract.
         self._resident_keys = frozenset(believed_resident - released)
+
+        # ONE INFO LINE PER TICK THAT EVICTS AT ALL (§3.3g), which is any
+        # tick with a trigger: a successful eviction used to be silent, so
+        # an operator watching a host fill up could not tell "nothing
+        # needed evicting" from "everything was skipped". Budget renders
+        # as `unset` rather than `None`, because that is the posture, not
+        # a missing value.
+        triggers = []
+        if own_endpoints:
+            triggers.append("exclusive admission")
+        if over_budget:
+            triggers.append("over budget")
+        if triggers:
+            resident_bytes, admitted_marginal = self._last_snapshot_bytes
+            logger.info(
+                "worker: eviction pass (%s): swept %s endpoints, %s resident, "
+                "%s admitted marginal, budget %s",
+                " and ".join(triggers), len(endpoints), resident_bytes, admitted_marginal,
+                budget_bytes if budget_bytes is not None else "unset",
+            )
         return refused
 
     _warned_missing_methods: set[tuple[str, str]] = set()

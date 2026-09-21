@@ -2761,6 +2761,136 @@ class TestEviction:
         assert len(engine.unload_calls) == 1
         assert worker._resident_keys == frozenset()
 
+    # --- saying what happened (spec §3.3g) ---------------------------------
+
+    def test_one_line_per_tick_that_evicts_at_all(self, worker, register_engine, caplog):
+        _set_budget(memory_budget_bytes=None)
+        register_engine(FakeEngine("e", installed=[
+            _installed("mine", loaded=True), _installed("spare", loaded=True),
+        ]))
+        claimed = [_admitted_exclusive("e", ENDPOINT, "mine")]
+
+        with caplog.at_level(logging.INFO, logger="models.queue.worker"):
+            worker._evict_to_match_plan(claimed)
+
+        line = next(r.getMessage() for r in caplog.records if "eviction pass" in r.getMessage())
+        assert "exclusive admission" in line
+        assert "budget unset" in line
+
+    def test_one_line_per_unload_attempt_with_the_stable_vocabulary(
+            self, worker, register_engine, caplog):
+        _set_budget(memory_budget_bytes=None)
+        register_engine(FakeEngine("e", installed=[
+            _installed("mine", loaded=True), _installed("spare", loaded=True),
+        ]))
+        claimed = [_admitted_exclusive("e", ENDPOINT, "mine")]
+
+        with caplog.at_level(logging.INFO, logger="models.queue.worker"):
+            worker._evict_to_match_plan(claimed)
+
+        line = next(r.getMessage() for r in caplog.records if "unload" in r.getMessage())
+        for fragment in ("e", ENDPOINT, "spare", "model", "not needed at an exclusive endpoint"):
+            assert fragment in line
+        assert "accepted" in line or "refused" in line or "unavailable" in line
+
+    def test_the_capped_pass_says_when_it_hits_its_cap(self, worker, register_engine, caplog):
+        engine = register_engine(FakeEngine("e", installed=[
+            _installed("needed", loaded=True, loaded_size=1 * GB),
+            _installed("unneeded-a", loaded=True, loaded_size=1 * GB),
+            _installed("unneeded-b", loaded=True, loaded_size=1 * GB),
+            _installed("unneeded-c", loaded=True, loaded_size=1 * GB),
+        ]))
+        _set_budget(memory_budget_bytes=1 * GB)
+        _running_job_holding("e", ENDPOINT, "needed")
+
+        with caplog.at_level(logging.INFO, logger="models.queue.worker"):
+            worker._evict_to_match_plan([])
+
+        assert len(engine.unload_calls) == worker_module.MAX_UNLOADS_PER_TICK
+        assert any("cap" in r.getMessage() for r in caplog.records)
+
+    def test_a_snapshot_that_raised_says_so(self, worker, register_engine, caplog):
+        """An endpoint whose probe blew up is a SKIP a human would
+        otherwise have to infer from an eviction that simply never
+        happened -- and it is INFO, not WARNING, because there is nothing
+        an operator does about one engine being briefly unreachable."""
+        register_engine(FakeEngineListInstalledRaises("e"))
+        _running_job_holding("e", ENDPOINT, "mine")
+
+        with caplog.at_level(logging.INFO, logger="models.queue.worker"):
+            worker._evict_to_match_plan([])
+
+        line = next(r.getMessage() for r in caplog.records if "list installed" in r.getMessage())
+        assert ENDPOINT in line
+        assert all(r.levelname == "INFO" for r in caplog.records)
+
+    def test_warnings_are_reserved_for_what_an_operator_can_act_on(
+            self, worker, register_engine, caplog):
+        """An ordinary successful eviction produces INFO only."""
+        _set_budget(memory_budget_bytes=None)
+        register_engine(FakeEngine("e", installed=[
+            _installed("mine", loaded=True), _installed("spare", loaded=True),
+        ]))
+
+        with caplog.at_level(logging.INFO, logger="models.queue.worker"):
+            worker._evict_to_match_plan([_admitted_exclusive("e", ENDPOINT, "mine")])
+
+        assert caplog.records
+        assert all(r.levelname == "INFO" for r in caplog.records)
+
+
+@pytest.mark.django_db
+class TestTheWidenedSweepDoesNotQueryPerEndpoint:
+    """Spec §5 names a query-count pin for the widened sweep.
+
+    WHAT IT ACTUALLY COSTS, measured rather than assumed: a FIXED number
+    of queries per exclusive-admitting tick -- `_eviction_targets` calls
+    `registered_endpoints()` with no `connections=`, so that helper
+    fetches the connection rows itself, once, however many endpoints come
+    back. The rest of the sweep's cost is `list_installed` HTTP, which no
+    query counter sees.
+
+    SO THE FACT WORTH PINNING IS THE SHAPE, NOT THE ZERO: the obvious way
+    to build the swept set is to look up each endpoint's connection rows
+    inside the loop, which would put N queries on an admitting tick. This
+    asserts the same LITERAL at one endpoint and at four.
+
+    NON-VACUOUS, and this is the part an earlier draft got wrong: each
+    extra idle endpoint must REGISTER A REAL (fake) ENGINE. An endpoint
+    whose engine name does not resolve is dropped by
+    `_get_engine_or_none` before the sweep ever reaches it, so three
+    unregistered addresses would leave the count flat no matter how the
+    swept set were implemented -- a pin that cannot fail."""
+
+    def test_an_exclusive_admitting_tick_pays_the_same_queries_at_one_and_four_endpoints(
+            self, worker, register_engine, settings, django_assert_num_queries):
+        register_engine(FakeEngine("e", installed=[_installed("warm", loaded=True)]))
+        _running_job_holding("e", ENDPOINT, "warm")
+        claimed = [_admitted_exclusive("e", ENDPOINT, "warm")]
+
+        settings.INFERENCE_DEFAULT_ENDPOINTS = {"e": ENDPOINT}
+        with django_assert_num_queries(4):
+            worker._evict_to_match_plan(claimed)
+
+        # Each idle endpoint gets its OWN registered engine, so all three
+        # genuinely enter the sweep (and genuinely get probed) instead of
+        # being dropped for an unresolvable engine name.
+        idle = {
+            index: register_engine(FakeEngine("idle%d" % index,
+                                              installed=[_installed("warm", loaded=True)]))
+            for index in (1, 2, 3)
+        }
+        settings.INFERENCE_DEFAULT_ENDPOINTS = {
+            "e": ENDPOINT, "idle1": "http://idle:1",
+            "idle2": "http://idle:2", "idle3": "http://idle:3",
+        }
+        with django_assert_num_queries(4):
+            worker._evict_to_match_plan(claimed)
+
+        # The non-vacuity check the pin's own argument rests on: the
+        # second block really did visit the extra endpoints.
+        assert idle[1].list_installed_calls == 1
+
 
 @pytest.mark.django_db(transaction=True)
 class TestTheInFlightRefsMapNeverLeaks:
