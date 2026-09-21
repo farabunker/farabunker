@@ -3333,11 +3333,11 @@ Re-pins agents/chat/tests/test_delete.py's four teardown classes, which now asse
 
 | Function | Extra queries | Why |
 |---|---|---|
-| `readable_documents` | **+3** | `ticketed_keys("document")`, `ticketed_keys("conversation")`, and the chat-scoped-document lookup — made **unconditionally**, so the count does not depend on whether a conversation ticket happens to exist |
-| `listable_documents` | **+3** on the `is_admin` leg; **+0** on the member leg, which reaches them through `readable_documents` | one `_deleted_document_ids()` call either way |
-| `attached_documents` | **+3**, not +6 | the ids are computed ONCE at the top and threaded into both its own `chat_scoped` query and its `readable_documents` call |
+| `readable_documents` | **+2** with no open conversation ticket on the box; **+3** with one or more | `ticketed_keys("document")` and `ticketed_keys("conversation")` always run; the chat-scoped-document lookup, keyed off the conversation-ticket ids, is answered by the ORM without a database round trip when that id list is empty (a filter on an empty `__in` is known-empty at compile time), so it costs a query only once there is an id to filter on |
+| `listable_documents` | same **+2/+3** on the `is_admin` leg; **+0** on the member leg, which reaches them through `readable_documents` | one `_deleted_document_ids()` call either way |
+| `attached_documents` | **+2/+3**, never doubled | the ids are computed ONCE at the top and threaded into both its own `chat_scoped` query and its `readable_documents` call |
 
-The unconditional third query is deliberate: a branch that skipped it when no conversation ticket existed would make every pin in those modules depend on test data that has nothing to do with the assertion, and would make the common path and the deleted path two different costs to reason about. Three flat queries, bounded by the number of open tickets, never by the number of documents.
+This is a real saving, not a corner cut: the common box has no open conversation ticket at all, and the cheaper path is exactly that common case — the count stays bounded by the number of open tickets, never by the number of documents, on both sides of the split. An implementation that forced the third query to run unconditionally, just to keep every pin at a single flat number, would be paying a real query on the box's most common state purely so a test constant never had to carry a branch — the wrong trade.
 
 **Interfaces:**
 - Consumes: `identity.retention.ticketed_keys`; `identity.contracts.retention.KIND_CONVERSATION`, `KIND_DOCUMENT`; `tools.rag.services.delete_document`; `django.conf.settings.NOTES_DIR`.
@@ -3485,13 +3485,18 @@ def _deleted_document_ids() -> list[int]:
     existence, and deleting a conversation must not hide a document
     another conversation still holds a claim on.
 
-    THREE BOUNDED QUERIES, ALWAYS -- flat in the number of TICKETS
-    rather than in the number of documents (the `agents.shares.
-    shared_keys` cost model, unchanged), and UNCONDITIONAL. Skipping the
-    third when no conversation ticket exists would save one query on a
-    box with nothing deleted and make every query-count pin in this
-    column depend on test data unrelated to what it asserts; a stable
-    cost is worth more than a saved read on the empty case.
+    TWO QUERIES WHEN NOTHING IS TICKETED, THREE WHEN A CONVERSATION IS --
+    flat in the number of TICKETS rather than in the number of documents
+    (the `agents.shares.shared_keys` cost model, unchanged), never
+    guessed. The two `ticketed_keys()` reads always run; the third, the
+    chat-scoped lookup keyed off the conversation ticket ids, is answered
+    by the ORM WITHOUT a database round trip when that id list is empty
+    -- filtering on an empty `__in` is known-empty at compile time, so
+    there is nothing for Postgres to be asked. That is a real saving,
+    not a corner being cut: the common box has no open conversation
+    ticket at all, and the cheaper path is exactly that common case. A
+    box with at least one open conversation ticket pays the third query,
+    still bounded by the number of TICKETS rather than documents.
 
     COMPUTED ONCE PER CALL AND THREADED. Its three callers each call it
     exactly once and pass the result down -- `attached_documents` in
@@ -3669,10 +3674,19 @@ Inside `ready()`, beside the existing `register_entitlement_cascade` call:
 
 One short section: the handlers this column registers, and what each one does **and does not** reach — the notes handler removes the staging note and the note document; a chat-scoped document dies with its conversation through the attachment seam; a universal or stream-contained document loses only its claim.
 
-- [ ] **Step 7: Re-pin the query counts and run the tests**
+- [ ] **Step 7: Re-pin the query counts, add the deleted-path siblings, and run the tests**
+
+Re-pin `tools/rag/tests/test_access_documents.py`'s two held `django_assert_num_queries`
+constants by the real, no-open-conversation-ticket delta: `test_open_posture_returns_
+everything_with_no_permission_query` (`readable_documents`) from 2 to 4;
+`test_an_ordinary_readable_attachment_is_readable_with_no_extra_query` (`attached_documents`)
+from 3 to 5. Beside each, add a sibling test that first tickets one conversation (through
+`identity.retention.delete_content`, never a hand-inserted `DeletionTicket` row) and pins the
+count one higher — 5 and 6 — proving both the common (no open conversation ticket) and the
+less-common (one open) costs are held, not merely the cheaper one.
 
 Run: `.venv/bin/pytest -q tools/rag identity agents`
-Expected: PASS, after adjusting the `django_assert_num_queries` constants named in this task's header.
+Expected: PASS, after the re-pin and the two new sibling tests above.
 
 - [ ] **Step 8: Run the full gate and commit**
 
@@ -3681,7 +3695,11 @@ git add tools/rag/retention.py tools/rag/access.py tools/rag/apps.py \
         tools/rag/README.md tools/rag/tests/
 git commit -m "feat(rag): the staging-note purge and the chat-scope exclusions
 
-Re-pins the query counts in tools/rag/tests/test_access_documents.py and tools/rag/tests/test_chat_scoped_documents.py: the document path gains two bounded ticket reads."
+Re-pins tools/rag/tests/test_access_documents.py::TestReadableDocuments::
+test_open_posture_returns_everything_with_no_permission_query and ::
+TestTheCaptionNeverCrossesALineTheBytesDoNot::
+test_an_ordinary_readable_attachment_is_readable_with_no_extra_query: the document path
+gains two bounded ticket reads with no open conversation ticket on the box, three with one."
 ```
 
 ---
@@ -6851,3 +6869,4 @@ Checked end to end: `ticketed_keys` / `visible_tickets` / `may_purge` / `delete_
 - **Execution amendment (Task 5 review, round 2), 2026-09-21:** three Minor findings, all in `identity/retention.py` with tests in `identity/tests/test_retention_service.py`: already-gone purge is a no-op (`purge_ticket` re-reads the row under `select_for_update()` inside its transaction and returns `{}` with nothing run and nothing written when it is already gone); restore logs only what it removed (`restore_content` deletes by queryset and writes `content.restored` only when a row was actually removed); refusals are warnings (`sweep` catches `RetentionRefused` before the generic `except Exception` and logs it at `logger.warning` with no traceback, leaving `logger.exception` for every other failure). Reflected in Task 5's code and test blocks above.
 - **Execution amendment (Task 8 review), 2026-09-21:** confirm copy no longer says purge; zero-day notice; soft-delete document pin restored; four tests renamed.
 - **Execution amendment (Task 9 fix round 1), 2026-09-21:** Task 9 review: `agents.attachments.delete_attachments_for` no longer swallows a broken cleanup provider (FIX C1) — its only production caller is `agents.retention.purge_conversation` at purge time, so a failure now logs and re-raises through the runner's own never-swallows contract, re-pinning `TestTheCleanupSavepoint` to expect propagation (and full survival, driven through `identity.retention.purge_ticket`) instead of a completed purge; `purge_conversation` now hands refs/generation ids to the registered artifact-purge slot LAST, after every row delete and the tool-record scrub, so a failure upstream never deletes a file whose row then survives (FIX I2, `TestBytesGoLast`); the collect step's parse-failure log line names the turn and conversation id only, never the raw stored reference (FIX M6); and two residues are now stated as docstring sentences rather than left implicit — `WorkstreamTaint.first_conversation` keeps a purged conversation's id by value, content-free and deliberately left, and `scrub_tool_records` cannot reach a tool call whose invocation was written but whose turn never was (FIX M7/I4), mirrored into `agents/README.md`. Task 7 fix round 1: the rendered Retention help copy said "purge date"/"cliff", both banned by this plan's own copy rule (`identity/contracts/retention.py`'s docstring) — reworded to "removal date"/"that date" and "no age limit"; the queue-jobs effects sentence was also factually wrong (a finished job carries no stamped purge date) and is now "applies ... the next time the queue tidies up, which happens whenever a new job is added"; the deletion-log effects sentence now says "permanent-deletion entries" rather than "purge entries". Both fixes reflected in the code/test/doc blocks above and in `foundation/settings_help.py`/`agents/attachments.py`/`agents/retention.py`/`agents/README.md`/`tools/rag/README.md` directly.
+- **Execution amendment (Task 10 review), 2026-09-21:** the "made unconditionally... THREE BOUNDED QUERIES, ALWAYS" claim this plan's own `_deleted_document_ids` code block made was checked against the real query planner and found wrong: a `filter(...__in=[])` on an empty id list is answered by the ORM without a database round trip, so the box's common state — no open conversation ticket — costs two queries, not three; a box with at least one open conversation ticket pays the third. The controller ruled this the correct behaviour, not a defect to paper over: the cheaper path is the common one, and forcing the third query to run unconditionally just to keep a test constant flat would trade a real query on the common case for a documentation convenience. The delta table, `_deleted_document_ids`'s own docstring, and the two held pins in `tools/rag/tests/test_access_documents.py` are corrected to +2/+3 throughout this task (never +3 flat, never +6); each re-pinned test gained a sibling that tickets one conversation first and asserts the one-query-more count, so both costs are held rather than only the cheaper one.
