@@ -372,6 +372,25 @@ _DRIVERS: dict[str, Callable[["World"], tuple[str, str, dict]]] = {
     "identity-entitlement-edit": lambda w: (
         "get", reverse("identity-entitlement-edit", args=[w.entitlement.pk]), {}),
 
+    # --- /chat/agents/ (chat cluster, feature B) ----------------------
+    "chat-agents": lambda w: ("get", reverse("chat-agents"), {}),
+    # A GET probe even though this route also accepts a POST, the SAME
+    # choice `chat-workstream-new`'s own driver makes just below and for
+    # the identical reason: this cell runs once per (principal,
+    # content_on) combination, and a POST driver would create a row as a
+    # side effect of merely proving the class boundary.
+    "chat-agent-new": lambda w: ("get", reverse("chat-agent-new"), {}),
+    # Row-addressed and owned by `other`, exactly like the conversation
+    # menu's own four drivers. The body names the fields the view really
+    # reads; a driver naming fields it ignores would exercise the "you
+    # sent nothing" branch and pass while testing the wrong thing.
+    # `_ADMIN_ALWAYS_ADMITTED_O` (below) carries this route's one
+    # departure from the base O mapping.
+    "chat-agent-edit": lambda w: (
+        "post", reverse("chat-agent-edit", args=[w.agent.pk]),
+        {"action": "fields", "name": "Driven", "description": "",
+         "system_prompt": "", "max_steps": "2", "enabled": "on"}),
+
     # --- /chat/w/ (new in Workstreams WS-1, T13) ----------------------
     "chat-workstreams": lambda w: ("get", reverse("chat-workstreams"), {}),
     # SETUP SCREEN (owner feedback round 7): class A, the identical shape
@@ -788,6 +807,23 @@ _OWNER_WIDENED = frozenset({
 # this module's own `TestTheMatrix` asserts stays true for THIS sweep.
 _ADMIN_NEVER_ADMITTED_O = frozenset({"chat-attachment-detach"})
 
+# THE MIRROR IMAGE, AND THE ONE O ROUTE WHOSE ADMIN ANSWER IS ADMITTED
+# IN **BOTH** CONTENT SETTINGS. `chat-agent-edit` (chat cluster, feature
+# B) gates on `agents.visibility.may_manage_agent`, which SHORT-CIRCUITS
+# on `is_admin` alone and never reads `admin_sees_content` -- an agent is
+# box INVENTORY, the same call `labellable_agents` already records for
+# `/chat/access/`, not a conversation or a document. The content toggle
+# governs READING somebody else's content, and administering the box's
+# own agents is not reading it: an administrator who could not open the
+# row could not turn a runaway agent off.
+#
+# It is still class O rather than S, and that is the whole feature (see
+# `identity/routes.py`'s own entry): a MEMBER is answered by the base O
+# mapping's `_REFUSED_ROW` for `world.agent`, which `other` owns -- so
+# this override widens exactly one cell of the three, and the member
+# column still proves the house 404.
+_ADMIN_ALWAYS_ADMITTED_O = frozenset({"chat-agent-edit"})
+
 _METHOD_STATUSES = {"get": frozenset({200, 302, 400, 401, 403, 404, 503}),
                     "post": frozenset({200, 202, 302, 400, 401, 403, 404, 409, 503})}
 
@@ -899,6 +935,10 @@ def _expected_for(name, who, content_on):
         return _ADMITTED
     if name in _ADMIN_NEVER_ADMITTED_O and who == "admin":
         return _REFUSED_ROW
+    # `_ADMIN_ALWAYS_ADMITTED_O`: the mirror image, admin only -- a
+    # member and an owner still take the base O mapping's `_REFUSED_ROW`.
+    if name in _ADMIN_ALWAYS_ADMITTED_O and who == "admin":
+        return _ADMITTED
     return _EXPECTED[(ROUTE_RULES[name], who, content_on)]
 
 
@@ -1139,6 +1179,15 @@ class TestTheContentToggleMovesExactlyOneClassInIA1:
             # 404 in both settings, never the flip every other O/L route
             # makes.
             assert answers[0] == answers[1] == 404, (name, answers)
+        elif name in _ADMIN_ALWAYS_ADMITTED_O:
+            # `may_manage_agent` short-circuits on `is_admin` and never
+            # reads `admin_sees_content` at all (see that set's own
+            # comment): an agent is box inventory, not content, so an
+            # administrator's answer is the SAME admission in both
+            # settings -- never the flip every other O/L route makes,
+            # and never `_ADMIN_NEVER_ADMITTED_O`'s doubled 404 either.
+            assert answers[0] == answers[1], (name, answers)
+            assert answers[0] != 404, (name, answers)
         elif ROUTE_RULES[name] in ("O", "L"):
             assert answers[0] == 404 and answers[1] != 404, (name, answers)
         else:

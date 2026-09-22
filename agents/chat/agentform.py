@@ -37,6 +37,28 @@ RESIDENT_WARNING = (
     "`install_defaults --reset` on it replaces everything below with the shipped text."
 )
 
+# THE FORM'S OWN REFUSAL, for a role value the select never offered.
+ROLE_NOT_OFFERED = "Pick one of the model roles offered here."
+
+
+def chat_role_options() -> tuple[tuple[str, str], ...]:
+    """`((key, label), ...)` -- the chat-capable model roles this form
+    offers, in key order.
+
+    A FUNCTION, NOT A LITERAL INSIDE THE BUILDER, because THE FORM OWNS
+    THE VOCABULARY (spec 4.4) and two callers now need it.
+    `agents.visibility::_validated_agent_fields` gates `llm_role` on
+    ADMIN alone and has no vocabulary of its own -- deliberately, since
+    it is the writer rather than the form -- so
+    `agents.chat.views.agents` refuses a POSTed role that is not one of
+    these before handing the body to the writer. A refusal keyed on a
+    SECOND spelling of this filter would be a select that offers what
+    the refusal rejects, which is the render-vs-gate bug in its other
+    direction.
+    """
+    return tuple(sorted((role.key, role.label) for role in all_roles()
+                        if role.capability == _CHAT_CAPABILITY))
+
 
 def _foreign_label_sentence(named, unnamed_count) -> str:
     """How many restrictions this actor cannot change here, and -- only
@@ -99,8 +121,8 @@ def agent_form_context(principal, *, agent=None, posted=None, errors=None,
         values = {"name": "", "description": "", "system_prompt": "",
                   "max_steps": MAX_STEPS_DEFAULT, "enabled": True}
 
-    roles = {role.key: role.label for role in all_roles()
-             if role.capability == _CHAT_CAPABILITY}
+    role_options = chat_role_options()
+    roles = dict(role_options)
     current_role = agent.llm_role if agent is not None else ""
 
     panel = None
@@ -157,7 +179,7 @@ def agent_form_context(principal, *, agent=None, posted=None, errors=None,
         # agent is box policy, the same call `Chat` and `Job execution`
         # already record for being ADMIN rather than per-person. A
         # non-admin owner sees the current role as read-only text.
-        "role_options": tuple(sorted(roles.items())) if admin else (),
+        "role_options": role_options if admin else (),
         "current_role_label": roles.get(current_role, current_role),
         "may_set_reach": admin,
         "box_wide": bool(agent is not None and agent.box_wide),

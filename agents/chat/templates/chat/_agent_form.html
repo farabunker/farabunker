@@ -1,0 +1,81 @@
+{% comment %}
+THE ONE AGENT FIELD FORM. Rendered by `chat/agent_edit.html` for both
+mounts, from `agents/chat/agentform.py::agent_form_context`. Every
+sentence it shows is declared in Python and handed in; this file types
+labels and nothing else.
+
+NO `slug` INPUT, EVER. `Agent.save()` refuses a slug change because a
+slug is a KEY -- `flow.run` resolves one, an `agent.<slug>` grant names
+one, `install_defaults --reset` matches on one -- so a form that offered
+the field would be offering a refusal.
+
+`llm_role` AND THE REACH RADIO ARE ADMINISTRATOR-ONLY DATA, and a
+non-admin's CONTEXT never builds them (render-vs-gate) -- the `{%
+templatetag openblock %} if {% templatetag closeblock %}` below is the
+second belt, not the gate.
+
+NO `<style>` AND NO `<script>`: every selector this fragment names
+(`.form-error`, `.agent-reach`) lives in `chat/base.html`, the nearest
+common ancestor of every page that can include it, which is the rule
+`foundation/ops/tests/test_css_ownership.py` enforces. `.muted` is the
+shell's own shared primitive.
+{% endcomment %}
+<input type="hidden" name="action" value="fields">
+<input type="hidden" name="next" value="{{ next_value }}">
+
+{% if resident_warning %}<p class="muted">{{ resident_warning }}</p>{% endif %}
+
+<p>
+  <label for="agent-name">Name</label>
+  <input id="agent-name" name="name" value="{{ values.name }}" maxlength="255" required>
+  {% if errors.name %}<span class="form-error">{{ errors.name }}</span>{% endif %}
+</p>
+<p>
+  <label for="agent-description">Description</label>
+  <textarea id="agent-description" name="description" rows="2">{{ values.description }}</textarea>
+</p>
+<p>
+  <label for="agent-system-prompt">System prompt</label>
+  <textarea id="agent-system-prompt" name="system_prompt" rows="10">{{ values.system_prompt }}</textarea>
+</p>
+{% if may_choose_role %}
+<p>
+  <label for="agent-llm-role">Model role</label>
+  <select id="agent-llm-role" name="llm_role">
+    {% for key, label in role_options %}
+    <option value="{{ key }}"{% if agent and agent.llm_role == key %} selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  {% comment %}
+  THE VOCABULARY REFUSAL (`agents/chat/views/agents.py::
+  _unoffered_role_errors`): the writer gates `llm_role` on ADMIN alone,
+  so a stale or hand-made body naming a role this select never offered
+  is refused by the view and lands here, under the control it belongs
+  to. The select itself re-renders from the ROW, never from the posted
+  body, so the refused value is not echoed back.
+  {% endcomment %}
+  {% if errors.llm_role %}<span class="form-error">{{ errors.llm_role }}</span>{% endif %}
+</p>
+{% elif agent %}
+<p class="muted">Model role: {{ current_role_label }}</p>
+{% endif %}
+<p>
+  <label for="agent-max-steps">Steps per turn</label>
+  <input id="agent-max-steps" name="max_steps" type="number" min="1"
+         max="{{ max_steps_ceiling }}" value="{{ values.max_steps }}">
+  {% if errors.max_steps %}<span class="form-error">{{ errors.max_steps }}</span>{% endif %}
+</p>
+<p>
+  <label><input type="checkbox" name="enabled"{% if values.enabled %} checked{% endif %}> Enabled</label>
+</p>
+{% if may_set_reach %}
+{% comment %}
+`update_agent` reads `box_wide` as a truthy value, so `""` and `"1"`
+give the two radio answers with no extra branch -- `bool("")` is False.
+{% endcomment %}
+<fieldset class="agent-reach">
+  <legend>Reach</legend>
+  <label><input type="radio" name="box_wide" value=""{% if not box_wide %} checked{% endif %}> The people I give it to</label>
+  <label><input type="radio" name="box_wide" value="1"{% if box_wide %} checked{% endif %}> Everyone on this box</label>
+</fieldset>
+{% endif %}

@@ -104,6 +104,27 @@ ROUTE_RULES: dict[str, str] = {
     # 9.6). ONE page for both -- see `agents/chat/views/access.py`.
     "chat-agent-entitlements": "S",
 
+    # --- /chat/agents/ (chat cluster, feature B) -----------------------
+    # A: a signed-in person's own list; the rows are narrowed in the
+    # view by `editable_agents`, so there is no row to be addressed by.
+    "chat-agents": "A",
+    # A: creation needs no row.
+    "chat-agent-new": "A",
+    # O, NOT S, and the difference is the whole feature: an S route
+    # would refuse a non-admin at the middleware, which is exactly the
+    # person this page exists for. Row-addressed, 404 in the view unless
+    # `agents.visibility.may_manage_agent` -- the same shape
+    # `chat-conversation-rename` and its siblings carry.
+    #
+    # THE ONE O ROUTE WHOSE ADMIN ANSWER DOES NOT MOVE WITH THE CONTENT
+    # TOGGLE. `may_manage_agent` short-circuits on `is_admin` alone --
+    # an agent is box INVENTORY, the same call `labellable_agents`
+    # records for `/chat/access/`, not a conversation or a document --
+    # so an administrator is admitted here whether `admin_sees_content`
+    # is on or off. `identity/tests/test_route_matrix.py`'s own
+    # `_ADMIN_ALWAYS_ADMITTED_O` names it for that reason.
+    "chat-agent-edit": "O",
+
     # --- /chat/w/ (new in Workstreams WS-1) ----------------------------
     # A, not O: the list is this principal's own streams plus the ones
     # shared to them, so there is no row to be addressed by.

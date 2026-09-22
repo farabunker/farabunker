@@ -1676,6 +1676,33 @@ Chats -- see that file's own comment for the current shape.
   .tool-output summary, .tool-args-all summary { cursor: pointer; color: var(--muted); }
   .tool-output .tool-message { margin: 0.3rem 0 0; }
   .turn-nested { margin-top: 0.5rem; font-size: 0.9rem; }
+  {% comment %}
+  THE AGENT PAGES (chat cluster, feature B): `chat/agents.html`,
+  `chat/agent_edit.html` and the fragment they share,
+  `chat/_agent_form.html`. HERE, not in either page's own `{%
+  templatetag openblock %} block chat_style {% templatetag closeblock
+  %}`, for the reason the `.messages`/`.msg` and `.turn-attachment*`
+  notes above already give twice: a fragment cannot own rules the page
+  has to load, and Django blocks do not merge -- a rule parked in one
+  leaf page's override is invisible in the other's.
+
+  THE RAIL ENTRY IS IN THE SAME GROUP because it belongs to the same
+  feature, not because it belongs to the same pages: `.chat-nav-link`
+  is `chat/_sidebar.html`'s own, and every rule that fragment needs is
+  on this base already (this file's own header says so).
+  {% endcomment %}
+  .chat-nav-link { display: block; padding: 0.3rem 0.1rem; }
+  .agent-row { border: 1px solid var(--border); border-radius: 6px;
+               padding: 0.6rem 0.85rem; margin: 0 0 0.6rem; background: var(--panel); }
+  .agent-row h2 { font-size: 1rem; margin: 0 0 0.25rem; }
+  .agent-group-head { font-size: 0.78rem; font-weight: 700; letter-spacing: 0.08em;
+                      text-transform: uppercase; color: var(--muted);
+                      margin: 1.5rem 0 0.6rem; }
+  .agent-reach { border: 1px solid var(--border); border-radius: 6px;
+                 padding: 0.4rem 0.75rem 0.6rem; }
+  .agent-reach legend { font-size: 0.85rem; color: var(--muted); }
+  .agent-reach label { display: block; }
+  .form-error { display: block; color: var(--danger); font-size: 0.85rem; }
   {% block chat_style %}{% endblock %}
 {% endblock %}
 {% block content %}

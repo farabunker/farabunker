@@ -855,13 +855,23 @@ def labellable_flows():
 
 
 def labellable_agent(pk):
-    """One `Agent` row by pk, for `/chat/access/`'s POST handler -- or
-    `None`. A ONE-QUERY reader, unconditional for the identical reason
-    `labellable_agents` is: CLASS S already means every caller here is
-    an administrator. Replaces a `next((r for r in labellable_agents()
-    if r.pk == pk), None)` full-table scan per POST, which is the same
-    N+1 shape `tool_entitlement_ids`'s own docstring warns against, just
-    on the write side rather than the render side.
+    """One `Agent` row by pk -- or `None`. A READER, never a gate.
+
+    TWO CALLERS, TWO DIFFERENT GATES, and the gate is always the
+    caller's. `/chat/access/`'s POST handler is CLASS S, so
+    `IdentityGateMiddleware` has already refused anybody but an
+    administrator before this is reached and there is no narrower
+    principal to ask about -- the reason this reader is unfiltered by
+    principal at all. `agents.chat.views.agents.agent_edit` (chat
+    cluster, feature B) is CLASS O: it applies
+    `may_manage_agent(principal, row)` to what this returns and turns a
+    refusal into the house 404. An unfiltered reader is safe for both
+    precisely because neither treats it as the permission check.
+
+    A ONE-QUERY reader, not a `next((r for r in labellable_agents()
+    if r.pk == pk), None)` full-table scan per POST -- the same N+1
+    shape `tool_entitlement_ids`'s own docstring warns against, on the
+    write side rather than the render side.
     """
     return Agent.objects.filter(pk=pk).first()
 

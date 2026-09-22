@@ -1109,6 +1109,89 @@ def _workstream_consolidate_malformed_target(client, monkeypatch):
     return missing
 
 
+# --- the agent pages (chat cluster, feature B) ----------------------------
+#
+# The sweep signs nobody in, so every request below is the OPEN
+# principal -- an administrator by construction (`is_admin` answers True
+# on a box with no accounts), which is what lets `chat-agent-edit`'s own
+# drivers reach the view's body rather than its 404.
+
+
+def _agents_list_normal(client, monkeypatch):
+    make_agent(slug=_unique_slug("sweep"))
+    return client.get(reverse("chat-agents"))
+
+
+def _agents_list_no_agents(client, monkeypatch):
+    return client.get(reverse("chat-agents"))
+
+
+def _agents_list_queue_down(client, monkeypatch):
+    # This route never touches the queue; proves that independence
+    # rather than skipping the condition, the same shape
+    # `_agent_entitlements_queue_down` already takes.
+    _patch_queue(monkeypatch, raises=QueueUnavailable("down"))
+    return client.get(reverse("chat-agents"))
+
+
+def _agents_list_malformed_target(client, monkeypatch):
+    # No path segment to malform (the route takes none); a query string
+    # this view never reads, carrying a NUL byte, is its nearest
+    # equivalent -- the same shape `_index_malformed_target` takes.
+    return client.get(f"{reverse('chat-agents')}?open=%00")
+
+
+def _agent_new_normal(client, monkeypatch):
+    return client.post(reverse("chat-agent-new"), {
+        "name": "Swept", "description": "", "system_prompt": "",
+        "max_steps": "2", "enabled": "on"})
+
+
+def _agent_new_no_agents(client, monkeypatch):
+    return client.get(reverse("chat-agent-new"))
+
+
+def _agent_new_queue_down(client, monkeypatch):
+    _patch_queue(monkeypatch, raises=QueueUnavailable("down"))
+    return client.get(reverse("chat-agent-new"))
+
+
+def _agent_new_malformed_target(client, monkeypatch):
+    """A blank name, a non-numeric step count and an off-box `next` in
+    one body -- every refusal this route can reach, at once."""
+    return client.post(reverse("chat-agent-new"), {
+        "name": "", "description": "", "system_prompt": "", "max_steps": "not-a-number",
+        "enabled": "on", "next": "https://elsewhere.example/steal"})
+
+
+def _agent_edit_normal(client, monkeypatch):
+    agent = make_agent(slug=_unique_slug("sweep-edit"))
+    return client.post(reverse("chat-agent-edit", args=[agent.pk]), {
+        "action": "fields", "name": "Swept", "description": "", "system_prompt": "",
+        "max_steps": "2", "enabled": "on"})
+
+
+def _agent_edit_no_agents(client, monkeypatch):
+    return client.get(reverse("chat-agent-edit", args=[424242]))
+
+
+def _agent_edit_queue_down(client, monkeypatch):
+    agent = make_agent(slug=_unique_slug("sweep-edit-down"))
+    _patch_queue(monkeypatch, raises=QueueUnavailable("down"))
+    return client.get(reverse("chat-agent-edit", args=[agent.pk]))
+
+
+def _agent_edit_malformed_target(client, monkeypatch):
+    # A role string no registry knows on the ROW (the render path must
+    # not explode on a label lookup that misses), an `action` this view
+    # has no branch for, a blank name and a negative step count in the
+    # body -- every refusal this route can reach, at once.
+    agent = make_agent(slug=_unique_slug("sweep-edit-bad"),
+                       llm_role="not.a.registered.role")
+    return client.post(reverse("chat-agent-edit", args=[agent.pk]), {
+        "action": "nonsense", "name": "", "max_steps": "-1"})
+
+
 # The one place every route name and its four drivers are named
 # together -- ANY name present in `chat_urls.urlpatterns` but absent
 # from this dict raises `KeyError` in the sweep below, immediately.
@@ -1150,6 +1233,12 @@ _DRIVERS: dict[str, tuple] = {
     "chat-conversation-share": (
         _share_normal, _share_no_agents, _share_queue_down, _share_malformed_target,
     ),
+    "chat-agents": (_agents_list_normal, _agents_list_no_agents,
+                    _agents_list_queue_down, _agents_list_malformed_target),
+    "chat-agent-new": (_agent_new_normal, _agent_new_no_agents,
+                       _agent_new_queue_down, _agent_new_malformed_target),
+    "chat-agent-edit": (_agent_edit_normal, _agent_edit_no_agents,
+                        _agent_edit_queue_down, _agent_edit_malformed_target),
     # The rename's fourth driver is the blank-title 400 rather than the
     # shared "unknown uuid" one: a body the view really reads, refused
     # for a reason no other route in this group has.

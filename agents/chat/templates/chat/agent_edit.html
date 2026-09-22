@@ -1,0 +1,32 @@
+{% extends "chat/base.html" %}
+{% comment %}
+THE ONE AGENT PAGE, rendered by the create route with `agent` unset and
+by the edit route with it set. `form_action` decides which, so there is
+no second template and no page-level branch over two nearly-identical
+forms.
+
+THE FIELD FORM AND THE ENTITLEMENT PANEL ARE SIBLINGS, NEVER NESTED.
+`_transfer_panel.html` renders its own `<form>` (two, counting the inert
+filter form), and its own header says it "must NOT be included inside
+another one" -- nested `<form>` elements are illegal HTML and the inner
+one silently does not submit. That is why the panel block sits AFTER
+`</form>` below, and why the two POST paths are told apart by an
+`action` field rather than by one form with two buttons.
+
+Task 9 fills in the panel block; until then this page renders the field
+form alone, which is all the create route ever needs.
+{% endcomment %}
+{% block title %}{% if agent %}{{ agent.name }}{% else %}New agent{% endif %} — Chat — farabunker{% endblock %}
+{% block chat_sidebar %}{% include "chat/_sidebar.html" %}{% endblock %}
+{% block chat_content %}
+<h1>{% if agent %}{{ agent.name }}{% else %}New agent{% endif %}</h1>
+{% include "chat/_messages.html" %}
+<form method="post" action="{{ form_action }}">
+  {% csrf_token %}
+  {% include "chat/_agent_form.html" %}
+  <p>
+    <button type="submit">Save</button>
+    <a href="{% url 'chat-agents' %}" class="muted">Cancel</a>
+  </p>
+</form>
+{% endblock %}

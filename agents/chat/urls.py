@@ -9,7 +9,8 @@ this whole surface untested in one of them.
 from django.urls import path
 
 from agents.chat.views import (
-    AllConversationsView, ChatIndexView, ConversationView, agent_entitlements,
+    AllConversationsView, ChatIndexView, ConversationView, agent_edit,
+    agent_entitlements, agent_list, agent_new,
     attachment_detach, chat_settings, conversation_archive, conversation_delete,
     conversation_duplicate,
     conversation_pin, conversation_rename, conversation_share, conversation_start,
@@ -67,6 +68,13 @@ urlpatterns = [
     path("settings/", chat_settings, name="chat-settings"),
     path("tools/", tool_entitlements, name="chat-tool-entitlements"),
     path("access/", agent_entitlements, name="chat-agent-entitlements"),
+    # THE AGENT PAGES (chat cluster, feature B). `agents/new/` BEFORE
+    # `agents/<int:pk>/` reads clearly even though Django's `int`
+    # converter would never match the literal "new" anyway -- the same
+    # non-issue `w/new/`'s own comment already names.
+    path("agents/", agent_list, name="chat-agents"),
+    path("agents/new/", agent_new, name="chat-agent-new"),
+    path("agents/<int:pk>/", agent_edit, name="chat-agent-edit"),
     # WS-1: the stream list, the stream page, and the one edit route with
     # an `action` field (author decision 11). `chat-workstream-share`
     # (WS-2, Task 17) shares and revokes on one URL, the same shape
