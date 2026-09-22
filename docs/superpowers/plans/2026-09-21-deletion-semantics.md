@@ -8,7 +8,7 @@
 
 **Tech Stack:** Django 5.2, PostgreSQL, server-rendered templates, no static pipeline, no new dependency, no Django signals.
 
-**Spec:** `docs/superpowers/specs/2026-09-21-deletion-semantics-design.md` — owner-approved. §11 records owner rulings that override earlier text in that document; §10 names what is OUT of scope and must not be planned or built (enterprise hold BEHAVIOUR, a longer retention for tool-call records, a dry-run count mode, workstream retention, retroactive backup purge). An implementer does not get to reopen any of them.
+**Spec:** `docs/superpowers/specs/2026-09-21-deletion-semantics-design.md` — owner-approved. §11 records owner rulings that override earlier text in that document; §10 names what is OUT of scope and must not be planned or built (enterprise hold BEHAVIOUR, a longer retention for tool-call records, a dry-run count mode, workstream retention, retroactive backup purge). An implementer does not get to reopen any of them. **One exception, ruled by the owner on 2026-09-22 and carried into the spec by Task 15D:** on the enterprise posture, the refusal of an early "Delete permanently" IS in scope and is built in this delivery — a person may put a deleted item back, but where the period is enforced nobody may destroy it early. The hold control and the operator-set cliff floor stay out of scope, exactly as §10.10 says.
 
 **Stewardship (whose clearance each task's hunks need, pre-merge, per `AGENTS.md`'s cross-column rule):**
 
@@ -7326,3 +7326,1462 @@ Checked end to end: `ticketed_keys` / `visible_tickets` / `may_purge` / `delete_
 - **Execution amendment (Task 12 review round one), 2026-09-21:** six findings, all reflected in Task 12's own code/test/help blocks above. (C1) `deleted_page`'s Deletion log leaked another person's item label to any signed-in viewer, because `audit.by_action`'s read is unscoped by design (the log lists every `content.*` event) and nothing further checked who was looking — `show_labels = sees_all_content(principal, settings_row=row)`, computed once, now gates `event.target_label` per event; the event itself still lists for every viewer, only the label is blanked for one with no standing to read everyone's content. (I2) The Deleted help card said "the retention setting" (the banned word) and omitted the backups sentence its own brief line requires — reworded to `"Keep deleted items for"` in quotes and the backups sentence added, modelled on the identical sentence on the Identity & security card. (I3) Both mutations' generic `except Exception` catches had no test of their own — `views.retention.restore_content`/`purge_ticket` patched to raise a bare `RuntimeError`, asserting the redirect, the fixed flash and the surviving ticket. (I4) `deleted_page`'s own "one read" docstring claim was false: `IdentityGateMiddleware` already reads `IdentitySettings` once per request, and the view's `IdentitySettings.get_solo()` was a second, needless read of the same table — replaced with `settings_row_for(request)` (the row the middleware already stashed), and `_own_ticket_or_404` now takes that row as a required keyword and threads it into `principal_for_request` rather than calling it bare, the same rule `entitlement_edit`'s own comment states; a new `CaptureQueriesContext` pin asserts exactly one `identity_identitysettings` statement per GET. (I5) `identity/README.md` section 9 gained a paragraph for the page itself — its three routes and their classes, the `EVERYONE` gate's reason, the prune-on-read GET, and the log's label-visibility rule — which the section had deferred to "the Deleted page's own tasks' code" until now. (M1/M2/M3/M4/M5) `_RESTORE_FAILED_MESSAGE` reworded ("nothing retries a restore" was itself untrue — the message no longer claims it); the log's own `helptext` reworded off "It never contains the deleted words" to name the real, setting-gated rule; the template's own comment corrected from "every sentence comes from the constants" (false — the page's own prose is typed in the template) to say which half is which; `may_purge`'s docstring gained one sentence naming it as today-inert and the hook for the deferred enterprise hold behaviour; the unused `make_admin` import was dropped from `identity/tests/test_deleted_page.py` (the two new label-visibility tests use `posture("open")` for their sees-all case rather than an administrator account, so the import stayed genuinely unused).
 - **Whole-branch fix wave (slice one), 2026-09-21:** the Deletion log is now scoped to the viewer's own activity unless they see all content (Task 12), not every viewer for every event; the chat delete confirm no longer promises a restore the box may not keep (Task 8); `identity/retention.py::sweep` counts only real purges, not a ticket another overlapping pass already purged.
 - **Steward closure (slice one), 2026-09-22:** seven blocking conditions from the `chat-cluster` steward's review of `0c835c9`, plus four cheap informational items, landed in one commit. `_deleted_document_ids()` (Task 10) gains a third leg for a workstream consolidation note, keyed off `notes_conversation_id` against the same ticketed conversation keys the chat-scoped leg already reads, closing the gap where hide and `purge_conversation_notes` disagreed; `by_action` (Task 3) gains an `actor=` keyword that filters BEFORE its slice, replacing `deleted_page`'s (Task 12) own after-the-slice Python filter, which could show a member "Nothing yet." on a box where a hundred other principals' events crowded their own out of the unscoped top 100; three surfaces claiming the queue's age limit is already live (the Identity & security help card, the Retention section's own helptext (Task 7), and the settings assistant's `queue_retention_line`) now say the value is recorded and the Queue page applies it starting in a following change; four docstrings naming `models.queue.retention.forget_conversation` and the queue-row teardown in the present tense now say so in the future tense, pointing at ADR 0019's residue list; and `docs/OPERATIONS.md` now states `purge_deleted`'s real per-run bound and the queue-row backup residue instead of promising the opposite of both.
+
+### Slice-one addendum: child tickets for a deleted chat's images (Tasks 15A–15D)
+
+A deleted conversation's generated images stayed in the gallery, stayed servable and stayed reusable for the whole soft-delete window, with no row on the Deleted page naming them, and were then destroyed on the promised date without ever having been disclosed as deleted. Hide and purge must give the same answer, so a delete that reaches an image now writes that image its own ticket: it disappears with the chat, it is listed with its own date, and it is restorable on its own.
+
+**Tree notes** — where the tree contradicted or constrained the shape these tasks were given:
+
+1. **`KIND_VISION_JOB` already exists** in `identity/contracts/retention.py` (with `KIND_LABELS["vision_job"] == "Generated image"`), and `RETENTION_KINDS` already contains it. Nothing to add.
+2. **`children` cannot be a Python callable on the dataclass.** `identity/contracts/cascades.py` is purity-pinned by `identity/tests/test_purity.py` (imported with no settings module); every other handler on it is a DOTTED-PATH STRING resolved by `identity/cascades.py`. So `RetentionHandler.children` is `str | None`, validated for a dot, and `identity/cascades.py` gains `run_children(kind, key) -> list[tuple[str, str]]` beside `run_retention`.
+3. **A child ticket records its parent in a column, and `0004` is edited IN PLACE.** The resolver answers "what else goes with this item"; it cannot answer "which of these tickets did THIS delete write", and without that second answer restore and purge would reach a ticket somebody else's delete created — an image deleted from the gallery on its own date, silently restored or destroyed early by an unrelated chat. So `DeletionTicket` gains `parent = models.ForeignKey("self", null=True, blank=True, on_delete=models.CASCADE, related_name="children")` (indexed, as Django indexes every foreign key by default), and `identity/migrations/0004_deletion_ticket_and_retention_settings.py` is amended in place rather than followed by a `0005`: `git log origin/dev -- identity/migrations/0004*` is empty — that migration has never run anywhere but test and preview databases — so the feature still has EXACTLY ONE migration, which is what the Global Constraints promise. A preview stack that already applied `0004` must be rebuilt (`scripts/preview down <name>`, then `up`); test databases are recreated per run.
+4. **No registry accessor change is needed.** `retention_handlers(kind)` already returns whole `RetentionHandler` specs, so `children` is exposed the moment the field exists.
+5. **`tools/vision/retention.py` may not query `GenerationJob.objects`** — `foundation/ops/tests/test_column_boundaries.py::test_no_vision_module_queries_generationjob_directly` closes that manager to `visibility.py` and `services.py` (the Task 11 review amendment). So `purge_job(key)` resolves nothing itself and returns `services.delete_jobs([job_id])`, which already returns the number of jobs removed, is unscoped by design, and is idempotent. The same rule sends the resolver's "does this job still exist" question to a second small helper in `services.py` (15B): a stored generation id can name a job that was deleted from the gallery long ago, and once those ids become TICKETS an unchecked one is a "Generated image" row on the Deleted page with a date and a Restore button, naming a picture nobody can restore and nothing will ever destroy. Task 22's printed `purge_job` (which queried the manager directly) would have tripped that gate and is superseded here.
+6. **Job primary keys are UUIDs**, so the resolver returns `list[str]` (stringified, deduped), not `list[int]`. The ticket key is text; a string is what the registry consumes.
+7. **The slot rename cannot be split across two commits.** `register_artifact_purge`'s only producer (`tools/vision/apps.py`) and only consumer (`agents/retention.py`) sit on opposite sides of the rename, so 15B stays purely additive inside `tools/vision` (it splits `purge_artifacts` into `resolve_artifact_jobs` + the existing `delete_jobs` call, and adds `purge_job`), and 15C flips the seam — contracts, both registrations, the spec's printed signature and the dropped call — in one green commit.
+8. **Task 22 and Task 23 shrink.** 15B lands `purge_job`, its registration and the `vision.GenerationJob` line moving from `_EXEMPT` into `_COVERED`; Task 22 keeps only its views half (the gallery's two deletes write tickets) and its held re-pins, and Task 23's "two `_EXEMPT` lines move" becomes one (`rag.AskRecord`). Task 19's vision hunk (`forget_jobs`) now applies to `purge_job` as well as to the resolver's callers.
+9. **The handler label is "Generated image", singular** — one ticket is one job, and it matches `KIND_LABELS`. Task 22's "Generated images" is superseded.
+10. **No Deleted-page code change is needed** (point 5 of the shape, confirmed): `identity/views.py::deleted_page` already builds `kind_label` from `KIND_LABELS` and `may_purge` per row, and `deleted.html` already renders the kind label when `ticket.label` is blank and already gates the permanent-delete control on `{% if row.may_purge %}`. Child tickets carry a BLANK label deliberately — the chat's title is not the image's name and the prompt is content.
+11. **15D's held test is `identity/tests/test_deleted_page.py::TestRestoreAndPurge::test_the_enterprise_posture_behaves_exactly_as_personal_does`**, which asserts the exact opposite of what 15D builds; it is re-pinned by name. The settings-help "drift" tests are structural (anchors, gates, one-field-per-anchor) and `CONTENT_HASH` is computed at import, not pinned as a literal, so adding a help sentence re-pins nothing there.
+12. **Two reads in `identity/tests/test_deletion_demo.py` count events the image now also writes**, and both are narrowed in 15C and named in its commit message: `test_step_5_...`'s `AuditEvent.objects.filter(action=CONTENT_PURGED).get()` (two `content.purged` events in the `vision` flag state), and `test_step_2b_...`'s `restored = audit.by_action([CONTENT_RESTORED]); assert len(restored) == 1` (two `content.restored` events, and `restored[0]` may be the image's). The `world` fixture builds a real generation with a real `output:` artifact and a real `data["id"]`, and both branch gate states carry `vision`, so neither is hypothetical.
+
+---
+
+### Task 15A: `identity/` — the `children` field, the parent column, and a delete that tickets what follows
+
+**Files:**
+- Modify: `identity/contracts/cascades.py` (`RetentionHandler.children`)
+- Modify: `identity/cascades.py` (`run_children`)
+- Modify: `identity/models.py` (`DeletionTicket.parent`, and the model docstring)
+- Modify: `identity/migrations/0004_deletion_ticket_and_retention_settings.py` (the `parent` field, added IN PLACE — tree note 3)
+- Modify: `identity/retention.py` (`delete_content`, `restore_content`, `purge_ticket`, `_purge_due`, `sweep`)
+- Modify: `identity/management/commands/purge_deleted.py` (what the printed number counts)
+- Modify: `identity/README.md`, `docs/adr/0019-deletion-and-retention.md`, `docs/OPERATIONS.md`
+- Test: `identity/tests/test_retention_contracts.py` (extend), `identity/tests/test_retention_runner.py` (extend), `identity/tests/test_retention_service.py` (extend), `identity/tests/test_deletion_ticket.py` (one case — the table's own contracts live there), `foundation/ops/tests/test_deletion_coverage.py` (one case — handler labels are keys, see Step 8)
+
+**Held tests:** none re-pinned. Every existing test in those three modules must stay green unchanged — a handler with no `children` behaves exactly as it does today (the first test this task writes), and a ticket with no children still counts as one purge in the sweep, so the existing sweep and command counts are unchanged.
+
+**Interfaces:**
+- Consumes: `identity.contracts.cascades.retention_handlers`; `identity.models.DeletionTicket`; `identity.audit.record`.
+- Produces, for 15C to register against:
+  - `RetentionHandler(..., children: str | None = None)` — a DOTTED PATH to a function with the signature `(key: str) -> list[tuple[str, str]]`, returning `(kind, key)` pairs.
+  - `identity.cascades.run_children(kind: str, key: str) -> list[tuple[str, str]]`, asked at DELETE TIME ONLY.
+  - `DeletionTicket.parent` / `ticket.children` — the link a delete writes and restore and purge read.
+  - `delete_content` writes one child ticket per pair; `restore_content` removes the children it wrote; `purge_ticket` destroys this item's rows, then each child, then this item's ticket.
+
+- [ ] **Step 1: Write the failing tests**
+
+Extend `identity/tests/test_retention_service.py`'s existing `_isolated_registry` fixture (do not write a second one) so it also registers a parent kind with children and a child handler, both recording into the module's `REMOVED` list:
+
+```python
+# beside `ask_handler` at the top of identity/tests/test_retention_service.py
+CHILDREN: list[tuple[str, str]] = [(KIND_DOCUMENT, "doc-1"), (KIND_DOCUMENT, "doc-2")]
+CALLED: list[str] = []
+
+
+def conversation_handler(key: str) -> int:
+    REMOVED.append(f"conversation:{key}")
+    return 1
+
+
+def document_handler(key: str) -> int:
+    REMOVED.append(f"document:{key}")
+    return 1
+
+
+def fake_children(key: str) -> list[tuple[str, str]]:
+    """Recomputed from the parent's own rows in production; a constant
+    here, because what this module tests is what the SERVICE does with
+    the pairs, not how a column finds them."""
+    CALLED.append(key)
+    return list(CHILDREN)
+```
+
+`CALLED` is this module's own list (`identity/tests/test_retention_runner.py` has one of its own; nothing is shared between the two modules), and `_isolated_registry` clears it beside `REMOVED.clear()` on both sides of the `yield`. Inside `_isolated_registry`, after the existing `KIND_ASK` registration:
+
+```python
+    register_retention_handler(RetentionHandler(
+        kind=KIND_CONVERSATION, key="t.conversation",
+        label="Conversation and turns",
+        handler=f"{__name__}.conversation_handler",
+        children=f"{__name__}.fake_children"))
+    register_retention_handler(RetentionHandler(
+        kind=KIND_DOCUMENT, key="t.document", label="Document",
+        handler=f"{__name__}.document_handler"))
+```
+
+The new cases:
+
+```python
+class TestChildTickets:
+    def test_a_delete_tickets_the_children_with_the_same_date_and_owner(self):
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(
+            user_principal(user), kind=KIND_CONVERSATION, key=item.pk,
+            owner=item, label="A thread")
+
+        children = DeletionTicket.objects.filter(kind=KIND_DOCUMENT).order_by("key")
+        assert [t.key for t in children] == ["doc-1", "doc-2"]
+        for child in children:
+            assert child.parent_id == parent.pk
+            assert child.purge_on == parent.purge_on
+            assert child.owner_kind == parent.owner_kind
+            assert child.owner_key == parent.owner_key
+            assert child.deleted_by_key == str(user.pk)
+            # THE PARENT'S NAME IS NOT THE CHILD'S: a child ticket
+            # carries no label at all, so the page shows its kind.
+            assert child.label == ""
+        assert REMOVED == []
+
+    def test_each_child_gets_its_own_content_free_event(self):
+        user = make_user()
+        item = _owner(user)
+        service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                               key=item.pk, owner=item, label="A thread")
+        events = AuditEvent.objects.filter(action=CONTENT_DELETED,
+                                           target_type=KIND_DOCUMENT)
+        assert events.count() == 2
+        assert {e.target_label for e in events} == {""}
+        assert {e.actor_key for e in events} == {str(user.pk)}
+
+    def test_a_child_that_already_has_a_ticket_keeps_its_date_and_stays_its_own(self):
+        """Unique on (kind, key): an image deleted from the gallery
+        yesterday keeps ITS date, is NOT adopted by this delete, and
+        gets no second event."""
+        user = make_user()
+        item = _owner(user)
+        existing = service.delete_content(user_principal(user), kind=KIND_DOCUMENT,
+                                          key="doc-1", owner=item, label="Its own")
+        DeletionTicket.objects.filter(pk=existing.pk).update(
+            purge_on=timezone.localdate() + datetime.timedelta(days=90))
+        service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                               key=item.pk, owner=item)
+        existing.refresh_from_db()
+        assert existing.label == "Its own"
+        assert existing.parent_id is None
+        assert existing.purge_on == timezone.localdate() + datetime.timedelta(days=90)
+        assert AuditEvent.objects.filter(
+            action=CONTENT_DELETED, target_type=KIND_DOCUMENT,
+            target_key="doc-1").count() == 1
+
+    def test_a_handler_with_no_children_is_unchanged(self):
+        user = make_user()
+        service.delete_content(user_principal(user), kind=KIND_ASK, key="5",
+                               owner=_owner(user))
+        assert DeletionTicket.objects.count() == 1
+
+    def test_the_resolver_is_asked_at_the_delete_and_nowhere_else(self):
+        """ASKED ONCE, AT EACH DELETE. Restore and permanent delete
+        follow the link the delete wrote instead of asking again, so a
+        column whose rows have since changed cannot make either of them
+        reach a ticket this delete never created."""
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        assert CALLED == [str(item.pk)]
+        service.restore_content(user_principal(user), parent)
+        assert CALLED == [str(item.pk)]
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        service.purge_ticket(user_principal(user), parent)
+        assert CALLED == [str(item.pk), str(item.pk)]
+
+    def test_restoring_the_parent_removes_its_children(self):
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        service.restore_content(user_principal(user), parent)
+        assert DeletionTicket.objects.count() == 0
+        assert AuditEvent.objects.filter(
+            action=CONTENT_RESTORED, target_type=KIND_DOCUMENT).count() == 2
+        assert REMOVED == []
+
+    def test_a_child_restored_on_its_own_is_simply_absent(self):
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        child = DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-1")
+        service.restore_content(user_principal(user), child)
+        service.restore_content(user_principal(user), parent)
+        assert DeletionTicket.objects.count() == 0
+        assert AuditEvent.objects.filter(
+            action=CONTENT_RESTORED, target_type=KIND_DOCUMENT).count() == 2
+
+    def test_a_restore_leaves_a_ticket_this_delete_did_not_write(self):
+        """The image was deleted from the gallery on its own date. A
+        chat that happens to reference it is restored; the image is not
+        put back, because nobody said to put it back."""
+        user = make_user()
+        item = _owner(user)
+        own = service.delete_content(user_principal(user), kind=KIND_DOCUMENT,
+                                     key="doc-1", owner=item, label="Its own")
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        service.restore_content(user_principal(user), parent)
+        assert DeletionTicket.objects.filter(pk=own.pk).exists()
+        assert DeletionTicket.objects.filter(kind=KIND_DOCUMENT,
+                                             key="doc-2").count() == 0
+
+    def test_permanent_delete_runs_this_items_rows_before_any_childs_bytes(self):
+        """ORDER IS THE POINT, and it is the filesystem-last rule this
+        registry already states: a child's handler is the one that
+        removes bytes, and a row handler that raised after files were
+        gone would leave a resurrected row pointing at nothing. So every
+        row this click touches goes first, and the children follow."""
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        service.purge_ticket(user_principal(user), parent)
+        assert REMOVED == [f"conversation:{item.pk}",
+                           "document:doc-1", "document:doc-2"]
+        assert DeletionTicket.objects.count() == 0
+
+    def test_the_parents_event_counts_the_children_under_their_own_label(self):
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        removed = service.purge_ticket(user_principal(user), parent)
+        assert removed == {"Conversation and turns": 1, "Document": 2}
+        event = AuditEvent.objects.get(action=CONTENT_PURGED,
+                                       target_type=KIND_CONVERSATION)
+        assert event.detail["removed"] == {"Conversation and turns": 1,
+                                           "Document": 2}
+
+    def test_every_destroyed_ticket_writes_its_own_event(self):
+        """ONE EVENT PER TICKET DESTROYED, because the Deletion log
+        lists tickets: an image that was listed with a date of its own
+        is a line of its own when that date is spent."""
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        service.purge_ticket(user_principal(user), parent)
+        assert AuditEvent.objects.filter(
+            action=CONTENT_PURGED, target_type=KIND_DOCUMENT).count() == 2
+        assert AuditEvent.objects.filter(
+            action=CONTENT_PURGED, target_type=KIND_CONVERSATION).count() == 1
+
+    def test_a_child_restored_alone_survives_the_parents_permanent_delete(self):
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        service.restore_content(
+            user_principal(user),
+            DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-1"))
+        service.purge_ticket(user_principal(user), parent)
+        assert "document:doc-1" not in REMOVED
+        assert "document:doc-2" in REMOVED
+
+    def test_a_ticket_this_delete_did_not_write_survives_the_permanent_delete(self):
+        """Its own date was printed for it, and this click is not that
+        date."""
+        user = make_user()
+        item = _owner(user)
+        own = service.delete_content(user_principal(user), kind=KIND_DOCUMENT,
+                                     key="doc-1", owner=item, label="Its own")
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        service.purge_ticket(user_principal(user), parent)
+        assert DeletionTicket.objects.filter(pk=own.pk).exists()
+        assert "document:doc-1" not in REMOVED
+
+    def test_the_sweep_counts_every_ticket_it_addressed(self):
+        """A parent and two children are three items destroyed and three
+        rows gone; reporting one would tell an operator two pictures are
+        still there."""
+        user = make_user()
+        item = _owner(user)
+        service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                               key=item.pk, owner=item)
+        DeletionTicket.objects.all().update(
+            purge_on=timezone.localdate() - datetime.timedelta(days=1))
+        assert service.sweep() == 3
+        assert DeletionTicket.objects.count() == 0
+        assert sorted(REMOVED) == sorted(
+            ["document:doc-1", "document:doc-2", f"conversation:{item.pk}"])
+
+    def test_a_child_the_sweep_reached_first_is_simply_gone(self):
+        """Children are ordinary due tickets. If a pass purges one
+        before its parent, the parent's own purge finds one child fewer
+        and completes."""
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        child = DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-1")
+        service.purge_ticket(user_principal(user), child)
+        service.purge_ticket(user_principal(user), parent)
+        assert DeletionTicket.objects.count() == 0
+        assert sorted(REMOVED) == sorted(
+            ["document:doc-1", "document:doc-2", f"conversation:{item.pk}"])
+
+    def test_zero_days_purges_the_children_too(self):
+        """THE ZERO-DAY PROOF. `delete_content` runs no immediate purge
+        of its own: the children are written inside the same
+        transaction with the SAME `purge_on`, so the unconditional
+        prune-on-write sweep at the end of every delete finds parent
+        and children all due today, and the parent's own purge destroys
+        all three -- its rows first, then each child's bytes."""
+        row = IdentitySettings.get_solo()
+        row.retention_days = 0
+        row.save()
+        user = make_user()
+        item = _owner(user)
+        service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                               key=item.pk, owner=item)
+        assert REMOVED == [f"conversation:{item.pk}",
+                           "document:doc-1", "document:doc-2"]
+        assert DeletionTicket.objects.count() == 0
+        assert AuditEvent.objects.filter(action=CONTENT_PURGED).count() == 3
+```
+
+Plus, in `identity/tests/test_retention_contracts.py`:
+
+```python
+class TestTheChildrenField:
+    def test_it_defaults_to_nothing(self):
+        spec = RetentionHandler(kind=KIND_CONVERSATION, key="k", label="L",
+                                handler="a.b")
+        assert spec.children is None
+
+    def test_it_must_be_a_dotted_path_when_given(self):
+        with pytest.raises(ValueError):
+            RetentionHandler(kind=KIND_CONVERSATION, key="k", label="L",
+                             handler="a.b", children="notdotted")
+```
+
+and in `identity/tests/test_retention_runner.py`, modelled on `TestTheRunner` above it (register into the isolated registry, call, assert) — the module's own `CALLED` list records each resolver call:
+
+```python
+def first_children(key: str) -> list[tuple[str, str]]:
+    CALLED.append(f"first:{key}")
+    return [(KIND_DOCUMENT, "d-1"), (KIND_DOCUMENT, "d-2")]
+
+
+def second_children(key: str) -> list[tuple[str, str]]:
+    CALLED.append(f"second:{key}")
+    return [(KIND_DOCUMENT, "d-2")]
+
+
+class TestRunChildren:
+    def test_it_returns_the_pairs_the_registered_resolver_answers(self):
+        register_retention_handler(RetentionHandler(
+            kind=KIND_ASK, key="t.rows", label="Rows",
+            handler=f"{__name__}.rows_handler",
+            children=f"{__name__}.first_children"))
+
+        assert run_children(KIND_ASK, "77") == [("document", "d-1"),
+                                                ("document", "d-2")]
+        assert CALLED == ["first:77"]
+
+    def test_a_kind_with_no_resolver_answers_an_empty_list(self):
+        register_retention_handler(RetentionHandler(
+            kind=KIND_ASK, key="t.rows", label="Rows",
+            handler=f"{__name__}.rows_handler"))
+
+        assert run_children(KIND_ASK, "77") == []
+        assert CALLED == []
+
+    def test_a_pair_two_handlers_both_name_is_returned_once(self):
+        register_retention_handler(RetentionHandler(
+            kind=KIND_ASK, key="t.rows", label="Rows",
+            handler=f"{__name__}.rows_handler",
+            children=f"{__name__}.first_children"))
+        register_retention_handler(RetentionHandler(
+            kind=KIND_ASK, key="t.files", label="Files",
+            handler=f"{__name__}.files_handler", order=ORDER_FILES,
+            children=f"{__name__}.second_children"))
+
+        assert run_children(KIND_ASK, "77") == [("document", "d-1"),
+                                                ("document", "d-2")]
+        assert CALLED == ["first:77", "second:77"]
+
+    def test_a_resolver_that_cannot_be_imported_takes_the_delete_down(self):
+        """NEVER SWALLOWS, the same contract `run_retention` has."""
+        register_retention_handler(RetentionHandler(
+            kind=KIND_ASK, key="t.rows", label="Rows",
+            handler=f"{__name__}.rows_handler",
+            children="identity.nope.not_a_resolver"))
+
+        with pytest.raises(ImportError):
+            run_children(KIND_ASK, "77")
+```
+
+(`KIND_DOCUMENT` and `run_children` join that module's imports.)
+
+In `identity/tests/test_deletion_ticket.py`, beside the classes that already pin this table's own contracts (the closed kind vocabulary, the unique constraint, the hold columns shipping empty), one more:
+
+```python
+class TestTheParentLink:
+    def test_a_ticket_has_no_parent_unless_one_was_given(self):
+        assert _ticket().parent_id is None
+
+    def test_deleting_a_parent_removes_its_children(self):
+        """CASCADE: a child ticket cannot outlive the ticket it arrived
+        with, so there is no orphan row to render or reason about."""
+        parent = _ticket(key="chat-1")
+        _ticket(kind=retention.KIND_VISION_JOB, key="job-1", parent=parent)
+        DeletionTicket.objects.filter(pk=parent.pk).delete()
+        assert DeletionTicket.objects.count() == 0
+
+    def test_deleting_a_child_leaves_its_parent(self):
+        parent = _ticket(key="chat-1")
+        child = _ticket(kind=retention.KIND_VISION_JOB, key="job-1", parent=parent)
+        DeletionTicket.objects.filter(pk=child.pk).delete()
+        assert list(DeletionTicket.objects.all()) == [parent]
+```
+
+And in `foundation/ops/tests/test_deletion_coverage.py`, the pin Step 8's merge depends on:
+
+```python
+def test_labels_that_meet_in_one_purge_map_are_distinct():
+    """A LABEL IS A KEY, NOT A CAPTION. One permanent delete returns one
+    `{label: count}` map, and two sets of labels meet in it: the
+    handlers registered for the item's own kind, and -- merged in -- the
+    handlers of each child ticket that went with it. TWO RULES FOLLOW,
+    and deliberately only two.
+
+    WITHIN ONE KIND every handler label is distinct, because
+    `run_retention` writes them into a single dict and the second would
+    silently overwrite the first.
+
+    AND NO HANDLER WEARS ANOTHER KIND'S PLAIN NAME. A merged line reads
+    as the kind it destroyed -- "Generated image" -- so a handler
+    answering for something else under that same word would put two
+    different things on one line. A kind's own handler matching its own
+    name is the intended case, not a clash.
+
+    TWO DIFFERENT KINDS MAY SHARE A HANDLER LABEL (the queue's rows are
+    "Queue jobs" for more than one kind): those are separate maps unless
+    one kind is the other's child, and the case that can actually meet
+    is the one the second rule covers.
+    """
+    for kind in RETENTION_KINDS:
+        labels = [spec.label for spec in retention_handlers(kind)]
+        assert sorted(labels) == sorted(set(labels)), (
+            f"two handlers registered for {kind!r} share a label, so "
+            f"run_retention would report one count for both")
+
+    for kind in RETENTION_KINDS:
+        for spec in retention_handlers(kind):
+            worn = sorted(other for other, name in KIND_LABELS.items()
+                          if name == spec.label and other != kind)
+            assert worn == [], (
+                f"the handler {spec.key!r} answers for {kind!r} but is "
+                f"labelled {spec.label!r}, which is what a {worn} ticket is "
+                f"called on the Deleted page")
+```
+
+(`RETENTION_KINDS` and `KIND_LABELS` join that module's `identity.contracts.retention` import, beside the `KIND_CONVERSATION` already there.)
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run, prefixed with the test `DATABASE_URL` your rules file gives: `DATABASE_URL=… .venv/bin/pytest -q -p no:cacheprovider -W ignore identity/tests/test_retention_service.py identity/tests/test_retention_contracts.py identity/tests/test_retention_runner.py identity/tests/test_deletion_ticket.py foundation/ops/tests/test_deletion_coverage.py`
+Expected: FAIL — `TypeError: RetentionHandler.__init__() got an unexpected keyword argument 'children'` from the first three, and `TypeError: DeletionTicket() got unexpected keyword arguments: 'parent'` from the ticket module. The label pin is expected to PASS from the start: it is a guard on a property the tree already has, written now because Step 8 starts depending on it.
+
+- [ ] **Step 3: The field**
+
+In `identity/contracts/cascades.py`, `RetentionHandler` gains one field and one validation, and its docstring gains the paragraph:
+
+```python
+    children: str | None = None
+```
+```python
+        if self.children is not None and "." not in self.children:
+            raise ValueError(
+                f"RetentionHandler({self.key!r}).children must be a dotted path, "
+                f"got {self.children!r}")
+```
+
+Docstring paragraph (house style — say WHY where the reader meets it):
+
+> `children` — OPTIONAL, a dotted path to `(key: str) -> list[tuple[str, str]]`, answering "what else is deleted when this item is". A conversation's generated images are the case it exists for: they are content of their own, on their own table, with their own visibility rule, and a delete that hid the chat while leaving them in the gallery would be a box whose "delete" and whose "destroy" disagreed. **It is asked ONCE, at delete time**, and what it answers becomes ordinary tickets — their own row, their own date on the Deleted page, their own handler, their own restore — each one linked back to the ticket whose delete created it. Restore and permanent delete follow that link rather than asking again, so this resolver is never the reason a ticket somebody else's delete wrote is put back or destroyed early.
+
+- [ ] **Step 4: The parent column, and the one migration amended in place**
+
+In `identity/models.py`, `DeletionTicket` gains one field, declared last so the migration's own field list is appended to rather than reordered:
+
+```python
+    # WHICH DELETE WROTE THIS TICKET. Blank for an item somebody deleted
+    # on its own; set for one that went with a parent item, so restore
+    # and permanent delete can reach exactly the tickets that click
+    # created and no others. An image deleted from the gallery on
+    # Monday keeps Monday's date even if a chat that used it is deleted
+    # on Tuesday -- and survives that chat being restored or destroyed.
+    # CASCADE because a ticket cannot outlive the ticket it hangs off:
+    # there is no orphan state to render and none to reason about.
+    parent = models.ForeignKey("self", null=True, blank=True,
+                               on_delete=models.CASCADE,
+                               related_name="children")
+```
+
+and the model docstring's "ONE TABLE RATHER THAN..." paragraph gains two sentences. One: the parent link is a column on this same table, not a second one, for the same reason the table itself is one — a child ticket is an ordinary deleted item that happens to have arrived with another. Two, a recorded choice rather than an accident: **a child ticket carries the PARENT ITEM's owner columns, not its own item's**, because those columns answer "whose deletion is this" — they are what `visible_tickets` and `may_purge` read — and whoever may restore or permanently delete the chat may do so for everything that went with it.
+
+`identity/migrations/0004_deletion_ticket_and_retention_settings.py` is EDITED IN PLACE: `parent` is appended to `CreateModel`'s field list (`models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, related_name='children', to='identity.deletionticket')`, with `import django.db.models.deletion` at the top). This is not a second migration and this feature still has exactly one: `git log origin/dev -- identity/migrations/0004*` is empty, so that file has never run anywhere but test and preview databases. The file must match the model exactly — `manage.py makemigrations --check --dry-run` staying clean is the check, and it is in this task's own gate. A preview stack that already applied `0004` is rebuilt (`scripts/preview down <name>`, then `up`); test databases are recreated per run.
+
+- [ ] **Step 5: `run_children`**
+
+In `identity/cascades.py`, beside `run_retention`:
+
+```python
+def run_children(kind: str, key: str) -> list[tuple[str, str]]:
+    """The `(kind, key)` pairs that follow this item's own ticket.
+
+    ASKED AT DELETE TIME ONLY -- `identity.retention.delete_content` is
+    the one caller. What it answers is written as tickets linked to the
+    one this delete created, and restore and purge read that link
+    instead of asking again: the parent's rows are what this answer is
+    computed from, and by purge time this item's handler is about to
+    destroy them.
+
+    NEVER SWALLOWS, exactly as `run_retention` does not: a resolver
+    that cannot be imported, or that raises, takes the delete down with
+    it rather than silently leaving a child undeleted.
+
+    Deduped, in handler order -- ROWS band before FILES band, stable
+    within a band, whatever `retention_handlers` returns. A kind with no
+    resolver -- every kind but one, today -- answers `[]`, which is not
+    an error.
+    """
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for spec in retention_handlers(kind):
+        if spec.children is None:
+            continue
+        for child_kind, child_key in import_string(spec.children)(key):
+            pair = (str(child_kind), str(child_key))
+            if pair not in seen:
+                seen.add(pair)
+                pairs.append(pair)
+    return pairs
+```
+
+- [ ] **Step 6: `delete_content` writes the children**
+
+Inside the existing `transaction.atomic()`, in the `if created:` branch, after the parent's own `audit.record(...)`:
+
+```python
+            # THE CHILDREN GET THEIR OWN TICKETS, not a mention on the
+            # parent's. Same owner, same actor, SAME DATE -- the date is
+            # the promise, and two dates for one click would be two
+            # promises -- and `parent=ticket`, which is how the restore
+            # and the permanent delete below know which tickets this
+            # click created.
+            # A CHILD THAT ALREADY HAS A TICKET IS LEFT EXACTLY AS IT
+            # IS: `get_or_create` on the unique `(kind, key)` returns
+            # it, and it is neither re-dated nor adopted. Somebody
+            # deleted that item on its own and was shown a date for it;
+            # this delete does not get to move it.
+            # NO SEPARATE ZERO-DAY PATH: these rows are due exactly when
+            # the parent is, so the unconditional prune-on-write sweep
+            # below purges them in the same call.
+            for child_kind, child_key in run_children(kind, str(key)):
+                _child, child_created = DeletionTicket.objects.get_or_create(
+                    kind=child_kind, key=child_key,
+                    defaults=dict(
+                        label="",
+                        parent=ticket,
+                        purge_on=purge_on,
+                        deleted_by_kind=getattr(actor, "kind", ""),
+                        deleted_by_key=getattr(actor, "key", ""),
+                        owner_kind=getattr(owner, "owner_kind", ""),
+                        owner_key=str(getattr(owner, "owner_key", "")),
+                    ),
+                )
+                if child_created:
+                    audit.record(actor, CONTENT_DELETED, target_type=child_kind,
+                                 target_key=child_key, target_label="",
+                                 source=source, kind=child_kind)
+```
+
+`delete_content`'s docstring gains: a child ticket carries NO label (the parent's title is not the child's name, and the child's own content is not copied into bookkeeping the purge is meant to leave behind); that a child ticket is stamped with the PARENT ITEM's owner columns, deliberately, because those columns answer "whose deletion is this" and whoever may restore or purge the parent may do so for the whole cascade; that an item already ticketed keeps its own date and its own standing; and the zero-day sentence above.
+
+- [ ] **Step 7: `restore_content` removes the children this delete wrote**
+
+Inside the same transaction, after the existing `kind, key, label = ticket.kind, ticket.key, ticket.label` line, the children are deleted EXPLICITLY and FIRST — each one reporting its own removal, exactly as the parent's own delete already does:
+
+```python
+        # THE CHILDREN COME BACK WITH THE PARENT, and they go first and
+        # one at a time. The foreign key would cascade them away with
+        # the parent row, but a cascade reports nothing per row, and
+        # this function's own rule is that A RESTORE THAT DID NOT
+        # HAPPEN IS NEVER LOGGED: a child a competing sweep purged in
+        # the meantime must not get a `content.restored` event for an
+        # item that was in fact destroyed. Deleting by queryset per
+        # child answers that question the same way the parent's own
+        # delete below answers it.
+        # NO RESOLVER HERE -- the link is what this restore follows, so
+        # an item somebody deleted on its own, or one that went with a
+        # different parent, is not this restore's business and is left
+        # deleted with the date it was shown.
+        restored_children = []
+        for child in ticket.children.all().order_by("pk"):
+            removed_child, _ = DeletionTicket.objects.filter(
+                pk=child.pk).delete()
+            if removed_child:
+                restored_children.append(child)
+        removed, _ = DeletionTicket.objects.filter(pk=ticket.pk).delete()
+        if not removed:
+            return
+        audit.record(actor, CONTENT_RESTORED, target_type=kind, target_key=key,
+                     target_label=label if row.audit_detail else "",
+                     source=source, kind=kind)
+        for child in restored_children:
+            audit.record(actor, CONTENT_RESTORED, target_type=child.kind,
+                         target_key=child.key, target_label="",
+                         source=source, kind=child.kind)
+```
+
+`restore_content`'s docstring gains: a child restored on its own earlier is simply absent by the time this runs, which is not an error and writes no event; each child is removed and reported on its own, for the reason the parent already is; and that a child cannot outlive its parent's row, so a parent whose delete reports nothing had no children left to put back either.
+
+- [ ] **Step 8: `purge_ticket` destroys this item's rows, then its children**
+
+One helper beside it, and the cascade written out in the body:
+
+```python
+def _purge_child(actor, ticket, *, source: str, row) -> dict[str, int]:
+    """Run ONE child ticket's handlers, delete it, record its own
+    content-free event. NO CASCADE OF ITS OWN -- a child is never asked
+    for children, so a link that somehow pointed back at its own parent
+    could not recurse."""
+    removed = run_retention(ticket.kind, ticket.key)
+    kind, key, label = ticket.kind, ticket.key, ticket.label
+    ticket.delete()
+    audit.record(actor, CONTENT_PURGED, target_type=kind, target_key=key,
+                 target_label=label if row.audit_detail else "",
+                 source=source, kind=kind, removed=removed)
+    return removed
+```
+
+and in `purge_ticket`, between the `select_for_update` read and the ticket's own delete:
+
+```python
+        # THIS ITEM'S ROWS FIRST, THEN THE CHILDREN, AND THE ORDER IS
+        # LOAD-BEARING. It is the filesystem-last rule
+        # `identity/contracts/cascades.py` states: a filesystem delete
+        # has no rollback, so a row handler that raised AFTER files were
+        # removed would leave a resurrected row pointing at bytes that
+        # are gone. A child here is a generated image, whose handler is
+        # in the FILES band, so every row this click touches is gone
+        # before the first byte is.
+        # READ UNDER THE SAME LOCK, and read before anything is
+        # destroyed: the parent row's delete would cascade these away
+        # without ever running their handlers. `order_by("pk")` because
+        # the table's own ordering is newest-first, and the order this
+        # destroys things in is worth being the order they were written
+        # in rather than whichever way a timestamp fell.
+        children = list(current.children.select_for_update().order_by("pk"))
+        removed = run_retention(current.kind, current.key)
+        for child in children:
+            child_removed = _purge_child(actor, child, source=source, row=row)
+            for child_label, count in child_removed.items():
+                removed[child_label] = removed.get(child_label, 0) + count
+        kind, key, label = current.kind, current.key, current.label
+        current.delete()
+        audit.record(actor, CONTENT_PURGED, target_type=kind, target_key=key,
+                     target_label=label if row.audit_detail else "",
+                     source=source, kind=kind, removed=removed)
+```
+
+`purge_ticket`'s docstring gains three sentences. (a) The returned map is this click's whole total: a child's counts are merged in under that handler's own label ("Generated image": 2), because what the person clicked destroyed all of it — the map is keyed by HANDLER LABEL, which is what the Deletion log renders, and the labels that can meet in one such map are distinct, pinned by `foundation/ops/tests/test_deletion_coverage.py::test_labels_that_meet_in_one_purge_map_are_distinct` (distinct within a kind, and no handler wearing another kind's plain name); two labels colliding there would pool their numbers into a line nobody could read apart. (b) EVERY TICKET DESTROYED WRITES ITS OWN `content.purged` EVENT, the children included, because the Deletion log lists tickets — an image listed with a date of its own is a line of its own when that date is spent — so one click can write several content-free events and the parent's is the one that carries the whole map. (c) A child restored on its own, or an item that already had a ticket of its own when this delete ran, has no link to this ticket and is therefore not purged with it: somebody put that image back, or was shown a different date for it, and this click is not that date.
+
+- [ ] **Step 9: The sweep says how many items it destroyed**
+
+In `_purge_due`, the count is read before the purge and covers the tickets the purge cascades:
+
+```python
+        # COUNTED BEFORE THE PURGE, because afterwards these rows are
+        # gone: one due ticket can destroy its children too, and each of
+        # those is an item somebody was shown a date for.
+        addressed = 1 + DeletionTicket.objects.filter(parent_id=ticket.pk).count()
+```
+with `purged += addressed` in place of `purged += 1`.
+
+`sweep`'s docstring, `_purge_due`'s "COUNTS ONLY REAL PURGES" paragraph and `manage.py purge_deleted`'s `--limit` help all gain the same fact in their own words: the number is ITEMS DESTROYED, one per ticket, a parent's children included; `limit` bounds how many due tickets one pass starts from, not how many items it ends up destroying, so a pass that reaches a parent with children destroys more than `limit` items and the next pass simply finds fewer. A child the sweep reaches before its parent is an ordinary due ticket and purges on its own; the parent then finds one child fewer and completes.
+
+- [ ] **Step 10: Document it**
+
+- `identity/README.md`, retention section: one paragraph for `children` — what it is, that it is asked at delete time only and its answer recorded as a parent link on the ticket, the three things that link governs (restore removes them, permanent delete destroys them after this item's own rows, the sweep counts them), and the two things a person can observe: a child restored alone survives its parent's permanent delete, and an item already deleted on its own keeps its own date and is untouched by either. The Deleted page section: a child row looks like any other row. No column names beyond `identity/`; the image case is named as the example, not as a dependency.
+- `docs/adr/0019-deletion-and-retention.md`: the one-table decision stands unchanged and is restated as standing — the parent link is a COLUMN on that same table, recorded here as decision text, and "three hold columns written by nothing" stays true because this is a fourth column that is written. Say what it buys (an item that arrived with another can be put back with it, and one deleted on its own is never moved by somebody else's delete) and what it costs (one nullable self-reference, indexed, in the feature's single migration).
+- `docs/OPERATIONS.md`, "Deleted content and your backups": the `purge_deleted` paragraph's bound sentence — each run starts from at most `--limit` due items and may destroy more than that, because destroying a chat destroys the pictures it carried, each of which was listed with its own date.
+
+- [ ] **Step 11: Gate and commit**
+
+Check first that fewer than two pytest processes are running on this machine (`pgrep -fl pytest`); if two are, wait. Then, one foreground Bash call each, `timeout: 600000`, each prefixed with the test `DATABASE_URL` your rules file gives:
+
+```bash
+DATABASE_URL=… .venv/bin/pytest -q -p no:cacheprovider -W ignore identity/tests agents/tests/test_retention.py foundation/ops/tests/test_import_law.py foundation/ops/tests/test_column_boundaries.py foundation/ops/tests/test_agent_standards.py foundation/ops/tests/test_docs_model_names.py foundation/ops/tests/test_docs_sync.py foundation/ops/tests/test_deletion_coverage.py
+FARABUNKER_FEATURES=vision,media DATABASE_URL=… .venv/bin/pytest -q -p no:cacheprovider -W ignore identity/tests agents/tests/test_retention.py foundation/ops/tests/test_import_law.py foundation/ops/tests/test_column_boundaries.py foundation/ops/tests/test_agent_standards.py foundation/ops/tests/test_docs_model_names.py foundation/ops/tests/test_docs_sync.py foundation/ops/tests/test_deletion_coverage.py
+DATABASE_URL=… .venv/bin/python manage.py makemigrations --check --dry-run
+```
+
+`makemigrations --check --dry-run` reporting no changes is what proves the amended `0004` matches the model. If it reports a change, the migration file is wrong — fix the file, never add a second migration.
+
+```bash
+git add identity/contracts/cascades.py identity/cascades.py identity/models.py identity/migrations/0004_deletion_ticket_and_retention_settings.py identity/retention.py identity/management/commands/purge_deleted.py identity/README.md identity/tests/test_retention_contracts.py identity/tests/test_retention_runner.py identity/tests/test_retention_service.py identity/tests/test_deletion_ticket.py foundation/ops/tests/test_deletion_coverage.py docs/adr/0019-deletion-and-retention.md docs/OPERATIONS.md
+git commit -m "feat(identity): child tickets — a deleted item's dependents get their own date"
+```
+
+Still exactly one migration: `0004` is amended in place, because it has never run outside test and preview databases.
+
+---
+
+### Task 15B: `tools/vision` — one ticket, one generation; and the map split from the delete
+
+**Steward: the vision steward.** Clearance packet: the diff against `tools/vision/retention.py`, `tools/vision/services.py` and `tools/vision/apps.py`. `tools/vision/visibility.py` is NOT touched by this task — `visible_jobs` and `may_read_job` already exclude `vision_job` tickets and must stay exactly as they are.
+
+**Files:**
+- Modify: `tools/vision/retention.py` (`resolve_artifact_jobs`, `purge_job`; `purge_artifacts` becomes a one-liner over the two)
+- Modify: `tools/vision/services.py` (`existing_job_ids` — the resolver's existence check, in the one file that may ask it)
+- Modify: `tools/vision/apps.py` (register the `vision_job` handler)
+- Modify: `foundation/ops/tests/test_deletion_coverage.py` (`vision.GenerationJob` moves from `_EXEMPT` to `_COVERED`)
+- Modify: `tools/vision/README.md`
+- Test: `tools/vision/tests/test_retention.py` (adapt + extend)
+
+**Held tests:** `tools/vision/tests/test_retention.py::TestMappingReferencesToJobs` and `::TestEmptyInputCostsNothing` — re-pinned onto `resolve_artifact_jobs`, which RESOLVES and deletes nothing; within the first class, `test_it_is_idempotent` changes MEANING and not just its subject (it asserted a second call answers `0`; a resolver answers the same list twice, because resolving twice is not destroying twice), and `test_it_goes_through_delete_job_so_the_files_and_the_sweep_run` moves onto `purge_job`. `::TestDeleteJobs` and every test in `tools/vision/tests/test_visibility.py` stand unchanged. Name the re-pinned classes, and that one test, in the commit message.
+
+**Interfaces:**
+- Consumes: `identity.contracts.retention.KIND_VISION_JOB`; `identity.contracts.cascades.RetentionHandler`/`register_retention_handler`/`ORDER_FILES`; `agents.contracts.artifacts.parse_artifact`; `tools.vision.services.delete_jobs`.
+- Produces, for 15C:
+  - `tools.vision.services.existing_job_ids(candidates) -> list[str]` — which of these job ids still name a job, one query for the whole batch, none for an empty input.
+  - `tools.vision.retention.resolve_artifact_jobs(refs, generation_ids) -> list[str]` — job primary keys as strings, deduped, and ONLY jobs that exist; NO delete, NO query at all for two empty inputs; an unparseable reference or id is dropped and logged WITHOUT its raw value.
+  - `tools.vision.retention.purge_job(key: str) -> int` — 1 or 0, idempotent.
+  - registration `RetentionHandler(kind=KIND_VISION_JOB, key="vision.job", label="Generated image", handler="tools.vision.retention.purge_job", order=ORDER_FILES)`.
+
+- [ ] **Step 1: Write the failing tests**
+
+Re-point the existing mapping class at the resolver (`assert resolve_artifact_jobs([f"output:{output.pk}"], []) == [str(job.pk)]`, the dedupe case answering a one-element list, the unparseable case answering `[]`, `test_a_reference_that_matches_no_row_is_ignored` and `test_a_uuid_that_matches_no_job_is_ignored` both still answering `[]` — the second one is the whole point of the existence check in Step 3 — and `test_it_is_idempotent` asserting the SAME list twice rather than `0` the second time, because resolving twice is not destroying twice), keep the two `caplog` tests, and re-pin `TestEmptyInputCostsNothing` to assert `resolve_artifact_jobs([], []) == []` inside `django_assert_num_queries(0)` with `services.delete_jobs` monkeypatched to record that it was never called. Then add:
+
+```python
+class TestOnlyJobsThatExistComeBack:
+    """A STORED GENERATION ID CAN NAME A JOB THAT IS ALREADY GONE --
+    the turn keeps the id after the picture was deleted from the
+    gallery. That was harmless while these ids fed a delete; it is not
+    harmless now that each one becomes a ticket, because a ticket for a
+    job nobody has is a "Generated image" row on the Deleted page with
+    a date and a Restore button, naming a picture nobody can restore
+    and nothing will ever destroy."""
+
+    def test_a_generation_id_whose_job_is_gone_is_dropped(self):
+        job = _generation()
+        services.delete_jobs([job.pk])
+        assert resolve_artifact_jobs([], [str(job.pk)]) == []
+
+    def test_a_live_job_and_a_gone_one_answer_only_the_live_one(self):
+        live = _generation()
+        gone = _generation()
+        services.delete_jobs([gone.pk])
+        assert resolve_artifact_jobs([], [str(live.pk), str(gone.pk)]) == [
+            str(live.pk)]
+
+    def test_the_check_is_one_query_for_the_whole_batch(
+            self, django_assert_num_queries):
+        """Two ids, one existence query -- never one per id. The
+        reference channel pays its own FK hop on top; this pins the
+        check itself."""
+        first = _generation()
+        second = _generation()
+        with django_assert_num_queries(1):
+            assert resolve_artifact_jobs(
+                [], [str(first.pk), str(second.pk)]) == sorted(
+                    [str(first.pk), str(second.pk)])
+
+    def test_a_reference_costs_its_hop_and_the_check(
+            self, django_assert_num_queries):
+        job = _generation()
+        output = _output(job=job)
+        with django_assert_num_queries(2):
+            assert resolve_artifact_jobs([f"output:{output.pk}"], []) == [
+                str(job.pk)]
+```
+
+```python
+class TestPurgeJob:
+    """The `vision_job` kind's registered handler: ONE generation,
+    addressed by its own ticket."""
+
+    def test_it_removes_the_row_its_children_and_its_file(self, tmp_path, settings):
+        settings.GENERATED_DIR = tmp_path
+        job = _generation()
+        path = store.store_output(job.pk, 0, "lighthouse.png", b"bytes on disk")
+        GeneratedOutput.objects.create(job=job, index=0, path=path,
+                                       media_type="image/png")
+        assert purge_job(str(job.pk)) == 1
+        assert not GenerationJob.objects.filter(pk=job.pk).exists()
+        assert not GeneratedOutput.objects.filter(job_id=job.pk).exists()
+        assert not Path(path).exists()
+
+    def test_it_is_idempotent(self):
+        job = _generation()
+        purge_job(str(job.pk))
+        assert purge_job(str(job.pk)) == 0
+
+    def test_a_job_that_does_not_exist_is_zero_not_an_error(self):
+        assert purge_job(str(uuid.uuid4())) == 0
+
+    def test_a_non_uuid_key_removes_nothing(self):
+        assert purge_job("not-a-uuid") == 0
+
+
+class TestTheKindIsRegistered:
+    def test_the_registered_handler_resolves_and_removes_the_job(self):
+        """END TO END THROUGH THE REGISTRY, not through the function
+        name: this is what `identity.retention.purge_ticket` will
+        actually run for a `vision_job` ticket."""
+        specs = retention_handlers(KIND_VISION_JOB)
+        assert [spec.label for spec in specs] == ["Generated image"]
+        job = _generation()
+        assert import_string(specs[0].handler)(str(job.pk)) == 1
+        assert not GenerationJob.objects.filter(pk=job.pk).exists()
+```
+
+That module's header imports only `uuid`, `pytest`, `tools.vision.services`, three models and its own helper today, so this step also adds: `pathlib.Path`, `tools.vision.store`, `django.utils.module_loading.import_string`, `identity.contracts.cascades.retention_handlers`, `identity.contracts.retention.KIND_VISION_JOB`, and the three new names from `tools.vision.retention`. Do NOT import `django.conf.settings` at module scope: `test_it_removes_the_row_its_children_and_its_file` takes pytest's `settings` fixture by that name, and a module-level import of the same name beside it reads as one thing being two. Both branch gate states carry `vision`, so `TestTheKindIsRegistered` needs no flag skip; the registration it asserts is inside `tools/vision/apps.py`'s feature gate, which those states satisfy.
+
+`store.store_output(job_id, index, filename, content)` and `settings.GENERATED_DIR` exist as used.
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `FARABUNKER_FEATURES=vision,media DATABASE_URL=… .venv/bin/pytest -q -p no:cacheprovider -W ignore tools/vision/tests/test_retention.py`
+Expected: FAIL — `ImportError: cannot import name 'resolve_artifact_jobs'`.
+
+- [ ] **Step 3: Split the map from the delete**
+
+In `tools/vision/retention.py`, rename the body of today's `purge_artifacts` to `resolve_artifact_jobs`, ending at the mapping rather than the delete:
+
+```python
+def resolve_artifact_jobs(refs, generation_ids) -> list[str]:
+    """The generation jobs these references and ids name, as primary
+    keys in string form, deduped.
+
+    RESOLVES; DESTROYS NOTHING. The conversation that owns these
+    references hands them over so each job can be given a DELETION OF
+    ITS OWN -- its own ticket, its own date on the Deleted page, its
+    own restore -- rather than being destroyed silently on somebody
+    else's date. `purge_job` below is what finally removes one, on the
+    date that job's own ticket printed.
+
+    Strings, not UUIDs: a ticket key is text, and the caller is
+    building `(kind, key)` pairs for a registry, not a queryset.
+
+    ONLY JOBS THAT STILL EXIST. A conversation's stored generation ids
+    outlive the jobs they name -- the turn keeps the id after the
+    picture was deleted from the gallery -- and every key this answers
+    becomes a TICKET. A ticket for a job nobody has would be a
+    "Generated image" row on the Deleted page with a date and a Restore
+    button, naming a picture nobody can restore and nothing will ever
+    destroy. So both channels' ids go through
+    `services.existing_job_ids` once, together.
+
+    With two empty lists this answers `[]` having run no query at all
+    -- every conversation delete on a box with this column installed
+    reaches this function, and most conversations have no images.
+
+    An unparseable reference or generation id is DROPPED and logged
+    WITHOUT its raw value: this runs inside a deletion, and a deletion
+    must not write what it is destroying somewhere new.
+    """
+```
+The body is today's, with two changes. Today's early `if not job_ids: return 0` returns an `int` from what is now a `list[str]` function: drop that branch. And the function ends by filtering BOTH channels' ids — the FK hops' `job_id`s and the parsed generation ids, already one deduped set — through the existence check, once:
+
+```python
+    return sorted(services.existing_job_ids(job_ids))
+```
+
+An empty set costs nothing: `existing_job_ids` answers `[]` without a query, so the common case (a conversation with no images) still reaches the end of this function having run none.
+
+In `tools/vision/services.py`, beside `delete_jobs` and for the reason `delete_jobs` is there:
+
+```python
+def existing_job_ids(candidates) -> list[str]:
+    """Which of these job ids still name a job, as strings.
+
+    ONE QUERY FOR THE WHOLE BATCH, never one per id, and NO QUERY AT
+    ALL for an empty input -- most conversations reach the retention
+    resolver with nothing to ask about.
+
+    THE SECOND UNSCOPED READ OF `GenerationJob.objects` A DELETION
+    NEEDS, and it lives here for the reason `delete_jobs` below does:
+    only `visibility.py` and this module may query that manager, and
+    "does this row exist" is not a visibility question -- a deletion
+    must see a job nobody may currently look at.
+
+    IT EXISTS BECAUSE A DELETED CHAT'S IMAGES ARE NOW GIVEN DELETIONS
+    OF THEIR OWN. A conversation's turns keep a generation id after the
+    job itself is gone; a key answered for one of those would become a
+    ticket, and a ticket is a row on the Deleted page with a date and a
+    Restore button. This box does not print promises about pictures it
+    does not have.
+    """
+    ids = list(candidates or ())
+    if not ids:
+        return []
+    return [str(job_id) for job_id in
+            GenerationJob.objects.filter(pk__in=ids).values_list("pk", flat=True)]
+```
+
+`candidates` are job primary keys already parsed as UUIDs — which is what both of the resolver's channels produce — so nothing here re-parses text.
+
+Then `purge_artifacts` becomes the two joined, so nothing in the landed tree changes behaviour in this commit:
+
+```python
+def purge_artifacts(refs, generation_ids) -> int:
+    """Today's conversation-purge slot: resolve, then delete. The next
+    change retires this in favour of the child tickets
+    `resolve_artifact_jobs` feeds."""
+    return services.delete_jobs(resolve_artifact_jobs(refs, generation_ids))
+```
+
+and the new handler:
+
+```python
+def purge_job(key: str) -> int:
+    """Destroy ONE generation on its own ticket's date: the row, its
+    `JobInput`/`GeneratedOutput` children by CASCADE, its managed
+    directory, and its best-effort engine-side sweep. Returns 1 or 0.
+
+    THROUGH `services.delete_jobs`, never `GenerationJob.objects`: only
+    `visibility.py` and `services.py` may query that manager in this
+    column, and a purge must reach a job nobody may currently see,
+    which is not a visibility question at all.
+
+    Idempotent: a job already gone, or a key that is not a UUID at all,
+    answers 0 rather than raising -- the ticket may outlive a row an
+    older path removed.
+
+    FILES band: it removes bytes.
+    """
+    try:
+        job_id = uuid.UUID(str(key))
+    except (ValueError, AttributeError, TypeError):
+        return 0
+    return services.delete_jobs([job_id])
+```
+
+- [ ] **Step 4: Register the kind**
+
+In `tools/vision/apps.py::ready()`, INSIDE the feature gate, beside the existing artifact registration:
+
+```python
+        # THIS COLUMN'S ANSWER TO "A DELETED IMAGE'S DATE HAS ARRIVED".
+        # A dotted-path string, like every other registration in this
+        # method, because `identity/` may not import `tools/` at all.
+        from identity.contracts.cascades import (
+            ORDER_FILES, RetentionHandler, register_retention_handler,
+        )
+        from identity.contracts.retention import KIND_VISION_JOB
+
+        register_retention_handler(RetentionHandler(
+            kind=KIND_VISION_JOB, key="vision.job", label="Generated image",
+            handler="tools.vision.retention.purge_job", order=ORDER_FILES))
+```
+
+- [ ] **Step 5: The coverage gate tells the truth now**
+
+In `foundation/ops/tests/test_deletion_coverage.py`, `"vision.GenerationJob"`'s hand-written line leaves both literal dicts and becomes an if/else written after them — this list's FIRST feature-dependent row, and BOTH BRANCHES ARE REQUIRED. The model carries the owner pair and `tools.vision` is in `INSTALLED_APPS` unconditionally, so the walk finds it in every flag state: covered-only would red `test_every_covered_model_has_a_registered_handler_that_resolves` with the feature off (no handler is registered), and covered-when-on-with-the-exempt-line-deleted would red `test_every_owned_model_is_covered_or_exempt` the same way — an owned model in neither dict. Neither branch gate state carries the flag off, so an incomplete gate here ships unnoticed.
+
+```python
+# A generated image is its own deletion kind, reached from the gallery
+# and as a deleted chat's child -- but the handler that answers for it
+# is registered by a column that only starts when that feature is on,
+# while the model itself is installed either way. BOTH BRANCHES MATTER:
+# with the feature off nothing registers the handler, and an owned
+# table still has to be accounted for in one dict or the other.
+if "vision" in settings.FARABUNKER_FEATURES:
+    _COVERED["vision.GenerationJob"] = (KIND_VISION_JOB,)
+else:
+    _EXEMPT["vision.GenerationJob"] = (
+        "the image column is not installed in this flag state, so nothing "
+        "registers its handler; with the feature on it is covered by the "
+        "vision_job kind")
+```
+
+`django.conf.settings` joins that module's imports, and `KIND_VISION_JOB` is ADDED to the `identity.contracts.retention` import line that is already there — never a rewrite of that line: the previous change put `KIND_LABELS` and `RETENTION_KINDS` on it for the label pin, and both must survive. After this task the line reads:
+
+```python
+from identity.contracts.retention import (
+    KIND_CONVERSATION, KIND_LABELS, KIND_VISION_JOB, RETENTION_KINDS,
+)
+```
+
+`rag.AskRecord` stays exempt until slice 2.
+
+- [ ] **Step 6: `tools/vision/README.md`**
+
+Update the image-cascade paragraph to the new shape: the column registers TWO things — the resolver, which maps a conversation's references and generation ids to the keys of jobs that still exist and destroys nothing, and `purge_job`, the `vision_job` kind's handler, which destroys exactly one generation on its own ticket's date. Say in one sentence why the resolver checks existence at all: a stored generation id outlives the job it names, and each key it answers becomes a row on the Deleted page with a date and a Restore button. Say once, here, that `delete_job`'s best-effort engine-side sweep runs for each job purged. The accepted-residue paragraph (a generation whose tool turn was never written) stands; the sentence promising that a conversation purge destroys images directly is removed.
+
+- [ ] **Step 7: Gate and commit** (two-process check first; one foreground call each, `timeout: 600000`, each prefixed with the test `DATABASE_URL` your rules file gives)
+
+```bash
+DATABASE_URL=… .venv/bin/pytest -q -p no:cacheprovider -W ignore tools/vision agents/tests/test_retention.py identity/tests/test_deletion_demo.py foundation/ops/tests
+FARABUNKER_FEATURES=vision,media DATABASE_URL=… .venv/bin/pytest -q -p no:cacheprovider -W ignore tools/vision agents/tests/test_retention.py identity/tests/test_deletion_demo.py foundation/ops/tests
+DATABASE_URL=… .venv/bin/python manage.py makemigrations --check --dry-run
+```
+
+```bash
+git add tools/vision/retention.py tools/vision/services.py tools/vision/apps.py tools/vision/README.md tools/vision/tests/test_retention.py foundation/ops/tests/test_deletion_coverage.py
+git commit -m "feat(vision): purge one generation by ticket, and split the artifact map from the delete
+
+Re-pins tools/vision/tests/test_retention.py::TestMappingReferencesToJobs (including its test_it_is_idempotent, which now asserts the same list twice rather than a second answer of zero) and ::TestEmptyInputCostsNothing onto resolve_artifact_jobs, which resolves and deletes nothing."
+```
+
+---
+
+### Task 15C: `agents/` — the chat's images become its children; the demo; the docs
+
+**Steward: the agents/rag/queue steward, plus the vision steward for the two `tools/vision` hunks** (one registration line, one deleted function).
+
+**Files:**
+- Modify: `agents/contracts/artifacts.py` (the slot becomes a resolver: `register_artifact_children` / `artifact_children`)
+- Modify: `agents/retention.py` (`conversation_children`; `purge_conversation` drops the slot call)
+- Modify: `agents/apps.py` (`children=` on the conversation handler)
+- Modify: `tools/vision/apps.py` (register on the new slot), `tools/vision/retention.py` (delete `purge_artifacts`)
+- Modify: `agents/README.md`, `tools/vision/README.md`, `identity/README.md`, `docs/adr/0019-deletion-and-retention.md`, `docs/OPERATIONS.md`, `docs/EXTENDING.md`
+- Modify: `docs/superpowers/specs/2026-09-21-deletion-semantics-design.md` — §3.7's "The seam" block prints the OLD pair (`register_artifact_purge(dotted_path)` / `artifact_purge()`) and the old `-> int` handler signature; it is the only place outside code that names them, and it changes with them.
+- Test: `agents/tests/test_retention.py` (re-pin), `agents/contracts/tests/test_artifacts.py` (re-pin), `identity/tests/test_deletion_demo.py` (extend + two re-pins)
+
+**Held tests, re-pinned by name in the commit message:**
+- `agents/tests/test_retention.py::TestFindingTheGeneratedImages` — the same two channels, now asserted through `conversation_children` rather than through a slot the purge calls.
+- `agents/tests/test_retention.py::TestBytesGoLast` — its subject is gone: `purge_conversation` no longer touches a file-deleting slot at all. Replaced by `TestThePurgeTouchesNoImages`, asserting the slot is never resolved during a conversation purge.
+- `agents/tests/test_retention.py::test_with_no_slot_registered_the_purge_still_completes` — re-pointed onto `conversation_children`, which is what the slot now feeds.
+- `agents/tests/test_retention.py::TestZeroDayEndToEnd` — extended to assert the image's ticket and row are both gone after a zero-day delete through the real registrations.
+- `identity/tests/test_deletion_demo.py::TestTheDemo::test_step_5_the_purged_event_is_content_free_with_the_toggle_off` — narrowed to the conversation's own `content.purged` event (`filter(action=CONTENT_PURGED, target_type=copy.KIND_CONVERSATION).get()`), because the image now writes one of its own in the vision flag state.
+- `identity/tests/test_deletion_demo.py::TestTheDemo::test_step_2b_restore_brings_it_back_before_step_3_deletes_it_again` — its `restored = audit.by_action([CONTENT_RESTORED]); assert len(restored) == 1` counts every restore event on the box, and the image now writes one too. Narrowed to the conversation's own (`[e for e in restored if e.target_type == copy.KIND_CONVERSATION and e.target_key == str(world.conversation.pk)]`), with the image's own restored event asserted separately inside the same `"vision" in settings.FARABUNKER_FEATURES` guard the module already uses — the point of the child ticket is that the picture came back too, so it is asserted rather than filtered away.
+- `agents/contracts/tests/test_artifacts.py`'s slot tests — renamed onto the new names.
+
+**Interfaces:**
+- Consumes: 15A's `RetentionHandler.children`, `run_children` and `DeletionTicket.parent`; 15B's `tools.vision.retention.resolve_artifact_jobs` and the registered `vision_job` handler.
+- Produces: `agents.contracts.artifacts.register_artifact_children(dotted_path)` / `artifact_children() -> str | None` — resolver signature `(refs, generation_ids) -> list[str]`; `agents.retention.conversation_children(key) -> list[tuple[str, str]]`; the conversation handler registered with `children="agents.retention.conversation_children"`.
+
+- [ ] **Step 1: Write the failing tests**
+
+In `agents/tests/test_retention.py`, rename the module's fake and fixture onto the new slot (`fake_artifact_children(refs, generation_ids)` recording into `SEEN` and returning a list of job-key strings), re-point `TestFindingTheGeneratedImages` at `conversation_children(str(conversation.pk))`, re-point the existing `test_with_no_slot_registered_the_purge_still_completes` onto the new question — keeping its own comment about why clearing the slot here is safe (`_isolated_slot` restores whatever the real registration put there) —
+
+```python
+    def test_with_no_resolver_registered_there_are_no_children(self):
+        """Safe to clear here: `_isolated_slot` restores whatever the
+        real `tools/vision/apps.py::ready()` registered."""
+        artifacts_module._ARTIFACT_CHILDREN = None
+        conversation = make_conversation()
+        make_turn(conversation=conversation, role="tool", artifacts=["output:1"])
+        assert conversation_children(str(conversation.pk)) == []
+```
+
+and add:
+
+```python
+class TestThePurgeTouchesNoImages:
+    """A generated image is no longer destroyed by the conversation's
+    own purge: it has a ticket, a date and a restore of its own, and it
+    is purged under that ticket -- after this handler has finished, so
+    rows still go before bytes. So this handler never reaches a file at
+    all."""
+
+    def test_the_resolver_is_never_called_by_a_purge(self):
+        conversation = make_conversation()
+        make_turn(conversation=conversation, role="tool", artifacts=["output:1"])
+        purge_conversation(str(conversation.pk))
+        assert SEEN == []
+
+
+class TestTheChildrenArePairs:
+    def test_each_job_key_becomes_a_vision_job_pair(self):
+        conversation = make_conversation()
+        job_id = str(uuid.uuid4())
+        make_turn(conversation=conversation, role="tool", artifacts=[],
+                  data={"id": job_id, "status": "succeeded"})
+        assert conversation_children(str(conversation.pk)) == [("vision_job", job_id)]
+
+    def test_a_key_that_is_not_a_uuid_answers_empty(self):
+        assert conversation_children("not-a-uuid") == []
+```
+
+In `identity/tests/test_deletion_demo.py`, the image steps (all guarded by `if "vision" in settings.FARABUNKER_FEATURES`, the same guard the module already uses):
+
+```python
+    def test_step_2c_the_image_is_hidden_listed_and_unfetchable(self, client, world):
+        """THE WHOLE POINT OF THE CHILD TICKET: the picture goes when
+        the chat goes, it is NAMED on the Deleted page with its own
+        date, and its direct URL stops answering -- rather than sitting
+        in the gallery until a date nobody was shown."""
+        if "vision" not in settings.FARABUNKER_FEATURES:
+            pytest.skip("the image column is not installed in this flag state")
+        with posture("personal"):
+            sign_in(client, world.user)
+            client.post(reverse("chat-conversation-delete",
+                                args=[world.conversation.id]))
+            principal = user_principal(world.user)
+
+            from tools.vision.visibility import visible_jobs
+            assert list(visible_jobs(principal)) == []
+            assert client.get(reverse("vision-output-file",
+                                      args=[world.output.pk])).status_code == 404
+
+            child = DeletionTicket.objects.get(kind=copy.KIND_VISION_JOB,
+                                               key=str(world.job.pk))
+            parent = DeletionTicket.objects.get(kind=copy.KIND_CONVERSATION)
+            assert child.parent_id == parent.pk
+            assert child.purge_on == parent.purge_on
+            body = client.get(reverse("identity-deleted")).content.decode()
+            assert copy.KIND_LABELS[copy.KIND_VISION_JOB] in body
+            # The row is still there and the bytes are still on disk --
+            # deleted is not destroyed.
+            assert Path(world.output_path).exists()
+
+    def test_step_2d_restoring_the_chat_restores_its_image(self, client, world):
+        if "vision" not in settings.FARABUNKER_FEATURES:
+            pytest.skip("the image column is not installed in this flag state")
+        with posture("personal"):
+            sign_in(client, world.user)
+            client.post(reverse("chat-conversation-delete",
+                                args=[world.conversation.id]))
+            ticket = DeletionTicket.objects.get(kind=copy.KIND_CONVERSATION)
+            client.post(reverse("identity-deleted-restore", args=[ticket.pk]))
+
+            from tools.vision.visibility import visible_jobs
+            principal = user_principal(world.user)
+            assert [job.pk for job in visible_jobs(principal)] == [world.job.pk]
+            assert not DeletionTicket.objects.filter(
+                kind=copy.KIND_VISION_JOB).exists()
+            assert client.get(reverse("vision-output-file",
+                                      args=[world.output.pk])).status_code == 200
+```
+
+`test_step_2b_restore_brings_it_back_before_step_3_deletes_it_again` keeps its shape and narrows its count to the conversation's own restore event, then asserts the image's own beside it when the column is installed:
+
+```python
+            restored = audit.by_action([CONTENT_RESTORED])
+            own = [e for e in restored
+                   if e.target_type == copy.KIND_CONVERSATION
+                   and e.target_key == str(world.conversation.pk)]
+            assert len(own) == 1
+            if "vision" in settings.FARABUNKER_FEATURES:
+                assert [e.target_key for e in restored
+                        if e.target_type == copy.KIND_VISION_JOB] == [
+                            str(world.job.pk)]
+```
+
+`test_step_3_delete_permanently_leaves_nothing_on_this_box` keeps its existing image assertions — they now pass through the child ticket rather than through the conversation's own handler — and gains one line: `assert not DeletionTicket.objects.exists()` (no ticket of any kind survives the chat's permanent delete).
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `FARABUNKER_FEATURES=vision,media DATABASE_URL=… .venv/bin/pytest -q -p no:cacheprovider -W ignore agents/tests/test_retention.py identity/tests/test_deletion_demo.py`
+Expected: FAIL — `ImportError: cannot import name 'conversation_children'`.
+
+- [ ] **Step 3: The slot becomes a resolver**
+
+In `agents/contracts/artifacts.py`, rename `_ARTIFACT_PURGE` → `_ARTIFACT_CHILDREN`, `register_artifact_purge` → `register_artifact_children`, `artifact_purge` → `artifact_children`, and rewrite the docstrings:
+
+> Register the function that says WHICH GENERATIONS a conversation's artifact references and generation ids name. Signature `(refs: Sequence[str], generation_ids: Sequence[str]) -> list[str]` — job keys, destroying nothing. **The name changed with the job:** this slot used to hand a tool column a list and let it delete; it now asks a question, because each of those generations is given a deletion of its own — its own ticket, its own date on the Deleted page, its own restore — instead of being destroyed silently on another item's date. One slot, not a per-kind dict, for the reason it always was: the agents column COMPUTES the values and exactly one tool column knows what they mean.
+
+- [ ] **Step 4: `agents/retention.py`**
+
+Delete step 4 of `purge_conversation` (the `artifact_purge()` block) and its docstring clause; the docstring's ORDER list ends at the scrub, and gains:
+
+> **A conversation's generated images are NOT destroyed here.** Each one carries a ticket of its own, written when this conversation was deleted (`conversation_children` below), and is destroyed by the image column's own handler on that ticket's date — or, when somebody clicks "Delete permanently" on this conversation, by the same click, after this function has finished: the purge runs this item's row handlers first and destroys its children's bytes afterwards. This function therefore reaches no file on disk at all.
+
+The module docstring's FILES-band paragraph says this handler is in that band partly because "it reaches bytes on disk through the registered artifact purge", which stops being true here: correct it to the half that is still true — it must READ the conversation's turns before it deletes them, and a handler that reads and writes orders its own work internally. **The band itself is unchanged** (`order=ORDER_FILES` in `agents/apps.py`): moving it would reorder this column against the other handlers registered for the same kind, which is not this change's business.
+
+Then add `conversation_children`. Imports: `uuid` is already at module scope; `django.utils.module_loading.import_string` and `identity.contracts.retention.KIND_VISION_JOB` are NEW module-scope imports (this module imports nothing from `identity` today, and `identity.contracts` is a named seam this column may use); `artifact_children` replaces `artifact_purge` in the existing `agents.contracts.artifacts` line; `_collect` is this module's own.
+
+```python
+def conversation_children(key: str) -> list[tuple[str, str]]:
+    """The tickets that go with this conversation's own: one per
+    generation its turns reached.
+
+    THE SAME COLLECT STEP THE PURGE USES, not a second copy of it --
+    both channels, the `output:`/`input:` artifact references and the
+    `data["id"]` generation ids that catch a job which failed and minted
+    no output at all.
+
+    ASKED AT DELETE TIME, and the conversation's turns are the only
+    truth about what it reached. Nothing here writes anything; the
+    tickets the answer becomes are what restore and permanent delete
+    follow afterwards.
+
+    WITH NOTHING REGISTERED ON THE SLOT -- a box with the image column
+    uninstalled -- this answers `[]`, and a chat delete tickets only the
+    chat, which is the honest answer on that box.
+    """
+    try:
+        conversation_id = uuid.UUID(str(key))
+    except (ValueError, AttributeError, TypeError):
+        return []
+    dotted = artifact_children()
+    if dotted is None:
+        return []
+    refs, generation_ids, _invocation_ids = _collect(conversation_id)
+    return [(KIND_VISION_JOB, str(job_key))
+            for job_key in import_string(dotted)(refs, generation_ids)]
+```
+
+- [ ] **Step 5: Register the children**
+
+`agents/apps.py`: the conversation `RetentionHandler` gains `children="agents.retention.conversation_children"`, with two sentences of comment — a deleted chat's images are content of their own and get tickets of their own, and the answer is computed from the chat's turns at the moment of the delete.
+
+`tools/vision/apps.py`: the one registration line becomes `register_artifact_children("tools.vision.retention.resolve_artifact_jobs")`. `tools/vision/retention.py` loses `purge_artifacts` (now unreferenced) and its one remaining test.
+
+- [ ] **Step 6: The docs, same commit**
+
+- `docs/superpowers/specs/2026-09-21-deletion-semantics-design.md` §3.7, "The seam": the printed pair becomes `register_artifact_children(dotted_path: str) -> None` / `artifact_children() -> str | None`, and the handler-signature sentence becomes `(refs: Sequence[str], generation_ids: Sequence[str]) -> list[str]` — job keys, which the delete turns into tickets of their own. The single-slot reasoning beneath it is unchanged and stays.
+- `docs/adr/0019-deletion-and-retention.md`: a new decision paragraph, "A deleted item's dependents get tickets of their own" — the problem (an image that was hidden and then destroyed without ever being disclosed), the mechanism (one optional dotted-path `children` resolver asked at delete time, its answer recorded as a parent link on the ticket table), the order rule at purge and why, and the two consequences a person can observe: restoring the chat restores its images, and an image restored on its own — or deleted on its own earlier — survives the chat's permanent delete because somebody said to keep it, or was shown a date of its own for it. **Remove the residue sentence** that says a conversation's images stay until the conversation's own purge; that residue no longer exists.
+- `docs/OPERATIONS.md`, "Deleted content and your backups": one sentence — a deleted conversation's generated images are listed individually on the Deleted page with the same date, and can be restored individually.
+- `docs/EXTENDING.md`, "Registering a retention handler": a subsection on the `children` callback — signature, that it must be side-effect-free (it is asked inside the delete's transaction), that its pairs become ordinary tickets with ordinary handlers linked to the parent's ticket, the order guarantee at purge, and that a child restored alone stays.
+- `identity/README.md` (the Deleted page section): child rows look like any other row.
+- `agents/README.md`: replace the "LAST — bytes last — …artifact-purge slot…" paragraph with the children shape.
+- `tools/vision/README.md`: the resolver is now the registered answer to that slot.
+
+- [ ] **Step 7: Gate and commit** (two-process check first; one foreground call each, `timeout: 600000`, each prefixed with the test `DATABASE_URL` your rules file gives)
+
+```bash
+DATABASE_URL=… .venv/bin/pytest -q -p no:cacheprovider -W ignore agents identity/tests tools/vision foundation/ops/tests
+FARABUNKER_FEATURES=vision,media DATABASE_URL=… .venv/bin/pytest -q -p no:cacheprovider -W ignore agents identity/tests tools/vision foundation/ops/tests
+DATABASE_URL=… .venv/bin/python manage.py makemigrations --check --dry-run
+```
+
+```bash
+git add agents/contracts/artifacts.py agents/retention.py agents/apps.py agents/README.md agents/tests/test_retention.py agents/contracts/tests/test_artifacts.py tools/vision/apps.py tools/vision/retention.py tools/vision/tests/test_retention.py tools/vision/README.md identity/README.md identity/tests/test_deletion_demo.py docs/adr/0019-deletion-and-retention.md docs/OPERATIONS.md docs/EXTENDING.md docs/superpowers/specs/2026-09-21-deletion-semantics-design.md
+git commit -m "feat(agents): a deleted chat's images get their own tickets
+
+Re-pins agents/tests/test_retention.py::TestFindingTheGeneratedImages, ::TestBytesGoLast (the conversation purge no longer reaches a file-deleting slot) and test_with_no_slot_registered_the_purge_still_completes (re-pointed onto conversation_children), agents/contracts/tests/test_artifacts.py's slot tests (renamed with the seam), and identity/tests/test_deletion_demo.py::TestTheDemo::test_step_5_the_purged_event_is_content_free_with_the_toggle_off and ::test_step_2b_restore_brings_it_back_before_step_3_deletes_it_again (both narrowed to the conversation's own event, now that an image writes one of its own)."
+```
+
+Name only these files to `git add`: this plan document and the other briefs are uncommitted work in the same tree, and a `git add docs/` would sweep them in.
+
+---
+
+### Task 15D: the organisation posture keeps a deleted item until its date
+
+Spec §3.10's table already defines this column: on the enterprise posture, nobody destroys content before the cliff; the control is not rendered and the POST refuses with its own sentence. This task builds exactly that one cell, under the owner's ruling of 2026-09-22 — a person may put a deleted item back, but where the period is enforced nobody may destroy it early. **The hold control and the operator-set cliff floor stay deferred** (spec §10.10) — no hold column is written, no new setting, no second mode. That deferral list currently also names this refusal, and §10.10 is amended in this task's own commit to strike it: the tree must not assert both that the refusal is built and that it is deferred.
+
+Child image tickets (15A–15C) inherit this automatically: the page and the POST both go through `may_purge`, and a child ticket is an ordinary ticket.
+
+**Files:**
+- Modify: `identity/contracts/retention.py` (one sentence-builder beside `purge_on_line`)
+- Modify: `identity/retention.py` (`may_purge`)
+- Modify: `identity/views.py` (`deleted_purge`)
+- Modify: `identity/templates/identity/deleted.html` (COMMENT only — the control is already gated on `row.may_purge`)
+- Modify: `foundation/settings_help.py` (one sentence on two cards)
+- Modify: `docs/adr/0019-deletion-and-retention.md`, `identity/README.md`, `docs/OPERATIONS.md`, `docs/superpowers/specs/2026-09-21-deletion-semantics-design.md` (every passage listed in Step 7 — the claim that this posture behaves exactly as personal does recurs in seven places, and one of them left standing contradicts the code)
+- Test: `identity/tests/test_retention_contracts.py`, `identity/tests/test_retention_service.py`, `identity/tests/test_deleted_page.py`
+
+**Held tests:** `identity/tests/test_deleted_page.py::TestRestoreAndPurge::test_the_enterprise_posture_behaves_exactly_as_personal_does` — this asserts the opposite of what this task builds; renamed to `test_the_enterprise_posture_keeps_an_item_until_its_date` and inverted. Name it in the commit message. `test_the_page_renders_no_hold_control_in_any_posture` stands unchanged — no hold control is added. `identity/tests/test_route_matrix.py`'s `identity-deleted-purge` cells stand: the refusal is a flashed sentence and a redirect (302), the same status the allowed cell answers, and a row this principal has no standing over is still a 404.
+
+**Interfaces:**
+- Consumes: `identity.contracts.postures.POSTURE_ENTERPRISE`; `identity.models.IdentitySettings.posture`.
+- Produces: `identity.contracts.retention.purge_refused_line(day) -> str`; `may_purge` returning False for every principal on the enterprise posture.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# identity/tests/test_retention_contracts.py, in TestTheCopyIsDeclaredOnceInPython
+    def test_the_refusal_says_what_can_still_be_done(self):
+        assert retention.purge_refused_line(datetime.date(2026, 10, 21)) == (
+            "This item is kept until 21 October 2026. "
+            "It can be restored, not destroyed early.")
+```
+and add that sentence to the existing `test_the_copy_never_says_ticket_cliff_or_sweep` word list.
+
+```python
+# identity/tests/test_retention_service.py
+class TestTheOrganisationPostureRefusesAnEarlyDestroy:
+    def test_the_owner_may_not_purge(self):
+        user = make_user()
+        with posture("enterprise"):
+            ticket = service.delete_content(user_principal(user), kind=KIND_ASK,
+                                            key="5", owner=_owner(user))
+            assert service.may_purge(user_principal(user), ticket) is False
+
+    def test_nor_may_a_principal_who_sees_all_content(self):
+        """THE PREDICATE IS NOT ABOUT STANDING. On this posture nobody
+        destroys content early -- not the owner, not an administrator
+        who may already read it."""
+        admin = make_admin()
+        with posture("enterprise"):
+            ticket = service.delete_content(user_principal(admin), kind=KIND_ASK,
+                                            key="5", owner=_owner(admin))
+            assert service.may_purge(user_principal(admin), ticket) is False
+
+    def test_restore_is_untouched(self):
+        user = make_user()
+        with posture("enterprise"):
+            ticket = service.delete_content(user_principal(user), kind=KIND_ASK,
+                                            key="5", owner=_owner(user))
+            service.restore_content(user_principal(user), ticket)
+            assert DeletionTicket.objects.count() == 0
+
+    def test_the_sweep_still_purges_on_the_date(self):
+        """The refusal is about destroying it EARLY. The promised date
+        arrives on this posture exactly as on any other."""
+        user = make_user()
+        with posture("enterprise"):
+            ticket = service.delete_content(user_principal(user), kind=KIND_ASK,
+                                            key="5", owner=_owner(user))
+            DeletionTicket.objects.filter(pk=ticket.pk).update(
+                purge_on=timezone.localdate() - datetime.timedelta(days=1))
+            assert service.sweep() == 1
+
+    @pytest.mark.parametrize("name", ["personal", "open"])
+    def test_the_other_postures_are_unchanged(self, name):
+        user = make_user()
+        with posture(name):
+            ticket = service.delete_content(user_principal(user), kind=KIND_ASK,
+                                            key="5", owner=_owner(user))
+            assert service.may_purge(user_principal(user), ticket) is True
+```
+
+```python
+# identity/tests/test_deleted_page.py, replacing the held test
+    def test_the_enterprise_posture_keeps_an_item_until_its_date(self, client):
+        """SPEC SECTION 3.10's enterprise column, for this one control:
+        nobody destroys content before the date it was promised. The
+        POST answers with a sentence, not a 404 -- the row is right
+        there on the page, and a 404 for something a person can see is
+        a lie about what happened."""
+        with posture("enterprise"):
+            user = make_user()
+            sign_in(client, user)
+            ticket = _ticket_for(user)
+            response = client.post(
+                reverse("identity-deleted-purge", args=[ticket.pk]),
+                follow=True)
+            assert DeletionTicket.objects.filter(pk=ticket.pk).exists()
+            body = response.content.decode()
+            assert copy.purge_refused_line(ticket.purge_on) in body
+
+    def test_the_control_is_not_rendered_on_that_posture(self, client):
+        """Scoped to `<main>`, the rule this module already follows: the
+        settings shell, the sidebar and the assistant panel are shared
+        markup this page does not own, and a substring assertion over
+        them would fail for a word some other surface introduced."""
+        with posture("enterprise"):
+            user = make_user()
+            sign_in(client, user)
+            _ticket_for(user)
+            body = client.get(reverse("identity-deleted")).content.decode()
+            main = body.split("<main>")[1].split("</main>")[0]
+            assert copy.ACTION_RESTORE in main
+            assert copy.ACTION_PURGE not in main
+```
+
+(Assert INSIDE the `posture(...)` block: its exit re-saves the settings snapshot.)
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `DATABASE_URL=… .venv/bin/pytest -q -p no:cacheprovider -W ignore identity/tests/test_retention_contracts.py identity/tests/test_retention_service.py identity/tests/test_deleted_page.py`
+Expected: FAIL — `AttributeError: module 'identity.contracts.retention' has no attribute 'purge_refused_line'`.
+
+- [ ] **Step 3: The sentence**
+
+In `identity/contracts/retention.py`, factor the date words out of `purge_on_line` and add the refusal beside it:
+
+```python
+def _date_words(day: datetime.date) -> str:
+    """"21 October 2026" -- an un-padded day and a month NAME, because
+    the un-padded directive (`%-d`) is platform-specific and these
+    sentences must read identically wherever the box runs."""
+    return f"{day.day} {_MONTHS[day.month - 1]} {day.year}"
+
+
+def purge_on_line(day: datetime.date) -> str:
+    """"Purge on 21 October 2026" -- the promise the page prints."""
+    return f"Purge on {_date_words(day)}"
+
+
+def purge_refused_line(day: datetime.date) -> str:
+    """"This item is kept until 21 October 2026. It can be restored,
+    not destroyed early."
+
+    WHAT THE ORGANISATION POSTURE SAYS INSTEAD OF DESTROYING SOMETHING.
+    It names the date the page already printed and the door that is
+    still open, and it claims nothing about records obligations, legal
+    holds or who could override it -- none of which this box builds.
+    """
+    return (f"This item is kept until {_date_words(day)}. "
+            f"It can be restored, not destroyed early.")
+```
+
+- [ ] **Step 4: `may_purge` is the one place the rule lives**
+
+In `identity/retention.py`, at the top of `may_purge`:
+
+```python
+    row = settings_row if settings_row is not None else IdentitySettings.get_solo()
+    # THE ORGANISATION POSTURE DESTROYS NOTHING EARLY, for anybody. Not
+    # a standing question and not a hold: the promised date is the whole
+    # policy on that posture, and a box that let one person shorten it
+    # would be a box whose printed date was advice. ONE PREDICATE, HERE,
+    # so every surface agrees by construction -- the page hides the
+    # control because it asks this, the POST refuses because it asks
+    # this -- and WHICH postures enforce it is a policy choice made on
+    # this line and nowhere else.
+    if row.posture == POSTURE_ENTERPRISE:
+        return False
+    if sees_all_content(principal, settings_row=row):
+        return True
+    return may_read_owned_row(principal, ticket)
+```
+
+with the docstring's "today this cannot refuse a ticket `visible_tickets` already lists" paragraph rewritten: it can, on one posture, and that is the difference the two functions always existed to hold. Restore is deliberately untouched — putting something back destroys nothing.
+
+- [ ] **Step 5: The POST refuses with the sentence**
+
+In `identity/views.py::deleted_purge`, replace the `raise Http404(...)` with:
+
+```python
+    if not retention.may_purge(principal, ticket, settings_row=row):
+        # A SENTENCE, NOT A 404: the row is listed on the page this
+        # click came from, so pretending it does not exist would be a
+        # refusal that lies. 404 stays the answer for a ticket this
+        # principal may not SEE -- `_own_ticket_or_404` above.
+        messages.error(request, retention_copy.purge_refused_line(ticket.purge_on))
+        return settings_redirect(request, "identity-deleted")
+```
+and amend the docstring's last sentence accordingly.
+
+- [ ] **Step 6: The template comment, and the help copy**
+
+`identity/templates/identity/deleted.html` needs no markup change — the control is already inside `{% if row.may_purge %}`. Amend the comment block: still no hold control in any posture; and on the organisation posture `may_purge` is False for everyone, so the permanent-delete control is simply absent and the page says nothing about why beyond the date it already prints.
+
+`foundation/settings_help.py`: one sentence on the "Keep deleted items for" field's `effects` and one on the Deleted card's "Deleted items" `effects`: *"On the organisation posture, deleted items always wait their full period: they can be restored, not destroyed early."* The settings-help tests are structural (every anchor exists, every card matches its sidebar entry) and `CONTENT_HASH` is computed at import rather than pinned as a literal, so no pin needs updating — that is a fact about those tests, not something this step hopes for; running `foundation/tests/test_settings_help.py` in the gate below confirms it.
+
+- [ ] **Step 7: Docs, same commit**
+
+Every passage below says, today, that this posture behaves exactly as personal does, or that this refusal is deferred. They ship in one commit with the code, because any one of them left standing contradicts it.
+
+- `docs/superpowers/specs/2026-09-21-deletion-semantics-design.md`:
+  - **§3.10 preamble** — "**What this delivery actually builds… enterprise behaves exactly as personal does.**" becomes: enterprise behaves as personal does except for this one control. The four-item deferred list in the same paragraph drops "the refusal of an early 'Delete permanently'" and keeps the Hold control, the owner-set cliff and the held-row copy. The closing "Until then, an enterprise box gets the personal behaviour: the item's owner may purge it before the cliff" is corrected — the owner may restore it, and nobody may purge it early.
+  - **§3.10 table**, "Delete permanently" row, the `enterprise` — **built** cell: **"no. Nobody, before the cliff."**, with "Control not rendered; the POST refuses with its own sentence". The Hold row and the cliff row are unchanged.
+  - **§3.13**, the Deleted tab's paragraph — "the page says nothing about holds or about a purge an owner cannot perform: the enterprise behaviour is deferred" becomes: the page says nothing about holds, and on the organisation posture the permanent-delete control is simply absent because `may_purge` refuses for everyone; every ticket is still restorable in every posture, which is what a ticket means.
+  - **§5**, the edge-case table row "A posture switch with tickets pending" — "in THIS delivery nothing changes at all — every posture behaves the same way" is no longer true of the permanent-delete control: a switch to the organisation posture stops it being offered, a switch away offers it again, and no ticket, date or row is touched either way.
+  - **§7 (Tests)** — "The enterprise-posture refusal is not tested here because it is not built here… the same POST in the enterprise posture succeeds, exactly as it does in personal, and one test asserts that" becomes the opposite: the refusal IS built and IS tested here, the POST answers a flashed sentence and a redirect, and the control is not rendered.
+  - **§9** — the slice list's sentence that the enterprise behaviour is entirely a deferred slice: this one control lands in slice one; the rest is still deferred.
+  - **§10.10** — strike "the refusal of 'Delete permanently' before the cliff in that posture, with the control not rendered and the POST refusing in its own sentence" from the deferred list, and correct the paragraph's closing "the enterprise posture behaves exactly as personal does and this spec, the help text, the ADR and the Deleted page all say so". What stays deferred: the Hold control, the owner-set cliff with an enterprise floor, `CONTENT_HELD`, and the held-row copy.
+  - **§11** — add the ruling, dated 2026-09-22, in the form the other rulings there take: a person may restore a deleted item, but where the period is enforced nobody may destroy it early, so the early-purge refusal moves out of §10.10 and into this delivery; the hold and the operator-set cliff floor stay out.
+- `docs/adr/0019-deletion-and-retention.md`: the "What was deferred" entry that names "the refusal of an immediate purge before the cliff" alongside the Hold control and `content.held`, and the consequence "**The enterprise posture ships fields with no behaviour.** A box running that posture today purges and restores exactly as a personal-posture box does" — both become: one control, and only one, is built — nobody destroys content early on that posture; restore is unchanged; the Hold control, the `content.held` action and the operator-set cliff remain deferred, and the three hold columns are still written by nothing.
+- `identity/README.md`, the Deleted page section: the per-row control depends on `may_purge`, which refuses for everybody on that posture.
+- `docs/OPERATIONS.md`, "Deleted content and your backups": one sentence for an operator choosing a posture.
+
+- [ ] **Step 8: Gate and commit** (two-process check first; one foreground call each, `timeout: 600000`, each prefixed with the test `DATABASE_URL` your rules file gives)
+
+```bash
+DATABASE_URL=… .venv/bin/pytest -q -p no:cacheprovider -W ignore identity/tests foundation/tests/test_settings_help.py foundation/ops/tests
+FARABUNKER_FEATURES=vision,media DATABASE_URL=… .venv/bin/pytest -q -p no:cacheprovider -W ignore identity/tests foundation/tests/test_settings_help.py foundation/ops/tests
+DATABASE_URL=… .venv/bin/python manage.py makemigrations --check --dry-run
+```
+
+```bash
+git add identity/contracts/retention.py identity/retention.py identity/views.py identity/templates/identity/deleted.html identity/README.md identity/tests/test_retention_contracts.py identity/tests/test_retention_service.py identity/tests/test_deleted_page.py foundation/settings_help.py docs/adr/0019-deletion-and-retention.md docs/OPERATIONS.md docs/superpowers/specs/2026-09-21-deletion-semantics-design.md
+git commit -m "feat(identity): the organisation posture keeps deleted items until their date
+
+Re-pins identity/tests/test_deleted_page.py::TestRestoreAndPurge::test_the_enterprise_posture_behaves_exactly_as_personal_does, renamed and inverted: that posture's one built control is now the refusal spec section 3.10 defines."
+```
+
+Name only these files to `git add`: this plan document and the briefs are uncommitted work in the same tree, and a `git add identity/ docs/` would sweep them in.
