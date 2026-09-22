@@ -624,6 +624,14 @@ def duplicate_conversation(principal, conversation, *, title: str):
     `workstream` is stamped once at creation like every other row's. v1
     offers NO LOOSE COPY of a stream conversation -- there is no control
     for it and no parameter that would produce one.
+
+    `author_id` IS COPIED, AND THAT CHANGED (chat cluster, feature C).
+    It used to be dropped, silently -- a pre-existing gap rather than a
+    decision. `agents/runtime/prompt.py::_is_foreign_user_turn` reads
+    `author` to fence another person's words in a replay, so a copy that
+    dropped it changed how the model was shown a shared conversation's
+    history. `branch_conversation` below copies it too, and the two do
+    it the same way on purpose.
     """
     if not may_manage_conversation(principal, conversation):
         return None
@@ -638,6 +646,7 @@ def duplicate_conversation(principal, conversation, *, title: str):
                 conversation=copy, index=index, role=turn.role, text=turn.text,
                 tool_call=turn.tool_call, data=turn.data, artifacts=turn.artifacts,
                 depth=turn.depth, state=turn.state, error=turn.error,
+                author_id=turn.author_id,
             )
             for index, turn in enumerate(
                 Turn.objects.filter(conversation=conversation,
@@ -654,6 +663,132 @@ def duplicate_conversation(principal, conversation, *, title: str):
             for t in conversation.taint_tags.all()
         ])
     return copy
+
+
+def may_edit_turn(principal, conversation, turn, *, settings_row=None) -> bool:
+    """Whether `principal` may edit `turn` and carry on from there.
+
+    MANAGE, NOT POST, AND THE DIFFERENCE IS THE WHOLE OF IT (spec review
+    M2). `may_post_to` is strictly wider -- owner, `sees_all_content`, a
+    `use`-level conversation share, ANY workstream-share recipient (a
+    workstream share is `use`-by-construction), and the stream's owner.
+    Under that gate a share recipient could, with one click on somebody
+    else's message, mint a NEW CONVERSATION THEY OWN holding the
+    original's full terminal history: stamped with their own
+    `owner_fields`, surviving revocation of the share that permitted it,
+    and neither visible, manageable nor deletable by the original owner.
+    A BRANCH IS A COPY, so it answers to the copy predicate --
+    `duplicate_conversation` refuses exactly that today, on
+    `may_manage_conversation`, whose own docstring is explicit that
+    "shared to somebody is not manageable by them".
+
+    Since `may_manage_conversation` is a SUBSET of `may_post_to`, the
+    right to write the new turn comes along with it and needs no second
+    check.
+
+    THE COST IS REAL AND IS THE OWNER'S CALL (flag 7, ruled): a
+    `use`-share or workstream-share recipient cannot edit and branch in
+    a conversation shared with them, even on their own message. What
+    they are refused is a COPY, which costs them nothing they had.
+
+    NO TURN IN THIS CONVERSATION MAY BE IN FLIGHT -- one flat
+    `.exists()`. Editing while an answer is running would branch from a
+    conversation whose shape is still changing, and the job would write
+    its answer back to the ORIGINAL's row anyway.
+    """
+    if turn.conversation_id != conversation.id:
+        return False
+    if turn.role != Turn.Role.USER or turn.depth != 0 or turn.state != Turn.State.DONE:
+        return False
+    if not may_manage_conversation(principal, conversation, settings_row=settings_row):
+        return False
+    return not Turn.objects.filter(conversation=conversation).exclude(
+        state__in=_TERMINAL_TURN_STATES).exists()
+
+
+def branch_conversation(principal, conversation, turn, *, title: str):
+    """A new conversation holding everything BEFORE `turn`, owned by
+    `principal` -- or `None` if they may not.
+
+    A SIBLING OF `duplicate_conversation`, NOT A PARAMETER ON IT (spec
+    decision 14). The two answer different questions -- copy the whole
+    thing / carry on from here -- and have different rules about the
+    last turn and about the index bound. They share the same predicate
+    and the same constants, which is an argument FOR the sibling shape
+    rather than against it: one gate, two operations, neither reaching
+    into the other's body.
+
+    STEPS 1-2 ONLY. This function knows nothing about HTTP, the queue,
+    or where the reader goes next: the chat package imports THIS module,
+    ONE WAY, and a function that also redirected would be a view. The
+    chat column's `turn_edit` view starts the new turn and redirects --
+    steps 3-4 -- after this returns.
+
+    THE ADMINISTRATOR'S-COPY CONSEQUENCE `duplicate_conversation`
+    RECORDS APPLIES HERE FOR THE SAME REASON, now that the gate is the
+    same predicate: an administrator branching under
+    `admin_sees_content` makes a copy they own BY OWNERSHIP, and it
+    survives the content setting being switched back off.
+
+    WHAT IS CARRIED, and each is `duplicate_conversation`'s own rule:
+    `agent` and `workstream` (ruling D -- a branch stays in the stream,
+    or one click launders labelled material out of every gate),
+    `**owner_fields(principal)` (the brancher owns it), the same
+    `title`, and the two provenance columns.
+
+    WHAT IS COPIED PER TURN: `role`, `text`, `tool_call`, `data`,
+    `artifacts`, `depth`, `state`, `error` -- AND `author_id`, which
+    `duplicate_conversation` did not copy until this change and now
+    does, in the same commit, because `agents.runtime.prompt.
+    _is_foreign_user_turn` reads it to fence another person's words in a
+    replay.
+
+    WHAT IS NOT: `invocation` (an audit row belongs to exactly ONE
+    conversation and is never re-pointed or re-invented),
+    `queue_job_id` (a copy was produced by nothing), any non-terminal
+    turn, any `DocumentAttachment` row (there is no copier seam, and the
+    edit form says so before the button), any share, and any pin or
+    archive state.
+
+    THE TAINT IS COPIED VERBATIM, INCLUDING TAGS WHOSE `first_turn` LIES
+    AFTER THE BRANCH POINT. Over-tainting is safe; under-tainting is a
+    leak, and the field is a plain integer precisely so it can name the
+    turn that really caused it, in the conversation where it really
+    happened. No `WorkstreamTaint` is written: the branch stays in the
+    parent's stream, whose materialised union already holds every one of
+    the parent's tags.
+
+    THE ORIGINAL IS NOT TOUCHED: this is a BRANCH, never a rewind. No
+    turn of `conversation` is edited, renumbered or deleted, and the
+    reader keeps both threads.
+    """
+    if not may_edit_turn(principal, conversation, turn):
+        return None
+    with transaction.atomic():
+        branch = Conversation.objects.create(
+            agent=conversation.agent, title=title,
+            workstream=conversation.workstream,      # THE BRANCH STAYS IN THE STREAM
+            branched_from=conversation, branched_at_index=turn.index,
+            **owner_fields(principal),
+        )
+        Turn.objects.bulk_create([
+            Turn(
+                conversation=branch, index=index, role=row.role, text=row.text,
+                tool_call=row.tool_call, data=row.data, artifacts=row.artifacts,
+                depth=row.depth, state=row.state, error=row.error,
+                author_id=row.author_id,
+            )
+            for index, row in enumerate(
+                Turn.objects.filter(conversation=conversation, index__lt=turn.index,
+                                    state__in=_TERMINAL_TURN_STATES).order_by("index")
+            )
+        ])
+        ConversationTaint.objects.bulk_create([
+            ConversationTaint(conversation=branch, entitlement_id=tag.entitlement_id,
+                              first_turn=tag.first_turn)
+            for tag in conversation.taint_tags.all()
+        ])
+    return branch
 
 
 def may_post_to(principal, conversation) -> bool:

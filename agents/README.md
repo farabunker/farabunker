@@ -827,6 +827,25 @@ Migration: `agents/migrations/0013_conversation_branch.py` — additive, no data
 migration: every existing conversation was started rather than branched, and
 null is the honest value for it.
 
+`branch_conversation` is `duplicate_conversation`'s sibling: same gate
+(`may_manage_conversation`, through `may_edit_turn`), same constants, same rules
+about what an audit row and an attachment belong to — but bounded by an index
+and stamped with provenance. Two operations, one gate, neither reaching into the
+other's body. Both copy `author_id`; neither copies `invocation`, `queue_job_id`,
+attachments or shares. The original is never edited, renumbered or truncated: a
+branch, never a rewind.
+
+`may_edit_turn` is the predicate both the card control and the writer answer to.
+A root-depth, finished `user` turn of this conversation, no turn anywhere in the
+conversation still in flight, and manage rights — so a share recipient may not
+branch somebody else's thread, not even on their own message: a branch is a copy,
+and a copy is the owner's to make.
+
+**It does steps 1–2 only.** It returns the new conversation and knows nothing
+about HTTP, the queue, or where the reader goes next — the chat package imports
+this module, one way, and a function that also redirected would be a view. The
+chat column's `turn_edit` view starts the branch's first turn and redirects.
+
 Design: `docs/superpowers/specs/2026-09-03-workstreams-design.md`. The
 rest of this app's design: `docs/superpowers/specs/
 2026-08-25-agents-and-tools-design.md`.
