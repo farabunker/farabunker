@@ -634,7 +634,7 @@ def deleted_restore(request, pk: int):
     row = settings_row_for(request)
     principal, ticket = _own_ticket_or_404(request, pk, settings_row=row)
     try:
-        retention.restore_content(principal, ticket)
+        retention.restore_content(principal, ticket, settings_row=row)
     except Exception:  # noqa: BLE001 -- never-500; the traceback goes to the log
         logger.exception(
             "identity.views: restore failed for ticket %s", ticket.pk)
@@ -671,7 +671,7 @@ def deleted_purge(request, pk: int):
     if not retention.may_purge(principal, ticket, settings_row=row):
         raise Http404("No such deleted item.")
     try:
-        retention.purge_ticket(principal, ticket)
+        retention.purge_ticket(principal, ticket, settings_row=row)
     except (services.ServiceRefused, RetentionRefused) as exc:
         messages.error(request, str(exc))
     except Exception:  # noqa: BLE001 -- never-500; the traceback goes to the log

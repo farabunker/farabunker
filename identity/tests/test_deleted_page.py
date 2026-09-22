@@ -336,3 +336,52 @@ class TestTheQueryCost:
         reads = sum(
             1 for q in context.captured_queries if "identity_identitysettings" in q["sql"])
         assert reads == 1, [q["sql"] for q in context.captured_queries]
+
+    def test_a_restore_post_reads_identitysettings_exactly_once(self, client):
+        """`deleted_restore` already holds the request's one
+        `IdentitySettings` row (`settings_row_for(request)`, the same
+        row `IdentityGateMiddleware` fetched); it threads that row into
+        `retention.restore_content(..., settings_row=row)` rather than
+        letting that call fetch its own second copy -- the obvious wrong
+        implementation, and the one `restore_content` had before it grew
+        the keyword, which would fail this equality at 2, not 1.
+        """
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with posture("open"):
+            user = make_user()
+            sign_in(client, user)
+            ticket = _ticket_for(user)
+            with CaptureQueriesContext(connection) as context:
+                response = client.post(
+                    reverse("identity-deleted-restore", args=[ticket.pk]))
+        assert response.status_code == 302
+        reads = sum(
+            1 for q in context.captured_queries if "identity_identitysettings" in q["sql"])
+        assert reads == 1, [q["sql"] for q in context.captured_queries]
+
+    def test_a_permanent_delete_post_reads_identitysettings_exactly_once(self, client):
+        """The same pin as the restore POST above, for `deleted_purge`:
+        `purge_ticket(..., settings_row=row)` reuses the request's one
+        `IdentitySettings` row rather than reading a second one of its
+        own. The registered handler here (`noop`, this module's own
+        fixture) touches no settings itself, so every
+        `identity_identitysettings` statement this request produces
+        comes from the view/service path this test pins, not from the
+        handler.
+        """
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with posture("open"):
+            user = make_user()
+            sign_in(client, user)
+            ticket = _ticket_for(user)
+            with CaptureQueriesContext(connection) as context:
+                response = client.post(
+                    reverse("identity-deleted-purge", args=[ticket.pk]))
+        assert response.status_code == 302
+        reads = sum(
+            1 for q in context.captured_queries if "identity_identitysettings" in q["sql"])
+        assert reads == 1, [q["sql"] for q in context.captured_queries]

@@ -185,7 +185,8 @@ def delete_content(actor, *, kind: str, key, owner, label: str = "",
     return ticket
 
 
-def restore_content(actor, ticket, *, source: str = SOURCE_WEB) -> None:
+def restore_content(actor, ticket, *, source: str = SOURCE_WEB,
+                    settings_row=None) -> None:
     """Put the item back: delete the ticket, record the event.
 
     NOTHING ELSE. The item was never modified, so there is nothing to
@@ -199,8 +200,14 @@ def restore_content(actor, ticket, *, source: str = SOURCE_WEB) -> None:
     RESTORE THAT DID NOT HAPPEN: deleting by QUERYSET rather than by
     instance reports how many rows it actually removed, and an event is
     written only when that count is nonzero.
+
+    `settings_row`, OPTIONAL, THE SAME SHAPE `visible_tickets`/`may_purge`
+    ABOVE TAKE: a caller that already holds the request's one
+    `IdentitySettings` row passes it through here instead of paying a
+    second read. `None` -- every caller before this parameter existed --
+    reads it here, exactly as before.
     """
-    row = IdentitySettings.get_solo()
+    row = settings_row if settings_row is not None else IdentitySettings.get_solo()
     with transaction.atomic():
         kind, key, label = ticket.kind, ticket.key, ticket.label
         removed, _ = DeletionTicket.objects.filter(pk=ticket.pk).delete()
@@ -211,7 +218,8 @@ def restore_content(actor, ticket, *, source: str = SOURCE_WEB) -> None:
                      source=source, kind=kind)
 
 
-def purge_ticket(actor, ticket, *, source: str = SOURCE_WEB) -> dict[str, int]:
+def purge_ticket(actor, ticket, *, source: str = SOURCE_WEB,
+                 settings_row=None) -> dict[str, int]:
     """Destroy this item's content, then the ticket. Returns
     `{handler label: rows removed}` -- integers, content-free.
 
@@ -233,8 +241,15 @@ def purge_ticket(actor, ticket, *, source: str = SOURCE_WEB) -> dict[str, int]:
     double-click "Delete permanently", so this RE-READS the row under a
     lock inside the transaction before running a single handler, and a
     miss returns `{}` with nothing run and nothing written.
+
+    `settings_row`, OPTIONAL, THE SAME SHAPE `restore_content` ABOVE
+    TAKES: a caller that already holds the request's one
+    `IdentitySettings` row passes it through here instead of paying a
+    second read. `None` -- `sweep` below and `manage.py purge_deleted`,
+    which purge one ticket per row on their own pass rather than one per
+    request -- reads it here, once per ticket, exactly as before.
     """
-    row = IdentitySettings.get_solo()
+    row = settings_row if settings_row is not None else IdentitySettings.get_solo()
     with transaction.atomic():
         current = DeletionTicket.objects.select_for_update().filter(pk=ticket.pk).first()
         if current is None:
