@@ -95,6 +95,15 @@ def may_purge(principal, ticket, *, settings_row=None) -> bool:
     `IdentitySettings` row for the request and passes it through here,
     so listing many tickets costs one settings read rather than one per
     row.
+
+    TODAY THIS CANNOT REFUSE A TICKET `visible_tickets` ALREADY LISTS --
+    the two share the same two predicates, owner or `sees_all_content`,
+    so anything visible to `principal` is also purgeable by them. The
+    two functions are still separate rather than one boolean reused,
+    because they answer different questions with different futures: this
+    is the hook the deferred enterprise hold behaviour (spec section
+    10.10) refuses THROUGH, once a held ticket can be visible without
+    being purgeable.
     """
     if sees_all_content(principal, settings_row=settings_row):
         return True

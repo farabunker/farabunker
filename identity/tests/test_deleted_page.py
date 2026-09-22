@@ -13,7 +13,7 @@ from identity.contracts.actions import CONTENT_PURGED, CONTENT_RESTORED
 from identity.contracts.cascades import RetentionHandler, register_retention_handler
 from identity.models import AuditEvent, DeletionTicket, IdentitySettings
 from identity.tests._helpers import (
-    make_admin, make_conversation, make_user, posture, sign_in, user_principal,
+    make_conversation, make_user, posture, sign_in, user_principal,
 )
 from identity import retention as service
 
@@ -127,6 +127,42 @@ class TestThePurgedTab:
         assert "A named question" in body
 
 
+class TestTheDeletionLogHidesOtherPeoplesLabels:
+    """The toggle above (`test_with_the_toggle_on_the_labels_appear`)
+    proves the label appears for the item's OWN viewer; this proves it
+    stops there. The log itself LISTS every `content.*` event to every
+    viewer -- it is a record of what happened, not a per-viewer view of
+    it -- but a viewer with no standing to read everyone's content must
+    not learn another person's item's own title through it, which is
+    exactly what `audit.by_action`'s unscoped read would leak with
+    nothing further checking who is looking."""
+
+    def test_a_principal_with_no_standing_over_the_item_sees_no_label(self, client):
+        with posture("personal"):
+            row = IdentitySettings.get_solo()
+            row.audit_detail = True
+            row.save()
+            owner, viewer = make_user(), make_user()
+            _ticket_for(owner, label="A private title")
+            sign_in(client, viewer)
+            body = client.get(reverse("identity-deleted")).content.decode()
+        assert copy.KIND_LABELS[copy.KIND_ASK] in body
+        assert "A private title" not in body
+
+    def test_a_sees_all_content_principal_still_sees_it(self, client):
+        """PURGED FIRST, so the label can only reach this viewer through
+        the log -- once the ticket is gone, `row.ticket.label` on the
+        Deleted-items list has nothing left to leak from either."""
+        with posture("open"):
+            row = IdentitySettings.get_solo()
+            row.audit_detail = True
+            row.save()
+            ticket = _ticket_for(make_user(), label="A private title")
+            client.post(reverse("identity-deleted-purge", args=[ticket.pk]))
+            body = client.get(reverse("identity-deleted")).content.decode()
+        assert "A private title" in body
+
+
 class TestRestoreAndPurge:
     def test_restore_removes_the_ticket_and_records_the_event(self, client):
         with posture("personal"):
@@ -203,6 +239,44 @@ class TestRestoreAndPurge:
         assert "a worker holds this job" in response.content.decode()
         assert DeletionTicket.objects.count() == 1
 
+    def test_a_broken_purge_flashes_the_fixed_sentence_and_keeps_the_ticket(
+            self, client, monkeypatch):
+        """THE OTHER CATCH -- the bare `except Exception` in
+        `deleted_purge`, for a failure with no operator-readable sentence
+        of its own (neither refusal type above)."""
+        from identity import views
+        monkeypatch.setattr(
+            views.retention, "purge_ticket",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("a database hiccup")))
+        with posture("personal"):
+            user = make_user()
+            sign_in(client, user)
+            ticket = _ticket_for(user)
+            response = client.post(
+                reverse("identity-deleted-purge", args=[ticket.pk]), follow=True)
+        assert response.redirect_chain[0][1] == 302
+        assert views._PURGE_FAILED_MESSAGE in response.content.decode()
+        assert DeletionTicket.objects.filter(pk=ticket.pk).exists()
+
+    def test_a_broken_restore_flashes_the_fixed_sentence_and_keeps_the_ticket(
+            self, client, monkeypatch):
+        """`deleted_restore`'s own bare `except Exception` -- the
+        identical never-500 shape, for the mutation with nothing of its
+        own to refuse."""
+        from identity import views
+        monkeypatch.setattr(
+            views.retention, "restore_content",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("a database hiccup")))
+        with posture("personal"):
+            user = make_user()
+            sign_in(client, user)
+            ticket = _ticket_for(user)
+            response = client.post(
+                reverse("identity-deleted-restore", args=[ticket.pk]), follow=True)
+        assert response.redirect_chain[0][1] == 302
+        assert views._RESTORE_FAILED_MESSAGE in response.content.decode()
+        assert DeletionTicket.objects.filter(pk=ticket.pk).exists()
+
 
 class TestTheQueryCost:
     def test_the_page_costs_the_same_queries_at_one_ticket_and_at_many(self, client):
@@ -238,3 +312,27 @@ class TestTheQueryCost:
         # accident: `copy.ACTION_PURGE` is offered per row an admin may
         # act on, and this admin `sees_all_content` on an open box.
         assert body.count(copy.ACTION_PURGE) == 10
+
+    def test_the_get_reads_identitysettings_exactly_once(self, client):
+        """THE TRUTH BEHIND `deleted_page`'s OWN "one read" CLAIM.
+        `IdentityGateMiddleware` already reads `IdentitySettings` once
+        per request (`identity/tests/test_middleware.py::
+        TestTheSingleRowRead`'s own pin); `settings_row_for(request)`
+        reuses that SAME row rather than the view fetching a second copy
+        of its own with `IdentitySettings.get_solo()` -- the obvious
+        wrong implementation, and the one this view had before this
+        fix, which names the same table a second time and would fail
+        this equality at 2, not 1.
+        """
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with posture("open"):
+            _ticket_for(make_user())
+            client.get(reverse("identity-deleted"))  # warm the session reads
+            with CaptureQueriesContext(connection) as context:
+                assert client.get(reverse("identity-deleted")).status_code == 200
+
+        reads = sum(
+            1 for q in context.captured_queries if "identity_identitysettings" in q["sql"])
+        assert reads == 1, [q["sql"] for q in context.captured_queries]

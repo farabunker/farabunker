@@ -12,9 +12,11 @@ NO HOLD CONTROL, IN ANY POSTURE, and nothing here mentions a records
 obligation: the enterprise behaviour is deferred (spec section 10.10) and
 this page must not imply a guarantee that is not built.
 
-EVERY SENTENCE COMES FROM `identity/contracts/retention.py` through the
-`copy` context key -- user-facing strings are declared once in Python,
-never typed into a template.
+HEADINGS, BUTTONS AND THE DATE LINE COME FROM
+`identity/contracts/retention.py` through the `copy` context key --
+declared once in Python, never typed twice. The page's OWN sentences
+(the tagline, the confirm prompt, the two `helptext`s) are typed here,
+same as every other settings leaf's own prose.
 
 THE WORD "PURGE" NEVER APPEARS HERE. `copy.ACTION_PURGE` says "Delete
 permanently" and `copy.purge_on_line` says "Purge on <date>" -- the one
@@ -78,7 +80,7 @@ The delete confirm is a native `<details>`, modelled on
 
   <section class="settings" id="deletion-log">
     <h2>{{ copy.TAB_LOG }}</h2>
-    <p class="helptext">A record of what was deleted, restored and destroyed &mdash; who, what kind, and when. It never contains the deleted words.</p>
+    <p class="helptext">A record of what was deleted, restored and destroyed &mdash; who, what kind, and when. Content-free by default: item names appear only when the setting to show them was on when the entry was written.</p>
     {% for event in events %}
     <p class="event">
       {{ event.kind_label }} {{ event.key }}

@@ -50,7 +50,9 @@ from django.views.decorators.http import require_POST
 # is exactly why the rule lives in `foundation/` at all.
 from foundation.settings_area import settings_redirect
 from identity import audit, retention, services, throttle
-from identity.access import effective_entitlements, grant_subjects, is_admin, owned_entitlement_ids
+from identity.access import (
+    effective_entitlements, grant_subjects, is_admin, owned_entitlement_ids, sees_all_content,
+)
 from identity.access import posture as current_posture
 from identity.axes import (
     AxisRefused, axis_doors, axis_for, axis_labels, axis_panels,
@@ -506,8 +508,8 @@ _PURGE_FAILED_MESSAGE = (
     "Deleted, and it will be tried again."
 )
 _RESTORE_FAILED_MESSAGE = (
-    "That could not be restored just now. It is still in Deleted, and "
-    "it will be tried again."
+    "That could not be restored just now. It is still in Deleted "
+    "— try again in a moment."
 )
 
 
@@ -534,15 +536,31 @@ def deleted_page(request):
     cannot perform: that behaviour is a deferred slice (spec section
     10.10) and the page must not imply a guarantee that is not built.
 
-    ONE `IdentitySettings` READ FOR THE WHOLE REQUEST, threaded through
-    `principal_for_request`, `visible_tickets` and every row's own
-    `may_purge` call -- the same per-request-reuse norm
-    `entitlement_edit` already follows -- so a row-per-ticket loop costs
-    no per-row settings query.
+    ONE `IdentitySettings` READ FOR THE WHOLE REQUEST, and it is not
+    this view's own: `settings_row_for(request)` reads
+    `IdentityGateMiddleware`'s own already-fetched row off the request
+    rather than calling `IdentitySettings.get_solo()` a second time, and
+    that one row is threaded through `principal_for_request`,
+    `visible_tickets`, `sees_all_content` and every row's own
+    `may_purge` call -- the same per-request-reuse norm `entitlement_edit`
+    already follows -- so a row-per-ticket loop costs no per-row settings
+    query, and this GET costs no settings read beyond the middleware's
+    own.
+
+    THE LOG NAMES NOBODY'S ITEM THIS VIEWER COULD NOT ALREADY READ.
+    `show_labels` is `sees_all_content(principal, settings_row=row)`,
+    computed once: every event still LISTS for every viewer (the log is
+    a record of what happened, not a per-viewer view of it), but its
+    `target_label` -- written only when `audit_detail` was on at write
+    time -- reaches the template only for a principal who could already
+    read everyone's content. Anybody else sees the same event with the
+    label blanked, exactly as an event carries no label at all when
+    `audit_detail` was off when it was written.
     """
     retention.sweep()
-    row = IdentitySettings.get_solo()
+    row = settings_row_for(request)
     principal = principal_for_request(request, settings_row=row)
+    show_labels = sees_all_content(principal, settings_row=row)
     tickets = [
         {
             "ticket": ticket,
@@ -562,7 +580,7 @@ def deleted_page(request):
             "kind_label": retention_copy.KIND_LABELS.get(event.target_type,
                                                          event.target_type),
             "key": event.target_key,
-            "label": event.target_label,
+            "label": event.target_label if show_labels else "",
             "verb": _EVENT_VERBS[event.action],
             "actor_label": event.actor_label,
             "at": event.at,
@@ -577,7 +595,7 @@ def deleted_page(request):
     })
 
 
-def _own_ticket_or_404(request, pk: int):
+def _own_ticket_or_404(request, pk: int, *, settings_row):
     """The addressed ticket, if this principal has standing over it.
 
     404, NEVER 403 -- the class-O shape: a 403 on a row-addressed URL
@@ -585,9 +603,17 @@ def _own_ticket_or_404(request, pk: int):
     too -- a ticket a sweep already purged between page-load and click
     is simply a ticket `visible_tickets` no longer lists, so this is the
     one lookup both `deleted_restore` and `deleted_purge` need.
+
+    `settings_row` IS REQUIRED, NOT OPTIONAL, and that asymmetry with
+    `deleted_page`'s own no-argument reads is deliberate: both callers
+    already hold the request's one `IdentitySettings` row
+    (`settings_row_for(request)`) before reaching here, and threading it
+    into `principal_for_request` rather than calling that bare is the
+    same "the caller that already paid for the read passes it on" rule
+    `entitlement_edit`'s own comment states in full.
     """
-    principal = principal_for_request(request)
-    ticket = retention.visible_tickets(principal).filter(pk=pk).first()
+    principal = principal_for_request(request, settings_row=settings_row)
+    ticket = retention.visible_tickets(principal, settings_row=settings_row).filter(pk=pk).first()
     if ticket is None:
         raise Http404("No such deleted item.")
     return principal, ticket
@@ -604,7 +630,8 @@ def deleted_restore(request, pk: int):
     way -- restore never removes content, so there is nothing to retry
     beyond the click itself.
     """
-    principal, ticket = _own_ticket_or_404(request, pk)
+    row = settings_row_for(request)
+    principal, ticket = _own_ticket_or_404(request, pk, settings_row=row)
     try:
         retention.restore_content(principal, ticket)
     except Exception:  # noqa: BLE001 -- never-500; the traceback goes to the log
@@ -638,8 +665,9 @@ def deleted_purge(request, pk: int):
     caller with no standing to purge (`may_purge` refuses) is a 404,
     like every other row this principal may not act on.
     """
-    principal, ticket = _own_ticket_or_404(request, pk)
-    if not retention.may_purge(principal, ticket):
+    row = settings_row_for(request)
+    principal, ticket = _own_ticket_or_404(request, pk, settings_row=row)
+    if not retention.may_purge(principal, ticket, settings_row=row):
         raise Http404("No such deleted item.")
     try:
         retention.purge_ticket(principal, ticket)

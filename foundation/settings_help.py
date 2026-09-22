@@ -572,9 +572,11 @@ CARDS: tuple[HelpCard, ...] = (
                 meaning=(
                     "Every item this viewer has deleted and can still see: what kind it is, "
                     "and the date it will be permanently destroyed. The removal date is fixed "
-                    "at the moment something is deleted, so changing the retention setting on "
-                    "Identity & security governs future deletions only -- an item already here "
-                    "keeps the date it was given."
+                    "at the moment something is deleted, so changing \"Keep deleted items for\" "
+                    "on Identity & security governs future deletions only -- an item already "
+                    "here keeps the date it was given. Backups are a separate layer the date "
+                    "does not reach: a deleted item can still exist in an earlier backup after "
+                    "that date has passed."
                 ),
                 effects=(
                     "Restore puts the item back immediately, exactly as it was; nothing about "

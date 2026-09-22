@@ -514,8 +514,25 @@ record` (`CONTENT_DELETED`, `CONTENT_RESTORED`, `CONTENT_PURGED`), and
 every one is content-free by construction: the item's own title reaches
 `target_label` only when `audit_detail` is on, and a purge's `removed`
 detail is `{handler label: count}` — integers, never rows. `queue_
-retention_days`'s own seam paragraph and the Deleted page itself ship
-with their own tasks' code, not here.
+retention_days`'s own seam paragraph ships with its own task's code, not
+here.
+
+**The Deleted page** (`/identity/deleted/`) is the one surface this
+feature ships in `identity/` itself, in three routes: `identity-deleted`
+(class **A**, the list), `identity-deleted-restore` and
+`identity-deleted-purge` (class **O**, row-addressed, 404 never 403).
+Gate `EVERYONE`, not `ADMIN` — every other settings entry is operator
+policy, and this one is a person's own deleted items, which on a box
+with accounts a member is exactly who needs it. The GET prunes before it
+lists: `sweep()` runs first, so the page can never show a row whose
+promised date has already passed — one of the three callers alongside a
+delete and `manage.py purge_deleted`, with no scheduler and no new job
+kind. The log lists every `content.*` event to every viewer — it is a
+record of what happened, not a per-viewer view of it — but an event's
+own `target_label` reaches the page only for a `sees_all_content`
+principal, and only when `audit_detail` was already on at the moment
+that particular event was written; anybody else, or an event written
+while the setting was off, renders with the label blank.
 
 ## Tests
 
