@@ -199,7 +199,7 @@ def branch_point_ordinal(parent, index: int) -> int:
     ONE QUERY, BOUNDED BY THE PARENT'S OWN LENGTH -- a `.count()` over
     the same `(conversation, index)` index `agents.usage.context_usage`
     already walks, and flat in the BRANCH's length, which is what
-    `agents/chat/tests/test_thread.py::test_the_meter_costs_the_same_on_
+    `agents/chat/tests/test_thread_meter.py::test_the_meter_costs_the_same_on_
     a_short_and_a_long_conversation` pins.
 
     THE FILTER IS `is_editable_turn_row`'S OWN SET plus the role the

@@ -157,7 +157,7 @@ def context_usage(conversation, agent, *, window: int, window_source: str) -> Co
     what `truncated` and the truncation clause are made of, and a
     `LIMIT` slice cannot produce it -- the spec's "exactly one query" was
     written before that clause became binding. What the equality-under-
-    scale pins in `agents/chat/tests/test_thread.py` actually assert is
+    scale pins in `agents/chat/tests/test_thread_meter.py` actually assert is
     that a one-turn and a many-turn conversation cost the SAME, which
     both of these do.
 

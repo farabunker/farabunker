@@ -2851,7 +2851,7 @@ whole `<p>` is gated on `is_branch` rather than on the tail.
 found a readable row -- both threaded through the same `settings_row` every
 other visibility call on this page already reuses, so a thread of any length
 pays them once, never once per turn. The ordinal is bounded by the PARENT's
-length, not this conversation's. `agents/chat/tests/test_thread.py::
+length, not this conversation's. `agents/chat/tests/test_thread_meter.py::
 TestTheContextMeter::test_the_meter_costs_the_same_on_a_short_and_a_long_
 conversation` -- the page's existing flat-cost equality pin -- was extended
 rather than copied: both the short and the long conversation it measures are

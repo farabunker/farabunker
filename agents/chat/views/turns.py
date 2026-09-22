@@ -372,7 +372,7 @@ def _context_body(turn) -> dict:
     sentence explaining it until the next F5. It is a CONSTANT, not a
     per-conversation computation -- no window, no percentage and no
     decision is made here, exactly as the paragraphs above require --
-    and `agents/chat/tests/test_thread.py` pins it against the page's
+    and `agents/chat/tests/test_thread_meter.py` pins it against the page's
     own render so the two can never drift into two sentences.
     """
     usage = context_usage(turn.conversation, turn.conversation.agent,

@@ -1108,27 +1108,17 @@ _KNOWN_OVER_SPLIT_THRESHOLD = {
     # so it is not itself a violation this merge introduced. Not this
     # merge's to split.
     "agents/chat/tests/test_assistant_panel.py",
-    # `agents/chat/tests/test_thread.py`: chat-cluster TASK 3 (`93851ac`,
-    # the thread-page context meter) is what actually carried this file
-    # from 2,030 to 2,299 lines and crossed C-56 -- task 3's own evidence
-    # never ran `foundation/ops`, so the breach shipped unnoticed and this
-    # gate was already red at `93851ac`, before task 4 touched anything.
-    # Task 4 (2026-09-21) is what SURFACED it, via its own Step 6
-    # `agents/chat agents/tests foundation/ops` sweep, and REMEDIATES it
-    # here rather than leaving it red -- task 4 also adds its own class
-    # (`TestTheContextMeterOnThePollPath`), which its brief (spec §9)
-    # requires to live right here, beside `TestTheContextMeter`, rather
-    # than in the poll endpoint's own `test_turn_status.py`: "every
-    # assertion in this class is about the relationship between the page
-    # and the tick... splitting the two halves across two modules is how
-    # they come to disagree." (Deliberately no per-task line count is
-    # carried here beyond the 2,030 -> 2,299 crossing the exemption
-    # itself rests on -- a figure that drifts with every later amendment
-    # to either task's own tests is not worth pinning in a comment.)
-    # Splitting this module is a materially larger change than either
-    # task's file list, and moving the poll-path class out would overrule
-    # that plan decision. Not either task's to split.
-    "agents/chat/tests/test_thread.py",
+    # `agents/chat/tests/test_thread.py` WAS HERE, added by chat-cluster
+    # task 4 after task 3's context meter carried that module over the
+    # threshold unnoticed. The whole-branch review (I-5) ruled the entry
+    # out: AGENTS.md non-negotiable 2 ends "A dated exemption list gets
+    # its exempted code removed, not grown", it carves out no exception
+    # for a well-argued growth, and the branch that grew it is the branch
+    # that re-wrapped that rule's own file. The module was split instead
+    # -- `agents/chat/tests/test_thread_meter.py`, the meter's own edge --
+    # and BOTH meter classes moved together, so task 4's plan decision
+    # ("splitting the two halves across two modules is how they come to
+    # disagree") is honoured rather than overruled.
 }
 
 
@@ -1182,7 +1172,6 @@ def test_the_split_threshold_exemption_is_a_closed_set_and_stays_honest():
         "tools/rag/tests/test_ingest.py",
         "models/queue/tests/test_worker.py",
         "agents/chat/tests/test_assistant_panel.py",
-        "agents/chat/tests/test_thread.py",
     }
     for relative in _KNOWN_OVER_SPLIT_THRESHOLD:
         assert (REPO_ROOT / relative).is_file(), relative

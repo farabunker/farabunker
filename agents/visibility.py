@@ -338,7 +338,7 @@ def visible_turn(principal, turn_id):
     tab, for the price of two more JOINs on a query it already runs (a
     nullable FK, which Django resolves with a LEFT JOIN). The thread
     page is unaffected -- there both rows are genuinely already in hand.
-    `agents/chat/tests/test_thread.py::TestTheContextMeterOnThePollPath
+    `agents/chat/tests/test_thread_meter.py::TestTheContextMeterOnThePollPath
     ::test_the_select_related_is_wide_enough_to_keep_the_budget_honest`
     is what turns red if a later reader narrows it back.
     """

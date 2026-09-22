@@ -389,7 +389,7 @@ class TestTheDisclosure:
 
     def test_the_done_tick_costs_exactly_the_reads_it_budgets(self, client):
         """WHOLE-BRANCH REVIEW I-4, THE ABSOLUTE PIN beside the flat one
-        above -- the shape `agents/chat/tests/test_thread.py::
+        above -- the shape `agents/chat/tests/test_thread_meter.py::
         test_the_context_key_costs_exactly_the_two_reads_it_budgets`
         already uses for the other half of this same tick.
 
@@ -874,7 +874,7 @@ class TestThePost:
 #       (its process cache is bypassed inside a transaction, which is
 #       every test and every write path)
 #   11  `_context_body` -> `context_usage`'s replayed-text slice, and
-#   12  ... its `.count()` -- the two `agents/chat/tests/test_thread.py::
+#   12  ... its `.count()` -- the two `agents/chat/tests/test_thread_meter.py::
 #       test_the_context_key_costs_exactly_the_two_reads_it_budgets`
 #       pins on their own
 #
