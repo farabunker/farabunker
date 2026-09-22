@@ -73,6 +73,32 @@ This is the operator's home for backing up and restoring a farabunker box (W3,
     watcher never looks at closes a question rather than opening one — see
     below.
 
+## Deleted content and your backups
+
+A backup is **a copy of content that no delete path on this box reaches.** The retention date
+governs the live box. It does not, and cannot, reach into a backup set that was written before
+the delete.
+
+**There is no retroactive purge of existing backup sets**, and this platform will not offer one:
+rewriting a database dump in place would make every backup's integrity unverifiable, and
+selectively deleting from a file copy would leave a set that no longer restores to a coherent
+box.
+
+Deleted content therefore leaves your backups **as rotation ages them out**, on whatever
+schedule you keep. An operator with a retention obligation sets the backup rotation to match the
+deletion date; the two numbers are independent and this platform will not pretend otherwise.
+
+**Preview stacks are not a backup layer** and are not covered either. A preview stack is a full
+parallel copy with its own database; deleting something on the live box does not touch it. Tear
+one down when you are done with it.
+
+What a deletion leaves in a *new* backup taken after the purge: the content-free audit rows,
+which are in the dump like every other identity row, and nothing else.
+
+An operator who would rather the retention date be enforced on a schedule than rely on the
+platform's own prune-on-write can run `manage.py purge_deleted` from cron: it purges every item
+whose date has already arrived and does nothing otherwise.
+
 ## `data/notes/`: why the watcher must never be pointed at it
 
 `config/settings.py::NOTES_DIR` (`DATA_DIR / "notes"`) is **deliberately NOT

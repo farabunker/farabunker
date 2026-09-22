@@ -487,6 +487,106 @@ key, prove it is gone, run `ready()` again, prove it came back
 seam is `identity/contracts/cascades.py`, and your column almost certainly
 wants both.
 
+## Registering a retention handler
+
+A retention handler is a column's answer to "this deleted item's content is going" — the
+purge-time counterpart to an entitlement cascade's "this entitlement is going away". Both live
+in `identity/contracts/cascades.py`, one registry each, for the reason stated where a reader
+meets it: deleting an entitlement and purging a deleted item are two questions with one shape,
+and a second registry module would only be a second file to hold in your head.
+
+`identity/` may not import your column (import-law rule 4), so — exactly like an entitlement
+cascade or an entitlement axis — the only way your column's cleanup runs is a **registration**,
+one call in your `AppConfig.ready()`, in the SAME COMMIT as the module it names
+(`identity/cascades.py::run_retention` resolves it with `import_string` and never swallows, so a
+registration that landed before its module would take a purge down the first time it ran):
+
+```python
+from identity.contracts.cascades import (
+    ORDER_FILES, RetentionHandler, register_retention_handler,
+)
+from identity.contracts.retention import KIND_CONVERSATION
+
+register_retention_handler(RetentionHandler(
+    kind=KIND_CONVERSATION,
+    key="agents.conversation",
+    label="Conversation and turns",
+    handler="agents.retention.purge_conversation",
+    order=ORDER_FILES,
+))
+```
+
+Quoted from `agents/apps.py` — the real, shipped registration for a deleted conversation's rows
+and turns. The fields:
+
+- **`kind`** — which ticket kind this answers for, one of
+  `identity.contracts.retention.RETENTION_KINDS` (`conversation`, `document`, `ask`,
+  `vision_job`). A kind nothing has registered for answers an empty handler list, which is not
+  an error — it is what a box with the feature uninstalled looks like.
+- **`key`** — a stable identifier, namespaced by your column, exactly like an entitlement
+  cascade's own `key`.
+- **`label`** — the key your handler's return count is filed under in the purge's content-free
+  audit detail, `removed={label: count}` — the ONLY place the count is read back.
+- **`handler`** — a dotted-path string, `"package.module.function"`, with the signature
+  `(key: str) -> int`, resolved at purge time by `identity/cascades.py`, never imported by
+  `identity/contracts/cascades.py` itself (which stays pure, pinned by
+  `identity/tests/test_purity.py`).
+- **`order`** — `ORDER_ROWS` (the default) or `ORDER_FILES`.
+
+**The two order bands, and when to use each.** The runner runs every `ORDER_ROWS` handler before
+any `ORDER_FILES` handler, stable within a band by registration order — and the ordering exists
+for one reason: a filesystem delete has no rollback, so a row handler that raised AFTER files
+were removed would leave a resurrected row pointing at bytes that are gone. Register in
+`ORDER_ROWS` for anything that only deletes or updates database rows. Register in `ORDER_FILES`
+for anything that removes bytes, directly or through a function that does — even if that same
+handler also touches rows. **A handler that must both read an item's rows and remove its bytes
+registers in `ORDER_FILES` and orders its own reads before its own writes, internally** — the
+conversation handler above is exactly this case: it reads the conversation's turns for their
+artifact references before deleting anything, then deletes rows, then purges the bytes those
+references named, last. That keeps the registry's ordering rule to one field with two values
+instead of a general dependency graph nothing else needs.
+
+**One mode, `(key: str) -> int`, not two like `EntitlementCascade`'s `commit` flag — and the
+reason is worth carrying over.** An entitlement cascade needs a count-only mode because deleting
+an entitlement is irreversible the instant it is confirmed: the count IS the confirmation, shown
+before the click. A deletion has a better confirmation than any number could give it — the
+Deleted page itself, where the item sits named and restorable for as many days as the retention
+setting says. So there is no dry-run pass, no `commit` argument, and the returned integer has
+exactly one consumer: the audit detail named above.
+
+**Every handler must be idempotent, and that is not a nicety — it is the whole recovery story
+for a purge that failed part-way.** The runner never swallows: a handler that raises takes the
+whole purge down with it, inside a savepoint, so the ticket survives for the next sweep to retry.
+An `ORDER_FILES` handler that raised after some bytes were already gone must, on that retry,
+finish the job rather than raise again on the half it already did — the rows still standing, the
+bytes it already removed staying removed, and the count it returns on the successful retry
+reflecting only what that run actually did.
+
+**The one test a new handler owes:** call it once against a fully-populated item, call it again
+against what is left, and assert the second call completes and returns what an already-purged
+item honestly has left to remove (usually `0`) rather than raising.
+`tools/rag/tests/test_retention.py::test_it_is_idempotent` is the shape:
+
+```python
+def test_it_is_idempotent(self, tmp_path, settings):
+    settings.NOTES_DIR = tmp_path
+    conversation_id = uuid.uuid4()
+    (tmp_path / f"{conversation_id}.md").write_text("x", encoding="utf-8")
+    make_document(notes_conversation_id=conversation_id)
+    purge_conversation_notes(str(conversation_id))
+    assert purge_conversation_notes(str(conversation_id)) == 0
+```
+
+**And the coverage gate.** Any model you add that carries the `owner_kind`/`owner_key` pair —
+`identity.access.owner_fields`'s stamp for content somebody owns — is found by
+`foundation/ops/tests/test_deletion_coverage.py`'s walk of `apps.get_models()`, whether or not
+you meant to wire it into deletion. The test fails until you do one of two things: add it to
+that module's `_COVERED` dict, mapped to the ticket kind whose handler now reaches it, or add it
+to `_EXEMPT` with one reasoned line saying why a deletion never reaches it — a setting a person
+authored rather than content, say, or a container whose contents each carry their own cliff. An
+exemption is a sentence somebody writes and a reviewer reads; that is the point of a list rather
+than a default.
+
 ## Adding a settings page
 
 Five steps get a control onto a page and into the sidebar; a further set,
