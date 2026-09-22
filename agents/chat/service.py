@@ -146,6 +146,57 @@ EDIT_LEAD = (
     "The original stays as it is. Files attached earlier in this conversation "
     "are not carried over."
 )
+# FEATURE C's provenance banner, the same public-declaration rule as
+# `EDIT_LEAD` just above and for the same reason: `agents/chat/views/
+# thread.py` renders it and may not import `views/turns.py`, so this
+# shared leaf both already import is where it lives.
+#
+# TASK 14 REVIEW FIX (I1/M3): these used to live in `agents/visibility.py`
+# -- the brief's own placement -- but that module is the column's
+# predicate-and-writer surface (its own string constants, e.g.
+# `AGENT_NOT_YOURS`, are refusal sentences its OWN writers return); this
+# is a chat PAGE's prose, consumed only by `chat/conversation.html`
+# through `thread_context`, exactly the shape `EDIT_LEAD` already lives
+# here for. The import direction does not bite: `agents/chat/service.py`
+# already imports from `agents.visibility` (`chat_surface_conversations`,
+# above), never the reverse, and `thread.py` already imports both
+# modules.
+#
+# `BRANCH_PROVENANCE_UNNAMED` NAMES NOTHING (I1, review Important 1). The
+# banner used to be assembled in the template out of `BRANCH_PROVENANCE_
+# LEAD` plus an `{% if branched_from %}<a>...</a>{% endif %}` that
+# rendered NOTHING on both the deleted-parent and the unreadable-parent
+# path -- `branched_from` is `None` either way -- leaving the literal
+# rendered sentence "Branched from  at message 3" (HTML collapses the
+# double space, so that really is what a reader saw). That is exactly
+# the shape AGENTS.md's "user-facing sentences are declared once, in
+# Python" exists to forbid: a sentence assembled from fragments plus a
+# hole nothing fills. This constant is the hole's own honest filling --
+# a whole, grammatical, disclosure-free phrase -- so the template's own
+# `{% else %}` (never a bare omission) always has a real noun phrase to
+# render, on both fallback paths alike.
+BRANCH_PROVENANCE_LEAD = "Branched from"
+BRANCH_PROVENANCE_UNNAMED = "an earlier conversation"
+
+
+def branch_provenance_tail(index: int) -> str:
+    """The provenance banner's own closing fragment: where in the parent
+    this thread left off ("at message N").
+
+    A FRAGMENT, NAMED AS ONE (review M3) -- `branch_provenance_sentence`
+    was this function's name until the fix round above, and the name
+    overclaimed: it never returned a whole sentence, only this tail, and
+    calling a fragment a sentence is what let the missing-middle defect
+    (I1) go unnoticed as long as it did. The parent's own title (or its
+    declared stand-in, `BRANCH_PROVENANCE_UNNAMED` above) is the
+    TEMPLATE's half, not this function's: whether the title may be NAMED
+    is a visibility question `thread_context` answers through `visible_
+    conversations`, and this function is handed only the index, never the
+    parent row, so it could not leak one if it tried.
+    """
+    return f"at message {index}"
+
+
 # Public (no leading underscore): `agents.chat.views.turns` imports this
 # rather than keeping its own copy of the same sentence (CQ-11).
 QUEUE_UNAVAILABLE = (

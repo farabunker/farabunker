@@ -1093,6 +1093,12 @@ the title linking back when the parent is still visible to this principal (throu
 `visible_conversations` — never a bare pk read). With the parent deleted or invisible, the line
 renders without a link and without the title.
 
+**Corrected (2026-09-22, Task 14 review I1).** Read literally, that leaves a hole where the title
+was — "Branched from at message N" — which shipped that way until the review caught it. What
+ships now fills the gap with a declared, disclosure-free stand-in noun phrase, *"an earlier
+conversation"*, so the line always reads as a whole sentence: *"Branched from an earlier
+conversation at message N."*
+
 **Why a migration rather than a title convention.** Two rows with the same name and no stated
 relationship is exactly the sidebar an operator cannot explain to themselves a week later, and a
 title suffix is a string nobody can query. Two nullable columns cost one migration and make the

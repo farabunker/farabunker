@@ -294,19 +294,35 @@ model.
 CHAT CLUSTER, FEATURE C's provenance line. The title links back only
 while the parent is still visible to THIS principal (resolved in the
 view through `visible_conversations`); with the parent deleted or
-invisible the line renders without a link and without the title, which
-is the honest version of "this came from somewhere you cannot see" --
-never a leaked title for a branch this reader was only handed, not the
+invisible the line renders `branch_provenance_unnamed` instead, never a
+leaked title for a branch this reader was only handed, not the
 original.
+
+REVIEW FIX I1: the `{% else %}` is load-bearing, not decoration. A bare
+`{% if branched_from %}<a>...</a>{% endif %}` used to render NOTHING on
+both the deleted-parent and the unreadable-parent path, leaving the
+literal sentence "Branched from  at message 3" (HTML collapses the
+double space) -- exactly the "sentence assembled from fragments plus a
+hole" AGENTS.md's own rule forbids. `branch_provenance_unnamed` is a
+declared, whole, disclosure-free noun phrase (`agents.chat.service`), so
+both fallback paths render "Branched from an earlier conversation at
+message 3" -- grammatical, and it still names nothing.
 
 STATIC, so the poller does not need to know about it: it renders once,
 outside `.thread` and `.thread-scroll`, and no swap this page performs
 (`insertBlock`/`swapBlock` below, both scoped to `.thread`'s own
 children) ever touches it.
 {% endcomment %}
-<p class="muted branch-provenance">{{ branch_provenance_lead }}
-  {% if branched_from %}<a href="{% url 'chat-conversation' branched_from.id %}">{{ branched_from.title|default:branched_from.agent.name }}</a>{% endif %}
-  {{ branch_provenance }}</p>
+{% comment %}
+ONE LINE, DELIBERATELY (review fix round): every piece is joined by an
+EXPLICIT single space rather than the template source's own newlines and
+indentation, which Django does not strip -- a multi-line version left
+literal `\n` characters between the pieces in the raw response, so a
+reader's browser collapsed them to spaces but a test asserting the whole
+declared sentence as one contiguous string could not. The rendered
+markup and the string a test (or a reader) sees are now the same text.
+{% endcomment %}
+<p class="muted branch-provenance">{{ branch_provenance_lead }} {% if branched_from %}<a href="{% url 'chat-conversation' branched_from.id %}">{{ branched_from.title|default:branched_from.agent.name }}</a>{% else %}{{ branch_provenance_unnamed }}{% endif %} {{ branch_provenance }}</p>
 {% endif %}
 
 {% comment %}

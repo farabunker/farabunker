@@ -856,13 +856,17 @@ about HTTP, the queue, or where the reader goes next — the chat package import
 this module, one way, and a function that also redirected would be a view. The
 chat column's `turn_edit` view starts the branch's first turn and redirects.
 
-**The provenance line is rendered, not just stored.** `branch_provenance_sentence`
-here declares the sentence's fixed tail ("at message N"); `agents/chat/views/
-thread.py::thread_context` resolves `branched_from` through `visible_conversations`
-— never a bare pk read, so a parent this reader may not see is neither named nor
-linked — and `chat/conversation.html` renders the banner. `agents/chat/README.md`'s
-own "The provenance line" section has the full account, including the deleted-
-and invisible-parent cases and the query-budget pin.
+**The provenance line is rendered, not just stored.** `agents/chat/service.py`
+declares the banner's sentence — `BRANCH_PROVENANCE_LEAD`, `BRANCH_PROVENANCE_
+UNNAMED`, and `branch_provenance_tail`'s own fixed tail ("at message N") — not
+this module: it is a chat page's prose, not one of this module's own refusal
+sentences, so it lives beside `EDIT_LEAD` in the shared leaf both `thread.py` and
+`views/turns.py` already import. `agents/chat/views/thread.py::thread_context`
+resolves `branched_from` through `visible_conversations` — never a bare pk read,
+so a parent this reader may not see is neither named nor linked — and
+`chat/conversation.html` renders the banner. `agents/chat/README.md`'s own "The
+provenance line" section has the full account, including the deleted- and
+invisible-parent cases and the query-budget pin.
 
 Design: `docs/superpowers/specs/2026-09-03-workstreams-design.md`. The
 rest of this app's design: `docs/superpowers/specs/

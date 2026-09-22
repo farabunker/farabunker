@@ -19,6 +19,7 @@ import itertools
 
 import pytest
 from django.urls import reverse
+from django.utils.html import escape
 
 from agents.chat.tests._helpers import (   # noqa: F401 -- the import IS the registration
     bind_chat_role, fake_queue_down, fake_queued_job, fake_running_job, fake_turn_queue,
@@ -795,6 +796,17 @@ class TestThePost:
         assert second_branch.branched_from_id == first_branch.id
 
 
+def _provenance_banner(body: str) -> str:
+    """JUST the banner's own `<p>`, not the rest of the page -- so an
+    assertion about what the banner does or does not contain (a link, a
+    raw title) cannot be answered by some other element on the page.
+    Same slicing idiom `agents.chat.tests.test_thread` uses for the
+    context-truncation clause."""
+    marker = 'class="muted branch-provenance"'
+    start = body.index(marker)
+    return body[start:body.index("</p>", start)]
+
+
 class TestTheProvenanceLine:
     """The banner on a branch's thread page: where it came from and at
     which turn, resolved through `visible_conversations` -- never a bare
@@ -844,8 +856,18 @@ class TestTheProvenanceLine:
             response = client.get(reverse("chat-conversation", args=[branch.id]))
         body = response.content.decode()
         assert response.status_code == 200
-        assert "Branched from" in body
+        # REVIEW FIX I1: the WHOLE declared sentence, not just the lead.
+        # A bare `{% if branched_from %}` used to leave a hole here --
+        # "Branched from  at message 2" -- on exactly this path; the
+        # declared `BRANCH_PROVENANCE_UNNAMED` phrase closes it on both
+        # fallback paths alike (see the escaping test's sibling below for
+        # the other one).
+        assert "Branched from an earlier conversation at message 2" in body
         assert "Gone" not in body
+        # REVIEW FIX M4: this test's own name claims "unlinked"; this is
+        # what actually pins it, scoped to the banner's own markup so a
+        # link elsewhere on the page could never launder the assertion.
+        assert "<a" not in _provenance_banner(body)
 
     def test_a_parent_this_principal_may_not_see_is_neither_named_nor_linked(
         self, client
@@ -863,10 +885,39 @@ class TestTheProvenanceLine:
                                        branched_from=parent, branched_at_index=1,
                                        **owner_fields(user_principal(owner)))
             sign_in(client, owner)
-            body = client.get(
-                reverse("chat-conversation", args=[branch.id])).content.decode()
+            response = client.get(reverse("chat-conversation", args=[branch.id]))
+        body = response.content.decode()
+        # REVIEW FIX M1: the two negatives below would stay green on a
+        # 404, or on a page that silently stopped rendering the banner
+        # at all -- neither proves the leak lens actually held. These
+        # two positives prove the banner rendered, and said the whole
+        # declared, disclosure-free sentence (REVIEW FIX I1's own fix),
+        # not merely that it omitted the confidential title.
+        assert response.status_code == 200
+        assert "Branched from an earlier conversation at message 1" in body
         assert "Confidential title" not in body
         assert reverse("chat-conversation", args=[parent.id]) not in body
+
+    def test_the_parents_title_is_escaped(self, client):
+        """REVIEW FIX M2. Autoescaping already holds today (no `|safe`/
+        `mark_safe` anywhere on this path) but nothing pinned it -- the
+        parent's title is text ANOTHER principal chose, rendered into a
+        page the branch owner reads, and this branch has an established
+        idiom for pinning exactly that (Task 8's `escape("Everyone's
+        helper") in body`, adopted after a review asked for it)."""
+        owner = make_user()
+        with posture(POSTURE_ENTERPRISE):
+            parent = make_conversation(agent=make_agent(slug="escaped-parent"),
+                                       title="Bob's <b>notes</b>",
+                                       **owner_fields(user_principal(owner)))
+            branch = make_conversation(agent=parent.agent, title="Branch",
+                                       branched_from=parent, branched_at_index=1,
+                                       **owner_fields(user_principal(owner)))
+            sign_in(client, owner)
+            body = client.get(
+                reverse("chat-conversation", args=[branch.id])).content.decode()
+        assert escape("Bob's <b>notes</b>") in body
+        assert "<b>notes</b>" not in body
 
     def test_a_branch_carrying_a_tool_call_shows_the_tool_cards_and_no_audit_link(
         self, client, fake_turn_queue

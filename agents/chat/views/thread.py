@@ -26,7 +26,8 @@ from agents.chat.pickers import chat_picker_options
 from agents.chat.rendering import thread_cards
 from agents.chat.sidebar import sidebar_context
 from agents.chat.service import (
-    EDIT_LEAD, MAX_POLL_DURATION_MS, MAX_TRANSPORT_RETRIES, POLL_INTERVAL_MS,
+    BRANCH_PROVENANCE_LEAD, BRANCH_PROVENANCE_UNNAMED, EDIT_LEAD, MAX_POLL_DURATION_MS,
+    MAX_TRANSPORT_RETRIES, POLL_INTERVAL_MS, branch_provenance_tail,
     composer_attach_context, visible_conversation_or_404,
 )
 from agents.entitlements import tool_access_for, wall_for
@@ -39,8 +40,7 @@ from agents.usage import (
     truncation_clause,
 )
 from agents.visibility import (
-    BRANCH_PROVENANCE_LEAD, branch_provenance_sentence, may_edit_any_turn, may_post_to,
-    may_read_conversation_shares, visible_conversations,
+    may_edit_any_turn, may_post_to, may_read_conversation_shares, visible_conversations,
 )
 from agents.workstreams import scope_for_conversation
 from identity.access import accounts_on, is_admin, share_subjects
@@ -275,10 +275,10 @@ def thread_context(request, conversation, *, selected: str | None = None) -> dic
         branched_from = visible_conversations(principal, settings_row=settings_row) \
             .filter(pk=conversation.branched_from_id).first()
     # `branched_at_index` OUTLIVES `branched_from_id` (`SET_NULL` clears
-    # only the FK), so the sentence's tail renders even for a branch
-    # whose parent is gone -- `branched_from`, above, is what decides
-    # whether it is also a LINK.
-    branch_provenance = (branch_provenance_sentence(conversation.branched_at_index)
+    # only the FK), so the tail renders even for a branch whose parent is
+    # gone -- `branched_from`, above, is what decides whether it is also
+    # a LINK.
+    branch_provenance = (branch_provenance_tail(conversation.branched_at_index)
                          if conversation.branched_at_index is not None else "")
     return {
         "conversation": conversation,
@@ -300,15 +300,20 @@ def thread_context(request, conversation, *, selected: str | None = None) -> dic
         # FEATURE C's provenance line, computed above. `branched_from`
         # is a `Conversation` or `None` (no parent, a deleted one, or
         # one this principal may not read -- see the comment above);
-        # `branch_provenance` is the declared sentence's tail, or `""`
-        # for a conversation that was never branched, which the
-        # template's own `{% if branch_provenance %}` treats as
-        # "nothing to show". `branch_provenance_lead` is the sentence's
-        # own fixed opening words, declared once in `agents.visibility`
-        # and never typed into the template.
+        # `branch_provenance` is the declared tail, or `""` for a
+        # conversation that was never branched, which the template's own
+        # `{% if branch_provenance %}` treats as "nothing to show".
+        # `branch_provenance_lead` and `branch_provenance_unnamed` are
+        # the sentence's own fixed pieces, declared once in
+        # `agents.chat.service` and never typed into the template --
+        # REVIEW FIX I1: `branch_provenance_unnamed` is what the
+        # template's `{% else %}` renders on BOTH the deleted-parent and
+        # the unreadable-parent path, so the banner is always a whole,
+        # grammatical sentence and never one with a hole in it.
         "branched_from": branched_from,
         "branch_provenance": branch_provenance,
         "branch_provenance_lead": BRANCH_PROVENANCE_LEAD,
+        "branch_provenance_unnamed": BRANCH_PROVENANCE_UNNAMED,
         "picker": chat_picker_options(principal, selected, wall=wall),
         "selected_connection": selected,
         # ROUND 18: `chat/_composer.html`'s own `composer_placeholder`
