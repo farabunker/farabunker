@@ -395,11 +395,14 @@ def conversation_delete(request, conversation_id):
 
     IT NO LONGER ERASES (Task 8). `agents.visibility.delete_conversation`
     now writes a `DeletionTicket` through `identity.retention.
-    delete_content` -- the turns, the shares, the attachment claims, the
-    chat-scoped documents and the queue rows all survive until the date
-    the Deleted page prints, and are torn down TOGETHER at purge time by
+    delete_content` -- the turns, the shares, the attachment claims and
+    the chat-scoped documents all survive until the date the Deleted
+    page prints, and are torn down TOGETHER at purge time by
     `agents.retention.purge_conversation` and its sibling handlers
-    (Task 9). The tool-call audit trail's own asymmetry -- `Turn.
+    (Task 9). THE QUEUE ROW DOES NOT JOIN THEM YET -- `models/queue` has
+    no retention handler in the landed tree, so it survives purge until
+    the queue half lands and reaches it, one of the residues ADR 0019
+    (decision 7) names. The tool-call audit trail's own asymmetry -- `Turn.
     invocation` is `SET_NULL`, so a `ToolInvocation` this conversation
     produced is never reachable through it -- is unaffected by any of
     this: the row was never the conversation's to lose, at delete time

@@ -616,6 +616,25 @@ class TestTheDeletionExclusionReachesRetrieval:
                 None, self._open_unrestricted(), _deleted_document_ids())
             assert not _matches(filters, {"file_id": str(document.pk)})
 
+    def test_a_consolidated_notes_chunk_is_excluded_once_its_conversation_is_ticketed(self):
+        """A workstream consolidation note is neither directly ticketed
+        nor attached (`tools.rag.jobs` writes
+        it with `notes_conversation_id`, no `DocumentAttachment` row,
+        `scope` staying `UNIVERSAL`) -- `_deleted_document_ids()`'s
+        third leg is what makes this chunk disappear from retrieval the
+        same instant `tools.rag.retention.purge_conversation_notes`
+        would later destroy it, rather than the two disagreeing about
+        whether the conversation's own distilled words are gone."""
+        with posture("open"):
+            principal = user_principal(make_user())
+            conversation = make_conversation()
+            note = make_document(origin=Document.Origin.NOTES,
+                                 notes_conversation_id=conversation.id)
+            delete_conversation(principal, conversation)
+            filters = retrieval._visibility_filters(
+                None, self._open_unrestricted(), _deleted_document_ids())
+            assert not _matches(filters, {"file_id": str(note.pk)})
+
     def test_a_directly_ticketed_documents_chunk_is_excluded(self):
         """The KIND_DOCUMENT half -- written through the real service,
         never a hand-inserted `DeletionTicket` row, so this also proves

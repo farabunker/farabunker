@@ -183,6 +183,32 @@ class TestTheDeletionLogIsScopedToTheViewersOwnActivity:
         assert "b-item" in body
         assert b.username in body
 
+    def test_a_members_own_event_survives_a_hundred_newer_ones_by_someone_else(self, client):
+        """A `by_action` that sliced the newest 100 rows BOX-WIDE and
+        left the viewer scoping to a Python filter applied AFTER that
+        slice would let 100+ events by ANOTHER principal, written AFTER
+        the viewer's own, push the viewer's real (older) event out of
+        that box-wide slice entirely -- "Nothing yet." on a page whose
+        own tagline promises otherwise. `actor=` filters before the
+        slice, so the viewer's own event survives regardless of how many
+        other principals acted more recently. THE ORDER IS THE WHOLE
+        TEST: the viewer's event is written FIRST and the noise AFTER
+        it, so a box-wide "newest 100" slice with no actor filter ahead
+        of it would have excluded it."""
+        from identity import audit
+
+        with posture("personal"):
+            noisy, viewer = make_user(), make_user()
+            ticket = _ticket_for(viewer, key="viewer-item", label="Viewer's own title")
+            service.purge_ticket(user_principal(viewer), ticket)
+            noisy_principal = user_principal(noisy)
+            for index in range(120):
+                audit.record(noisy_principal, CONTENT_RESTORED,
+                             target_type=copy.KIND_ASK, target_key=str(index))
+            sign_in(client, viewer)
+            body = client.get(reverse("identity-deleted")).content.decode()
+        assert "viewer-item" in body
+
     def test_a_sees_all_content_principal_sees_everyones_activity(self, client):
         with posture("open"):
             a, b = make_user(), make_user()

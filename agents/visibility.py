@@ -452,10 +452,14 @@ def delete_conversation(principal, conversation):
     writes one `DeletionTicket`, records a content-free
     `content.deleted` event, and runs a bounded sweep. The conversation,
     its turns, its shares, its attachment claims, its chat-scoped
-    documents, its generated images and its queue rows all survive until
-    the date the Deleted page prints -- and are then destroyed together
-    by `agents.retention.purge_conversation` and its sibling handlers,
-    through the registry `identity/cascades.py` runs.
+    documents and its generated images all survive until the date the
+    Deleted page prints -- and are then destroyed together by
+    `agents.retention.purge_conversation` and its sibling handlers,
+    through the registry `identity/cascades.py` runs. ITS QUEUE ROWS ARE
+    NOT AMONG THEM YET: `models/queue` has no retention handler in the
+    landed tree, so a purged conversation's queue row survives purge
+    entirely until the queue half lands and reaches it -- one of the
+    residues ADR 0019 (decision 7) names.
 
     THE TICKET, NOT A BARE BOOL:
     `agents/chat/views/conversations.py::conversation_delete` must not

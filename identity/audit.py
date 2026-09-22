@@ -90,7 +90,7 @@ def for_target(target_type: str, target_key: str, limit: int = 100) -> list[Audi
     )
 
 
-def by_action(actions, limit: int = 100) -> list[AuditEvent]:
+def by_action(actions, *, actor=None, limit: int = 100) -> list[AuditEvent]:
     """Every row whose action is one of `actions`, newest first.
 
     HERE, not in the page that renders it, for the reason this module's
@@ -103,11 +103,25 @@ def by_action(actions, limit: int = 100) -> list[AuditEvent]:
     An empty `actions` answers `[]` without querying -- `action__in=()`
     is a query that can only return nothing, and the Deleted page's
     Deletion log is a never-500 surface that should not pay for one.
+
+    `actor`, OPTIONAL, a `Principal`-shaped object read the same way
+    `record` above reads one (`getattr(actor, "kind"/"key", "")`):
+    narrows to that principal's own rows, filtered BEFORE the slice.
+    `None` (the default) is unscoped, exactly as this function always
+    was. THE ORDER MATTERS: a caller that sliced first and filtered the
+    Python list afterwards would truncate away a viewer's own events on
+    any box where `limit` OTHER principals had produced more recent
+    rows first -- the exact shape `identity/views.py::deleted_page` used
+    to have and the reason this parameter exists.
     """
     actions = tuple(actions)
     if not actions:
         return []
-    return list(AuditEvent.objects.filter(action__in=actions)[:limit])
+    qs = AuditEvent.objects.filter(action__in=actions)
+    if actor is not None:
+        qs = qs.filter(actor_kind=getattr(actor, "kind", ""),
+                       actor_key=getattr(actor, "key", ""))
+    return list(qs[:limit])
 
 
 def failed_logins_since(username: str, since) -> int:

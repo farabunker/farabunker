@@ -295,6 +295,27 @@ class TestTheOverview:
         assert "3 days" in result.text
         assert "shown" in result.text
 
+    def test_the_queue_retention_line_discloses_it_is_not_applied_yet(self):
+        """`models/` is untouched by this branch and nothing reads
+        `queue_retention_days` yet, so a line that just printed a number
+        would tell the reader this box's Queue page already behaves
+        that way. Both branches -- a number and "no age limit" -- carry
+        the same disclosure, since neither is enforced today."""
+        from identity.models import IdentitySettings
+
+        with posture(POSTURE_ENTERPRISE):
+            row = IdentitySettings.get_solo()
+            row.queue_retention_days = 3
+            row.save()
+            result = run_overview({}, make_tool_ctx(principal=user_principal(make_admin())))
+        assert "3 days (recorded; the queue does not apply it yet)" in result.text
+
+        with posture(POSTURE_ENTERPRISE):
+            row.queue_retention_days = None
+            row.save()
+            result = run_overview({}, make_tool_ctx(principal=user_principal(make_admin())))
+        assert "no age limit (recorded; the queue does not apply it yet)" in result.text
+
     def test_the_zero_and_blank_retention_edges_get_plain_words(self):
         """`0` and `None` are both LEGAL values with specific meanings
         (`identity/models.py`'s own field comments) -- "no grace period"

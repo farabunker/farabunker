@@ -230,7 +230,7 @@ only.
     <div class="field" id="queue-retention">
       <label for="{{ form.queue_retention_days.id_for_label }}">{{ form.queue_retention_days.label }}</label>
       {{ form.queue_retention_days }}
-      <p class="helptext">Days. Finished jobs older than this are removed from the Queue page. Leave it blank to keep them until the queue's own row limit removes them.</p>
+      <p class="helptext">Days. Recorded now; the Queue page does not remove finished jobs by age yet -- that starts in a following change. Leave it blank for no age limit.</p>
       {% if form.queue_retention_days.errors %}<ul class="errorlist">{% for error in form.queue_retention_days.errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
     </div>
     <div class="field checkbox-field" id="audit-detail">

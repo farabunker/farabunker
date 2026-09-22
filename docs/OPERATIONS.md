@@ -93,11 +93,17 @@ parallel copy with its own database; deleting something on the live box does not
 one down when you are done with it.
 
 What a deletion leaves in a *new* backup taken after the purge: the content-free audit rows,
-which are in the dump like every other identity row, and nothing else.
+which are in the dump like every other identity row — and, for now, the queue row of any purged
+conversation, which still carries the person's literal message or prompt in its payload, because
+`models/queue` has no retention handler yet (see ADR 0019's residue list, decision 7, for the full
+accounting). An operator reading an `InferenceJob` payload from a backup for a conversation
+somebody deleted and purged today will find the message still there.
 
 An operator who would rather the retention date be enforced on a schedule than rely on the
-platform's own prune-on-write can run `manage.py purge_deleted` from cron: it purges every item
-whose date has already arrived and does nothing otherwise.
+platform's own prune-on-write can run `manage.py purge_deleted` from cron: each run purges at
+most `--limit` items (default 25, the same bound the on-write sweep uses), never every item whose
+date has arrived in one pass. A box with more due items than the limit drains its backlog across
+several runs, not in the one that first catches up to it.
 
 ## `data/notes/`: why the watcher must never be pointed at it
 

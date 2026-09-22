@@ -949,24 +949,29 @@ the document's own existence.
 document a ticket hides must disappear from `readable_documents`, `listable_documents` and
 `attached_documents` the moment it is ticketed, days before its purge handler ever runs.
 `_deleted_document_ids()` answers this in one place for all three: the ids ticketed outright
-(`identity.retention.ticketed_keys("document")`), plus every chat-scoped document whose
-conversation is ticketed (`ticketed_keys("conversation")`, joined through the same
-one-attachment-per-conversation invariant `delete_attachments` depends on). A universal or
-stream-contained document attached to a ticketed conversation is untouched here too, for the
-identical reason its purge is untouched: the attachment is the conversation's claim, not the
-document's existence.
+(`identity.retention.ticketed_keys("document")`), every chat-scoped document whose conversation
+is ticketed (`ticketed_keys("conversation")`, joined through the same
+one-attachment-per-conversation invariant `delete_attachments` depends on), and every workstream
+consolidation note distilled from a ticketed conversation (`notes_conversation_id`, joined
+against the same `ticketed_keys("conversation")` list -- `tools/rag/jobs.py`'s consolidation job
+writes that column, never a `DocumentAttachment` row, so this third leg is what keeps a
+consolidated note's hide and its purge, `tools.rag.retention.purge_conversation_notes`, in
+agreement). A universal or stream-contained document merely attached to a ticketed conversation
+is untouched here too, for the identical reason its purge is untouched: the attachment is the
+conversation's claim, not the document's existence.
 
 The cost is two `ticketed_keys()` reads, always — flat in the number of open tickets, never in
-the number of documents — plus a third, conditional read: the chat-scoped lookup, keyed off the
-conversation-ticket ids, only touches the database once there is at least one id to filter on.
-An empty filter list is answered by the query planner without a round trip, so a box with
-nothing deleted pays two queries, and a box with an open conversation ticket pays three. That is
-not an approximation kept for convenience — it is the real, measured cost, and the cheaper path
-is deliberately the common one: a box spends most of its life with nothing deleted, so that is
-the state the design should be cheap in, not the rarer one. `readable_documents`,
-`listable_documents` and `attached_documents` each accept a keyword-only `deleted_ids=None` so a
-caller already holding the list — `attached_documents` computes it once and threads it into its
-own `chat_scoped` query and both of its `readable_documents` calls — never pays for it twice.
+the number of documents — plus two further conditional reads, both keyed off the same
+conversation-ticket ids (read once, not twice): the chat-scoped lookup and the notes lookup each
+touch the database only once there is at least one id to filter on. An empty filter list is
+answered by the query planner without a round trip, so a box with nothing deleted pays two
+queries, and a box with an open conversation ticket pays four. That is not an approximation kept
+for convenience — it is the real, measured cost, and the cheaper path is deliberately the common
+one: a box spends most of its life with nothing deleted, so that is the state the design should
+be cheap in, not the rarer one. `readable_documents`, `listable_documents` and
+`attached_documents` each accept a keyword-only `deleted_ids=None` so a caller already holding
+the list — `attached_documents` computes it once and threads it into its own `chat_scoped` query
+and both of its `readable_documents` calls — never pays for it twice.
 
 **Retrieval applies the same exclusion, not a second copy of it.** `tools/rag/retrieval.py::
 retrieve_nodes` calls `_deleted_document_ids()` once per retrieval call and threads the result
@@ -975,7 +980,7 @@ category and visibility clauses it already builds — so a deleted item's chunks
 fresh answer at the same instant its row stops reaching the library pages, rather than surviving
 until its own purge handler runs. Nothing is added to the filter when nothing is ticketed: an
 empty exclusion list adds no clause at all, matching the ordinary case exactly as it did before
-this exclusion existed. The cost lands on `retrieve_nodes` itself — the same two-or-three-query
+this exclusion existed. The cost lands on `retrieve_nodes` itself — the same two-or-four-query
 shape described above, paid once per call, never once per filter leg and never once per retrieved
 chunk.
 

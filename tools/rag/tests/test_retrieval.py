@@ -618,14 +618,15 @@ class TestRetrieveNodes:
 
     @patch("tools.rag.retrieval.gateway")
     @patch("tools.rag.retrieval.get_index")
-    def test_one_open_conversation_ticket_costs_one_query_more(
+    def test_one_open_conversation_ticket_costs_two_queries_more(
         self, mock_get_index, mock_gateway, django_assert_num_queries
     ):
         """The sibling of the pin just above: one open conversation
-        ticket gives the chat-scoped lookup inside `_deleted_document_
-        ids` an id to filter on, so it is no longer answerable from an
-        empty `__in` -- exactly one query more than the no-ticket count,
-        the same delta that function's own docstring states and
+        ticket gives BOTH the chat-scoped lookup AND the notes lookup
+        inside `_deleted_document_ids` an id to filter on each, so
+        neither is answerable from an empty `__in` any more -- exactly
+        two queries more than the no-ticket count, the
+        same delta that function's own docstring states and
         `tools/rag/tests/test_access_documents.py` already pins for the
         row surfaces."""
         from identity.contracts.actions import SOURCE_WEB
@@ -641,7 +642,7 @@ class TestRetrieveNodes:
         _stub_index(mock_get_index)
         settings_row = RagSettings.get_solo()
 
-        with django_assert_num_queries(3):
+        with django_assert_num_queries(4):
             retrieval.retrieve_nodes(
                 "q?", None, settings_row, embed_resolved=EMBED_RESOLVED,
                 visibility=OPEN_VISIBILITY)

@@ -850,14 +850,17 @@ CARDS: tuple[HelpCard, ...] = (
                 name="Keep finished queue jobs for",
                 anchor="queue-retention",
                 meaning=(
-                    "How many days a finished job record stays on the Queue page. Left BLANK, "
-                    "there is no age limit and only the queue's own row limit (Job execution's "
-                    "\"Keep the most recent\") bounds how many finished jobs are kept."
+                    "How many days a finished job record should stay on the Queue page. Left "
+                    "BLANK, there is no age limit. The value is recorded now; the Queue page's "
+                    "own cleanup does not read it yet, and applies it starting in a following "
+                    "change."
                 ),
                 effects=(
-                    "Applies to finished jobs already on the Queue page too, the next time the "
-                    "queue tidies up (which happens whenever a new job is added). It never "
-                    "touches a job that is still running or waiting."
+                    "Nothing on the Queue page changes today -- only the queue's own row limit "
+                    "(Job execution's \"Keep the most recent\") bounds how many finished jobs "
+                    "are kept. Once the Queue page's cleanup applies this setting, in a "
+                    "following change, it will never touch a job that is still running or "
+                    "waiting."
                 ),
             ),
             HelpField(

@@ -262,6 +262,13 @@ class TestTheSweep:
         assert service.sweep() == 0
         assert DeletionTicket.objects.count() == 1
 
+    def test_the_default_limit_is_twenty_five(self):
+        """`docs/OPERATIONS.md` now states this number to the operator
+        reading `manage.py purge_deleted --help`, so a change here must
+        be a deliberate, visible re-pin, not a silent drift between the
+        code and the doc."""
+        assert service.SWEEP_LIMIT == 25
+
     def test_it_is_bounded_by_the_limit(self):
         """All four tickets are created FIRST, while none of them is due
         (the shipped default is 30 days), and backdated together in ONE

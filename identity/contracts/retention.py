@@ -104,9 +104,10 @@ class RetentionRefused(Exception):
     RAISED BY A RETENTION HANDLER, CAUGHT BY THE DELETED PAGE'S POST
     VIEW, which renders `str(exc)` as a flashed sentence and leaves the
     ticket in place -- the never-500 shape every mutation on this box
-    has. Today exactly one handler raises it:
-    `models.queue.retention.forget_conversation`, when a worker still
-    holds one of the conversation's jobs.
+    has. Once the queue half lands, `models.queue.retention.
+    forget_conversation` will raise it when a worker still holds one of
+    the conversation's jobs -- that handler is not yet in the tree, one
+    of the residues ADR 0019 (decision 7) names.
 
     IT LIVES IN THIS PURE MODULE RATHER THAN BESIDE
     `identity.services.ServiceRefused`, and that is not a stylistic

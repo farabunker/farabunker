@@ -412,3 +412,35 @@ def test_the_filter_is_never_none_any_more():
     with posture("open"):
         from identity.contracts.principals import OPEN_PRINCIPAL
         assert _visibility_filters(None, document_visibility(OPEN_PRINCIPAL)) is not None
+
+
+def test_a_consolidated_notes_conversation_ticket_hides_it_from_the_stream_panel():
+    """A workstream consolidation note is
+    CONTAINED (`tools.rag.jobs` stamps `workstream_id` at
+    consolidation) but reaches `stream_documents` through `readable_
+    documents`'s own exclusion, not through a `workstream`-clause rule
+    of its own -- so ticketing its conversation hides it from the panel
+    the same instant it hides it from the library, before
+    `tools.rag.retention.purge_conversation_notes` ever runs."""
+    from identity.contracts.actions import SOURCE_WEB
+    from identity.contracts.principals import OPEN_PRINCIPAL
+    from identity.contracts.retention import KIND_CONVERSATION
+    from identity.retention import delete_content
+    from tools.rag.models import Document
+    from tools.rag.tests._helpers import make_conversation
+
+    reader = make_user()
+    stream = _workstream()
+    conversation = make_conversation()
+    note = make_document(origin=Document.Origin.NOTES,
+                         notes_conversation_id=conversation.id, workstream=stream)
+    scope = WorkstreamScope(workstream_id=stream.pk, wall=frozenset(),
+                            default_upload_placement="", may_upload=True)
+    with posture("open"):
+        principal = user_principal(reader)
+        assert note in stream_documents(principal, scope)
+
+        delete_content(OPEN_PRINCIPAL, kind=KIND_CONVERSATION, key=str(conversation.id),
+                       owner=conversation, source=SOURCE_WEB)
+
+        assert note not in stream_documents(principal, scope)

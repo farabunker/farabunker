@@ -158,6 +158,14 @@ def delete_content(actor, *, kind: str, key, owner, label: str = "",
     purges each due ticket in its own transaction, always as the SERVICE
     principal -- never the principal that triggered this call -- exactly
     as `sweep` below documents.
+
+    `retention_days = 0` IS SYNCHRONOUS ONLY WHILE THE DUE BACKLOG STAYS
+    UNDER `SWEEP_LIMIT`: this call's own bounded sweep orders every due
+    ticket by `purge_on, pk` and takes the oldest `SWEEP_LIMIT`, so on a
+    box with `SWEEP_LIMIT` or more OTHER tickets already due, the ticket
+    this call just wrote may not be in that batch. The item is hidden at
+    once regardless -- the exclusion is unconditional -- and purged by
+    whichever sweep reaches it next.
     """
     row = IdentitySettings.get_solo()
     purge_on = timezone.localdate() + datetime.timedelta(days=row.retention_days)

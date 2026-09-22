@@ -420,10 +420,17 @@ def run_overview(args: dict, ctx: ToolContext) -> ToolResult:
         if data["retention_days"] == 0
         else f"  {LABEL_RETENTION_DAYS} {data['retention_days']} days"
     )
+    # THE DISCLOSURE IS PART OF THE LINE, NOT A SEPARATE SENTENCE:
+    # `models/` is untouched by this branch and nothing reads
+    # `queue_retention_days` yet, so a bare number here would tell the
+    # reader this box's Queue page already behaves that way, on the ONE
+    # surface with no page beside it to correct the claim.
     queue_retention_line = (
         f"  {LABEL_QUEUE_RETENTION_DAYS} no age limit"
+        " (recorded; the queue does not apply it yet)"
         if data["queue_retention_days"] is None
         else f"  {LABEL_QUEUE_RETENTION_DAYS} {data['queue_retention_days']} days"
+             " (recorded; the queue does not apply it yet)"
     )
     audit_detail_line = (
         f"  {LABEL_AUDIT_DETAIL}: "

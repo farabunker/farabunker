@@ -22,11 +22,15 @@ from django.conf import settings
 from django.urls import reverse
 
 from identity.access import owner_fields
-from identity.contracts.postures import POSTURE_ENTERPRISE
+from identity.contracts.actions import SOURCE_WEB
+from identity.contracts.postures import POSTURE_ENTERPRISE, POSTURE_OPEN
+from identity.contracts.principals import OPEN_PRINCIPAL
+from identity.contracts.retention import KIND_CONVERSATION
+from identity.retention import delete_content
 from tools.rag.models import Category, Document, DocumentEntitlement
 from tools.rag.tests._helpers import (  # noqa: F401 -- `client` is a fixture, discovered by name
-    bind_rag_roles, client, grant, make_admin, make_document, make_entitlement, make_user,
-    posture, sign_in, user_principal,
+    bind_rag_roles, client, grant, make_admin, make_conversation, make_document,
+    make_entitlement, make_user, posture, sign_in, user_principal,
 )
 from tools.rag.views import RANGE_UNSATISFIABLE, _parse_range
 
@@ -160,6 +164,34 @@ class TestChatScopedDocumentFileAccess:
         with posture(POSTURE_ENTERPRISE, admin_sees_content=False):
             sign_in(client, admin)
             response = client.get(reverse("rag-document-file", args=[doc.id]))
+        assert response.status_code == 404
+
+
+@pytest.mark.django_db
+class TestAConsolidatedNotesFileRouteFollowsItsConversation:
+    """The file route gates on `readable_document`
+    -> `readable_documents`, so `_deleted_document_ids()`'s third leg
+    (the consolidated-note leg) reaches it for free -- pinned directly
+    rather than assumed, since this is the surface a person would
+    actually click "Download" from."""
+
+    def test_it_answers_404_once_its_conversation_is_ticketed(self, client, tmp_path):
+        path = tmp_path / "note.md"
+        path.write_text("a consolidated stream")
+        conversation = make_conversation()
+        note = Document.objects.create(
+            title="note.md", source_path=str(path), file_hash="a" * 64,
+            doc_type=Document.DocType.PROSE, origin=Document.Origin.NOTES,
+            notes_conversation_id=conversation.id,
+        )
+        with posture(POSTURE_OPEN):
+            response = client.get(reverse("rag-document-file", args=[note.id]))
+            assert response.status_code == 200
+
+            delete_content(OPEN_PRINCIPAL, kind=KIND_CONVERSATION, key=str(conversation.id),
+                           owner=conversation, source=SOURCE_WEB)
+
+            response = client.get(reverse("rag-document-file", args=[note.id]))
         assert response.status_code == 404
 
 

@@ -224,10 +224,11 @@ ever configures.
 
 ## Consequences
 
-- **A box that is installed and never configured deletes correctly, purges on a 30-day cliff,
-  and keeps finished queue jobs for a day — with nothing filled in, nothing scheduled, and no
-  posture decided.** The three retention fields' shipped defaults are the whole of what "zero
-  required setup" means for this feature.
+- **A box that is installed and never configured deletes correctly and purges on a 30-day
+  cliff — with nothing filled in, nothing scheduled, and no posture decided.** The queue
+  retention field ships its own default (a day) too, recorded from day one so the queue half
+  needs no later migration against a live settings row, but nothing in the landed tree reads it
+  yet — see "Where the landed tree differs from the spec", above.
 - **A person's own deleted items are one page, one query, in every posture that has accounts.**
   Restoring is deleting the ticket; nothing about the item was ever touched, so there is nothing
   to put back but the ticket itself.

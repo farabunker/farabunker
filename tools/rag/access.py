@@ -291,30 +291,46 @@ def document_visibility(principal, *, settings_row=None, stream=None,
 
 
 def _deleted_document_ids() -> list[int]:
-    """Documents a ticket hides: the ones deleted outright, plus every
-    chat-scoped document whose CONVERSATION is deleted.
+    """Documents a ticket hides: the ones deleted outright, every
+    chat-scoped document whose CONVERSATION is deleted, and every
+    workstream consolidation note distilled FROM a deleted conversation.
 
     A `Document` with `scope=conversation` has exactly one
     `DocumentAttachment`, for one conversation (`delete_attachments`
     states and depends on that invariant), so a chat-scoped document
     follows its conversation and nothing else does. Universal and
-    stream-contained documents are UNTOUCHED: an attachment is a CLAIM a
-    conversation makes on a document, never the document's own
+    stream-contained documents are otherwise UNTOUCHED: an attachment is
+    a CLAIM a conversation makes on a document, never the document's own
     existence, and deleting a conversation must not hide a document
     another conversation still holds a claim on.
 
-    TWO QUERIES WHEN NOTHING IS TICKETED, THREE WHEN A CONVERSATION IS --
+    THE THIRD LEG is a DIFFERENT relationship, not a second case of the
+    second: `tools.rag.jobs`'s consolidation job writes a note `Document`
+    with `origin=NOTES` and `notes_conversation_id` set to the
+    conversation it distilled -- no `DocumentAttachment` row, `scope`
+    staying `UNIVERSAL` -- so it matches neither of the first two legs on
+    its own. `tools.rag.retention.purge_conversation_notes` destroys that
+    same document by the same `notes_conversation_id` at purge time, so
+    this function must hide it by the same key: a note this function did
+    not hide would be destroyed on its purge date without ever having
+    been shown as pending deletion.
+
+    TWO QUERIES WHEN NOTHING IS TICKETED, FOUR WHEN A CONVERSATION IS --
     flat in the number of TICKETS rather than in the number of documents
     (the `agents.shares.shared_keys` cost model, unchanged), never
-    guessed. The two `ticketed_keys()` reads always run; the third, the
-    chat-scoped lookup keyed off the conversation ticket ids, is answered
-    by the ORM WITHOUT a database round trip when that id list is empty
-    -- filtering on an empty `__in` is known-empty at compile time, so
-    there is nothing for Postgres to be asked. That is a real saving,
-    not a corner being cut: the common box has no open conversation
-    ticket at all, and the cheaper path is exactly that common case. A
-    box with at least one open conversation ticket pays the third query,
-    still bounded by the number of TICKETS rather than documents.
+    guessed. The two `ticketed_keys()` reads always run; the conversation
+    ticket keys they return are threaded into BOTH the chat-scoped leg
+    and the notes leg rather than read twice, so a conversation ticket
+    still costs exactly one extra `ticketed_keys()` read, not two. The
+    chat-scoped and notes lookups, each keyed off those same ids, are
+    each answered by the ORM WITHOUT a database round trip when the id
+    list is empty -- filtering on an empty `__in` is known-empty at
+    compile time, so there is nothing for Postgres to be asked. That is
+    a real saving, not a corner being cut: the common box has no open
+    conversation ticket at all, and the cheaper path is exactly that
+    common case. A box with at least one open conversation ticket pays
+    both conditional queries, still bounded by the number of TICKETS
+    rather than documents.
 
     COMPUTED ONCE PER CALL AND THREADED. Its four callers --
     `readable_documents`, `attached_documents`, `listable_documents`
@@ -325,10 +341,16 @@ def _deleted_document_ids() -> list[int]:
     `readable_documents`.
     """
     ids = [int(key) for key in ticketed_keys(KIND_DOCUMENT) if key.isdecimal()]
+    ticketed_conversation_keys = ticketed_keys(KIND_CONVERSATION)
     ids.extend(
         Document.objects.filter(
             scope=Document.Scope.CONVERSATION,
-            attachments__conversation_id__in=ticketed_keys(KIND_CONVERSATION),
+            attachments__conversation_id__in=ticketed_conversation_keys,
+        ).values_list("pk", flat=True)
+    )
+    ids.extend(
+        Document.objects.filter(
+            notes_conversation_id__in=ticketed_conversation_keys,
         ).values_list("pk", flat=True)
     )
     return ids
