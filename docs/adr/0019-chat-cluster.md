@@ -3,9 +3,9 @@
 **Status:** Accepted
 **Date:** 2026-09-22
 
-Written against `chat-cluster` at **`4b8606d`**, with its fourteen implementation tasks
-landed; Task 14's fix round and the whole-branch review follow, and the branch's closing
-documentation pass re-stamps this SHA to the branch tip it merges from. Its argument lives in
+Written against `chat-cluster` at **`25faf17`** — the branch's fifteen tasks, their review
+rounds, the whole-branch review and its closing fix wave, all on the branch and **in review**,
+which is the state [`docs/ROADMAP.md`](../ROADMAP.md) records for this phase too. Its argument lives in
 [`docs/superpowers/specs/2026-09-21-chat-cluster-design.md`](../superpowers/specs/2026-09-21-chat-cluster-design.md),
 whose §16 records the owner's ruling on all eight of its open flags; the plan that executed it
 is [`docs/superpowers/plans/2026-09-21-chat-cluster.md`](../superpowers/plans/2026-09-21-chat-cluster.md),
@@ -91,6 +91,15 @@ a new conversation" signal *only if the reader is told*, so the disclosure names
 exclusions large enough to change a decision: what a tool was asked and answered, and files
 attached to a message.
 
+**Both of the line's clauses can become true mid-session, and both arrive without a reload.**
+The truncation clause is server-rendered and merely unhidden by the poller — its text names
+two counts, and a page below the threshold gives nothing away by carrying it. The `full`
+band's own sentence is a constant with no counts in it, and a page below 90% must not carry it
+at all, so it travels in the poll body and the script writes it with `textContent`. Neither is
+composed in JavaScript, and no new `<script>` exists anywhere in this branch. The distinction
+is worth recording because the first shipped with the treatment and the second did not, on a
+page where the band flips on a tick and the bar turns red.
+
 **One counter, not two.** `estimate_tokens` is the only token arithmetic on this platform, at
 the column root rather than inside `agents/chat` so a future management command or MCP edge
 can ask the same question without being a view. Conversation compaction, when it is built,
@@ -167,6 +176,16 @@ administrator who could not open the row could not switch a runaway agent off.
 and `identity/access.py::sees_all_content`'s own docstring now records the distinction rather
 than leaving two true-looking statements side by side.
 
+**Stated plainly, because "manage" understates it:** that exception is a **read and a
+rewrite**. The editor renders the agent's full `system_prompt` in a textarea, so an
+administrator with `admin_sees_content` off — the ordinary posture — can read and rewrite the
+text of any member's agent on this box. This is the accepted price of one edit route rather
+than two: agent **configuration** is administer-class, and the content toggle governs
+conversation and document **content**. The narrower reading (turning a runaway agent off is
+served by `enabled`, reach and labels, none of which needs the prompt rendered) was
+considered and declined — it would mean a second, narrowed form, which is the second editor
+this decision exists not to have.
+
 **`/settings/agents/` is not a `/chat/` route**, so it has its own URLconf in the owning column
 (`agents/chat/agent_admin_urls.py`), mounted from `config/urls.py` beside `/settings/` — the
 same shape the settings assistant already set. The cost is one test module: the column's
@@ -227,6 +246,17 @@ destroying history: `Conversation.branched_from` (`SET_NULL`) and
 make "where did this thread come from" a fact you can query rather than a string you can only
 read. The asymmetry decided it: branching when a rewind was wanted costs reversible clutter;
 rewinding when history was wanted destroys data irreversibly.
+
+**The column is provenance; the banner's number is display, and they are not the same
+number.** `branched_at_index` stores the parent's raw `Turn.index` — a dense counter over
+every row in the thread, assistant answers, tool cards and delegate turns included — which is
+exactly what a queryable provenance column should hold and exactly what no reader can count
+to. The banner renders a 1-based ordinal over the parent's own finished root-depth user
+messages instead ("at your message 3"), computed at render time by one bounded `.count()`
+threaded into the page's existing flat-cost pin. On the two fallback paths — the parent
+deleted, or invisible to this reader — the banner carries **no number at all**: an ordinal
+counted over a thread nobody can open to check is a claim, not a fact, and the declared
+sentence "Branched from an earlier conversation." is whole without one.
 
 **A share recipient may not branch**, not even on their own message. A branch is a copy, so it
 answers to the copy predicate (`may_manage_conversation`) and not the wider `may_post_to`: a
@@ -399,11 +429,16 @@ untitled conversation is the agent's name; the list-level default is a literal. 
 banner follows the page-level one, which is locally consistent and defensible, and there is no
 display helper to reuse today. Worth one shared helper before a sixth spelling appears.
 
-**G10 — the thread page's test module is a permanent member of the split-threshold exemption
-list.** It crossed the repo's per-module size gate during this branch and was exempted rather
-than split, because splitting it is materially larger than any one task's file list. It now
-holds two large meter classes. The next task to add to it should ask whether the split is
-finally due. Exemption lists get their exempted code removed, not grown.
+**G10 — CLOSED, and recorded rather than deleted.** The thread page's test module crossed the
+repo's per-module size gate during this branch and was **exempted** rather than split, on the
+argument that splitting it was materially larger than any one task's file list. The
+whole-branch review ruled the argument beside the point: AGENTS.md non-negotiable 2 ends "A
+dated exemption list gets its exempted code removed, not grown", it carves out no exception
+for a well-argued growth, and this is the branch that re-wrapped that rule's own file. The
+module was split at the meter's own edge (`agents/chat/tests/test_thread_meter.py`) with both
+meter classes moving together — so the plan decision that put the poll-path class beside the
+page class is honoured, not overruled — and the exemption entry is gone. Left here as a gap
+that was closed, because the reasoning is the reusable part.
 
 **Not gaps, but boundaries this branch deliberately did not cross:** granting tools from the
 agent form, per-person agent sharing, a branch that carries its attachments, an audit action
@@ -425,10 +460,12 @@ for a branch, and conversation compaction.
 - **A share recipient cannot edit-and-branch in a conversation shared with them.** This is the
   one refusal in the branch with a stated cost to a real reader, and it is the copy they are
   refused, not the conversation.
-- **The administrator-content toggle now has a documented exception.** Managing an agent
-  ignores it; listing agents does not. Both halves are stated in the predicate's own docstring
-  and pinned by a named cell in the route matrix, so the next reader meets a rule rather than
-  two contradictions.
+- **The administrator-content toggle now has a documented exception, and it is a read.**
+  Managing an agent ignores it; listing agents does not. What "managing" grants includes
+  reading and rewriting a member's agent prompt, which decision 5 now says in those words
+  rather than leaving a reader to find it in a textarea. Both halves are stated in the
+  predicate's own docstring and pinned by a named cell in the route matrix, so the next reader
+  meets a rule rather than two contradictions.
 - **The shared transfer panel's CSS now lives in the page shell.** Any consumer anywhere in
   the tree gets it styled, and the CSS-ownership gate keeps it in exactly one place.
 
