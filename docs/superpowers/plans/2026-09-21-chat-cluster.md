@@ -6757,11 +6757,12 @@ Run by the author against the spec, before handing this over.
 
 ---
 
-## Amendment (2026-09-22) — what actually shipped, task by task
+## Amendment (2026-09-22) — what actually landed, task by task
 
 Appended after Tasks 1–14 landed and were reviewed, in the shape this archive's other plans
 use: the plan text above is left as written, because it is the record of what was planned and
-reviewed, and **where it and this section disagree, this section is what shipped.**
+reviewed, and **where it and this section disagree, this section is what landed on the
+branch.** Nothing here is a claim about a merge or a deploy; neither has happened.
 
 **The headline.** Task 6's audit detail keyword is **`fields=`, not the `was=`** the task body
 above prints. `was=` already means "the previous value" on the workstream rename action, so

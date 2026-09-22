@@ -141,3 +141,147 @@ class TestCategoryDescriptionRemovalStaysDocumented:
             "replace it with an equally honest record that the field "
             "was removed."
         )
+
+
+ADR_DIR = Path(settings.BASE_DIR) / "docs" / "adr"
+
+# `0019-chat-cluster.md`: four digits, a hyphen, a lower-case slug.
+_ADR_FILENAME = re.compile(r"^(\d{4})-[a-z0-9]+(?:-[a-z0-9]+)*\.md$")
+
+# An inline Markdown link's target. Reference-style links (`[x]: url`) are
+# not used anywhere in `docs/adr/` and are deliberately not matched -- a
+# pattern that matched them and resolved them wrongly would be worse than
+# one that says what it covers.
+_MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
+
+_OFF_BOX_SCHEMES = ("http://", "https://", "mailto:")
+
+
+def _anchor_slug(heading: str) -> str:
+    """A Markdown heading, as the fragment a renderer will link it by.
+
+    The rule the common renderers share: drop the leading `#`s, lower-case,
+    remove every character that is not a letter, digit, underscore, space or
+    hyphen, then turn each remaining space into a hyphen. Runs are NOT
+    collapsed -- "A — B" becomes `a--b`, because the em dash is removed and
+    both of its spaces survive. Collapsing them here would make this gate
+    accept an anchor no renderer produces, which is the wrong direction for
+    a test whose whole job is to answer "does this link land".
+    """
+    text = heading.strip().lstrip("#").strip()
+    return re.sub(r"[^\w\- ]", "", text).lower().replace(" ", "-")
+
+
+def _heading_slugs(path: Path) -> set[str]:
+    return {
+        _anchor_slug(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.startswith("#")
+    }
+
+
+def _adr_links() -> list[tuple[Path, str]]:
+    """Every inline link in every ADR, paired with the file it is written in
+    (which is what a relative target resolves against)."""
+    found: list[tuple[Path, str]] = []
+    for adr in sorted(ADR_DIR.glob("*.md")):
+        for match in _MARKDOWN_LINK.finditer(adr.read_text(encoding="utf-8")):
+            found.append((adr, match.group(1)))
+    return found
+
+
+class TestTheDecisionRecordIsNavigable:
+    """The decision record is a numbered series that cross-references
+    itself, and nothing checked either half until now (chat cluster, Task 15
+    review). ADR 0019 was hand-verified at review time -- its number against
+    `ls`, its nine links by eye -- which is exactly the check a gate should
+    be doing.
+
+    TWO CLAIMS, DELIBERATELY NARROW.
+
+    (1) The NUMBERS are unique and dense. A duplicate means two decisions
+    wearing one identity, and every `[ADR NNNN]` reference in the tree then
+    points at both; a hole means a reader cannot tell a decision that was
+    never written from one that was deleted. "Take the next number; do not
+    guess" is the instruction every ADR-writing brief carries, and this is
+    what makes it checkable.
+
+    (2) Every relative LINK inside `docs/adr/` resolves -- the file, and the
+    heading anchor when the link names one. ADRs link each other, the column
+    READMEs, the design docs and the planning archive; a rename anywhere
+    else in the tree breaks them silently, and a decision record whose
+    citations do not land is a record you have to verify by hand before you
+    can trust it.
+
+    SCOPED TO `docs/adr/`, not to `docs/**`. The planning archive is a
+    historical record of thousands of links written against trees that have
+    since moved; holding it to this rule is a different and much larger
+    claim, and one nobody has decided to make. The ADRs are current
+    documentation and are expected to stay correct, which is why they are
+    the half worth gating. Widening the walk is a one-line change to
+    `_adr_links` when somebody wants to make that claim.
+
+    Off-box links (`http`, `https`, `mailto`) are skipped: resolving them
+    would be a network call, and non-negotiable 5 forbids one in any code
+    path.
+    """
+
+    def test_every_adr_filename_is_a_number_and_a_slug(self):
+        offenders = [
+            path.name for path in sorted(ADR_DIR.glob("*.md"))
+            if not _ADR_FILENAME.match(path.name)
+        ]
+        assert offenders == [], offenders
+
+    def test_the_adr_numbers_are_unique_and_dense(self):
+        numbers = sorted(
+            int(_ADR_FILENAME.match(path.name).group(1))
+            for path in ADR_DIR.glob("*.md")
+            if _ADR_FILENAME.match(path.name)
+        )
+        duplicates = [n for n in numbers if numbers.count(n) > 1]
+        assert duplicates == [], (
+            f"two ADRs share a number: {sorted(set(duplicates))} -- one of "
+            "them took a number instead of the next free one."
+        )
+        assert numbers == list(range(1, len(numbers) + 1)), (
+            "the ADR numbers are not dense from 0001: "
+            f"{numbers}. A hole means a reader cannot tell a decision that "
+            "was never written from one that was deleted."
+        )
+
+    def test_every_relative_link_in_an_adr_resolves(self):
+        offenders = []
+        for adr, target in _adr_links():
+            if target.startswith(_OFF_BOX_SCHEMES):
+                continue
+            path_part, _, fragment = target.partition("#")
+            resolved = adr.parent if path_part == "" else adr.parent / path_part
+            if not resolved.exists():
+                offenders.append(f"{adr.name} -> {target} (no such file)")
+                continue
+            if fragment and resolved.is_file():
+                if fragment not in _heading_slugs(resolved):
+                    offenders.append(f"{adr.name} -> {target} (no such heading)")
+        assert offenders == [], offenders
+
+    def test_the_walk_is_reading_a_real_decision_record(self):
+        """Anti-vacuous pin: both assertions above pass trivially on an empty
+        directory or on a set of documents carrying no links at all."""
+        assert len(list(ADR_DIR.glob("*.md"))) >= 15
+        on_box = [
+            target for _adr, target in _adr_links()
+            if not target.startswith(_OFF_BOX_SCHEMES)
+        ]
+        assert len(on_box) >= 40, len(on_box)
+
+    def test_the_anchor_slug_matches_the_renderers_rule(self):
+        """The slug function is the load-bearing half of the link check, and
+        a wrong one fails OPEN -- it would accept an anchor no renderer
+        produces and reject one every renderer does. Pinned directly,
+        including the run-preserving case the docstring argues for."""
+        assert _anchor_slug("## The Decision") == "the-decision"
+        assert _anchor_slug("### 2. Security posture: the offline spectrum") == (
+            "2-security-posture-the-offline-spectrum")
+        assert _anchor_slug("## `box_wide` and `resident`") == "box_wide-and-resident"
+        assert _anchor_slug("## A — B") == "a--b"

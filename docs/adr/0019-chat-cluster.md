@@ -3,8 +3,9 @@
 **Status:** Accepted
 **Date:** 2026-09-22
 
-Written against the `chat-cluster` branch with its fourteen implementation tasks landed and
-reviewed. Its argument lives in
+Written against `chat-cluster` at **`4b8606d`**, with its fourteen implementation tasks
+landed; Task 14's fix round and the whole-branch review follow, and the branch's closing
+documentation pass re-stamps this SHA to the branch tip it merges from. Its argument lives in
 [`docs/superpowers/specs/2026-09-21-chat-cluster-design.md`](../superpowers/specs/2026-09-21-chat-cluster-design.md),
 whose §16 records the owner's ruling on all eight of its open flags; the plan that executed it
 is [`docs/superpowers/plans/2026-09-21-chat-cluster.md`](../superpowers/plans/2026-09-21-chat-cluster.md),
@@ -36,8 +37,9 @@ design.
 The meter divides by what the engine will actually be asked to allocate:
 `models/contracts/bindings.py::effective_context_window` returns the operator's own
 per-connection `context_window` when there is one, the engine adapter's bounded default
-otherwise, and a declared "unknown" when the bound engine declares no default here. **Not** a
-model's architecture maximum, and **not** a probe.
+otherwise, and a declared "unknown" when the bound engine declares no default here — or when
+the stored value is not a positive integer, the degradation the function's own docstring calls
+out. **Not** a model's architecture maximum, and **not** a probe.
 
 This amends [ADR 0010](0010-model-management-framework.md)'s 2026-08-22 context-window
 amendment with a direction it did not have. That column was written to be **sent** — the
@@ -184,10 +186,10 @@ cannot manage"; with accounts off the reader can manage all of them, so the coun
 every label on the row, printed as a restriction to the one operator who could change any of
 them.
 
-The column is **hidden, never zeroed**. A `0` would say "none" where the truth is "not
-asked", which is a third wrong answer rather than a safe default — so the chat list drops the
-chip and the settings list drops the header cell, the data cell and one from the empty row's
-`colspan`, single-sourced from one flag.
+The column is **hidden, never zeroed**. A *rendered* `0` would say "none" where the truth is
+"not asked"; `0` stays the honest internal value, and the templates drop the cell rather than
+print it — the chat list drops the chip, and the settings list drops the header cell, the data
+cell and one from the empty row's `colspan`, single-sourced from one flag.
 
 **The count is a bare number, never a name.** Naming the entitlements would be the
 entitlement non-disclosure gate, which the route matrix sweeps these routes for. It is folded
@@ -284,7 +286,7 @@ conversation, since both ids arrive from the URL separately.
 So the page's answer and the POST's answer are built from the same two functions and cannot
 drift. That matters in both directions: a card copy grown wider would render a disclosure
 whose own POST answers 404, and one grown narrower would silently hide an available control.
-The first shipped spelling had the row rule written twice — once in the predicate, once in the
+The first spelling to land had the row rule written twice — once in the predicate, once in the
 card builder — with no test that could notice them disagreeing; the agreement pin that
 replaced it could not have been written before the extraction, because there was no single
 object to move.
@@ -368,9 +370,11 @@ on either side) rather than encoding the surcharge as a passing number, so an au
 poll-path budgets has something honest to start from.
 
 **G5 — agents have no name uniqueness.** Two agents may carry the same `name`, differing only
-by derived slug; both list pages render names. Ruled for v1: slug-only uniqueness stands, and
-the list may show the key beside the name if it ever becomes a real confusion. `Workstream`'s
-per-owner name constraint is the shape a fix would take.
+by derived slug; both list pages render names. **Carried for v1, not ruled:** slug-only
+uniqueness stands by default because `Agent` never had a per-owner name constraint, and
+Task 6's report asked for an owner decision before the list pages landed — none was taken, so
+this is an open question rather than a settled one. `Workstream`'s per-owner name constraint
+is the shape a fix would take.
 
 **G6 — the field writer's refusal is keyed under `name`.** `update_agent` returns a
 field-keyed error dict and has no form-wide key, so its "not yours" refusal is keyed to

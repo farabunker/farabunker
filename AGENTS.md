@@ -21,9 +21,8 @@ docker compose restart watcher worker                  # after ingest/queue/runt
 docker compose up -d --build                           # run it locally, or after Dockerfile/requirements.txt changes
 ```
 
-[docs/DEV.md](docs/DEV.md#8-the-verification-ladder) §8 rung 1 owns the test commands,
-[README.md](README.md#quickstart) the local-run path, and
-[docs/DEV.md](docs/DEV.md#testing-a-branch-before-merge) the preview port table.
+[docs/DEV.md](docs/DEV.md#8-the-verification-ladder) §8 rung 1 owns the test commands and, in its
+preview section (linked below), the port table; [README.md](README.md#quickstart) the local-run path.
 
 ## The non-negotiables
 
@@ -92,7 +91,7 @@ docker compose up -d --build                           # run it locally, or afte
 ## Subagent-driven development
 
 Implementation here is subagent-driven: the orchestrating session does not write production code.
-It may write orchestration artifacts — a spec, a brief, a ledger entry — and says so when it does.
+It may write short orchestration artifacts — a spec, a brief, a ledger entry — and says so when it does.
 
 - Every plan is written before the code and reviewed adversarially before it is executed.
 - Every task gets its own review pass against the real tree, not the plan's claims, and the

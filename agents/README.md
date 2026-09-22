@@ -853,7 +853,10 @@ author-less turn in an unshared thread as the reader's own, so a duplicate of a
 conversation somebody else had posted into used to replay that person's words to
 the model unfenced. It no longer does.
 
-`may_edit_turn` is the predicate both the card control and the writer answer to.
+The card control and the writer share `is_editable_turn_row` — the per-row half,
+asked with no principal and no query; the conversation-level half is
+`may_edit_any_turn`, asked once per render. `may_edit_turn` composes both for the
+POST, so the page's answer and the writer's cannot drift.
 A root-depth, finished `user` turn of this conversation, no turn anywhere in the
 conversation still in flight, and manage rights — so a share recipient may not
 branch somebody else's thread, not even on their own message: a branch is a copy,

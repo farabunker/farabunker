@@ -742,20 +742,11 @@ told what to ask for, and its own fix sentence forbids ever letting a client pro
 server for an architecture maximum on the platform's behalf. That column was written to be
 **sent**.
 
-The chat cluster's context meter now also **reads** it, for display:
-`models/contracts/bindings.py::effective_context_window(resolved)` returns the operator's own
-per-connection value when there is one, the engine adapter's bounded default otherwise, and a
-declared "unknown" when the bound engine declares no default of its own. It is a pure read —
-it writes nothing, sends nothing, and never touches the network — and it never reports a
-model's architecture maximum, because the bounded number the engine is actually asked for is
-the number that truncates a conversation.
+The chat cluster's context meter now also **reads** it, for display, through
+`models/contracts/bindings.py::effective_context_window` — a pure read that writes nothing,
+sends nothing and never touches the network.
 
 **This amendment adds a direction, not a rule.** Nothing about how the value is set, resolved
 or spread into the engine call changes, and the prohibition the incident produced stands
 unweakened: a display probe would still be a probe, one per page render, against a machine
-that may be asleep.
-
-The reasoning, the engine-default lookup, and why this reader deliberately answers differently
-from the retrieval page's own context-window reader are recorded in
-[ADR 0019](0019-chat-cluster.md), Decision 1; `models/registry/README.md` carries the
-reconciliation between the two readers.
+that may be asleep. [ADR 0019](0019-chat-cluster.md), Decision 1, carries the rest.

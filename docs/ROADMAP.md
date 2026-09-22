@@ -302,8 +302,9 @@ architectural constraints this phase must honor, and
   installed) and **a row that came from a shipped default is the operator's to edit**
   (ruling 3 — the resident edit-lock is gone; `--reset <slug>` is the one deliberate way
   back to the shipped text).
-- [x] **The chat cluster** — shipped 2026-09-22, three independently argued features on one
-  branch. **A context meter**: the thread page says how much of the model's context the next
+- [ ] **The chat cluster** — on branch `chat-cluster`, in review (2026-09-22); this box ticks
+  when a later documentation pass records the deploy. Three independently argued features on
+  one branch. **A context meter**: the thread page says how much of the model's context the next
   turn will carry, measured against the window the engine will actually be asked to allocate
   rather than a model's architecture maximum, and says so when a conversation is already
   being shortened before it is sent. **An agent create/edit utility**: one form and one edit

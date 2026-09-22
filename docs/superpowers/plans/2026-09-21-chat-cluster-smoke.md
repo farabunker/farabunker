@@ -60,11 +60,12 @@ window) signed in as a plain member on an accounts-on box.
       principal who owns an entitlement — two panes side by side, each a fixed height with its
       own scroll, each with a working type-to-filter box, and the panel's own Save **below the
       field form's Save**, visibly a separate control rather than a nested one.
-- [ ] **The transfer panel looks identical on all five surfaces.** Its CSS was *moved* from the
-      settings shell to the page shell this branch; compare the panes side by side on the
-      entitlement page, `/chat/tools/`, `/chat/access/`, and the agent editor at both mounts.
-      Same card chrome, same pane height, same filter box. A promotion that half-worked shows
-      here and nowhere else.
+- [ ] **The transfer panel looks identical on all five consumers.** Its CSS was *moved* from
+      the settings shell to the page shell this branch; compare, side by side, an entitlement's
+      own page, the **entitlements list page** (whose search box is the one consumer that
+      shares only the promoted `.filter-input` rule — so a half-worked promotion shows there
+      first), `/chat/tools/`, `/chat/access/`, and the agent editor. Same card chrome, same
+      pane height, same filter box.
 - [ ] **The reach control is absent from a member's page source.** View source as a member on
       the agent editor — "everyone on this box" appears nowhere in the HTML, not merely hidden
       by CSS. Same for the engine-default sentence on the thread page.
@@ -95,5 +96,5 @@ window) signed in as a plain member on an accounts-on box.
       the top never flickers, never duplicates, and never ends up below the thread. On a
       branch of a branch, confirm it names the **immediate** parent.
 - [ ] **A branch looks like an ordinary thread.** The copied history above, the edited message
-      as the newest turn, the answer arriving into it, tool cards rendered, and the original
-      unchanged when you open it again.
+      as the newest turn, the answer arriving into it, tool cards rendered **and no audit link
+      on the branch**, and the original unchanged when you open it again.

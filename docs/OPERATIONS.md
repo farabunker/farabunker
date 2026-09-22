@@ -649,8 +649,8 @@ sidebar's Setup group, administrator-gated; a context line under the composer on
 every thread page; and an edit control on a reader's own finished messages, which
 creates a new conversation rather than rewriting the old one. On a box running
 without accounts the entitlement-restriction column on both agent lists is not
-rendered at all — deliberate, because with accounts off a label restricts nobody,
-and a `0` there would say "none" where the truth is "not asked".
+rendered at all — deliberate, not a rendering fault; the reasoning is
+[ADR 0019](adr/0019-chat-cluster.md), decision 6.
 
 ## Turning on accounts
 
