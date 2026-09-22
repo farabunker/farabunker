@@ -70,6 +70,10 @@ _COVERED: dict[str, tuple[str, ...]] = {
     "rag.Document": (KIND_CONVERSATION,),
     "rag.DocumentRow": (KIND_CONVERSATION,),
     "rag.DocumentAttachment": (KIND_CONVERSATION,),
+    # The KIND-LEVEL check this gate runs passes today because `agents`
+    # registered the conversation handler; the queue ROW itself is only
+    # actually reached once the queue half of this feature lands (ADR
+    # 0019 decision 7 records the residue).
     "jobs.InferenceJob": (KIND_CONVERSATION,),
 }
 

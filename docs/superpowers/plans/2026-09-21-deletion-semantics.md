@@ -2764,11 +2764,10 @@ Work through the list in this task's header. Each one either (a) changes its ass
             request, "Conversation deleted. You can restore it from Settings → Deleted.")
 ```
 
-`_thread_actions.html` and `_sidebar_row.html` — replace the confirm sentence in both. The two say the same thing because they are the same affordance in two places:
+`_thread_actions.html` and `_sidebar_row.html` — replace the confirm sentence in both. The two say the same thing because they are the same affordance in two places. **The confirm drops its own restore clause (whole-branch review, slice one)**: "where you can restore it until the date shown there" is untrue on a box with "Keep deleted items for" set to 0, where the item is removed at once — the Deleted page itself shows the date and the Restore control, so the confirm need not promise either:
 
 ```html
-        <span class="muted">Delete this conversation? It moves to Settings → Deleted,
-          where you can restore it until the date shown there.</span>
+        <span class="muted">Delete this conversation? It moves to Settings → Deleted.</span>
 ```
 
 Update each fragment's surrounding `{% comment %}` to say the same, and drop the now-wrong "Its tool-call audit trail is kept" line — after a purge the tool-call records' words are blanked and only the content-free shell survives, which Task 9 documents in `agents/README.md`.
@@ -4662,15 +4661,20 @@ def deleted_page(request):
     query, and this GET costs no settings read beyond the middleware's
     own.
 
-    THE LOG NAMES NOBODY'S ITEM THIS VIEWER COULD NOT ALREADY READ.
-    `show_labels` is `sees_all_content(principal, settings_row=row)`,
-    computed once: every event still LISTS for every viewer (the log is
-    a record of what happened, not a per-viewer view of it), but its
-    `target_label` -- written only when `audit_detail` was on at write
-    time -- reaches the template only for a principal who could already
-    read everyone's content. Anybody else sees the same event with the
-    label blanked, exactly as an event carries no label at all when
-    `audit_detail` was off when it was written.
+    THE LOG IS THE VIEWER'S OWN ACTIVITY, UNLESS THEY SEE ALL CONTENT
+    (whole-branch review, slice one). `show_labels` is `sees_all_content
+    (principal, settings_row=row)`, computed once: a principal who may
+    already read everyone's content sees every `content.*` event, same
+    as before. Everybody else sees only the events they themselves
+    performed -- `actor_kind`/`actor_key` equal to their own principal
+    -- never somebody else's kind, item key or name; an item of theirs
+    the sweep purged on its own date (always the service principal, never
+    the person who deleted it) was nobody's own act either, so it never
+    reaches a member's log this way. A LABEL STILL NEEDS `show_labels` ON
+    TOP of that: an event surviving the actor filter is the viewer's own,
+    but its `target_label` -- written only when `audit_detail` was on at
+    write time -- reaches the template only for a principal who could
+    already read everyone's content, exactly as before.
     """
     retention.sweep()
     row = settings_row_for(request)
@@ -4702,6 +4706,8 @@ def deleted_page(request):
         }
         for event in audit.by_action(
             (CONTENT_PURGED, CONTENT_DELETED, CONTENT_RESTORED))
+        if show_labels or (event.actor_kind == principal.kind
+                            and event.actor_key == principal.key)
     ]
     return render(request, "identity/deleted.html", {
         "tickets": tickets,
@@ -7283,3 +7289,4 @@ Checked end to end: `ticketed_keys` / `visible_tickets` / `may_purge` / `delete_
 - **Execution amendment (Task 11 review round one), 2026-09-21:** three findings. (1) `output_file`/`input_file` bypass `visible_jobs` entirely (they load their row by primary key and call `may_read_job` directly), so Task 11's exclusion never reached them — a ticketed job's image stayed fetchable by its direct URL after deletion; `may_read_job` now refuses a ticketed job too, before its own `sees_all_content` branch, and the only other production callers of `may_read_job` (there is no sibling `may_manage_job`/`may_delete_job` in this module) are those same two routes, so no other predicate needed the same fix. (2) `purge_artifacts` logged the raw artifact reference and the raw generation id it failed to parse; both warnings now record only that one value failed to parse, pinned by a `caplog` test. (3) the module's own docstring promised a FAILED job with no output is reached only through its generation id; no test built one until now. All three, and the README sentence recording the file-view refusal, are reflected in Task 11's Files list and code/test blocks above.
 - **Execution amendment (Task 10 review round one), 2026-09-21:** two findings. (1) `purge_conversation_notes` caught every `OSError` from the note file's own unlink and logged-and-continued to delete the `Document` row regardless — `missing_ok=True` already forgives the one case that should be forgiven, "already gone"; any OTHER `OSError` (a permissions or I/O problem) is a genuine failure, and deleting the row while the file itself stayed stuck on disk would report a purge that never happened, with the row being the only remaining handle on that file. The catch is removed: the file goes first, the row survives when it could not be removed, and `identity/cascades.py::run_retention`'s own never-swallows contract fails the whole purge and retries it on the next sweep. (2) `tools/rag/retrieval.py::_visibility_filters` never consulted the deletion exclusion at all, so a soft-deleted item's chunks stayed retrievable into a fresh answer through any surface that function still governed (today only from inside a ticketed conversation itself, which can take no new turns — but the same gap would reopen the moment a library document can be ticketed on its own). Closed uniformly rather than per-caller: `retrieve_nodes` computes `tools.rag.access._deleted_document_ids()` once per call — never once per filter leg, never once per node — and threads it into `_visibility_filters`, which expresses it as one `file_id NOT IN (...)` clause using the installed Postgres store's own `NIN` operator, added only when the list is non-empty (an empty `NOT IN (...)` is not valid SQL, and "nothing is deleted" costs nothing extra, not an inert clause). Both fixes are reflected in Task 10's Files list, code blocks and test description above, and in `tools/rag/README.md`'s deletion section.
 - **Execution amendment (Task 12 review round one), 2026-09-21:** six findings, all reflected in Task 12's own code/test/help blocks above. (C1) `deleted_page`'s Deletion log leaked another person's item label to any signed-in viewer, because `audit.by_action`'s read is unscoped by design (the log lists every `content.*` event) and nothing further checked who was looking — `show_labels = sees_all_content(principal, settings_row=row)`, computed once, now gates `event.target_label` per event; the event itself still lists for every viewer, only the label is blanked for one with no standing to read everyone's content. (I2) The Deleted help card said "the retention setting" (the banned word) and omitted the backups sentence its own brief line requires — reworded to `"Keep deleted items for"` in quotes and the backups sentence added, modelled on the identical sentence on the Identity & security card. (I3) Both mutations' generic `except Exception` catches had no test of their own — `views.retention.restore_content`/`purge_ticket` patched to raise a bare `RuntimeError`, asserting the redirect, the fixed flash and the surviving ticket. (I4) `deleted_page`'s own "one read" docstring claim was false: `IdentityGateMiddleware` already reads `IdentitySettings` once per request, and the view's `IdentitySettings.get_solo()` was a second, needless read of the same table — replaced with `settings_row_for(request)` (the row the middleware already stashed), and `_own_ticket_or_404` now takes that row as a required keyword and threads it into `principal_for_request` rather than calling it bare, the same rule `entitlement_edit`'s own comment states; a new `CaptureQueriesContext` pin asserts exactly one `identity_identitysettings` statement per GET. (I5) `identity/README.md` section 9 gained a paragraph for the page itself — its three routes and their classes, the `EVERYONE` gate's reason, the prune-on-read GET, and the log's label-visibility rule — which the section had deferred to "the Deleted page's own tasks' code" until now. (M1/M2/M3/M4/M5) `_RESTORE_FAILED_MESSAGE` reworded ("nothing retries a restore" was itself untrue — the message no longer claims it); the log's own `helptext` reworded off "It never contains the deleted words" to name the real, setting-gated rule; the template's own comment corrected from "every sentence comes from the constants" (false — the page's own prose is typed in the template) to say which half is which; `may_purge`'s docstring gained one sentence naming it as today-inert and the hook for the deferred enterprise hold behaviour; the unused `make_admin` import was dropped from `identity/tests/test_deleted_page.py` (the two new label-visibility tests use `posture("open")` for their sees-all case rather than an administrator account, so the import stayed genuinely unused).
+- **Whole-branch fix wave (slice one), 2026-09-21:** the Deletion log is now scoped to the viewer's own activity unless they see all content (Task 12), not every viewer for every event; the chat delete confirm no longer promises a restore the box may not keep (Task 8); `identity/retention.py::sweep` counts only real purges, not a ticket another overlapping pass already purged.

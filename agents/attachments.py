@@ -143,8 +143,7 @@ def delete_attachments_for(conversation_id) -> int:
     (round 11 re-review minor 4) -- the delete-time twin of `attached_
     documents` above, resolved through `agents.contracts.attachments.
     attachment_cleanup` the identical way. Returns the count removed,
-    or `0` when nothing is registered or the registered cleanup
-    provider itself raises.
+    or `0` when nothing is registered.
 
     THE ONE CALLER: `agents.retention.purge_conversation`, at PURGE time
     -- a delete only writes a ticket now

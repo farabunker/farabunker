@@ -271,9 +271,8 @@ counterpart to `EntitlementCascade`: a pure dataclass (`kind`, `key`,
 `AppConfig.ready()`, with rows-before-files as the whole reason
 `order` exists — a filesystem delete has no rollback, so a row handler
 that raises after files are gone would leave a resurrected row pointing
-at bytes that no longer exist. The model, the runner and the service
-that call this registry are later work; this slice is vocabulary and
-registration only.
+at bytes that no longer exist. Section 9 below covers the model, the
+runner and the service that call this registry.
 
 **Four pages**: `/identity/groups/` and `/identity/groups/<pk>/edit/`
 (create/rename/delete a group, manage membership); `/identity/
