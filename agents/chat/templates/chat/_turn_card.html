@@ -212,6 +212,16 @@ so a polled thread and a reloaded one never disagree by a duplicate.
     of onto the branch. The per-turn id is what points each form's label
     at its own input.
 
+    `card.edit_text_id` IS THE SAME PER-TURN RULE, applied to the
+    TEXTAREA (feature C review, M1). This disclosure renders once per
+    eligible user turn, so a long thread is a run of edit boxes; a fixed
+    id would point every `<label for=>` at the first one in document
+    order, and no id at all would leave every one of them unnamed. A
+    REAL `<label>` rather than an `aria-label`: the composer reaches for
+    the attribute only because the shared fragment had dropped a visible
+    label that used to exist (`chat/_composer.html`'s own recorded
+    decision), and nothing here forces that compromise.
+
     `card.attach_workstream` IS PASSED EXPLICITLY, not inherited: the
     fragment reads it to decide between the three-value placement
     chooser and the two-value one, and on a polled swap the surrounding
@@ -234,6 +244,16 @@ so a polled thread and a reloaded one never disagree by a duplicate.
     it into this field -- so the polled swap was the only path that did,
     and it no longer does.
 
+    THAT FIELD IS ECHOED, NEVER TRUSTED, and this fragment multiplies
+    the echo by the number of editable turns, so the rule is worth
+    stating here rather than left to infer (feature C review, n2).
+    `?connection=` is a raw caller-supplied query value: it is
+    autoescaped into each hidden field, and `agents.chat.service.
+    start_turn` re-resolves it through `preflight_turn` on the POST and
+    refuses an id that names nothing this principal may use. The page
+    never grants anything by rendering it -- the same "carry it, then
+    re-validate it" shape `validated_next_url` keeps for `?next=`.
+
     `edit_lead` IS ONE DECLARED SENTENCE (`agents.chat.service.
     EDIT_LEAD`), never typed here, and it reaches BOTH renders: the
     thread page's context and `_group_html`'s own poll-body context read
@@ -246,7 +266,9 @@ so a polled thread and a reloaded one never disagree by a duplicate.
             action="{% url 'chat-turn-edit' card.turn.conversation_id card.turn.pk %}">
         {% csrf_token %}
         <input type="hidden" name="connection" value="{{ selected_connection }}">
-        <textarea name="text" rows="4" required>{{ card.text }}</textarea>
+        <label for="{{ card.edit_text_id }}">Edit this message</label>
+        <textarea name="text" rows="4" required
+                  id="{{ card.edit_text_id }}">{{ card.text }}</textarea>
         {% if card.may_attach_files %}
         {% include "chat/_attach_files.html" with attach_workstream=card.attach_workstream attach_id=card.attach_id %}
         {% endif %}

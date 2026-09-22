@@ -2769,7 +2769,17 @@ the poller carries it across on the page instead, copying the composer's own
 server-rendered field into each swapped block. A no-JS page load never lost the
 pick; the polled swap was the only path that did, and it no longer does.
 
-**No new script, and one new template parameter.** The disclosure is a
+**One rule, one definition.** Editability splits in two, and each half lives
+once: `agents.visibility.is_editable_turn_row` is the per-turn half (a finished,
+root-depth USER row — no principal, no query, which is why the card may ask it
+too), and `may_edit_any_turn` is the conversation half (the manage predicate plus
+"nothing in flight"), asked once per render rather than once per message.
+`may_edit_turn` composes both, so the page's answer and the POST's answer are
+built from the same two functions and cannot drift. That matters in both
+directions: a card copy that grew wider would render a disclosure whose own POST
+answers 404, and one that grew narrower would silently hide an available control.
+
+**No new script, and two new template parameters.** The disclosure is a
 `<details>` plus a plain form — the house's zero-JS idiom — and it includes
 `chat/_attach_files.html` alone, never `chat/_composer.html`: that fragment ends
 with two script blocks, and this disclosure renders once per eligible user turn,
@@ -2779,4 +2789,14 @@ one optional `attach_id`, defaulted so its three existing call sites are
 byte-identical: without it every "+ Add files" inside every edit form would
 resolve its `<label for="attach-files">` to the **composer's** input — the first
 match in document order — and stage the chosen file onto a new turn instead of
-onto the branch.
+onto the branch. The edit textarea carries a per-turn id on the same rule, for a
+real `<label>`: the composer reaches for an `aria-label` only because the shared
+fragment had dropped a visible label that used to exist, and nothing here forces
+that compromise.
+
+**A note for anyone reading `chat/_composer.html`'s own comments:** the invariant
+"exactly one of these renders per page" now holds for the **composer**
+(`#composer-text`, `#turn-form`, and the composer's own `#attach-files`) and no
+longer for anything a turn card can also render. The edit disclosure is the first
+thing to render `_attach_files.html` more than once, and it passes its own
+`attach_id` precisely so the composer keeps the bare id.

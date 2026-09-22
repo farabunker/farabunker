@@ -55,6 +55,17 @@ from agents.contracts.tools import VISION_GENERATE_KEY
 from agents.limits import TURN_TIMEOUT_ERROR
 from agents.models import Turn
 from agents.runtime.audit import invocation_message, invocation_state
+# THE PER-TURN EDITABILITY RULE, ONE DEFINITION (feature C review, I1).
+# `is_editable_turn_row` needs no principal and runs no query -- it is
+# three facts off a row this module already holds -- so the card asks the
+# SAME function `agents.visibility.may_edit_turn` asks rather than
+# spelling the condition a second time in its own words. Importing
+# `agents.visibility` from here is the sanctioned direction:
+# `agents/chat/views/turns.py` and `views/thread.py` already do it, the
+# import law's rule is about the reverse, and `agents/visibility.py`
+# imports nothing from `agents.chat` at all (its own `ast`-walking test
+# pins that).
+from agents.visibility import is_editable_turn_row
 
 logger = logging.getLogger(__name__)
 
@@ -299,8 +310,15 @@ def turn_card(turn, nested: list[dict] | None = None, attachments: list[dict] | 
         # swap shows exactly what a reload shows -- the invariant
         # `_done_body`, `_group_html`, `turn_group_cards` and
         # `_attachments_by_turn` each state in their own words.
-        "may_edit": bool(may_edit and turn.role == Turn.Role.USER
-                         and turn.depth == 0 and turn.state == Turn.State.DONE),
+        #
+        # THE ROW HALF IS `is_editable_turn_row`, NOT A SECOND SPELLING
+        # OF IT (feature C review, I1): this line used to restate
+        # `may_edit_turn`'s own `role`/`depth`/`state` condition in the
+        # positive, with nothing pinning that the two agreed. A card
+        # whose copy drifted WIDER would render a disclosure whose POST
+        # answers 404; one that drifted NARROWER would silently hide an
+        # available control. One definition, asked from both sides.
+        "may_edit": bool(may_edit and is_editable_turn_row(turn)),
         "may_attach_files": bool(may_attach_files),
         "attach_workstream": attach_workstream,
         # THE PER-TURN DOM ID the edit form's file input and its label
@@ -313,6 +331,17 @@ def turn_card(turn, nested: list[dict] | None = None, attachments: list[dict] | 
         # would open the COMPOSER's picker and stage the file onto a new
         # turn instead of onto the branch.
         "attach_id": f"attach-files-{turn.pk}",
+        # THE EDIT TEXTAREA'S OWN DOM ID, on the same per-turn rule and
+        # for the same reason (feature C review, M1): the disclosure
+        # renders once per eligible user turn, so a long thread is a run
+        # of edit boxes, and a fixed id would give every `<label for=>`
+        # on the page the same target -- the first one in document
+        # order. A REAL `<label>`, not an `aria-label`: `chat/
+        # _composer.html`'s own recorded decision reaches for the
+        # attribute only because the shared fragment had dropped a
+        # visible label that used to exist, and nothing here forces that
+        # compromise.
+        "edit_text_id": f"edit-text-{turn.pk}",
     }
 
 

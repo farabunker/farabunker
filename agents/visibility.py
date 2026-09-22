@@ -727,15 +727,49 @@ def duplicate_conversation(principal, conversation, *, title: str):
     return copy
 
 
+def is_editable_turn_row(turn) -> bool:
+    """`may_edit_turn`'s PER-TURN half: a finished, root-depth USER row.
+
+    NO PRINCIPAL, NO QUERY, WHICH IS WHY THE CARD MAY ASK IT TOO. This is
+    three facts off a row already in hand, so `agents.chat.rendering.
+    turn_card` -- which holds the row and no principal at all -- calls
+    this rather than restating the condition in its own words.
+
+    THAT IT IS SHARED IS THE POINT, and the reason is this feature's own
+    review finding (I1) rather than a style rule. The condition used to
+    be spelled twice -- negatively here, positively on the card -- with
+    nothing pinning that the two agreed, and the two ways they could
+    drift are both bad. If the CARD's copy grew WIDER (a fourth state
+    admitted, the `depth` rule relaxed) the page would render a
+    disclosure whose own POST answers 404 -- exactly what the in-flight
+    clause is HIDDEN rather than merely refused to prevent. If it grew
+    NARROWER, an available control would silently disappear. One
+    definition makes both impossible; `agents/chat/tests/test_turn_edit.
+    py::TestTheRowPredicateIsSharedNotSpelledTwice` walks the whole
+    `(role, depth, state)` truth table through BOTH call sites and
+    asserts they agree row by row.
+
+    `agents/chat/rendering.py` importing this module is the sanctioned
+    direction -- `agents/chat/views/turns.py` and `views/thread.py`
+    already do it, and the import law's rule is about the reverse.
+    """
+    return (turn.role == Turn.Role.USER and turn.depth == 0
+            and turn.state == Turn.State.DONE)
+
+
 def may_edit_any_turn(principal, conversation, *, settings_row=None) -> bool:
     """`may_edit_turn`'s CONVERSATION-LEVEL half, asked ONCE per render.
 
-    The per-turn half -- a finished, root-depth USER row -- is already on
-    the card (`agents.chat.rendering.turn_card` reads `role`/`depth`/
-    `state` off the row it is rendering anyway), so the thread page asks
-    THIS once rather than once per message: a thread of two hundred
-    turns costs one predicate, not two hundred. The two can never
-    disagree, because `may_edit_turn` itself calls this.
+    The per-turn half is `is_editable_turn_row` above, and the card asks
+    THAT one directly for the row it is rendering -- so the thread page
+    asks THIS one once rather than once per message: a thread of two
+    hundred turns costs one principal-bearing predicate, not two hundred.
+
+    NEITHER HALF CAN DISAGREE WITH `may_edit_turn`, and each for its own
+    reason: `may_edit_turn` CALLS this function for the conversation
+    half, and it calls `is_editable_turn_row` for the row half, so there
+    is one definition of each and the page's answer and the POST's
+    answer are built from the same two.
 
     BOTH CLAUSES ARE CONVERSATION-WIDE, and that is why they can be
     hoisted at all. `may_manage_conversation` is a question about the
@@ -787,15 +821,25 @@ def may_edit_turn(principal, conversation, turn, *, settings_row=None) -> bool:
     conversation whose shape is still changing, and the job would write
     its answer back to the ORIGINAL's row anyway.
 
-    THE LAST TWO CLAUSES LIVE IN `may_edit_any_turn` ABOVE, ONCE. They
-    are both conversation-level questions, and the thread page asks them
-    once for a whole render rather than once per rendered message; this
-    function calls that one rather than restating it, so the page's
-    answer and the POST's answer cannot drift apart.
+    EVERY CLAUSE BUT THE FIRST LIVES ELSEWHERE, ONCE EACH, and this
+    function is where they are composed. `is_editable_turn_row` is the
+    ROW half -- three facts, no principal -- which the card asks
+    directly for the row it renders; `may_edit_any_turn` is the
+    CONVERSATION half, which the thread page asks once per render rather
+    than once per message. Restating either here would be the second
+    spelling this feature's own review caught (I1), so neither is
+    restated: the page's answer and the POST's answer are built from the
+    same two definitions.
+
+    THE ONE CLAUSE THAT IS GENUINELY THIS FUNCTION'S OWN is the first:
+    that `turn` really belongs to `conversation`. Both ids arrive from
+    the URL separately, so a caller can name a turn of some OTHER
+    conversation they may also read -- and neither half above would
+    notice, because each is asked about only one of the two rows.
     """
     if turn.conversation_id != conversation.id:
         return False
-    if turn.role != Turn.Role.USER or turn.depth != 0 or turn.state != Turn.State.DONE:
+    if not is_editable_turn_row(turn):
         return False
     return may_edit_any_turn(principal, conversation, settings_row=settings_row)
 

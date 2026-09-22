@@ -22,7 +22,8 @@ from django.urls import reverse
 
 from agents.chat.tests._helpers import (   # noqa: F401 -- the import IS the registration
     bind_chat_role, fake_queue_down, fake_queued_job, fake_running_job, fake_turn_queue,
-    make_agent, make_conversation, make_turn, make_user, posture, sign_in, user_principal,
+    make_admin, make_agent, make_conversation, make_turn, make_user, posture, sign_in,
+    user_principal,
 )
 from agents.models import Conversation, Share, Turn
 from identity.access import owner_fields
@@ -48,6 +49,105 @@ def _own_thread(owner, *, texts=("first", "second")):
     turns = [make_turn(conversation=conversation, role=Turn.Role.USER, text=text,
                        state=Turn.State.DONE) for text in texts]
     return conversation, turns
+
+
+class TestTheRowPredicateIsSharedNotSpelledTwice:
+    """FEATURE C REVIEW, I1. The per-turn half of editability used to be
+    written twice -- negatively in `agents.visibility.may_edit_turn`
+    (`role != USER or depth != 0 or state != DONE`) and positively in
+    `agents.chat.rendering.turn_card` -- with nothing pinning that the
+    two agreed.
+
+    BOTH DRIFTS ARE BAD, AND IN OPPOSITE DIRECTIONS. A card copy that
+    grew WIDER renders a disclosure whose own POST answers 404, which is
+    the very thing the in-flight clause is HIDDEN rather than merely
+    refused to prevent. One that grew NARROWER silently removes an
+    available control. Per-condition tests elsewhere in this file catch
+    neither, because each asserts about one spelling only: a fourth
+    condition added to the predicate would be invisible to all of them.
+
+    So this class walks the whole `(role, depth, state)` truth table
+    through BOTH call sites and asserts they agree row by row.
+    """
+
+    def test_the_card_and_the_predicate_agree_on_every_row_shape(self):
+        from agents.chat.rendering import turn_card
+        from agents.visibility import is_editable_turn_row, may_edit_turn
+
+        owner = make_user()
+        with posture(POSTURE_ENTERPRISE):
+            conversation = make_conversation(
+                agent=make_agent(slug="truth-table"),
+                **owner_fields(user_principal(owner)))
+            principal = user_principal(owner)
+            shapes = [
+                (role, depth, state)
+                for role in (Turn.Role.USER, Turn.Role.ASSISTANT, Turn.Role.TOOL)
+                for depth in (0, 1)
+                for state in (Turn.State.DONE, Turn.State.QUEUED,
+                              Turn.State.FAILED, Turn.State.CANCELLED)
+            ]
+            for role, depth, state in shapes:
+                turn = make_turn(conversation=conversation, role=role, depth=depth,
+                                 state=state, text="t")
+                # `may_edit_turn` also asks the CONVERSATION half, which
+                # a non-terminal row would flip for the whole thread --
+                # so each shape is measured on its own conversation-free
+                # terms and the row predicate is the subject.
+                card = turn_card(turn, may_edit=True)
+                assert card["may_edit"] is is_editable_turn_row(turn), (
+                    role, depth, state)
+                turn.delete()
+
+            # AND THE TWO REALLY ARE ONE FUNCTION, not two that happen to
+            # agree: the POST's own gate is built from the same call.
+            editable = make_turn(conversation=conversation, role=Turn.Role.USER,
+                                 depth=0, state=Turn.State.DONE, text="t")
+            assert is_editable_turn_row(editable) is True
+            assert may_edit_turn(principal, conversation, editable) is True
+            assert turn_card(editable, may_edit=True)["may_edit"] is True
+
+    def test_widening_the_shared_row_predicate_moves_both_answers_at_once(
+        self, client, monkeypatch, fake_turn_queue
+    ):
+        """THE AGREEMENT PIN PROPER. Monkeypatching the ONE definition to
+        admit an ASSISTANT row must change the rendered disclosure AND
+        the POST's answer TOGETHER -- which is only possible while both
+        call the same function. Before I1 this test could not be written
+        at all: there was no single object to patch, and patching either
+        spelling would have moved one answer and not the other."""
+        import agents.chat.rendering as rendering_module
+        import agents.visibility as visibility_module
+
+        owner = make_user()
+        bind_chat_role(CHAT_CONVERSE_ROLE, name="widen-role")
+        with posture(POSTURE_ENTERPRISE):
+            conversation, _turns = _own_thread(owner)
+            assistant = make_turn(conversation=conversation,
+                                  role=Turn.Role.ASSISTANT, text="answer",
+                                  state=Turn.State.DONE)
+            sign_in(client, owner)
+
+            url = reverse("chat-turn-edit", args=[conversation.id, assistant.pk])
+            refused = client.post(url, {"text": "edited"})
+            body_before = client.get(
+                reverse("chat-conversation", args=[conversation.id])).content.decode()
+            assert refused.status_code == 404
+            assert body_before.count("Send from here") == 2   # the two USER turns
+
+            # ONE definition widened, in the one module that holds it,
+            # and rebound in `rendering`'s own namespace too because it
+            # imported the name rather than the module.
+            widened = (lambda turn: turn.depth == 0
+                       and turn.state == Turn.State.DONE)
+            monkeypatch.setattr(visibility_module, "is_editable_turn_row", widened)
+            monkeypatch.setattr(rendering_module, "is_editable_turn_row", widened)
+
+            allowed = client.post(url, {"text": "edited"})
+            body_after = client.get(
+                reverse("chat-conversation", args=[conversation.id])).content.decode()
+        assert allowed.status_code == 302                     # the POST moved
+        assert body_after.count("Send from here") == 3        # and so did the page
 
 
 class TestTheDisclosure:
@@ -305,6 +405,32 @@ class TestTheDisclosure:
         assert body.count('id="attach-files-') == 3
         assert body.count('for="attach-files-') == 3
 
+    def test_every_edit_textarea_has_its_own_real_label(self, client):
+        """FEATURE C REVIEW, M1. The disclosure renders once per eligible
+        user turn, so a fixed id would point every `<label for=>` at the
+        first box in document order and no id at all would leave every
+        box unnamed. A REAL `<label>`, not an `aria-label`: `chat/
+        _composer.html` reaches for the attribute only because the shared
+        fragment had dropped a visible label that used to exist, and
+        nothing here forces that compromise.
+
+        PAIRED COUNTS, not a membership test: three ids, three matching
+        `for=`, and three textareas -- so a label that lost its target,
+        or a textarea that lost its id, reds this rather than passing on
+        the other half."""
+        owner = make_user()
+        with posture(POSTURE_ENTERPRISE):
+            conversation, turns = _own_thread(owner, texts=("a", "b", "c"))
+            sign_in(client, owner)
+            body = client.get(
+                reverse("chat-conversation", args=[conversation.id])).content.decode()
+        assert body.count('id="edit-text-') == 3
+        assert body.count('for="edit-text-') == 3
+        assert body.count("Edit this message") == 3
+        for turn in turns:
+            assert f'for="edit-text-{turn.pk}"' in body
+            assert f'id="edit-text-{turn.pk}"' in body
+
     def test_the_edit_form_carries_the_pickers_current_selection(self, client):
         """Spec section 5.4 step 3: the branch's first turn is started
         with the picker's current selection, not with the agent's role
@@ -466,6 +592,81 @@ class TestThePost:
                 assert response.status_code == 404
                 client.logout()
         assert Conversation.objects.count() == before
+
+    def test_a_workstream_share_recipient_is_refused_through_the_view(
+        self, client, fake_turn_queue
+    ):
+        """FEATURE C REVIEW, M3. A workstream share is `use`-by
+        construction, so its holder may POST into this thread and is
+        still refused the COPY. Pinned at the predicate by Task 12
+        (`agents/tests/test_branch.py::TestMayEditTurn::
+        test_a_workstream_share_recipient_may_not`); driven through the
+        VIEW here, so the 404 is a pinned fact rather than an inference
+        from the view delegating to that predicate."""
+        from agents.tests._helpers import _workstream
+        from agents.visibility import share_workstream
+
+        owner = make_user()
+        recipient = make_user(username="stream-recipient")
+        with posture(POSTURE_ENTERPRISE):
+            stream = _workstream(**owner_fields(user_principal(owner)))
+            conversation = make_conversation(
+                agent=make_agent(slug="stream-edit-thread"), workstream=stream,
+                **owner_fields(user_principal(owner)))
+            turn = make_turn(conversation=conversation, role=Turn.Role.USER,
+                             text="theirs", state=Turn.State.DONE)
+            share_workstream(user_principal(owner), stream, user=recipient,
+                             level=Share.Level.USE)
+            before = Conversation.objects.count()
+            sign_in(client, recipient)
+            # The stream share really does admit them to the thread --
+            # otherwise this would prove only that they cannot read it.
+            assert client.get(
+                reverse("chat-conversation", args=[conversation.id])
+            ).status_code == 200
+            response = client.post(
+                reverse("chat-turn-edit", args=[conversation.id, turn.pk]),
+                {"text": "mine now"})
+        assert response.status_code == 404
+        assert Conversation.objects.count() == before
+
+    def test_an_admin_with_the_content_toggle_off_is_refused_through_the_view(
+        self, client, fake_turn_queue
+    ):
+        """FEATURE C REVIEW, M3. Refused a gate EARLIER than the
+        predicate -- `visible_conversation_or_404` is itself gated on
+        `sees_all_content` -- which is real defence in depth and worth
+        pinning as the view's own answer rather than leaving to
+        inference. The same 404 either way, so no response distinguishes
+        "no such row" from "not yours"."""
+        owner = make_user()
+        with posture(POSTURE_ENTERPRISE, admin_sees_content=False):
+            conversation, turns = _own_thread(owner)
+            before = Conversation.objects.count()
+            sign_in(client, make_admin())
+            response = client.post(
+                reverse("chat-turn-edit", args=[conversation.id, turns[1].pk]),
+                {"text": "mine now"})
+        assert response.status_code == 404
+        assert Conversation.objects.count() == before
+
+    def test_an_admin_with_the_content_toggle_on_may(self, client, fake_turn_queue):
+        """The other side of the toggle, so the test above pins the
+        TOGGLE rather than something incidental about being an admin --
+        and the administrator's-copy consequence `branch_conversation`
+        records is real: the branch is theirs BY OWNERSHIP and survives
+        the setting being switched back off."""
+        owner = make_user()
+        bind_chat_role(CHAT_CONVERSE_ROLE, name="admin-edit-role")
+        with posture(POSTURE_ENTERPRISE, admin_sees_content=True):
+            conversation, turns = _own_thread(owner)
+            sign_in(client, make_admin())
+            response = client.post(
+                reverse("chat-turn-edit", args=[conversation.id, turns[1].pk]),
+                {"text": "an administrator's edit"})
+            branch = Conversation.objects.exclude(pk=conversation.pk).get()
+        assert response.status_code == 302
+        assert str(branch.id) in response["Location"]
 
     def test_a_stranger_gets_the_same_404_and_writes_nothing(
         self, client, fake_turn_queue

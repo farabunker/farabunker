@@ -138,8 +138,9 @@ TOO_LONG_MESSAGE = _TOO_LONG
 # already import is the only place it can live without a cycle or a
 # second copy.
 #
-# THE TYPOGRAPHIC CHARACTERS ARE DELIBERATE and are never retyped: this
-# string is the sentence, and both renderers interpolate it.
+# THIS STRING IS THE SENTENCE, and both renderers interpolate it rather
+# than retyping any part of it -- which is what makes the reload/poll
+# parity a property rather than a coincidence.
 EDIT_LEAD = (
     "This starts a new conversation with everything before this message. "
     "The original stays as it is. Files attached earlier in this conversation "
