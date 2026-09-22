@@ -1144,17 +1144,34 @@ def test_the_transfer_panel_brings_its_own_card_chrome():
     gave it three, so the check covers the element half now; this stays
     because it pins the other half, which no derived check states: that
     the panel's CARD comes from the sanctioned shared home rather than
-    from whichever consumer page happens to style its container."""
+    from whichever consumer page happens to style its container.
+
+    THE SANCTIONED HOME MOVED (chat cluster, feature B) -- from
+    `_settings.html`'s own `extra_style` block to `_shell.html`'s
+    unconditional `<style>` region, read here by
+    `_shell_style_outside_block` rather than `_style_block`. The panel
+    gained a consumer OUTSIDE the settings area
+    (`agents/chat/templates/chat/agent_edit.html`, which extends
+    `chat/base.html` and cannot reach `_settings.html` at all), so
+    `_settings.html` stopped being an ancestor of every consumer and the
+    rules were promoted one tier, exactly as its own comment said they
+    would be. WHAT THIS TEST PINS IS UNCHANGED: the card comes from one
+    shared ancestor, never from a consumer page. Only the ancestor's name
+    changed, and it is asserted OUTSIDE the block for the same reason
+    `.messages`/`.msg` are -- `chat/base.html` overrides `extra_style`
+    without `{{ block.super }}`, so a rule inside the block would not
+    reach the new consumer."""
     files = _template_files()
     panel = files["_transfer_panel.html"].read_text()
     # STARTSWITH, not the whole attribute: the class list carries an
     # optional `transfer-panel-bare` branch for the phase-2 consumers.
     assert 'class="transfer-panel' in panel, "the panel's root class was renamed"
-    settings_rules = dict(_rules(_style_block(files["_settings.html"].read_text())))
-    chrome = settings_rules.get(".transfer-panel")
+    shell_rules = dict(_rules(_shell_style_outside_block(
+        files["_shell.html"].read_text())))
+    chrome = shell_rules.get(".transfer-panel")
     assert chrome is not None, (
-        ".transfer-panel is not defined in _settings.html -- the panel is borrowing its "
-        "card from a consumer page again")
+        ".transfer-panel is not defined in _shell.html's unconditional <style> region -- "
+        "the panel is borrowing its card from a consumer page again")
     for declaration in ("background:", "border:", "padding:"):
         assert declaration in chrome, (declaration, chrome)
 
@@ -1164,11 +1181,31 @@ def test_the_transfer_panel_brings_its_own_card_chrome():
     # invisible to the element check above, which reads BARE element
     # selectors only and deliberately says nothing about descendant
     # ones. Pinned directly for the same reason the card is.
-    heading = settings_rules.get(".transfer-panel h2")
+    heading = shell_rules.get(".transfer-panel h2")
     assert heading is not None, (
-        ".transfer-panel h2 is not defined in _settings.html -- the panel's heading is "
+        ".transfer-panel h2 is not defined in _shell.html -- the panel's heading is "
         "borrowing its size from whichever consumer styles `section h2`")
     assert "font-size:" in heading, heading
+
+    # AND NOTHING WAS LEFT BEHIND. A promotion that COPIES rather than
+    # MOVES is the duplication this whole module exists to fail on, and
+    # `_settings.html` is the one file that could plausibly still carry a
+    # stale second copy -- it is where these rules lived until this
+    # commit. `.access-summary` is deliberately NOT checked here: it is
+    # the two access pages' own `<summary>` class, never one the fragment
+    # writes, so it stayed behind on purpose.
+    settings_selectors = {
+        selector for selector, _body in _rules(
+            _style_block(files["_settings.html"].read_text()))
+    }
+    left_behind = sorted(
+        selector for selector in settings_selectors
+        if selector.strip().startswith((".transfer-", ".filter-input"))
+    )
+    assert not left_behind, (
+        "_settings.html still defines the promoted transfer-panel rules -- the promotion "
+        f"copied them instead of moving them: {left_behind}"
+    )
 
 
 def test_both_transfer_panes_are_one_fixed_size_whatever_they_hold():
@@ -1185,15 +1222,21 @@ def test_both_transfer_panes_are_one_fixed_size_whatever_they_hold():
     silently regress is the KIND of constraint.
 
     IN THE SHARED HOME, so it holds for every consumer at once: the
-    entitlement page's panels and both access pages' expanded rows are
-    the same fragment, and a leaf page re-stating a height would put the
-    two directions back out of step.
+    entitlement page's panels, both access pages' expanded rows and the
+    chat agent page's own panel are the same fragment, and a leaf page
+    re-stating a height would put those directions back out of step.
+    That home is `_shell.html`'s unconditional `<style>` region since the
+    chat cluster's feature B promoted it one tier -- see
+    `test_the_transfer_panel_brings_its_own_card_chrome` for why the
+    promotion happened and why this reader is
+    `_shell_style_outside_block` rather than `_style_block`.
     """
-    rules = dict(_rules(_style_block(_template_files()["_settings.html"].read_text())))
+    rules = dict(_rules(_shell_style_outside_block(
+        _template_files()["_shell.html"].read_text())))
     pane_list = rules.get(".transfer-list")
     assert pane_list is not None, (
-        ".transfer-list is not defined in _settings.html -- the panes are taking their "
-        "size from somewhere this gate cannot see")
+        ".transfer-list is not defined in _shell.html's unconditional <style> region -- "
+        "the panes are taking their size from somewhere this gate cannot see")
     assert re.search(r"(^|;)\s*height:", pane_list), (
         ".transfer-list has no fixed `height` -- with `max-height` alone a pane shrinks "
         f"to its content and the two panes render ragged again: {pane_list}")
@@ -1592,6 +1635,17 @@ def test_the_shared_flash_recipe_lives_in_the_shell(selector):
 @pytest.mark.parametrize("selector", [
     ".banner", ".banner a", ".muted", ".empty",
     ".delete-disclosure > summary", ".delete-disclosure > summary::-webkit-details-marker",
+    # THE PROMOTED TRANSFER-PANEL RULES (chat cluster, feature B). Three
+    # representatives of the block `_settings.html` handed up to the
+    # shell when the fragment gained a consumer outside the settings
+    # area: the panel's card, the pane's fixed-height scroll box, and the
+    # filter input that came with them. They are here because moving
+    # rules OUT of `_style_block` and into the shell's unconditional
+    # region puts them beyond `test_no_template_retypes_a_rule_one_of_
+    # its_ancestors_already_owns`'s reach (that check reads named style
+    # blocks only, and says so), and a promotion whose second copy can
+    # reappear unnoticed is half a promotion.
+    ".transfer-panel", ".transfer-list", ".filter-input",
 ])
 def test_a_shared_primitive_is_not_retyped_below_the_shell(selector):
     """C-22/C-23/C-24. Four primitives written out at three, eight, two

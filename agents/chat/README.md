@@ -2486,7 +2486,9 @@ entitlement non-disclosure gate, and the route matrix sweeps these routes for it
 `None`, whatever this actor may label with — a member who owns no entitlements at
 all still needs to be told their row carries an administrator-set restriction; only
 the transfer panel itself is conditioned on there being something to offer
-(`choices` non-empty).
+(`choices` non-empty). **The page renders that sentence outside the panel's own
+condition** for the same reason: nested under the panel, the one reader it was
+written for would never see it.
 
 ## The agent pages: the three routes (chat cluster, feature B)
 
@@ -2561,15 +2563,61 @@ unconditionally — an unvalidated GET value must never become a clickable `href
 
 ### One action per POST, named
 
-`chat-agent-edit` reads an `action` field and accepts `fields` today. Anything
-else — an absent field, a stale form, Task 9's `labels` before it lands — is
-refused with the page re-rendered, a declared sentence and a 400, never handled
-as a field save. The role vocabulary is refused twice on purpose: the form owns
+`chat-agent-edit` reads an `action` field and accepts exactly two values,
+`fields` and `labels` — one per control on the page. Anything else — an absent
+field, a stale form, a hand-made body — is refused with the page re-rendered, a
+declared sentence and a 400, never handled as a field save. That refusal is not
+defensive decoration: a labels-shaped body handled as a field save would run an
+empty `name` and `system_prompt` through `update_agent` and blank the row.
+
+Each control ships its own spelling of its own name, because a template cannot
+read a view constant and `agents/chat/agentform.py` is what the view imports, so
+it cannot import back: `chat/_agent_form.html` writes `value="fields"` and
+`agent_form_context` puts `"labels"` in the panel's own hidden `tp_fields`. The
+two spellings are pinned against the view's `FIELDS_ACTION`/`LABELS_ACTION` by
+test rather than trusted to agree.
+
+The role vocabulary is refused twice on purpose: the form owns
 which roles it offers (spec §4.4) and the writer refuses the same set at its own
 seam, so a caller that saw no form cannot stamp an agent with a role no chat
 turn can resolve. The one filter both ask lives in
 `models.contracts.roles.chat_capable_roles`, below both columns, because
 `agents/visibility.py` may not import `agents.chat`.
+
+### The label editor — the edit route's second POST path
+
+`action=labels` goes to `_save_labels`, which takes the **same four steps**
+`agents/chat/views/access.py::_save` takes: build the return URL, parse the
+submitted diff through `agents.chat.service.parse_entitlement_diff`, derive the
+new set from what is on the row right now, and hand that whole set to
+`agents.labels.set_agent_labels`.
+
+**`parse_entitlement_diff` is the gate; `set_agent_labels` is not.** That writer
+is raw — it takes an actor only to stamp the audit row, never consults
+`labelling_entitlements`, and its remove closure deletes any row the diff names.
+The check that a submitted id is one this principal may label with lives in the
+parser, over the same predicate the form rendered from, so a stale form and a
+hand-made request get the identical refusal. No caller on this surface reaches
+the writer with an ungated diff, and none should.
+
+**The new set is derived from what is there now**, never from what the form
+showed: `before | submitted` for add, `before - submitted` for remove. A label
+this actor may not label with is never in `submitted`, so neither expression can
+touch it — which is why an administrator's label stands whatever a member does
+with their own, by construction rather than by a check. A whole submitted set
+would clobber, which is the same reason the two access pages post a diff.
+
+**The refusal and the success both land back on this row**, and not through
+`agents.chat.service.entitlement_row_url`: that helper builds
+`reverse(route_name)` with no arguments plus an `?open=` anchor, for the two
+access pages whose rows all share one URL. `chat-agent-edit` is row-addressed —
+the helper cannot name it at all — and `reverse("chat-agent-edit", args=[pk])`
+already *is* the row. `validated_next_url` is still honoured first, exactly as
+the field save honours it, for a mount that carries one.
+
+`AgentEntitlement.labelled_by` needs the real `User`, so the view reads it
+through `identity.request.user_for_request` — never a bare `request.user`, which
+`foundation/ops/tests` scans this column for.
 
 ### Where the CSS lives
 
@@ -2584,9 +2632,29 @@ selectors are prefixed (`.agent-row`, not `.row`) because the bare names already
 mean a settings page's card and section heading under
 `foundation/templates/_settings.html`.
 
-**No `<style>` and no `<script>` in any of the three templates.** The pages are
-one plain POST form with a CSRF token and two lists of links; the only script
-they carry is the rail's own `chat/_menu_exclusive.html`, which rides
-`chat/_sidebar.html`. `agents/chat/tests/test_agent_pages.py` pins that per
-page, slicing the content block away from the rail for the same reason
-`test_sidebar.py` slices the other way.
+**The transfer panel's own rules were promoted one tier** when the edit page
+started rendering it. Every `.transfer-*` rule, `.filter-input` included, lived
+in `foundation/templates/_settings.html` while every consumer of
+`foundation/templates/_transfer_panel.html` extended it; `chat/agent_edit.html`
+extends `chat/base.html`, which extends `_shell.html` directly and cannot reach
+`_settings.html` at all, so `_shell.html` became the deepest common ancestor and
+the block moved there — **moved, not copied**, which is what the ownership gate
+fails the build on. They sit in the shell's unconditional `<style>` region, not
+inside `extra_style`, because `chat/base.html` overrides that block without
+`{{ block.super }}`. `.access-summary` stayed behind: it is the two access
+pages' own `<summary>` class, never one the fragment writes, and the chat page
+writes a plain `<summary>`.
+
+**No `<style>` in any of the three templates, and one `<script>` on one of
+them.** The pages are plain POST forms with CSRF tokens and lists of links. The
+one exception is `foundation/templates/_filter_rows_script.html`, included
+beside the panel and gated on the same condition its existing consumers gate it
+on — so a page with no panel ships no script at all. It is pure progressive
+enhancement: it hides already-rendered rows as the operator types, adds no row,
+removes no checkbox and changes no `name=`/`value=` a JavaScript-off submission
+relies on, and each filter input says so in its own `title=`. The only other
+script these pages carry is the rail's own `chat/_menu_exclusive.html`, which
+rides `chat/_sidebar.html`. `agents/chat/tests/test_agent_pages.py` pins both
+halves — no script at all where there is no panel, and exactly that one include
+where there is — slicing the content block away from the rail for the same
+reason `test_sidebar.py` slices the other way.

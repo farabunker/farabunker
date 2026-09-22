@@ -475,8 +475,14 @@ entitlements label this row" — is your column's own page, because only your
 column knows what a row of yours looks like. What you can reuse there is the
 same component: `{% include "_transfer_panel.html" %}` with panes of
 entitlements instead of panes of resources, which is exactly what
-`/chat/tools/` and `/chat/access/` do (`agents/chat/views/tools.py` for the
-view side, `agents/chat/service.py::parse_entitlement_diff` for the POST).
+`/chat/tools/`, `/chat/access/` and the agent editor at `/chat/agents/<pk>/`
+do (`agents/chat/views/tools.py` for the view side,
+`agents/chat/service.py::parse_entitlement_diff` for the POST — which is the
+gate, while the `set_*_labels` writers below it are raw and enforce nothing).
+The fragment's own CSS lives in `foundation/templates/_shell.html`, so a
+consumer anywhere in the tree gets it styled; it was promoted there from
+`_settings.html` by the first consumer outside the settings area, and
+`foundation/ops/tests/test_css_ownership.py` is what keeps it in one place.
 Registering an axis and never writing that page is a legitimate choice —
 `tools/rag` does it in reverse, editing documents on its own page and
 registering counts only.

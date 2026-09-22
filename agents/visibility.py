@@ -63,7 +63,7 @@ from identity.access import (
     may_read_owned_row, owned_rows_q, owner_fields, sees_all_content,
 )
 from identity.contracts import actions
-from models.contracts.roles import chat_capable_roles
+from models.contracts.roles import CHAT_CONVERSE_ROLE, chat_capable_roles
 
 
 def visible_conversations(principal, *, settings_row=None):
@@ -1102,8 +1102,6 @@ def create_agent(principal, fields, *, settings_row=None):
     field (spec decision 8), and an agent with a prompt and a model is
     already useful.
     """
-    from models.contracts.roles import CHAT_CONVERSE_ROLE
-
     clean, errors = _validated_agent_fields(principal, fields, settings_row=settings_row)
     if errors:
         return None, errors

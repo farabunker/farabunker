@@ -13,8 +13,12 @@ one silently does not submit. That is why the panel block sits AFTER
 `</form>` below, and why the two POST paths are told apart by an
 `action` field rather than by one form with two buttons.
 
-Task 9 fills in the panel block; until then this page renders the field
-form alone, which is all the create route ever needs.
+THE PANEL RENDERS ONLY WHEN THERE IS SOMETHING TO OFFER.
+`agent_form_context` returns `entitlement_panel = None` for the create
+route (no row to label yet), on an open box (`labelling_entitlements`
+answers `()` with accounts off) and for an actor who may label with
+nothing at all -- so the create route renders the field form alone,
+which is all it ever needs.
 {% endcomment %}
 {% block title %}{% if agent %}{{ agent.name }}{% else %}New agent{% endif %} — Chat — farabunker{% endblock %}
 {% block chat_sidebar %}{% include "chat/_sidebar.html" %}{% endblock %}
@@ -40,4 +44,69 @@ both selectors are already in `chat/base.html`; this adds no CSS.
     <a href="{% url 'chat-agents' %}" class="muted">Cancel</a>
   </p>
 </form>
+{% comment %}
+THE FOREIGN-LABEL SENTENCE SITS OUTSIDE THE PANEL'S OWN `{%
+templatetag openblock %} if {% templatetag closeblock %}`, and that is
+a DELIBERATE DEPARTURE from the brief's draft, which nested it under
+the summary. `agent_form_context` computes this sentence whenever there
+is an AGENT to ask about -- explicitly NOT only when `choices` is
+non-empty, and its own comment says the case that forced that: a member
+who owns no entitlements at all has NO panel, and is precisely the
+reader who most needs telling that their row carries a restriction they
+cannot change here. Nested inside the panel block, that reader would be
+told nothing at all -- and `TestTheNonDisclosureGate`'s existing
+"told how many restrictions they cannot change" test would still have
+passed, because it asserts on the CONTEXT rather than on this page.
+`TestThePanelOnThePage` pins the rendered half instead.
+
+HOW MANY, NEVER WHICH, except for an entitlement this reader already
+holds -- the non-disclosure gate. The sentence is built once in Python
+(`agentform._foreign_label_sentence`) and only printed here.
+{% endcomment %}
+{% if foreign_label_sentence %}
+<p class="muted">{{ foreign_label_sentence }}</p>
+{% endif %}
+{% if entitlement_panel %}
+{% comment %}
+CONTROL 2 -- ENTITLEMENT LABELS. A SIBLING of the field form above,
+never nested inside it: `_transfer_panel.html` renders its OWN `<form>`
+(two of them, counting the inert filter form), and its own header says
+"ONE FORM, NO NESTING -- this fragment renders its own `<form>`, so it
+must NOT be included inside another one." Nested `<form>` elements are
+illegal HTML and the inner one simply does not submit.
+
+The include below is `chat/agent_entitlements.html`'s own line with the
+row's keys coming off `entitlement_panel` instead (one panel, not a list
+of rows) and NO `tp_action`, because this route posts to itself -- which
+is what carries whatever query string this page arrived with. Diff it
+against that page's line, or `chat/tool_entitlements.html`'s, before
+changing anything here: those two are byte-identical to each other.
+
+`tp_label` is deliberately ABSENT. The fragment's parameter block says
+phase 2 omits it "because the `<details>` summary it sits under already
+names the row"; here the page's own `<h1>` names the row and the summary
+names the control, so a third heading would say nothing new.
+
+THE PANES ARE `tp_available` / `tp_active`, the fragment's own parameter
+names -- not `available` / `active`, which would render two empty panes
+with no error at all.
+{% endcomment %}
+<details class="agent-labels">
+  <summary>Who may use this agent</summary>
+  {% include "_transfer_panel.html" with tp_key=entitlement_panel.anchor tp_anchor=entitlement_panel.panel_anchor tp_fields=entitlement_panel.fields tp_bare=1 tp_available=entitlement_panel.available tp_active=entitlement_panel.active tp_available_count=entitlement_panel.available_count tp_active_count=entitlement_panel.active_count tp_total=entitlement_panel.total tp_empty_catalogue=entitlement_panel.no_entitlements %}
+</details>
+{% comment %}
+THE ONE TYPE-TO-FILTER SCRIPT, INCLUDED BESIDE THE PANEL and GATED ON
+THE SAME CONDITION, exactly as `chat/agent_entitlements.html` and
+`chat/tool_entitlements.html` include it beside theirs. It is pure
+progressive enhancement -- it hides already-rendered rows as the
+operator types, adds no row, removes no checkbox and changes no
+`name=`/`value=` -- so with JavaScript off both panes still render
+every row and both buttons still submit. Inside the `{% templatetag
+openblock %} if {% templatetag closeblock %}`, so a page with no panel
+ships no script at all, which is what
+`test_agent_pages.py::TestTheNewPagesAddNoScript` reads.
+{% endcomment %}
+{% include "_filter_rows_script.html" %}
+{% endif %}
 {% endblock %}

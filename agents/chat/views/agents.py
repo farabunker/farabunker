@@ -24,9 +24,21 @@ addition). `agents.visibility::_validated_agent_fields` gates `llm_role`
 on ADMIN alone and writes whatever string an administrator sends;
 WHICH roles this surface offers is the FORM's question (spec 4.4), and
 `agents.chat.agentform.chat_role_options` is the one answer to it. So
-both POST paths below refuse a role that is not among the options the
-select really rendered, rather than letting a stale or hand-made body
-stamp an agent with a role no chat turn can resolve.
+both FIELD-WRITING POST paths below refuse a role that is not among the
+options the select really rendered, rather than letting a stale or
+hand-made body stamp an agent with a role no chat turn can resolve.
+
+THE AUDIENCE CONTROLS ARE THE EDIT ROUTE'S SECOND POST PATH, and every
+label mutation on this surface goes through ONE seam:
+`agents.chat.service.parse_entitlement_diff` (the gate) and then
+`agents.labels.set_agent_labels` (a raw writer that enforces nothing).
+`_save_labels` below is the same four steps `/chat/access/` already
+takes, and the reason there are two controls rather than one is spec
+4.3.1's: REACH answers to the actor's own authority, while a LABEL
+answers to whether the actor may label with THAT entitlement. A single
+control writing both would either clobber a label its actor may not
+touch -- the hole spec review M1 found -- or refuse an edit it should
+allow.
 """
 from __future__ import annotations
 
@@ -37,15 +49,17 @@ from django.urls import reverse
 from django.views.decorators.http import require_http_methods
 
 from agents.chat.agentform import ROLE_NOT_OFFERED, agent_form_context, chat_role_options
-from agents.chat.service import validated_next_url
+from agents.chat.service import (
+    entitlement_change_flash, parse_entitlement_diff, validated_next_url,
+)
 from agents.chat.sidebar import sidebar_context
-from agents.labels import agent_entitlement_ids
+from agents.labels import agent_entitlement_ids, agent_label_ids, set_agent_labels
 from agents.visibility import (
     box_wide_agents_owned_by, create_agent, editable_agents, labellable_agent,
     may_manage_agent, update_agent,
 )
 from identity.access import is_admin, labelling_entitlements
-from identity.request import principal_for_request, settings_row_for
+from identity.request import principal_for_request, settings_row_for, user_for_request
 
 # TRUE, AND NOTHING ELSE ON THIS PAGE SAYS IT.
 BOX_WIDE_SECTION_TITLE = "Agents everyone on this box can use"
@@ -64,10 +78,23 @@ BOX_WIDE_SECTION_ADMIN_NOTE = (
     "changes it for everyone."
 )
 
-# `agent_edit` accepts ONE action today (fix round, review M2). Task 9 adds
-# "labels" beside it; until then anything else is refused rather than silently
-# handled as a field save, which is what a branchless POST handler did.
+# `agent_edit`'s WHOLE ACTION VOCABULARY, and anything outside it is refused
+# rather than silently handled as a field save, which is what a branchless POST
+# handler did (Task 8 fix round, review M2). The two names are the page's two
+# CONTROLS: the field form writes the row through `update_agent`, the
+# entitlement panel writes its labels through the gated diff, and neither can
+# be reached by the other's body.
+#
+# EACH CONTROL SHIPS ITS OWN SPELLING OF ITS OWN NAME -- `chat/_agent_form.
+# html`'s hidden `value="fields"`, and `agents.chat.agentform.
+# agent_form_context`'s `entitlement_panel.fields["action"]` -- because a
+# template cannot read a view constant and the form module sits BELOW this one
+# (it is what this module imports, so it cannot import back). The two spellings
+# are pinned together by a test rather than left to agree by luck:
+# `test_agent_pages.py::TestTheAudienceWriteInBothDirections::
+# test_the_panels_own_hidden_action_is_the_one_this_view_branches_on`.
 FIELDS_ACTION = "fields"
+LABELS_ACTION = "labels"
 AGENT_UNKNOWN_ACTION = "That is not something this page can do."
 
 
@@ -201,12 +228,12 @@ def agent_edit(request, pk: int):
 
     TWO POST PATHS, told apart by an `action` field: `fields` writes the
     row through `update_agent`, and `labels` goes through
-    `parse_entitlement_diff` -> `set_agent_labels` (Task 9). They are
-    two forms on one page for the reason spec 4.3.1 gives: reach
-    answers to the actor's own authority and a label answers to whether
-    the actor may label with THAT entitlement, and one control writing
-    both would either clobber a label it may not touch or refuse an edit
-    it should allow.
+    `parse_entitlement_diff` -> `set_agent_labels`. They are two forms on
+    one page for the reason spec 4.3.1 gives: reach answers to the
+    actor's own authority and a label answers to whether the actor may
+    label with THAT entitlement, and one control writing both would
+    either clobber a label it may not touch or refuse an edit it should
+    allow.
     """
     settings_row = settings_row_for(request)
     principal = principal_for_request(request, settings_row=settings_row)
@@ -219,16 +246,18 @@ def agent_edit(request, pk: int):
                                              settings_row=settings_row):
         raise Http404(f"No agent {pk} you may change.")
     if request.method == "POST":
-        # ONE ACTION TODAY, NAMED RATHER THAN ASSUMED (fix round, review
-        # M2). `chat/_agent_form.html` already ships the hidden
-        # `action=fields` field, so a body naming anything else is a stale
-        # form or a hand-made request -- and handling it as a field save is
-        # how an `action=labels` body would silently blank a row's prompt
-        # the day Task 9's panel starts posting one. Refused with the page
-        # re-rendered and a declared sentence, the house 400 shape
-        # (`views/workstreams.py`, `views/conversations.py`), never a save.
-        # Task 9's second path is then a pure insertion here.
-        if request.POST.get("action", "") != FIELDS_ACTION:
+        # TWO ACTIONS, NAMED RATHER THAN ASSUMED, and everything else
+        # refused (fix round, review M2). Both controls ship their own
+        # hidden `action` field, so a body naming neither is a stale form
+        # or a hand-made request -- and handling THAT as a field save is
+        # how a labels-shaped body would silently blank a row's prompt.
+        # Refused with the page re-rendered and a declared sentence, the
+        # house 400 shape (`views/workstreams.py`,
+        # `views/conversations.py`), never a save.
+        action = request.POST.get("action", "")
+        if action == LABELS_ACTION:
+            return _save_labels(request, principal, agent, settings_row)
+        if action != FIELDS_ACTION:
             return render(request, "chat/agent_edit.html", {
                 **agent_form_context(principal, agent=agent,
                                      settings_row=settings_row),
@@ -262,3 +291,55 @@ def _save_fields(request, principal, agent, settings_row):
         })
     messages.info(request, f"Saved {agent.name}.")
     return redirect(validated_next_url(request) or reverse("chat-agents"))
+
+
+def _save_labels(request, principal, agent, settings_row):
+    """The entitlement panel's save -- the SAME four steps
+    `agents/chat/views/access.py::_save` takes, reached from this page.
+
+    `parse_entitlement_diff` IS THE GATE, and `set_agent_labels` is not.
+    That writer is raw: it takes `actor` only to stamp the audit row,
+    never consults `labelling_entitlements`, and its `remove` closure
+    deletes any row the diff names. The check that a submitted id is one
+    this principal may label with lives in the parser, over the SAME
+    predicate the form rendered from, so a stale form or a hand-made
+    request gets the identical honest refusal.
+
+    THE NEW SET IS DERIVED FROM WHAT IS THERE NOW, never from what the
+    form showed: a submitted whole set clobbers, and a label this actor
+    may not label with is never in `submitted`, so `before | submitted`
+    cannot add it and `before - submitted` cannot remove it. That is why
+    an administrator's label stands whatever a member does with their
+    own, by construction rather than by a check -- which is the whole of
+    spec review M1's fix.
+
+    THE REFUSAL URL IS THIS ROW'S OWN ROUTE, not
+    `agents.chat.service.entitlement_row_url`: that helper builds
+    `reverse(route_name)` with NO arguments plus an `?open=` anchor, for
+    the two access pages whose rows all live on one URL, and
+    `chat-agent-edit` is row-addressed -- it cannot name this route at
+    all. `reverse("chat-agent-edit", args=[agent.pk])` already IS the
+    row, and there is no `<details>` state to restore on a page whose
+    panel is the only one it renders.
+    """
+    back = reverse("chat-agent-edit", args=[agent.pk])
+    parsed = parse_entitlement_diff(request, principal, settings_row,
+                                    redirect_url=back)
+    if not isinstance(parsed, tuple):
+        return parsed
+    operation, submitted = parsed
+    # `user_for_request`, NOT a bare `request.user` read: `agents/` is one
+    # of the three columns `test_no_view_outside_identity_reads_request_
+    # user` scans, and `AgentEntitlement.labelled_by` needs the real
+    # `User` instance rather than the `Principal` value object the access
+    # checks above use.
+    labelled_by = user_for_request(request)
+    before = set(agent_label_ids(agent))
+    wanted = before | submitted if operation == "add" else before - submitted
+    set_agent_labels(principal, agent, wanted, labelled_by=labelled_by)
+    messages.info(request, entitlement_change_flash(agent.slug, before, wanted))
+    # `validated_next_url` FIRST, exactly as `_save_fields` above does, so
+    # a mount that arrives with a `next` hidden field is honoured -- the
+    # panel's own form ships none today, which is why the fallback is this
+    # row rather than the list: a label edit leaves you where you were.
+    return redirect(validated_next_url(request) or back)
