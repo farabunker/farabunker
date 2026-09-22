@@ -37,7 +37,7 @@ from django.views.decorators.http import require_safe
 
 from agents.labels import agent_entitlement_ids
 from agents.visibility import labellable_agents
-from identity.access import is_admin
+from identity.access import accounts_on, is_admin
 from identity.request import principal_for_request, settings_row_for
 
 # THE TWO SENTENCES THE REACH COLUMN CAN SAY, declared here because a
@@ -72,7 +72,17 @@ def agents_admin_list(request):
     # and unbounded in the size of the `AgentEntitlement` table; the
     # repair, if that table ever outgrows the page, is a pk-narrowed
     # reader in `agents/labels.py`, never a per-row read here.
-    labels = agent_entitlement_ids()
+    #
+    # AND NOT READ AT ALL ON AN OPEN BOX (review I1), gated on
+    # `accounts_on()` alone -- the ruling-A shape `views/workstreams.py`
+    # takes, and what puts this route in `identity/tests/
+    # test_zero_queries.py::_MOUNTS`. A label restricts nobody with
+    # accounts off (`visible_agents` returns at its `sees_all_content`
+    # short-circuit before the label clause is reached, spec 4.3.1), so a
+    # "Restrictions" count there would report a restriction that
+    # restricts no one.
+    accounts = accounts_on(settings_row=settings_row)
+    labels = agent_entitlement_ids() if accounts else {}
     # `labellable_agents()` RETURNS A LIST, so the fold below costs no
     # query per row.
     rows = [{
@@ -82,6 +92,12 @@ def agents_admin_list(request):
     } for agent in labellable_agents()]
     return render(request, "chat/agents_admin.html", {
         "rows": rows,
+        # THE COLUMN IS HIDDEN, NEVER ZEROED. `/chat/agents/` renders its
+        # count as a chip behind `{% if row.restrictions %}`, so a zero
+        # there is already invisible; a TABLE always prints a cell, so
+        # this page needs the flag -- and printing `0` would be a third
+        # wrong answer, meaning "none" where the truth is "not asked".
+        "show_restrictions": accounts,
         # WHERE THE EDITOR COMES BACK TO. `request.get_full_path()` is
         # this page including whatever query string it was reached with
         # (the assistant panel's own `?assistant=1` among them), and the

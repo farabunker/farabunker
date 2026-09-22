@@ -46,7 +46,16 @@ render in which any of it is built.
   is not what is holding it back -- the honest reason is that the
   promotion is a separate piece of work.
   {% endcomment %}
-  .table-wrap {
+  {% comment %}
+  PREFIXED WITH THE PAGE'S OWN NAME (review M2), following Task 8's own
+  accepted ruling for the same situation: the agent pages write
+  `.agent-row`/`.agent-group-head` rather than `.row`/`.group-head`,
+  because those names already mean a settings page's card and section
+  heading. `.table-wrap` is in the same position -- four other leaf
+  templates define it with four different bodies -- so this page's
+  wrapper carries its own name rather than making that five.
+  {% endcomment %}
+  .agent-library-wrap {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -86,11 +95,22 @@ including the empty one, which is the rule `docs/EXTENDING.md`'s "The
 anchors" step states ("an id inside a conditional that a fresh box does
 not satisfy is an id the anchor assertion will not find").
 {% endcomment %}
-<div class="table-wrap" id="agent-library">
+<div class="agent-library-wrap" id="agent-library">
   <table class="agent-library">
+  {% comment %}
+  THE RESTRICTIONS COLUMN IS HIDDEN ON AN OPEN BOX, NEVER ZEROED (review
+  I1). With accounts off a label restricts nobody -- `visible_agents`
+  returns at its `sees_all_content` short-circuit before the label
+  clause is ever evaluated -- so the view does not even read the table,
+  and a `0` printed here would mean "none" where the truth is "not
+  asked". `/chat/agents/` needs no equivalent branch: its count is a
+  chip behind `{% templatetag openblock %} if row.restrictions
+  {% templatetag closeblock %}`, and a table always prints its cell.
+  {% endcomment %}
     <thead>
       <tr>
-        <th>Name</th><th>Key</th><th>Reach</th><th>Owner</th><th>Restrictions</th>
+        <th>Name</th><th>Key</th><th>Reach</th><th>Owner</th>
+        {% if show_restrictions %}<th>Restrictions</th>{% endif %}
       </tr>
     </thead>
     <tbody>
@@ -108,10 +128,11 @@ not satisfy is an id the anchor assertion will not find").
         <td><code>{{ row.agent.slug }}</code></td>
         <td>{{ row.reach }}</td>
         <td>{{ row.agent.owner_kind }}:{{ row.agent.owner_key }}</td>
-        <td>{{ row.label_count }}</td>
+        {% if show_restrictions %}<td>{{ row.label_count }}</td>{% endif %}
       </tr>
     {% empty %}
-      <tr><td colspan="5" class="no-labels">No agents on this box yet.</td></tr>
+      <tr><td colspan="{% if show_restrictions %}5{% else %}4{% endif %}"
+              class="no-labels">No agents on this box yet.</td></tr>
     {% endfor %}
     </tbody>
   </table>

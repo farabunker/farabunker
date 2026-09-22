@@ -514,9 +514,12 @@ CARDS: tuple[HelpCard, ...] = (
                 anchor="agent-library",
                 meaning=(
                     "A read-only table: name, key, reach (everyone on this box, or only the "
-                    "people it is given to), owner, and the number of entitlements labelling "
-                    "it. Nothing is saved on this page -- each name is a link into the agent's "
-                    "own editor, which is where reach, the prompt and the labels are changed."
+                    "people it is given to), and owner. Nothing is saved on this page -- each "
+                    "name is a link into the agent's own editor, which is where reach, the "
+                    "prompt and the labels are changed. A fifth column counts the entitlements "
+                    "restricting each row, and it appears ONLY once accounts are turned on: "
+                    "with accounts off there is nobody for an entitlement to restrict, so the "
+                    "count is not asked rather than answered as zero."
                 ),
                 effects=(
                     "Opening a row from here returns here when it is saved or cancelled. The "

@@ -11,7 +11,7 @@ from agents.chat.tests._helpers import (   # noqa: F401
 )
 from agents.labels import agent_label_ids, set_agent_labels
 from identity.access import owner_fields
-from identity.contracts.postures import POSTURE_ENTERPRISE
+from identity.contracts.postures import POSTURE_ENTERPRISE, POSTURE_OPEN
 
 pytestmark = pytest.mark.django_db
 
@@ -560,6 +560,69 @@ class TestEditingAnAgent:
                 assert str(MAX_STEPS_CEILING) in response.content.decode()
 
 
+class TestTheRestrictionCountIsNotAskedOnAnOpenBox:
+    """REVIEW I1. `_restriction_fold` prints "how many labels this row
+    carries that THIS PRINCIPAL CANNOT MANAGE". With accounts off
+    `labelling_entitlements` answers `()`, so `mine` is empty and the
+    subtraction degenerates into "every label on the row" -- printed as
+    "N restrictions" on a box where a label restricts nobody
+    (`visible_agents` returns at its `sees_all_content` short-circuit
+    before the label clause is reached) and where the single operator is
+    the administrator who could change every one of them.
+
+    So the read is gated on `accounts_on()` alone -- the ruling-A shape
+    `views/workstreams.py` already takes -- and the number is HIDDEN
+    rather than zeroed. That gate is also what puts both agent list
+    pages in `identity/tests/test_zero_queries.py::_MOUNTS`.
+    """
+
+    def _a_row_carrying_a_dormant_label(self):
+        admin = make_admin()
+        agent = make_agent(slug="dormant-chat", name="Dormant chat",
+                           box_wide=True, **owner_fields(user_principal(admin)))
+        set_agent_labels(user_principal(admin), agent,
+                         {make_entitlement(name="Legal").pk})
+        return agent
+
+    def test_the_chat_list_prints_no_restriction_chip(self, client):
+        with posture(POSTURE_ENTERPRISE):
+            agent = self._a_row_carrying_a_dormant_label()
+        with posture(POSTURE_OPEN):
+            body = client.get(reverse("chat-agents")).content.decode()
+        assert agent.name in body, "the row itself must still list"
+        assert "restriction" not in body
+
+    def test_and_it_reads_no_label_row_there_at_all(self, client):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with posture(POSTURE_ENTERPRISE):
+            self._a_row_carrying_a_dormant_label()
+        with posture(POSTURE_OPEN):
+            with CaptureQueriesContext(connection) as captured:
+                assert client.get(reverse("chat-agents")).status_code == 200
+        assert captured.captured_queries, "the sweep captured nothing at all"
+        offenders = [q["sql"] for q in captured.captured_queries
+                     if "agents_agententitlement" in q["sql"]]
+        assert not offenders, offenders
+
+    def test_the_chip_is_back_the_moment_accounts_are_on(self, client):
+        """ANTI-VACUOUS COMPANION: hiding the chip everywhere would pass
+        both tests above. A MEMBER is the reader here, because the chip
+        counts what its reader cannot manage and an administrator can
+        manage everything."""
+        member = make_user()
+        with posture(POSTURE_ENTERPRISE):
+            admin = make_admin()
+            agent = make_agent(slug="restricted-chat", name="Restricted chat",
+                               **owner_fields(user_principal(member)))
+            set_agent_labels(user_principal(admin), agent,
+                             {make_entitlement(name="Legal").pk})
+            sign_in(client, member)
+            body = client.get(reverse("chat-agents")).content.decode()
+        assert "1 restriction" in body
+
+
 class TestWhereCancelLands:
     """TASK 8 REVIEW N3, closed by the second mount that made it matter.
 
@@ -711,6 +774,59 @@ class TestTheLabelPanelCarriesTheMountsOwnNext:
         assert response.status_code == 302
         assert response["Location"] == reverse("settings-agents")
         assert legal.pk in agent_label_ids(agent)
+
+    @pytest.mark.parametrize("body", [
+        {"op": "sideways"},                          # an unrecognised operation
+        {"op": "add", "add": "not-a-number"},        # an id that was typed
+    ], ids=["unknown-op", "typed-id"])
+    def test_a_REFUSED_label_save_returns_to_the_settings_mounted_editor(
+        self, client, body
+    ):
+        """REVIEW M3 -- N3's other half. A refusal is a REDIRECT to the
+        editor, and `_save_labels` used to build that URL bare, so the
+        re-rendered page had forgotten where it came from and its own
+        Cancel link dropped back to `/chat/agents/`. Reached by
+        mistyping rather than by cancelling, but the same strand."""
+        admin = make_admin()
+        with posture(POSTURE_ENTERPRISE):
+            agent = make_agent(slug=f"labels-refused-{body['op']}",
+                               **owner_fields(user_principal(admin)))
+            sign_in(client, admin)
+            response = client.post(reverse("chat-agent-edit", args=[agent.pk]),
+                                   {"action": "labels", "next": reverse("settings-agents"),
+                                    **body})
+        assert response.status_code == 302
+        expected = (f'{reverse("chat-agent-edit", args=[agent.pk])}'
+                    f'?next=%2Fsettings%2Fagents%2F')
+        assert response["Location"] == expected
+
+    def test_a_refusal_with_no_next_lands_on_the_bare_row_as_it_always_did(
+        self, client
+    ):
+        """The unchanged half: `/chat/agents/`'s own mount ships no
+        `next`, so its refusal URL is byte-identical to what it was."""
+        admin = make_admin()
+        with posture(POSTURE_ENTERPRISE):
+            agent = make_agent(slug="labels-refused-bare",
+                               **owner_fields(user_principal(admin)))
+            sign_in(client, admin)
+            response = client.post(reverse("chat-agent-edit", args=[agent.pk]),
+                                   {"action": "labels", "op": "sideways"})
+        assert response["Location"] == reverse("chat-agent-edit", args=[agent.pk])
+
+    def test_an_off_box_next_is_dropped_from_the_refusal_url_too(self, client):
+        """The refusal URL is built from `validated_next_url`, the same
+        guard the success path uses -- so a hostile value is dropped
+        here as well as there, and never becomes a `Location`."""
+        admin = make_admin()
+        with posture(POSTURE_ENTERPRISE):
+            agent = make_agent(slug="labels-refused-hostile",
+                               **owner_fields(user_principal(admin)))
+            sign_in(client, admin)
+            response = client.post(reverse("chat-agent-edit", args=[agent.pk]), {
+                "action": "labels", "op": "sideways",
+                "next": "https://elsewhere.example/steal"})
+        assert response["Location"] == reverse("chat-agent-edit", args=[agent.pk])
 
     def test_the_rendered_page_really_carries_it_in_the_panels_own_form(self, client):
         """The builder's key has to survive into the panel's markup --

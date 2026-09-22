@@ -75,27 +75,31 @@ pytestmark = pytest.mark.django_db
 #   * `inference-model-sets` (`models/registry/views.py::model_sets`)
 #     reads `ModelSet.objects.prefetch_related(...).all()` -- the base
 #     query alone names `inference_modelset`.
-#   * `settings-agents` (`agents/chat/views/agents_admin.py`, the agent
-#     library, chat cluster feature B) and `chat-agents`
-#     (`agents/chat/views/agents.py`) both call `agent_entitlement_ids()`
-#     -- the same unconditional bare `SELECT ... FROM
-#     agents_agententitlement` that puts `chat-agent-entitlements` on
-#     this list, for the same reason and with the same answer. Each
-#     prints, per row, how many entitlements RESTRICT that agent; that
-#     count is the page's own subject, read on an empty database as on a
-#     full one, and never a decision about whether the open principal may
-#     see somebody else's row. Confirmed directly, the same way as every
-#     other entry here: GET-swept against the full twelve-table set on an
-#     empty database, and `agents_agententitlement` is named in a
-#     captured query on both.
-# `settings-agents` is the newest MOUNT in `config/urls.py`
-# (`settings/agents/`) and is therefore the one exclusion here that is
-# also a mount rather than only a page, which is why it is named
-# explicitly: the rule this module states is one representative GET per
-# mount, and a mount left silently unnamed reads as an oversight rather
-# than a decision. `settings/assistant/` is in the same position -- its
+# THE TWO AGENT LIST PAGES ARE THE COUNTER-EXAMPLE, AND THEY ARE IN THE
+# SWEEP RATHER THAN ON THIS LIST. `chat-agents` and `settings-agents`
+# both print, per row, how many entitlements restrict that agent, which
+# reads like the four above -- a listing page whose subject is one of the
+# twelve tables. It is not: the count is not the page's subject, it is a
+# COLUMN on a page whose subject is agents, and it is meaningless with
+# accounts off (a label restricts nobody there -- `visible_agents`
+# returns at its `sees_all_content` short-circuit before the label clause
+# is evaluated). So both views gate `agent_entitlement_ids()` on
+# `accounts_on()` alone, the ruling-A shape `chat-workstream-new` already
+# takes below, and both pages hide the number rather than printing a `0`
+# that would mean "none" where the truth is "not asked". That gate is
+# what earns them their place in `_MOUNTS`; `labelling_entitlements`,
+# their other read, already returns `()` before touching its own table.
+# Confirmed directly, the same way as every inclusion here: GET-swept
+# against the full twelve-table set on an empty database, and neither
+# names one -- pinned by `agents/chat/tests/test_agent_pages.py` and
+# `agents/chat/tests/test_settings_agents.py` as well as here.
+#
+# `settings/agents/` IS ALSO A MOUNT of its own in `config/urls.py`, so
+# it belongs in a sweep whose rule is one representative GET per mount.
+# `settings/assistant/` is the one mount that is still absent -- its
 # three routes are the settings assistant's own, swept by
-# `agents/chat/tests/test_assistant_panel.py`.
+# `agents/chat/tests/test_assistant_panel.py` -- named here so it stays a
+# decision rather than reading as an oversight.
 # None of these four is a permission CHECK -- none of them decides
 # whether the open principal may see somebody ELSE's row, which is the
 # claim this module exists to pin (spec section 3.4). Each is the page
@@ -191,7 +195,15 @@ _MOUNTS = ["landing", "chat-index", "rag-ask-page", "rag-documents", "jobs-queue
            "jobs-settings",
            "inference-console", "setup-index", "settings-index", "identity-groups",
            "identity-settings", "chat-workstreams", "chat-workstream-new",
-           "chat-workstream", "chat-workstream-settings"]
+           "chat-workstream", "chat-workstream-settings",
+           # The two agent list pages (chat cluster, feature B; added at
+           # Task 10 review I1). Class A and class S respectively, both
+           # reachable at 200 on an open box for the reason
+           # `inference-console` above is, and both query-free there once
+           # their restriction count is gated on `accounts_on()` -- see
+           # the counter-example paragraph in this module's own comment
+           # block above.
+           "chat-agents", "settings-agents"]
 if "vision" in settings.FARABUNKER_FEATURES:
     _MOUNTS.append("vision-gallery")
     # Engine files (2026-09-02): class S, like `inference-console` above

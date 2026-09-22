@@ -46,6 +46,7 @@ from django.contrib import messages
 from django.http import Http404
 from django.shortcuts import redirect, render
 from django.urls import reverse
+from django.utils.http import urlencode
 from django.views.decorators.http import require_http_methods
 
 from agents.chat.agentform import ROLE_NOT_OFFERED, agent_form_context, chat_role_options
@@ -59,7 +60,7 @@ from agents.visibility import (
     box_wide_agents_owned_by, create_agent, editable_agents, labellable_agent,
     may_manage_agent, update_agent,
 )
-from identity.access import is_admin, labelling_entitlements
+from identity.access import accounts_on, is_admin, labelling_entitlements
 from identity.request import principal_for_request, settings_row_for, user_for_request
 
 # TRUE, AND NOTHING ELSE ON THIS PAGE SAYS IT.
@@ -129,6 +130,26 @@ def _restriction_fold(principal, settings_row):
     if that table ever outgrows the page, the repair is a pk-narrowed
     reader in `agents/labels.py`, never a per-row read here.
 
+    AND IT IS NOT READ AT ALL ON AN OPEN BOX (Task 10 review I1), gated
+    on `accounts_on()` alone -- the same ruling-A shape
+    `views/workstreams.py`'s own setup context takes, and the reason
+    `chat-workstream-new` is in `identity/tests/test_zero_queries.py::
+    _MOUNTS`. `labelling_entitlements` ALREADY returns `()` before
+    touching its table when accounts are off, so this one gate is what
+    makes the whole page query-free there.
+
+    THE GATE IS A CORRECTNESS FIX, NOT AN ECONOMY. With accounts off
+    `mine` is empty, so `len(labels - mine)` becomes "every label on this
+    row" -- rendered under a fold whose documented meaning is "how many
+    labels it carries that THIS PRINCIPAL CANNOT MANAGE" and printed as
+    "N restrictions". Both halves are false there: a label restricts
+    nobody on an open box (`visible_agents` returns at its
+    `sees_all_content` short-circuit before the label clause is
+    evaluated, spec 4.3.1), and the single operator is the administrator
+    who could change every one of them the moment accounts are on. `0`
+    is the honest value for a question that was not asked, and the two
+    templates HIDE the number rather than printing it.
+
     `manageable` IS `may_manage_agent`'s ANSWER FOR THAT ROW, threaded
     with the `settings_row` this request already holds so the predicate
     adds no query per row (fix round, review I2). ONE ROW SHAPE, not two:
@@ -139,7 +160,8 @@ def _restriction_fold(principal, settings_row):
     `identity.access.may_read_owned_row` and is reached only for a
     `service`-owned row.
     """
-    labels = agent_entitlement_ids()
+    labels = (agent_entitlement_ids()
+              if accounts_on(settings_row=settings_row) else {})
     mine = {pk for pk, _name in labelling_entitlements(principal,
                                                        settings_row=settings_row)}
 
@@ -366,8 +388,19 @@ def _save_labels(request, principal, agent, settings_row):
     all. `reverse("chat-agent-edit", args=[agent.pk])` already IS the
     row, and there is no `<details>` state to restore on a page whose
     panel is the only one it renders.
+
+    AND THE REFUSAL CARRIES THE MOUNT'S `next` TOO (Task 10 review M3),
+    which is the other half of review N3. A refusal is a REDIRECT to the
+    editor, so without the parameter the re-rendered page has forgotten
+    where it came from and its own Cancel link drops back to
+    `/chat/agents/` -- exactly the strand N3 was about, reached by
+    mistyping rather than by cancelling. Built from `validated_next_url`,
+    the same guard the success path uses, so an off-box value is dropped
+    here as well as there.
     """
-    back = reverse("chat-agent-edit", args=[agent.pk])
+    row_url = reverse("chat-agent-edit", args=[agent.pk])
+    onward = validated_next_url(request)
+    back = f"{row_url}?{urlencode({'next': onward})}" if onward else row_url
     parsed = parse_entitlement_diff(request, principal, settings_row,
                                     redirect_url=back)
     if not isinstance(parsed, tuple):
@@ -383,8 +416,10 @@ def _save_labels(request, principal, agent, settings_row):
     wanted = before | submitted if operation == "add" else before - submitted
     set_agent_labels(principal, agent, wanted, labelled_by=labelled_by)
     messages.info(request, entitlement_change_flash(agent.slug, before, wanted))
-    # `validated_next_url` FIRST, exactly as `_save_fields` above does, so
-    # a mount that arrives with a `next` hidden field is honoured -- the
-    # panel's own form ships none today, which is why the fallback is this
-    # row rather than the list: a label edit leaves you where you were.
-    return redirect(validated_next_url(request) or back)
+    # THE MOUNT'S OWN `next` FIRST, exactly as `_save_fields` above does
+    # -- the panel ships one since the second mount existed
+    # (`agentform.py`'s `tp_fields`). The fallback is this ROW rather
+    # than the list: a label edit leaves you where you were, so
+    # `row_url`, not the `back` above, which is the row plus the `next` a
+    # REFUSAL needs to re-render with.
+    return redirect(onward or row_url)

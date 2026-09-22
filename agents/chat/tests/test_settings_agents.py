@@ -26,7 +26,7 @@ from agents.chat.tests._helpers import (   # noqa: F401
 )
 from agents.labels import set_agent_labels
 from identity.access import owner_fields
-from identity.contracts.postures import POSTURE_ENTERPRISE
+from identity.contracts.postures import POSTURE_ENTERPRISE, POSTURE_OPEN
 
 pytestmark = pytest.mark.django_db
 
@@ -58,12 +58,41 @@ class TestTheSettingsList:
     def test_it_carries_its_own_is_admin_check_as_well_as_the_gate(self):
         """The gate is not the only way a view function can be reached
         -- the reasoning `agents/chat/views/assistant.py` records for its
-        own three views."""
-        import inspect
+        own three views.
 
-        from agents.chat.views import agents_admin
+        DRIVEN, NOT GREPPED (review M1). The first version of this test
+        asserted `"is_admin" in inspect.getsource(agents_admin)`, and
+        `inspect.getsource` returns the module's DOCSTRING too -- which
+        says "IT CARRIES ITS OWN `is_admin` CHECK" in so many words, so
+        deleting the check left the test green. The view is called
+        directly here, with no middleware chain in front of it, because
+        that is the only arrangement that distinguishes "this view
+        refuses" from "the gate refused first": through the client, a
+        member never reaches the function at all."""
+        from django.core.exceptions import PermissionDenied
+        from django.test import RequestFactory
 
-        assert "is_admin" in inspect.getsource(agents_admin)
+        from agents.chat.views.agents_admin import agents_admin_list
+
+        request = RequestFactory().get(reverse("settings-agents"))
+        with posture(POSTURE_ENTERPRISE):
+            request.user = make_user()
+            with pytest.raises(PermissionDenied):
+                agents_admin_list(request)
+
+    def test_the_same_call_answers_an_administrator(self):
+        """ANTI-VACUOUS COMPANION: the refusal above has to be the
+        `is_admin` check, not the bare request the factory builds. Same
+        arrangement, an administrator, and a rendered 200."""
+        from django.test import RequestFactory
+
+        from agents.chat.views.agents_admin import agents_admin_list
+
+        request = RequestFactory().get(reverse("settings-agents"))
+        with posture(POSTURE_ENTERPRISE):
+            request.user = make_admin()
+            response = agents_admin_list(request)
+        assert response.status_code == 200
 
     def test_it_shows_each_rows_audience_and_owner(self, client):
         """The declared sentence, not a substring of it: a user-facing
@@ -130,6 +159,56 @@ class TestTheSettingsList:
         edit = reverse("chat-agent-edit", args=[agent.pk])
         assert f'{edit}?next={url}"' in body
         assert f'{edit}?next={url}%3Fassistant%3D1"' in flagged
+
+    def test_the_restrictions_column_is_hidden_on_an_open_box(self, client):
+        """REVIEW I1. A label restricts nobody with accounts off --
+        `visible_agents` returns at its `sees_all_content` short-circuit
+        before the label clause is ever evaluated -- so the column is
+        HIDDEN rather than zeroed: a `0` would mean "none" where the
+        truth is "not asked". The row itself still lists."""
+        admin = make_admin()
+        with posture(POSTURE_ENTERPRISE):
+            agent = make_agent(slug="dormant", name="Dormant",
+                               **owner_fields(user_principal(admin)))
+            set_agent_labels(user_principal(admin), agent,
+                             {make_entitlement(name="Legal").pk})
+        with posture(POSTURE_OPEN):
+            body = client.get(reverse("settings-agents")).content.decode()
+        assert "Dormant" in body
+        assert "Restrictions" not in body
+        # THE HEADER ROW STILL MATCHES THE BODY ROWS: four columns, and
+        # the empty state's colspan follows.
+        assert "<th>Owner</th>" in body
+
+    def test_and_it_reads_no_label_row_there_at_all(self, client):
+        """The other half of I1, and the claim that earns this route its
+        place in `identity/tests/test_zero_queries.py::_MOUNTS`: the gate
+        is on the READ, not only on the render."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        admin = make_admin()
+        with posture(POSTURE_ENTERPRISE):
+            agent = make_agent(slug="dormant-read", name="Dormant read",
+                               **owner_fields(user_principal(admin)))
+            set_agent_labels(user_principal(admin), agent,
+                             {make_entitlement(name="Legal").pk})
+        with posture(POSTURE_OPEN):
+            with CaptureQueriesContext(connection) as captured:
+                assert client.get(reverse("settings-agents")).status_code == 200
+        assert captured.captured_queries, "the sweep captured nothing at all"
+        offenders = [q["sql"] for q in captured.captured_queries
+                     if "agents_agententitlement" in q["sql"]]
+        assert not offenders, offenders
+
+    def test_the_column_is_back_the_moment_accounts_are_on(self, client):
+        """ANTI-VACUOUS COMPANION to the two above: hiding it everywhere
+        would pass both of them."""
+        with posture(POSTURE_ENTERPRISE):
+            make_agent(slug="counted", name="Counted")
+            sign_in(client, make_admin())
+            body = client.get(reverse("settings-agents")).content.decode()
+        assert "Restrictions" in body
 
     def test_the_list_costs_the_same_at_one_agent_and_at_twenty_five(self, client):
         """TWO BATCH READS FOR THE WHOLE PAGE, never one per row --

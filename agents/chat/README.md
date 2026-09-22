@@ -2567,6 +2567,20 @@ twenty-five rows cost what one row costs and no per-row held-entitlement read
 happens here. A name would be the entitlement non-disclosure gate, which the
 route matrix sweeps these routes for.
 
+**And it is not asked at all on an open box.** Both list pages gate
+`agent_entitlement_ids()` on `accounts_on()` alone — ruling A's shape, the one
+`views/workstreams.py` already takes — because with accounts off a label
+restricts nobody: `visible_agents` returns at its `sees_all_content`
+short-circuit before the label clause is ever evaluated (spec §4.3.1). Without
+the gate the fold's own meaning inverts: `mine` is empty, so "how many labels
+this reader cannot manage" becomes "every label on the row", printed as
+"N restrictions" to the single operator who could change all of them. The
+number is **hidden, never zeroed** — a `0` would say "none" where the truth is
+"not asked" — so `/chat/agents/` drops the chip (its `{% if row.restrictions %}`
+already does) and `/settings/agents/` drops the column, the header cell and one
+from the empty row's `colspan`. That gate is also what puts both routes in
+`identity/tests/test_zero_queries.py::_MOUNTS`.
+
 ### `?next=` is echoed, never redirected to, on a GET
 
 `agents.chat.service.validated_next_url` reads `request.POST` and nothing else,
@@ -2591,8 +2605,15 @@ The raw value still reaches the hidden fields and nothing else.
 `<form>` (it must — nested forms are illegal HTML), so the field form's hidden
 `next` does not reach it; `agent_form_context` puts the mount's value in the
 panel's `tp_fields` when there is one, and omits the key entirely when there is
-not, so `/chat/agents/`'s own panel is byte-identical to what it was. No view
-change: `_save_labels` already honours `validated_next_url` first.
+not, so `/chat/agents/`'s own panel is byte-identical to what it was.
+
+**A refused label save carries it too.** `_save_labels` builds the URL it hands
+`parse_entitlement_diff` as that helper's `redirect_url` from the same
+`validated_next_url`, so an unknown `op` or a typed id lands back on an editor
+that still knows where it came from — otherwise the Cancel link on that
+re-rendered page drops to `/chat/agents/`, which is the strand above reached by
+mistyping rather than by cancelling. The success redirect falls back to the row
+itself, not to that URL: a label edit leaves you where you were.
 
 ### One action per POST, named
 
