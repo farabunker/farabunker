@@ -29,7 +29,7 @@ def fake_artifact_purge(refs, generation_ids) -> int:
 @pytest.fixture
 def real_registration():
     """Requested BY NAME, not autoused: opts a test out of `_isolated_
-    slot` below (CONTROLLER ADDITION, Task 8 review). `TestZeroDayEndToEnd`
+    slot` below. `TestZeroDayEndToEnd`
     wants the box exactly as a real deploy starts it -- whatever `agents/
     apps.py::ready()` and `tools/vision/apps.py::ready()` actually
     registered at Django startup, not this module's `SEEN`-recording
@@ -52,8 +52,8 @@ def _isolated_slot(request):
     On a box with "vision" off the saved value is `None`, which restores
     correctly too.
 
-    STANDS ASIDE FOR A TEST THAT REQUESTS `real_registration` (above,
-    CONTROLLER ADDITION): that one test wants the REAL, app-registered
+    STANDS ASIDE FOR A TEST THAT REQUESTS `real_registration` (above):
+    that one test wants the REAL, app-registered
     slot end to end, not this module's fake.
     """
     if "real_registration" in request.fixturenames:
@@ -120,7 +120,7 @@ class TestTheToolRecordScrub:
         first is what makes the scrub reachable, and this is the test
         that would fail if somebody reordered it. (This pins the
         INVOCATION-ID half of collect-before-delete; the ARTIFACT-PURGE
-        half -- FIX I2, Task 9 fix round 1 -- moved to run LAST, after
+        half moved to run LAST, after
         every row delete and the scrub, and is pinned separately by
         `TestBytesGoLast` below.)"""
         conversation = make_conversation()
@@ -207,8 +207,7 @@ class TestFindingTheGeneratedImages:
 
 # `TestAttachmentRowsGoAtPurge`, `_raising_db_cleanup` / `TestTheCleanupSavepoint`
 # and `TestConversationPurgeCascadesChatScopedDocuments` below are MOVED from
-# `agents/chat/tests/test_delete.py` (Task 8's own commit message names
-# them), rewritten against `purge_conversation` directly rather than the
+# `agents/chat/tests/test_delete.py`, rewritten against `purge_conversation` directly rather than the
 # HTTP delete view: the attachment cascade, the savepoint around a
 # broken cleanup provider, and the chat-scoped document cascade all run
 # at PURGE now, never at the soft delete that only writes a ticket.
@@ -274,7 +273,7 @@ def _raising_db_cleanup(conversation_id) -> int:
 
 
 class TestTheCleanupSavepoint:
-    """Round 11 fix-2 verify, Important N-1: the registered attachment-
+    """The registered attachment-
     cleanup provider used to run bare inside `delete_conversation`'s own
     outer `transaction.atomic()` -- a Python exception was caught
     (`agents.attachments.delete_attachments_for`'s own `except`), but a
@@ -283,7 +282,7 @@ class TestTheCleanupSavepoint:
     own nested `transaction.atomic()` (a SAVEPOINT) is what still
     protects a caller from that.
 
-    RE-PINNED (Task 9 fix round 1, FIX C1): a database error inside the
+    A database error inside the
     cleanup provider used to be pinned as something the purge SURVIVES
     (the conversation still went). That was right when a broken cleanup
     provider could only run at a conversation-delete click a person had
@@ -371,7 +370,7 @@ class TestTheCleanupSavepoint:
 
 
 class TestBytesGoLast:
-    """FIX I2 (Task 9 fix round 1): the registered artifact-purge slot
+    """BYTES LAST: the registered artifact-purge slot
     deletes generated images' ROWS AND THEIR FILES ON DISK. It used to
     run right after collect, before any row delete -- so a LATER step
     raising (the attachment cleanup, say) rolled the row deletes back
@@ -452,7 +451,7 @@ class TestConversationPurgeCascadesChatScopedDocuments:
 
 
 class TestZeroDayEndToEnd:
-    """CONTROLLER ADDITION (Task 8 review). Until this column's handler
+    """Until this column's handler
     was REGISTERED (Step 5, `agents/apps.py`), a delete on a zero-day box
     (`retention_days = 0`) purged the TICKET while the rows survived:
     `identity.retention.delete_content`'s own unconditional bounded sweep

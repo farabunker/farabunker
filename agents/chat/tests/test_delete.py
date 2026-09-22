@@ -1,13 +1,13 @@
 """Deleting a conversation, and what survives it.
 
-IT TICKETS; IT DOES NOT ERASE (Task 8). A delete POST no longer removes
+IT TICKETS; IT DOES NOT ERASE. A delete POST no longer removes
 the `Conversation` row -- `agents.visibility.delete_conversation` now
 calls `identity.retention.delete_content`, which writes one
 `DeletionTicket` and a content-free `content.deleted` event. The row,
 its turns, its shares, its attachment claims and its chat-scoped
 documents all survive the request; they are torn down TOGETHER at purge
-time by `agents.retention.purge_conversation` and its sibling handlers
-(Task 9), whose own test module (`agents/tests/test_retention.py`) is
+time by `agents.retention.purge_conversation` and its sibling handlers,
+whose own test module (`agents/tests/test_retention.py`) is
 where every "the row is gone"/"the cascade ran" assertion this module
 used to make now lives. This module's own job narrows to what a SOFT
 delete does: the row survives, the thread disappears from every reader
@@ -58,7 +58,7 @@ pytestmark = pytest.mark.django_db
 
 class TestTheRowsSurviveADelete:
     def test_the_conversation_and_its_turns_survive_and_a_ticket_hides_them(self, client):
-        """RE-PINNED (Task 8): a delete no longer erases the row. The
+        """A delete no longer erases the row. The
         conversation and its turns SURVIVE the request; what actually
         happens is that the thread leaves every reader that goes through
         `visible_conversations`, and exactly one `DeletionTicket` now
@@ -95,7 +95,7 @@ class TestTheRowsSurviveADelete:
         messages` (already installed platform-wide, `tools/rag`'s own
         pattern) carries the notice across the redirect.
 
-        RE-PINNED (Task 8): the notice now NAMES THE DELETED PAGE --
+        THE NOTICE NOW NAMES THE DELETED PAGE --
         `conversation_delete`'s own docstring has the reason the exact
         sentence depends on the box's retention policy -- so this checks
         for the Deleted page's own name rather than the old flat
@@ -115,8 +115,9 @@ class TestTheRowsSurviveADelete:
 
 class TestTheAuditSurvives:
     """The pin that makes SET_NULL a decision rather than a default --
-    unchanged by Task 8: a SOFT delete does not touch `ToolInvocation`
-    either, so this stays green with no edit."""
+    a SOFT delete does not touch `ToolInvocation` either, so writing
+    delete as a ticket instead of an erasure leaves this test's own
+    behaviour untouched."""
 
     def test_the_tool_invocation_row_survives_with_outcome_and_principal_key(
         self, client,
@@ -179,15 +180,15 @@ class TestAttachmentRowsSurviveADelete:
     and the `agents.contracts.attachments` cleanup registry, resolving
     `tools.rag.access.delete_attachments`).
 
-    RE-PINNED (Task 8): that reach now happens at PURGE, not at delete.
-    `agents/tests/test_retention.py` (Task 9) is where "the row is gone"
+    That reach now happens at PURGE, not at delete.
+    `agents/tests/test_retention.py` is where "the row is gone"
     moves to, against `agents.retention.purge_conversation`; this class's
     own job narrows to the SOFT-DELETE half -- the claim survives a
     delete exactly like everything else the conversation owns."""
 
     def test_deleting_a_conversation_leaves_its_attachment_rows(self, client):
-        """MOVED (Task 9, `agents/tests/test_retention.py`): "removes"
-        is now true at PURGE, through `agents.retention.
+        """The word "removes" moved to `agents/tests/test_retention.py`:
+        it is now true at PURGE, through `agents.retention.
         purge_conversation`'s attachment handler -- not at delete. The
         soft-delete half stays here: the row survives the POST."""
         from agents.tests._helpers import make_document
@@ -207,7 +208,7 @@ class TestAttachmentRowsSurviveADelete:
         never the document's own existence -- deleting the conversation
         must not delete, or touch, the document another conversation
         (or the universal library itself) may still hold or contain.
-        UNCHANGED by Task 8: a soft delete touches neither row, so this
+        A soft delete touches neither row, so this
         stays true even more directly than before."""
         from agents.tests._helpers import make_document
         from tools.rag.models import DocumentAttachment
@@ -222,9 +223,10 @@ class TestAttachmentRowsSurviveADelete:
         assert doc.title == "Notes.pdf"
 
     def test_a_different_conversations_attachment_row_is_untouched(self, client):
-        """MOVED (Task 9, `agents/tests/test_retention.py`): the scoped-
-        cleanup claim ("deleting one conversation must not touch
-        another's own claim") is a PURGE-time claim now. The soft-delete
+        """The scoped-cleanup claim ("deleting one conversation must not
+        touch another's own claim") moved to
+        `agents/tests/test_retention.py`: it is a PURGE-time claim now.
+        The soft-delete
         half stays here: a delete touches NEITHER conversation's
         attachment row."""
         from agents.tests._helpers import make_document
@@ -265,8 +267,8 @@ class TestMethodAndTransport:
 
 
 class TestTheDeleteControlOnThePage:
-    """A disclosure, then a real POST -- no JS confirm dialog. UNCHANGED
-    by Task 8: the copy changes, the mechanism does not."""
+    """A disclosure, then a real POST -- no JS confirm dialog. Writing
+    delete as a ticket changes the copy, not the mechanism."""
 
     def test_the_page_carries_a_details_confirm_not_a_js_dialog(self, client):
         conversation = make_conversation()
@@ -281,8 +283,8 @@ class TestTheDeleteControlOnThePage:
         assert "confirm(" not in body
 
 
-# `_raising_db_cleanup` and `TestTheCleanupSavepoint` MOVED to
-# `agents/tests/test_retention.py` (Task 9), against `agents.retention.
+# `_raising_db_cleanup` and `TestTheCleanupSavepoint` moved to
+# `agents/tests/test_retention.py`, against `agents.retention.
 # purge_conversation`: the registered attachment-cleanup provider no
 # longer runs inside `delete_conversation` at all -- a soft delete calls
 # `identity.retention.delete_content`, which never touches the
@@ -290,8 +292,8 @@ class TestTheDeleteControlOnThePage:
 # database error through now belongs to the purge path.
 
 
-# `TestConversationDeleteCascadesChatScopedDocuments` MOVED to
-# `agents/tests/test_retention.py` (Task 9), against `agents.retention.
+# `TestConversationDeleteCascadesChatScopedDocuments` moved to
+# `agents/tests/test_retention.py`, against `agents.retention.
 # purge_conversation`: round 12's document cascade ("if I submit a
 # document but have scope for chat, then it should only be used in that
 # chat") ran at delete time through the SAME cleanup slot
@@ -309,9 +311,9 @@ class TestASoftDeleteLeavesAttachedDocumentsAlone:
     have scope for chat, then it should only be used in that chat")
     used to cascade a chat-scoped document's own delete at CONVERSATION
     delete time, through the same cleanup slot
-    `TestAttachmentRowsSurviveADelete` above pins. RE-PINNED (Task 8):
-    that cascade now runs only at PURGE (`agents/tests/test_retention.py`,
-    Task 9) -- a soft delete calls `identity.retention.delete_content`,
+    `TestAttachmentRowsSurviveADelete` above pins. That cascade now runs
+    only at PURGE (`agents/tests/test_retention.py`) -- a soft delete
+    calls `identity.retention.delete_content`,
     which never touches the attachment-cleanup registry at all, so a
     chat-scoped document's row, its attachment claim and its files are
     every bit as untouched by a soft delete as a universal document's.
@@ -379,7 +381,7 @@ class TestDeleteWritesATicketAndHidesTheThread:
     def test_the_notice_names_permanent_deletion_when_the_grace_period_is_zero(
         self, client
     ):
-        """CONTROLLER ADDITION (Task 8 review): the notice must not
+        """The notice must not
         promise a restore the box cannot keep. With `retention_days = 0`
         the ticket `delete_content` hands back has ALREADY been purged
         by the time the view runs -- its `purge_on` is today

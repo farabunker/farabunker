@@ -725,7 +725,7 @@ deletes the DOCUMENT itself — chunks, managed-store files, and the row —
 since nothing else can ever reference it; for a universal or contained
 document merely attached to that conversation, only the attachment row
 dies and the document lives on. A failure in that cleanup slot now
-fails the whole purge rather than being swallowed (Task 9 fix round 1),
+fails the whole purge rather than being swallowed,
 so the `DocumentAttachment` rows — and, for a chat-scoped document, the
 document itself — never silently outlive a purge that reported success;
 the ticket survives instead, and the next sweep retries.

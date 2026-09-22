@@ -457,7 +457,7 @@ def delete_conversation(principal, conversation):
     by `agents.retention.purge_conversation` and its sibling handlers,
     through the registry `identity/cascades.py` runs.
 
-    THE TICKET, NOT A BARE BOOL (controller addition, Task 8 review):
+    THE TICKET, NOT A BARE BOOL:
     `agents/chat/views/conversations.py::conversation_delete` must not
     promise a restore the box cannot keep -- with `retention_days = 0`
     the ticket `delete_content` hands back has ALREADY been purged by

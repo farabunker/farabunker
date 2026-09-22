@@ -147,8 +147,8 @@ def delete_attachments_for(conversation_id) -> int:
     provider itself raises.
 
     THE ONE CALLER: `agents.retention.purge_conversation`, at PURGE time
-    (Task 9) -- a delete only writes a ticket now
-    (`agents.visibility.delete_conversation`, Task 8), and this cascade
+    -- a delete only writes a ticket now
+    (`agents.visibility.delete_conversation`), and this cascade
     no longer runs at that moment at all. It runs alongside the
     conversation's own `Share` rows and the conversation itself, in the
     same purge -- so a `DocumentAttachment` row naming a UUID that no
@@ -156,11 +156,11 @@ def delete_attachments_for(conversation_id) -> int:
     never a real FK -- `tools/rag` may not import `agents.models`) does
     not silently outlive the conversation it claimed to be attached to.
 
-    RE-RAISES, ON PURPOSE (Task 9 fix round 1, FIX C1). The reason this
+    RE-RAISES, ON PURPOSE. The reason this
     function used to swallow -- "a broken `tools.rag` cleanup provider
     must not block a conversation delete the actor already confirmed
-    through `may_manage_conversation`" -- stopped being true the moment
-    Task 8 made a delete write only a ticket: THE ONE CALLER above is
+    through `may_manage_conversation`" -- stopped being true once a
+    delete started writing only a ticket: THE ONE CALLER above is
     the whole of this function's production traffic today, and it runs
     at PURGE time, inside `identity.cascades.run_retention`'s own
     never-swallows runner. A swallowed failure here would let
@@ -177,10 +177,10 @@ def delete_attachments_for(conversation_id) -> int:
     Document too in that case; see `tools.rag.access.delete_
     attachments`'s own docstring).
 
-    THE SAVEPOINT STAYS (round 11 fix-2 verify, Important N-1) -- C1
+    THE SAVEPOINT STAYS -- re-raising instead of swallowing
     changes what happens to the exception, never whether this call needs
     one. This call ALWAYS runs inside `agents.retention.
-    purge_conversation`'s own outer transaction (Task 9:
+    purge_conversation`'s own outer transaction:
     `identity.cascades.run_retention` opens one savepoint per registered
     handler, and this call sits inside that one, itself nested one level
     deeper). A DATABASE-level error (the reviewer reproduced
@@ -215,7 +215,7 @@ def delete_attachments_for(conversation_id) -> int:
         with transaction.atomic():
             return import_string(provider)(conversation_id)
     except Exception:
-        # NOT SWALLOWED (FIX C1): logged for an operator reading this
+        # NOT SWALLOWED: logged for an operator reading this
         # box's own logs, then re-raised so `run_retention` -- and, above
         # it, `identity.retention.purge_ticket` -- see a real failure
         # rather than a quiet zero.

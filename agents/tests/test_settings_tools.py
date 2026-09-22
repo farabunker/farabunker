@@ -270,8 +270,8 @@ class TestTheOverview:
         assert set(result.data["unreported_settings"]) == {"Library", "Job execution"}
 
     def test_it_reports_the_retention_policy_in_plain_words(self):
-        """Task 8 review, controller addition: the three retention
-        columns Task 2 added to `IdentitySettings` (`retention_days`,
+        """The three retention
+        columns added to `IdentitySettings` (`retention_days`,
         `queue_retention_days`, `audit_detail`) are operator-editable
         and readable off the SAME `settings_row()` this tool already
         fetches once -- so they are REPORTED, not named in `UNREPORTED_
@@ -384,8 +384,8 @@ class TestTheOverviewFieldCoverage:
         added `JobSettings.response_timeout_seconds`, for the identical
         reason -- import law, not a policy choice about this one field.
 
-        EIGHTEEN BECAME TWENTY-ONE (Task 8 review, controller addition)
-        when the deletion-semantics task's `IdentitySettings.
+        EIGHTEEN BECAME TWENTY-ONE
+        when deletion semantics' `IdentitySettings.
         retention_days`/`queue_retention_days`/`audit_detail` joined the
         REPORTED set instead -- unlike the Library/Job-execution fields,
         these three are readable off the same `settings_row()` this tool

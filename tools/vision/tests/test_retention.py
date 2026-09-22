@@ -145,7 +145,7 @@ class TestAFailedParseIsLoggedWithoutWhatItFailedToParse:
 
 
 class TestEmptyInputCostsNothing:
-    """CONTROLLER ADDITION: the artifact-purge slot is called on EVERY
+    """The artifact-purge slot is called on EVERY
     conversation purge on a vision box, including the common case -- a
     conversation with no images -- which hands it two empty lists. That
     must not touch a job, run no engine-side sweep, and cost no more

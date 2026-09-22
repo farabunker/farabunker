@@ -181,9 +181,8 @@ SETTINGS_OVERVIEW = ToolSpec(
 REPORTED_SETTINGS_FIELDS: dict[str, frozenset[str]] = {
     "IdentitySettings": frozenset(
         {"posture", "library_posture", "admin_sees_content", "session_idle_minutes",
-         # The deletion-semantics retention policy (Task 2 added the
-         # columns; this tool reports them Task 8 review, controller
-         # addition): all three are operator-editable and readable
+         # The deletion-semantics retention policy: all three are
+         # operator-editable and readable
          # through `identity.access.settings_row()`, the SAME row this
          # function already reads once -- no second query, no
          # `identity.models` import (that stays closed to `agents/`).
@@ -384,8 +383,8 @@ def run_overview(args: dict, ctx: ToolContext) -> ToolResult:
         "admin_sees_content": bool(row.admin_sees_content),
         "session_idle_minutes": int(row.session_idle_minutes),
         "time_aware": bool(chat.time_aware),
-        # THE RETENTION POLICY, off the SAME `row` -- no second read
-        # (Task 8 review, controller addition). `queue_retention_days`
+        # THE RETENTION POLICY, off the SAME `row` -- no second read.
+        # `queue_retention_days`
         # is nullable (`None` means no age cliff at all), which is why
         # its text line below branches rather than always printing a
         # number.

@@ -919,7 +919,7 @@ built here.
 `POST /chat/c/<uuid>/delete/` (`agents/chat/views/conversations.py`)
 looks the conversation up through `visible_conversations` (ruling 4c,
 so a bad id is a real 404) and calls `agents.visibility.
-delete_conversation` — which, since deletion semantics (Task 8), no
+delete_conversation` — which, since deletion semantics, no
 longer erases anything. It calls `identity.retention.delete_content`,
 which writes one `DeletionTicket`, records a content-free
 `content.deleted` event, and returns the ticket. **The click hides the
@@ -964,8 +964,8 @@ still references it — and neither the click nor the later teardown
 touches the agent row; `test_delete.py::TestTheAgentIsUntouched` pins
 it.
 
-**The index confirms it (chat-polish P3.1, D4; two notices since Task
-8)** — `conversation_delete` reads the returned ticket's `purge_on` and
+**The index confirms it (chat-polish P3.1, D4; two notices now that
+delete writes a ticket)** — `conversation_delete` reads the returned ticket's `purge_on` and
 calls `django.contrib.messages.info(request, ...)` with one of two
 sentences before its redirect: "Conversation deleted. You can restore
 it from Settings → Deleted." ordinarily, or "Conversation deleted
@@ -984,9 +984,8 @@ bespoke `?deleted=1` query flag.
 _delete_control.html`: click "Delete this conversation" to reveal the
 real POST form and a "Yes, delete" button, or "Cancel" (a one-line
 `onclick` that is inert without JavaScript) to close it again. No
-`confirm()`/`alert()`/`prompt()` anywhere — unchanged by Task 8: the
-copy behind the click changed, the mechanism that raises the form did
-not.
+`confirm()`/`alert()`/`prompt()` anywhere — deletion semantics changed the
+copy behind the click, not the mechanism that raises the form.
 
 ## The conversation sidebar (UI-3b)
 
@@ -2052,11 +2051,12 @@ carried it; a `Document.scope == "conversation"` row (round 12) still
 carries EXACTLY one attachment row, enforced in the write path (`tools.
 rag.services._attach`, moved from the now-retired `tools.rag.views.
 _attach`). Deleting a conversation (`agents.visibility.
-delete_conversation`, since Task 8) only tickets it — the attachment
+delete_conversation`, under deletion semantics) only tickets it — the attachment
 rows survive that click untouched. They are removed later, at PURGE,
-by `agents.retention.purge_conversation` (Task 9), through the SAME
+by `agents.retention.purge_conversation`, through the SAME
 `agents.contracts.attachments` cleanup slot the provider registry uses
-for reads, wrapped in its own savepoint (round 11 fix-2 Important N-1,
+for reads, wrapped in its own savepoint (the same savepoint the read
+path already opened,
 now inherited by the purge path) — for a chat-scoped attachment, that
 cascade deletes the DOCUMENT itself (chunks, managed-store files, and
 the row); for a universal/contained one, only the attachment row dies.

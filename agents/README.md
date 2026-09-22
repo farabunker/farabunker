@@ -798,7 +798,7 @@ before the response returns. A notice that promised a restore door the
 box had already closed would be a lie the settings page's own "Keep
 deleted items for" control made possible.
 
-`agents/retention.py::purge_conversation` (Task 9) is where the HARD
+`agents/retention.py::purge_conversation` is where the HARD
 side lands, registered under `agents.apps.AgentsConfig.ready()` as a
 `RetentionHandler(kind=KIND_CONVERSATION, key="agents.conversation",
 handler="agents.retention.purge_conversation", order=ORDER_FILES)` —
@@ -822,14 +822,14 @@ are gone there is no path left from the conversation to its tool
 records at all. An artifact reference that fails to parse is dropped
 and logged by TURN ID AND CONVERSATION ID only — never the raw stored
 string, because a deletion path must not write the content it is
-destroying into a log (Task 9 fix round 1, FIX M6).
+destroying into a log.
 
 The row deletes follow: the conversation's `Share` rows, then
 `agents.attachments.delete_attachments_for` (which reaches `tools.rag.
 access.delete_attachments` through the registered cleanup seam — a
 chat-scoped document is deleted outright there, a universal or
 stream-contained one loses only its claim; a failure here now
-PROPAGATES rather than degrading to zero, Task 9 fix round 1's FIX C1
+PROPAGATES rather than degrading to zero
 — that provider's only production caller today is this purge, so a
 swallowed failure would report success while its rows survive with no
 ticket left to find them by), then `conversation.delete()`, with `Turn`
@@ -839,7 +839,7 @@ the shell (principal, tool key, outcome, timings) kept, because that
 shell IS the machine audit trail. **Scrubbed inline with the same
 purge, always, with no setting and no second date.**
 
-LAST — bytes last, Task 9 fix round 1's FIX I2 — the refs and
+LAST — bytes last — the refs and
 generation ids from the collect step are handed to the ONE registered
 artifact-purge slot (`agents.contracts.artifacts.register_artifact_
 purge` / `artifact_purge`, resolved by dotted path, never imported —

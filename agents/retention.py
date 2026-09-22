@@ -59,7 +59,7 @@ def _collect(conversation_id):
     raised -- `agents.shares.shared_keys`' own posture for untrusted
     stored strings: a purge must not be stopped by one bad row.
 
-    THE LOG LINE NAMES NO CONTENT (FIX M6): a deletion path must not
+    THE LOG LINE NAMES NO CONTENT: a deletion path must not
     write the very bytes it is destroying into a log a purge is
     supposed to make disappear, so this logs the TURN's own id and the
     conversation id -- enough for an operator to find the row by hand --
@@ -120,7 +120,7 @@ def scrub_tool_records(invocation_ids) -> int:
     Idempotent by construction: a second run matches the same rows and
     writes the same three empty values.
 
-    A KNOWN, ACCEPTED RESIDUE (FIX M7/I4): this only reaches invocations
+    A KNOWN, ACCEPTED RESIDUE: this only reaches invocations
     a SURVIVING `Turn` points at, because `_collect` above finds them by
     walking the conversation's own turns. A tool call whose job died
     between its `ToolInvocation` row being written (`agents/runtime/
@@ -147,8 +147,8 @@ def purge_conversation(key: str) -> int:
     is not a UUID at all -- is not an error: the item may have been hard
     -deleted by an older path while its ticket stood.
 
-    ORDER, and every step's reason -- BYTES LAST (FIX I2, Task 9 fix
-    round 1: the registered artifact-purge slot used to run SECOND,
+    ORDER, and every step's reason -- BYTES LAST (the registered
+    artifact-purge slot used to run SECOND,
     right after collect, which meant a later step raising -- the
     attachment cleanup, say -- rolled the ROW deletes back while the
     files that slot had already removed from disk stayed gone; a
@@ -161,7 +161,7 @@ def purge_conversation(key: str) -> int:
          `tools.rag.access.delete_attachments` through the registered
          cleanup seam -- chat-scoped documents die there, universal and
          stream-contained ones lose only their claim; a failure here now
-         PROPAGATES -- FIX C1 -- rather than degrading to zero), then
+         PROPAGATES rather than degrading to zero), then
          `conversation.delete()`, with `Turn` going by CASCADE;
       3. the tool-record scrub, on the invocation ids from step 1;
       4. LAST: hand the references and generation ids collected in step
@@ -176,14 +176,15 @@ def purge_conversation(key: str) -> int:
          this function owns is already gone before a single FILE on
          disk is touched: if step 2 or 3 raises, this step never runs
          at all (see `TestBytesGoLast` in `agents/tests/
-         test_retention.py`), the whole purge rolls back (FIX C1's own
-         propagation makes that true for step 2), and no file was ever
+         test_retention.py`), the whole purge rolls back (the attachment
+         cleanup's own propagation, above, makes that true for step 2),
+         and no file was ever
          deleted for a conversation whose ticket just survived to be
          retried. The reverse order could delete a file whose row then
          survived a later failure, with nothing left pointing at the
          gap.
 
-    A DELIBERATE, HONEST LEFTOVER (FIX M7/I4): `agents.models.
+    A DELIBERATE, HONEST LEFTOVER: `agents.models.
     WorkstreamTaint.first_conversation` keeps this conversation's id BY
     VALUE after the purge -- content-free (an entitlement id and a
     timestamp is all a taint row ever carries), inert, and not cleaned

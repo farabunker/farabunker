@@ -383,10 +383,10 @@ class TestVisibleTurn:
 
 class TestDeleteConversation:
     def test_the_owner_may_delete_and_a_stranger_may_not(self):
-        """RE-PINNED (Task 8): the gate is still `may_manage_
+        """The gate is still `may_manage_
         conversation`, so the refuse/permit answers are unchanged -- but
         `delete_conversation` now returns the `DeletionTicket` rather
-        than a bare `True` (controller addition, Step 6: the view needs
+        than a bare `True` (the view needs
         `ticket.purge_on` to choose its notice), so this asserts
         truthy/`None` rather than `is True`/`is False`. The row is no
         longer gone the instant a truthy delete returns. `agents.chat.

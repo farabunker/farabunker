@@ -410,8 +410,8 @@ def conversation_delete(request, conversation_id):
     The AGENT is untouched: `Conversation.agent` is `PROTECT` in the
     other direction only.
 
-    THE NOTICE MUST NOT PROMISE A RESTORE THE BOX CANNOT KEEP
-    (controller addition, Task 8 review). With `retention_days = 0` the
+    THE NOTICE MUST NOT PROMISE A RESTORE THE BOX CANNOT KEEP.
+    With `retention_days = 0` the
     ticket `delete_conversation` hands back has ALREADY been purged by
     the time this view runs -- its `purge_on` is today
     (`identity.retention.delete_content`'s own unconditional bounded
