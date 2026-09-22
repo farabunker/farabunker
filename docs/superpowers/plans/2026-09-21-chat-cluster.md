@@ -6789,7 +6789,7 @@ the task reports asked for.
 ### Every reviewed deviation
 
 One line each, in task order. All were reviewed; none is an open question. Task 1 and Task 11
-shipped with none.
+have none.
 
 | Task | Deviation | Why |
 |---|---|---|
@@ -6818,7 +6818,7 @@ shipped with none.
 | 8 | Page-prefixed CSS class names, not the bare ones the brief printed | The bare names already mean something else under the settings shell. |
 | 8 | The create route's route-matrix driver probes with a GET | A POST driver would create a row as a side effect of proving a class boundary; the existing precedent probes with a GET too. |
 | 8 | An apostrophe-bearing row name asserted through the escaping helper; the reset warning pinned whole | Autoescape again; and the warning constant had never been proven to reach a page. |
-| 8 (fix) | The read-only box-wide section's sentence is chosen **per row**, and an administrator gets a link | As first shipped it told an administrator on an open box that "an administrator can change it" and offered no way in — the owner's headline ask, with no door. |
+| 8 (fix) | The read-only box-wide section's sentence is chosen **per row**, and an administrator gets a link | As first written it told an administrator on an open box that "an administrator can change it" and offered no way in — the owner's headline ask, with no door. |
 | 9 | The foreign-label sentence renders outside the panel's own condition | Nested under the panel, its one intended reader would never see it. |
 | 9 | The shared type-to-filter script include is gated on the panel | Keeps the zero-script pin on this page passing unchanged rather than weakening it. |
 | 9 | Two brief tests strengthened | Both were vacuous as drafted — one asked "in neither pane" of a panel that did not render. |
