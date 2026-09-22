@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import inspect
+import re
 
 import pytest
 from django.urls import reverse
@@ -249,6 +250,42 @@ class TestTheDeletedIdsClause:
         clause = built.filters[-1]
         assert (clause.key, clause.operator, clause.value) == (
             "file_id", FilterOperator.NIN, ["9"])
+
+    def test_the_ingest_stamp_and_the_exclusion_key_are_the_same_literal(self):
+        """NEITHER SIDE NAMES A SHARED CONSTANT TODAY: `tools.rag.ingest.
+        _ingest_prose` writes `node.metadata["file_id"] = str(doc.id)`
+        on every chunk it produces, and `_visibility_filters` above
+        builds its NOT-IN leg against `key="file_id"`,
+        `value=[str(i) for i in deleted_ids]` -- two independent
+        literals that happen to agree. If ingest ever stamped a
+        different key, or dropped the `str(...)` cast, the exclusion
+        above would silently match nothing: chunks would keep answering
+        for a document its own ticket already hides. This test reads
+        both literals out of the real source rather than retyping a
+        third copy, so a drift between them fails HERE instead of only
+        showing up as a deleted document's chunks still being
+        retrievable."""
+        from tools.rag import ingest
+
+        ingest_source = inspect.getsource(ingest._ingest_prose)
+        stamp_match = re.search(
+            r'node\.metadata\["(?P<key>\w+)"\]\s*=\s*str\(doc\.id\)', ingest_source)
+        assert stamp_match, (
+            "tools.rag.ingest._ingest_prose no longer stamps "
+            "`node.metadata[<key>] = str(doc.id)` the way this test expects -- "
+            "update this test to read wherever the document-id metadata key "
+            "now lives.")
+
+        filter_source = inspect.getsource(retrieval._visibility_filters)
+        filter_match = re.search(
+            r'key="(?P<key>\w+)",\s*value=\[str\(i\) for i in deleted_ids\]',
+            filter_source)
+        assert filter_match, (
+            "tools.rag.retrieval._visibility_filters no longer builds its "
+            "deletion NOT-IN clause the way this test expects -- update this "
+            "test to read wherever that key now lives.")
+
+        assert stamp_match.group("key") == filter_match.group("key")
 
 
 class TestTheConversationLeg:

@@ -104,6 +104,12 @@ def _label(model) -> str:
     return f"{model._meta.app_label}.{model.__name__}"
 
 
+def _all_model_labels() -> set[str]:
+    """Every model Django knows about, labelled the same way `_COVERED`
+    and `_EXEMPT` spell their own keys."""
+    return {_label(model) for model in apps.get_models()}
+
+
 def _owned_models() -> list[str]:
     """Every model carrying BOTH owner columns, discovered by walking the
     app registry -- so a new owned table is seen the day it is added."""
@@ -153,6 +159,24 @@ def test_every_owned_model_is_covered_or_exempt():
         "into deletion with a retention handler, or add it to _EXEMPT with "
         "one line saying why a deletion never reaches it: "
         f"{unaccounted}")
+
+
+def test_every_listed_model_still_exists():
+    """`_COVERED` and `_EXEMPT` are hand-written labels, not a live
+    query -- so renaming or removing a model does not by itself touch
+    either dict, and every OTHER test above only walks forward, from
+    `apps.get_models()` to the dicts, never back. A stale key (a model
+    renamed in a migration, or dropped outright) would sit there
+    unnoticed, silently describing a table that no longer exists, and
+    the wiring or the exemption it once documented would no longer be
+    checked by anything. This test walks backward instead, so a rename
+    fails here rather than leaving a dead entry for nobody to revisit."""
+    known = _all_model_labels()
+    stale = sorted((set(_COVERED) | set(_EXEMPT)) - known)
+    assert stale == [], (
+        "these _COVERED/_EXEMPT keys no longer name a real model -- the "
+        "model was renamed or removed; update or remove the entry: "
+        f"{stale}")
 
 
 def test_the_two_lists_do_not_overlap():
