@@ -2233,11 +2233,23 @@ class TestTheContextMeter:
         path would have nothing here to catch it. The two assertions
         below the meter's own pair are what make that non-vacuous: the
         banner really renders on both pages.
+
+        THE CLOSING WAVE EXTENDS IT ONCE MORE, for the same reason and in
+        the same shape: whole-branch review I-2 added a SECOND bounded
+        read to this page -- `agents.chat.service.branch_point_ordinal`,
+        the parent-side `.count()` behind "at your message N" -- and it
+        is bounded by the PARENT's length, not this conversation's, so
+        equality under scale is exactly the right pin for it. The parent
+        below now carries a real user turn so the ordinal is a live
+        number on both renders rather than a count over nothing, and the
+        two "at your message 1" assertions at the end are what keep that
+        non-vacuous.
         """
         from agents.limits import HISTORY_TURNS
 
         agent = make_agent(slug="meter-scale")
         parent = make_conversation(agent=agent, title="Meter parent")
+        make_turn(conversation=parent, text="parent message", state=Turn.State.DONE)
         short = make_conversation(agent=agent, branched_from=parent, branched_at_index=0)
         make_turn(conversation=short, text="hi", state=Turn.State.DONE)
         long_one = make_conversation(agent=agent, branched_from=parent, branched_at_index=0)
@@ -2257,6 +2269,8 @@ class TestTheContextMeter:
         assert long_body.count("Send from here") == HISTORY_TURNS * 3
         assert short_body.count("Branched from") == 1
         assert long_body.count("Branched from") == 1
+        assert short_body.count("at your message 1") == 1
+        assert long_body.count("at your message 1") == 1
 
     def test_a_reader_who_may_not_upload_pays_no_extra_query_for_the_stream(
         self, client, bound_chat_role

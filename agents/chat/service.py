@@ -179,9 +179,45 @@ BRANCH_PROVENANCE_LEAD = "Branched from"
 BRANCH_PROVENANCE_UNNAMED = "an earlier conversation"
 
 
-def branch_provenance_tail(index: int) -> str:
+def branch_point_ordinal(parent, index: int) -> int:
+    """WHICH OF THE PARENT'S OWN MESSAGES the branch left off at, 1-based
+    and countable by a reader -- the ordinal of the turn at `index` among
+    `parent`'s finished, root-depth USER turns.
+
+    WHY NOT `Turn.index` (whole-branch review I-2). That column is a
+    DENSE counter over EVERY row in the thread -- user, assistant, tool
+    cards, and delegate turns at `depth >= 1` (`agents/models.py::Turn.
+    next_index` returns `0` for the very first one). Nothing on the
+    thread page renders it, and a reader's notion of "message" is the
+    bubbles they can see, so the banner used to render "at message 0"
+    for a branch off the FIRST message and "at message 4" for the second
+    message of a thread that had used one tool. The column stays exactly
+    what it was -- `branched_at_index` is PROVENANCE, queryable, not
+    display -- and this is the display half, computed at render time
+    from the parent that is being pointed at.
+
+    ONE QUERY, BOUNDED BY THE PARENT'S OWN LENGTH -- a `.count()` over
+    the same `(conversation, index)` index `agents.usage.context_usage`
+    already walks, and flat in the BRANCH's length, which is what
+    `agents/chat/tests/test_thread.py::test_the_meter_costs_the_same_on_
+    a_short_and_a_long_conversation` pins.
+
+    THE FILTER IS `is_editable_turn_row`'S OWN SET plus the role the
+    branch point always has: `agents.visibility.may_edit_turn` admits
+    only a finished root-depth USER turn, so by construction the answer
+    is at least 1. It can still be 0 if the parent's earlier rows were
+    deleted after the branch was taken, and `thread_context` renders no
+    number at all in that case rather than "at your message 0".
+    """
+    return parent.turns.filter(role=Turn.Role.USER, depth=0,
+                               state=Turn.State.DONE, index__lte=index).count()
+
+
+def branch_provenance_tail(ordinal: int) -> str:
     """The provenance banner's own closing fragment: where in the parent
-    this thread left off ("at message N").
+    this thread left off ("at your message N"), N being
+    `branch_point_ordinal` above -- the number the reader can point at,
+    never the raw row index (whole-branch review I-2).
 
     A FRAGMENT, NAMED AS ONE (review M3) -- `branch_provenance_sentence`
     was this function's name until the fix round above, and the name
@@ -191,10 +227,20 @@ def branch_provenance_tail(index: int) -> str:
     declared stand-in, `BRANCH_PROVENANCE_UNNAMED` above) is the
     TEMPLATE's half, not this function's: whether the title may be NAMED
     is a visibility question `thread_context` answers through `visible_
-    conversations`, and this function is handed only the index, never the
+    conversations`, and this function is handed only a number, never the
     parent row, so it could not leak one if it tried.
+
+    BOTH FALLBACK SENTENCES CARRY NO NUMBER, and that is declared here
+    rather than left to be inferred. The ordinal is counted over the
+    PARENT's rows, so a parent that was deleted (`branched_from_id is
+    None` after `SET_NULL`) or that this reader may not see has no rows
+    to count -- and a number counted over nothing, or over a thread the
+    reader cannot open to check, is exactly the unverifiable number I-2
+    is about. On both paths the banner is the whole, grammatical,
+    disclosure-free sentence "Branched from an earlier conversation."
+    and nothing more.
     """
-    return f"at message {index}"
+    return f"at your message {ordinal}"
 
 
 # Public (no leading underscore): `agents.chat.views.turns` imports this

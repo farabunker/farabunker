@@ -289,7 +289,7 @@ model.
 <p class="muted">{{ note }}</p>
 {% endfor %}
 
-{% if branch_provenance %}
+{% if is_branch %}
 {% comment %}
 CHAT CLUSTER, FEATURE C's provenance line. The title links back only
 while the parent is still visible to THIS principal (resolved in the
@@ -305,8 +305,16 @@ literal sentence "Branched from  at message 3" (HTML collapses the
 double space) -- exactly the "sentence assembled from fragments plus a
 hole" AGENTS.md's own rule forbids. `branch_provenance_unnamed` is a
 declared, whole, disclosure-free noun phrase (`agents.chat.service`), so
-both fallback paths render "Branched from an earlier conversation at
-message 3" -- grammatical, and it still names nothing.
+both fallback paths render "Branched from an earlier conversation" --
+grammatical, and it still names nothing.
+
+WHOLE-BRANCH REVIEW I-2: the WHOLE `<p>` is gated on `is_branch`, not on
+the tail, because those same two fallback paths now carry NO NUMBER --
+an ordinal counted over a thread that is gone, or that this reader may
+not open to check, is a number nobody can verify. Gating on the tail (as
+this block used to) would have deleted the banner outright on exactly
+the two paths the fix above exists for. The tail has its own `{% if %}`
+so the sentence never ends in a dangling space.
 
 STATIC, so the poller does not need to know about it: it renders once,
 outside `.thread` and `.thread-scroll`, and no swap this page performs
@@ -322,7 +330,7 @@ reader's browser collapsed them to spaces but a test asserting the whole
 declared sentence as one contiguous string could not. The rendered
 markup and the string a test (or a reader) sees are now the same text.
 {% endcomment %}
-<p class="muted branch-provenance">{{ branch_provenance_lead }} {% if branched_from %}<a href="{% url 'chat-conversation' branched_from.id %}">{{ branched_from.title|default:branched_from.agent.name }}</a>{% else %}{{ branch_provenance_unnamed }}{% endif %} {{ branch_provenance }}</p>
+<p class="muted branch-provenance">{{ branch_provenance_lead }} {% if branched_from %}<a href="{% url 'chat-conversation' branched_from.id %}">{{ branched_from.title|default:branched_from.agent.name }}</a>{% else %}{{ branch_provenance_unnamed }}{% endif %}{% if branch_provenance %} {{ branch_provenance }}{% endif %}</p>
 {% endif %}
 
 {% comment %}

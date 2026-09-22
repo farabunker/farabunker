@@ -1099,6 +1099,18 @@ ships now fills the gap with a declared, disclosure-free stand-in noun phrase, *
 conversation"*, so the line always reads as a whole sentence: *"Branched from an earlier
 conversation at message N."*
 
+**Amended (2026-09-22, whole-branch review I-2).** *"message N"* above conflated two different
+numbers. `branched_at_index` is `Turn.index`, a dense counter over EVERY row in the thread —
+assistant answers, tool cards and delegate turns included, and `0` for the very first one — so
+the line read *"at message 0"* for a branch off the first message and *"at message 4"* for the
+second message of a thread that had used one tool. The column is unchanged (it is provenance,
+and queryable, which is what this section asked of it); what ships is a display-side ordinal
+computed at render time — the 1-based position of that turn among the PARENT's finished
+root-depth user messages, one bounded `.count()` — rendered as *"at your message N"*. Both
+fallback paths (parent deleted, parent invisible) carry NO number at all, because an ordinal
+counted over a thread the reader cannot open is one nobody can check: there the line is
+*"Branched from an earlier conversation."* and nothing more.
+
 **Why a migration rather than a title convention.** Two rows with the same name and no stated
 relationship is exactly the sidebar an operator cannot explain to themselves a week later, and a
 title suffix is a string nobody can query. Two nullable columns cost one migration and make the

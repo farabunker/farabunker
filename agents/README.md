@@ -869,7 +869,9 @@ chat column's `turn_edit` view starts the branch's first turn and redirects.
 
 **The provenance line is rendered, not just stored.** `agents/chat/service.py`
 declares the banner's sentence — `BRANCH_PROVENANCE_LEAD`, `BRANCH_PROVENANCE_
-UNNAMED`, and `branch_provenance_tail`'s own fixed tail ("at message N") — not
+UNNAMED`, and `branch_provenance_tail`'s own tail ("at your message N", whose N
+is `branch_point_ordinal`'s reader-countable ordinal, never the raw
+`branched_at_index`) — not
 this module: it is a chat page's prose, not one of this module's own refusal
 sentences, so it lives beside `EDIT_LEAD` in the shared leaf both `thread.py` and
 `views/turns.py` already import. `agents/chat/views/thread.py::thread_context`

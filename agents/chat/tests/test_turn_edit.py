@@ -814,6 +814,34 @@ def _provenance_banner(body: str) -> str:
     return body[start:body.index("</p>", start)]
 
 
+def _parent_with_three_user_messages(owner, *, slug, title):
+    """A parent thread whose ROW INDEXES and whose READER-COUNTABLE
+    MESSAGE NUMBERS deliberately disagree.
+
+    Six rows -- user, assistant, tool, user, assistant, user -- so the
+    third user message sits at `Turn.index == 5`. Anything that renders
+    the raw column says "5"; the reader counting bubbles says "3". That
+    gap IS whole-branch review I-2, and a fixture without an assistant or
+    tool row in it cannot express it.
+    """
+    parent = make_conversation(agent=make_agent(slug=slug), title=title,
+                               **owner_fields(user_principal(owner)))
+    make_turn(conversation=parent, role=Turn.Role.USER, text="a",
+              state=Turn.State.DONE)
+    make_turn(conversation=parent, role=Turn.Role.ASSISTANT, text="answer",
+              state=Turn.State.DONE)
+    make_turn(conversation=parent, role=Turn.Role.TOOL, text="result",
+              state=Turn.State.DONE,
+              tool_call={"tool": "rag.search", "tool_kwargs": {"q": "x"}})
+    make_turn(conversation=parent, role=Turn.Role.USER, text="b",
+              state=Turn.State.DONE)
+    make_turn(conversation=parent, role=Turn.Role.ASSISTANT, text="answer two",
+              state=Turn.State.DONE)
+    third = make_turn(conversation=parent, role=Turn.Role.USER, text="c",
+                      state=Turn.State.DONE)
+    return parent, third
+
+
 class TestTheProvenanceLine:
     """The banner on a branch's thread page: where it came from and at
     which turn, resolved through `visible_conversations` -- never a bare
@@ -822,20 +850,74 @@ class TestTheProvenanceLine:
     `SET_NULL`) still leaves the page readable."""
 
     def test_a_branch_says_where_it_came_from_and_links_back(self, client):
+        """WHOLE-BRANCH REVIEW I-2 RE-PINS THE NUMBER. This test asserted
+        `"message 3" in body` against `branched_at_index=3` -- the stored
+        column read back to itself, which is true of any number at all.
+        It now asserts the ordinal a reader can count to, over a parent
+        whose row indexes deliberately disagree with it."""
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            parent = make_conversation(agent=make_agent(slug="parent"),
-                                       title="The original",
-                                       **owner_fields(user_principal(owner)))
+            parent, third = _parent_with_three_user_messages(
+                owner, slug="parent", title="The original")
             branch = make_conversation(agent=parent.agent, title="The original",
-                                       branched_from=parent, branched_at_index=3,
+                                       branched_from=parent,
+                                       branched_at_index=third.index,
                                        **owner_fields(user_principal(owner)))
             sign_in(client, owner)
             body = client.get(
                 reverse("chat-conversation", args=[branch.id])).content.decode()
+        assert third.index == 5, "the fixture's own premise"
         assert "Branched from" in body
-        assert "message 3" in body
+        assert "at your message 3" in body
+        assert "message 5" not in body
         assert reverse("chat-conversation", args=[parent.id]) in body
+
+    def test_a_branch_off_the_very_first_message_says_one_not_zero(self, client):
+        """The sharpest case in I-2: `Turn.next_index` returns `0` for
+        the first row, so the shipped banner read "at message 0" for the
+        most ordinary branch there is."""
+        owner = make_user()
+        with posture(POSTURE_ENTERPRISE):
+            parent = make_conversation(agent=make_agent(slug="first-parent"),
+                                       title="First",
+                                       **owner_fields(user_principal(owner)))
+            first = make_turn(conversation=parent, role=Turn.Role.USER, text="a",
+                              state=Turn.State.DONE)
+            branch = make_conversation(agent=parent.agent, title="Branch",
+                                       branched_from=parent,
+                                       branched_at_index=first.index,
+                                       **owner_fields(user_principal(owner)))
+            sign_in(client, owner)
+            body = client.get(
+                reverse("chat-conversation", args=[branch.id])).content.decode()
+        assert first.index == 0, "the fixture's own premise"
+        assert "at your message 1" in body
+        assert "message 0" not in body
+
+    def test_the_number_is_the_one_the_branch_writer_actually_produces(
+        self, client, fake_turn_queue
+    ):
+        """END TO END, not a hand-set column: the two existing pins
+        (`test_the_branch_is_stamped_with_the_parents_own_index` and
+        `agents/tests/test_branch.py`) assert the COLUMN against the ROW
+        -- both still correct, the column is provenance -- and neither
+        connects what was branched to what the reader is shown."""
+        owner = make_user()
+        bind_chat_role(CHAT_CONVERSE_ROLE, name="edit-role-ordinal")
+        with posture(POSTURE_ENTERPRISE):
+            conversation, turns = _own_thread(owner, texts=("a", "b", "c"))
+            sign_in(client, owner)
+            client.post(reverse("chat-turn-edit", args=[conversation.id, turns[1].pk]),
+                        {"text": "edited"})
+            branch = Conversation.objects.exclude(pk=conversation.pk).get()
+            body = client.get(
+                reverse("chat-conversation", args=[branch.id])).content.decode()
+        # `_own_thread`'s rows are dense from 0, so the SECOND message is
+        # row index 1 and the reader's second message -- off by one, the
+        # smallest gap the defect has and still a gap.
+        assert turns[1].index == 1, "the fixture's own premise"
+        assert "at your message 2" in body
+        assert "message 1" not in _provenance_banner(body)
 
     def test_a_plain_conversation_says_nothing(self, client):
         owner = make_user()
@@ -869,7 +951,11 @@ class TestTheProvenanceLine:
         # declared `BRANCH_PROVENANCE_UNNAMED` phrase closes it on both
         # fallback paths alike (see the escaping test's sibling below for
         # the other one).
-        assert "Branched from an earlier conversation at message 2" in body
+        # WHOLE-BRANCH REVIEW I-2: NO NUMBER on this path. The ordinal is
+        # counted over the PARENT's rows, and there is no parent left to
+        # count over -- a number here would be one no reader could check.
+        assert "Branched from an earlier conversation" in body
+        assert "message" not in _provenance_banner(body)
         assert "Gone" not in body
         # REVIEW FIX M4: this test's own name claims "unlinked"; this is
         # what actually pins it, scoped to the banner's own markup so a
@@ -901,7 +987,13 @@ class TestTheProvenanceLine:
         # declared, disclosure-free sentence (REVIEW FIX I1's own fix),
         # not merely that it omitted the confidential title.
         assert response.status_code == 200
-        assert "Branched from an earlier conversation at message 1" in body
+        assert "Branched from an earlier conversation" in body
+        # WHOLE-BRANCH REVIEW I-2: no number on this path either -- this
+        # reader cannot open the parent to count its messages, so an
+        # ordinal would be an unverifiable claim about a thread that is
+        # not theirs. It is also one fewer fact about somebody else's
+        # conversation than the page used to disclose.
+        assert "message" not in _provenance_banner(body)
         assert "Confidential title" not in body
         assert reverse("chat-conversation", args=[parent.id]) not in body
 

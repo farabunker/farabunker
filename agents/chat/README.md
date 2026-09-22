@@ -2802,33 +2802,60 @@ thing to render `_attach_files.html` more than once, and it passes its own
 `attach_id` precisely so the composer keeps the bare id.
 
 **The provenance line.** A branch's thread page opens with a small banner --
-"Branched from *the parent's title* at message *N*" -- built by `thread_context`
-and rendered above `.thread-scroll` in `chat/conversation.html`, styled by that
-page's own `.branch-provenance` rule (Task 8's page-scoped-CSS ruling: one
-consumer, so it lives in the page's own `chat_style` block, not `chat/base.html`).
-It is static per conversation and sits outside every element the poller's
-`insertBlock`/`swapBlock` ever touch, so the done-tick swap needs no changes and
-carries no risk of clobbering it.
+"Branched from *the parent's title* at your message *N*" -- built by
+`thread_context` and rendered above `.thread-scroll` in `chat/conversation.html`,
+styled by that page's own `.branch-provenance` rule (Task 8's page-scoped-CSS
+ruling: one consumer, so it lives in the page's own `chat_style` block, not
+`chat/base.html`). It is static per conversation and sits outside every element
+the poller's `insertBlock`/`swapBlock` ever touch, so the done-tick swap needs no
+changes and carries no risk of clobbering it.
 
 The title and the link are resolved through `agents.visibility.
 visible_conversations`, **never a bare `Conversation.objects.get(pk=...)`** --
 the same rule every other reader in this column follows, because a branch an
 administrator made of somebody's thread must not hand the parent's title back to
-a reader who was only given the branch. `branched_from_id is None` renders the
-sentence's tail ("at message N") with no link and no title, and that single
-`None` covers two different facts on purpose: the parent was deleted (`SET_NULL`
-already cleared the column, but `branched_at_index` survives it) and the parent
-still exists but this principal may not read it. Both are "the honest version of
-this came from somewhere you cannot see", and the template's own `{% if
-branched_from %}` cannot and does not need to tell them apart.
+a reader who was only given the branch.
 
-One query, and only when `branched_from_id is not None` -- threaded through the
-same `settings_row` every other visibility call on this page already reuses, so
-a thread of any length pays it once, never once per turn. `agents/chat/tests/
-test_thread.py::TestTheContextMeter::
-test_the_meter_costs_the_same_on_a_short_and_a_long_conversation` -- the page's
-existing flat-cost equality pin -- was extended rather than copied: both the
-short and the long conversation it measures are now branches of the same parent,
-so the banner's own lookup runs on both renders the test captures, and a later
-reader who moved it onto a per-turn path would turn this pin red rather than
-leaving it silently unexercised.
+**Two names, and the distinction matters.** `branched_from_id` is the COLUMN;
+`branched_from` is the ROW the view resolved out of it, and it is `None` on two
+different paths on purpose -- the parent was deleted (`SET_NULL` already cleared
+the column, so `branched_from_id` is `None` too, though `branched_at_index`
+survives it) and the parent still exists but this principal may not read it
+(`branched_from_id` is non-null and the resolved row is `None`). Both are "the
+honest version of this came from somewhere you cannot see".
+
+On both of those paths the banner is a WHOLE sentence, never one with a hole in
+it: the template's `{% if branched_from %}...{% else %}...{% endif %}` renders
+the declared stand-in `BRANCH_PROVENANCE_UNNAMED` ("an earlier conversation") in
+the title's place, and the `{% else %}` is load-bearing -- a bare `{% if %}` used
+to render nothing there, leaving the literal "Branched from  at message 3". A
+link appears only when the parent is both present and readable.
+
+**The number is the reader's, not the row's** (whole-branch review I-2).
+`branched_at_index` is `Turn.index`, a dense counter over EVERY row in the parent
+-- assistant answers, tool cards, delegate turns at `depth >= 1` -- and `0` for
+the first one, so rendering it said "at message 0" for a branch off the first
+message and "at message 4" for the second message of a thread that had used a
+tool. The column is unchanged; it is provenance, and queryable, which is the job
+it was added for. What the banner renders is `agents.chat.service.
+branch_point_ordinal`, a display-side count of the parent's own finished
+root-depth USER turns up to that index -- the bubble a reader can point at.
+Both fallback paths above carry NO number: the ordinal is counted over the
+PARENT's rows, and a number counted over a deleted thread, or over one this
+reader cannot open to check, is one nobody can verify. There the banner is
+"Branched from an earlier conversation." and nothing more, which is why the
+whole `<p>` is gated on `is_branch` rather than on the tail.
+
+**Two queries, and only for a branch.** The parent lookup runs only when
+`branched_from_id is not None`, the ordinal `.count()` only when that lookup
+found a readable row -- both threaded through the same `settings_row` every
+other visibility call on this page already reuses, so a thread of any length
+pays them once, never once per turn. The ordinal is bounded by the PARENT's
+length, not this conversation's. `agents/chat/tests/test_thread.py::
+TestTheContextMeter::test_the_meter_costs_the_same_on_a_short_and_a_long_
+conversation` -- the page's existing flat-cost equality pin -- was extended
+rather than copied: both the short and the long conversation it measures are
+branches of the same parent, which now carries a real user turn so the ordinal
+is a live number on both renders, and a later reader who moved either read onto
+a per-turn path would turn this pin red rather than leaving it silently
+unexercised.

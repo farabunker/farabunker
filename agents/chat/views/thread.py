@@ -27,8 +27,8 @@ from agents.chat.rendering import thread_cards
 from agents.chat.sidebar import sidebar_context
 from agents.chat.service import (
     BRANCH_PROVENANCE_LEAD, BRANCH_PROVENANCE_UNNAMED, EDIT_LEAD, MAX_POLL_DURATION_MS,
-    MAX_TRANSPORT_RETRIES, POLL_INTERVAL_MS, branch_provenance_tail,
-    composer_attach_context, visible_conversation_or_404,
+    MAX_TRANSPORT_RETRIES, POLL_INTERVAL_MS, branch_point_ordinal,
+    branch_provenance_tail, composer_attach_context, visible_conversation_or_404,
 )
 from agents.entitlements import tool_access_for, wall_for
 from agents.models import Share
@@ -274,12 +274,35 @@ def thread_context(request, conversation, *, selected: str | None = None) -> dic
     if conversation.branched_from_id is not None:
         branched_from = visible_conversations(principal, settings_row=settings_row) \
             .filter(pk=conversation.branched_from_id).first()
-    # `branched_at_index` OUTLIVES `branched_from_id` (`SET_NULL` clears
-    # only the FK), so the tail renders even for a branch whose parent is
-    # gone -- `branched_from`, above, is what decides whether it is also
-    # a LINK.
-    branch_provenance = (branch_provenance_tail(conversation.branched_at_index)
-                         if conversation.branched_at_index is not None else "")
+    # THE NUMBER IS THE READER'S ORDINAL, NOT THE ROW INDEX
+    # (whole-branch review I-2). `branched_at_index` is the parent's
+    # DENSE `Turn.index` -- assistant rows, tool cards and delegate turns
+    # all take a number -- so rendering it said "at message 0" for a
+    # branch off the first message and "at message 4" for the second
+    # message of a thread that had used a tool. `branch_point_ordinal`
+    # counts the parent's own finished root-depth USER turns up to that
+    # index instead: ONE bounded `.count()`, on a page that already pays
+    # two for the meter, and flat in this conversation's own length
+    # (pinned by `test_the_meter_costs_the_same_on_a_short_and_a_long_
+    # conversation`). The column itself is untouched -- it is provenance,
+    # queryable, not display.
+    #
+    # AND ONLY WHEN THERE IS A PARENT TO COUNT OVER. `branched_at_index`
+    # outlives `branched_from_id` (`SET_NULL` clears only the FK), but an
+    # ordinal counted over a deleted thread, or over one this reader may
+    # not open to check, is precisely the unverifiable number I-2 is
+    # about -- so both fallback paths render the whole declared sentence
+    # "Branched from an earlier conversation." with no number at all,
+    # which `branch_provenance_tail`'s own docstring states.
+    branch_provenance = ""
+    if branched_from is not None and conversation.branched_at_index is not None:
+        ordinal = branch_point_ordinal(branched_from, conversation.branched_at_index)
+        # ZERO ONLY IF THE PARENT'S EARLIER ROWS WERE DELETED after the
+        # branch was taken -- `may_edit_turn` admits only a finished
+        # root-depth user turn, so the live answer is at least 1. "at
+        # your message 0" would be the same defect in a new spelling.
+        if ordinal:
+            branch_provenance = branch_provenance_tail(ordinal)
     return {
         "conversation": conversation,
         "agent": conversation.agent,
@@ -311,6 +334,14 @@ def thread_context(request, conversation, *, selected: str | None = None) -> dic
         # the unreadable-parent path, so the banner is always a whole,
         # grammatical sentence and never one with a hole in it.
         "branched_from": branched_from,
+        # WHETHER THERE IS A BANNER AT ALL, asked of the COLUMNS rather
+        # than of the tail (whole-branch review I-2). The tail is now
+        # empty on both fallback paths -- deleted parent, unreadable
+        # parent -- and the banner must still render there, saying the
+        # whole declared sentence with no number; gating the `<p>` on the
+        # tail would delete it on exactly those two paths.
+        "is_branch": (conversation.branched_from_id is not None
+                      or conversation.branched_at_index is not None),
         "branch_provenance": branch_provenance,
         "branch_provenance_lead": BRANCH_PROVENANCE_LEAD,
         "branch_provenance_unnamed": BRANCH_PROVENANCE_UNNAMED,
