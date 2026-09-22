@@ -2517,9 +2517,9 @@ administrator, so `visible_agents(principal)` would hide a member's own agent
 from the page that exists to administer the box's agents whenever
 `admin_sees_content` is off. It has **no POST path at all** — `require_safe`, so
 a POST is a declared 405 — and every row links to `chat-agent-edit` with this
-page as its `?next=`. Because `agents/chat/tests/test_never_500.py` derives its
-sweep from `agents.chat.urls.urlpatterns`, this route's never-500 proof lives in
-`agents/chat/tests/test_settings_agents.py` instead.
+page as its `?next=`. `docs/EXTENDING.md` records why a route mounted this way
+needs its own never-500 proof, and `agents/chat/tests/test_settings_agents.py`
+is this route's.
 
 **`chat-agent-edit` is class O, not S**, and that is the whole feature: an S
 route refuses a non-admin at the middleware, which is exactly the person these
@@ -2785,8 +2785,9 @@ answers 404, and one that grew narrower would silently hide an available control
 with two script blocks, and this disclosure renders once per eligible user turn,
 so including it would multiply the page's pinned script counts (4 with the attach
 door, 3 without) by the number of editable messages. `_attach_files.html` gains
-one optional `attach_id`, defaulted so its three existing call sites are
-byte-identical: without it every "+ Add files" inside every edit form would
+one optional `attach_id`, defaulted so its one existing include site (the
+composer, reachable from three pages) is byte-identical: without it every
+"+ Add files" inside every edit form would
 resolve its `<label for="attach-files">` to the **composer's** input — the first
 match in document order — and stage the chosen file onto a new turn instead of
 onto the branch. The edit textarea carries a per-turn id on the same rule, for a

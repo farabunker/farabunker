@@ -21,8 +21,7 @@ import pytest
 from django.urls import reverse
 
 from agents.chat.tests._helpers import (   # noqa: F401
-    grant, make_admin, make_agent, make_entitlement, make_user, posture, sign_in,
-    user_principal,
+    make_admin, make_agent, make_entitlement, make_user, posture, sign_in, user_principal,
 )
 from agents.labels import set_agent_labels
 from identity.access import owner_fields

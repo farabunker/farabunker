@@ -5,7 +5,9 @@ from __future__ import annotations
 import pytest
 
 from agents.models import Conversation, Turn
-from agents.tests._helpers import make_agent, make_conversation, make_turn
+from agents.tests._helpers import (
+    make_agent, make_conversation, make_editable_thread, make_turn,
+)
 from identity.access import owner_fields
 from identity.contracts.postures import POSTURE_ENTERPRISE
 from identity.testing import (
@@ -210,19 +212,12 @@ class TestTheShareAnswersArePinnedExplicitly:
 
 
 class TestBranchConversation:
-    def _thread_of(self, owner, texts, *, slug="branchable"):
-        conversation = make_conversation(agent=make_agent(slug=slug),
-                                         **owner_fields(user_principal(owner)))
-        turns = [make_turn(conversation=conversation, role=Turn.Role.USER, text=text,
-                           state=Turn.State.DONE) for text in texts]
-        return conversation, turns
-
     def test_it_copies_turns_strictly_BEFORE_the_edited_index(self):
         from agents.visibility import branch_conversation
 
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = self._thread_of(owner, ["a", "b", "c", "d"])
+            conversation, turns = make_editable_thread(owner, texts=["a", "b", "c", "d"])
             branch = branch_conversation(user_principal(owner), conversation, turns[2],
                                          title="Branch")
             texts = list(branch.turns.order_by("index").values_list("text", flat=True))
@@ -233,7 +228,7 @@ class TestBranchConversation:
 
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = self._thread_of(owner, ["a", "b", "c"])
+            conversation, turns = make_editable_thread(owner, texts=["a", "b", "c"])
             branch = branch_conversation(user_principal(owner), conversation, turns[2],
                                          title="Branch")
             indexes = list(branch.turns.order_by("index").values_list("index",
@@ -245,7 +240,7 @@ class TestBranchConversation:
 
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = self._thread_of(owner, ["a", "b"])
+            conversation, turns = make_editable_thread(owner, texts=["a", "b"])
             branch = branch_conversation(user_principal(owner), conversation, turns[1],
                                          title="Branch")
         assert branch.owner_kind == "user"
@@ -313,7 +308,7 @@ class TestBranchConversation:
 
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = self._thread_of(owner, ["a"])
+            conversation, turns = make_editable_thread(owner, texts=["a"])
             make_turn(conversation=conversation, role=Turn.Role.ASSISTANT, text="",
                       state=Turn.State.CANCELLED)
             last = make_turn(conversation=conversation, role=Turn.Role.USER, text="z",
@@ -334,7 +329,7 @@ class TestBranchConversation:
         owner = make_user()
         entitlement = make_entitlement(name="Legal")
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = self._thread_of(owner, ["a", "b", "c"])
+            conversation, turns = make_editable_thread(owner, texts=["a", "b", "c"])
             ConversationTaint.objects.create(conversation=conversation,
                                              entitlement=entitlement,
                                              first_turn=turns[2].index)
@@ -382,7 +377,7 @@ class TestBranchConversation:
 
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = self._thread_of(owner, ["a", "b"])
+            conversation, turns = make_editable_thread(owner, texts=["a", "b"])
             DocumentAttachment.objects.create(document=make_document(),
                                               conversation_id=conversation.id,
                                               turn_id=turns[0].pk)
@@ -397,7 +392,7 @@ class TestBranchConversation:
 
         owner, recipient = make_user(), make_user(username="recipient")
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = self._thread_of(owner, ["a", "b"])
+            conversation, turns = make_editable_thread(owner, texts=["a", "b"])
             share_conversation(user_principal(owner), conversation, user=recipient,
                                level=Share.Level.VIEW)
             branch = branch_conversation(user_principal(owner), conversation, turns[1],
@@ -412,7 +407,7 @@ class TestBranchConversation:
 
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = self._thread_of(owner, ["a", "b", "c"])
+            conversation, turns = make_editable_thread(owner, texts=["a", "b", "c"])
             before = list(conversation.turns.order_by("index")
                           .values_list("index", "text", "state"))
             branch_conversation(user_principal(owner), conversation, turns[1],
@@ -430,7 +425,7 @@ class TestBranchConversation:
 
         owner, stranger = make_user(), make_user(username="stranger")
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = self._thread_of(owner, ["a", "b"])
+            conversation, turns = make_editable_thread(owner, texts=["a", "b"])
             before = Conversation.objects.count()
             result = branch_conversation(user_principal(stranger), conversation,
                                          turns[1], title="Branch")
@@ -454,10 +449,10 @@ class TestBranchConversation:
 
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            short, short_turns = self._thread_of(owner, [str(n) for n in range(3)],
-                                                 slug="flat-short")
-            long_thread, long_turns = self._thread_of(
-                owner, [str(n) for n in range(30)], slug="flat-long")
+            short, short_turns = make_editable_thread(
+                owner, texts=[str(n) for n in range(3)], slug="flat-short")
+            long_thread, long_turns = make_editable_thread(
+                owner, texts=[str(n) for n in range(30)], slug="flat-long")
             with CaptureQueriesContext(connection) as two_copied:
                 branch_conversation(user_principal(owner), short, short_turns[2],
                                     title="Branch")
@@ -486,8 +481,10 @@ class TestBranchConversation:
 
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            first, first_turns = self._thread_of(owner, ["a", "b"], slug="row-unthreaded")
-            second, second_turns = self._thread_of(owner, ["a", "b"], slug="row-threaded")
+            first, first_turns = make_editable_thread(
+                owner, texts=["a", "b"], slug="row-unthreaded")
+            second, second_turns = make_editable_thread(
+                owner, texts=["a", "b"], slug="row-threaded")
             row = IdentitySettings.get_solo()
             with CaptureQueriesContext(connection) as unthreaded:
                 branch_conversation(user_principal(owner), first, first_turns[1],

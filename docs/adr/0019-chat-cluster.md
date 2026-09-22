@@ -10,7 +10,7 @@ which is the state [`docs/ROADMAP.md`](../ROADMAP.md) records for this phase too
 whose §16 records the owner's ruling on all eight of its open flags; the plan that executed it
 is [`docs/superpowers/plans/2026-09-21-chat-cluster.md`](../superpowers/plans/2026-09-21-chat-cluster.md),
 which carries a dated amendment listing every reviewed deviation. **Where the spec and the
-code differ, the code is what this ADR records** — including the corrections the fourteen
+code differ, the code is what this ADR records** — including the corrections the fifteen
 review rounds forced onto the tree after the design was written — and every claim below is
 checkable against the tree it describes.
 
@@ -59,13 +59,10 @@ The engine-to-default map is a lookup (`_ENGINE_DEFAULT_WINDOWS`), so a future a
 itself to it. An engine absent from the map answers "unknown" rather than borrowing another
 engine's number, and the page renders a ceiling-free line.
 
-**It deliberately answers differently from the retrieval page's own reader.**
-`tools/rag/views.py`'s `_resolved_answer_context_window` returns "unknown" where this one
-returns the adapter's default, because that one decides whether to run a fit check at all —
-skipping a check on a guessed number is safe, and refusing a legitimate top-k for a reason
-the operator never configured is not. This one must display something.
-`models/registry/README.md` records the reconciliation so the next reader finds it before
-concluding one of the two is a bug.
+**It deliberately answers differently from the retrieval page's own reader**
+(`tools/rag/views.py`'s `_resolved_answer_context_window`) — a fit check may skip a guessed
+number, a display may not. `models/registry/README.md` records the reconciliation so the
+next reader finds it before concluding one of the two is a bug.
 
 ### 2. The meter measures what is SENT, not what the conversation holds
 
@@ -188,10 +185,8 @@ this decision exists not to have.
 
 **`/settings/agents/` is not a `/chat/` route**, so it has its own URLconf in the owning column
 (`agents/chat/agent_admin_urls.py`), mounted from `config/urls.py` beside `/settings/` — the
-same shape the settings assistant already set. The cost is one test module: the column's
-never-500 sweep derives itself from that column's own URLconf and cannot see a route mounted
-elsewhere, so this route's never-500 proof lives in its own test module.
-`docs/EXTENDING.md` records both halves.
+same shape the settings assistant already set. `docs/EXTENDING.md` records both halves: the
+pattern and its cost, a route mounted this way needing its own never-500 proof.
 
 ### 6. The restriction count is asked only when accounts are on — hidden, never zeroed
 

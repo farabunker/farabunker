@@ -322,7 +322,7 @@ ROUTE_RULES: dict[str, str] = {
     # above does: the gate is not the only way a view function can be
     # reached.
     #
-    # NOT O, unlike `chat-agent-edit` below, and the two are not in
+    # NOT O, unlike `chat-agent-edit` above, and the two are not in
     # tension: the EDIT route is class O precisely so a non-admin owner
     # can open their own row, and this LISTING is the box-wide view of
     # every row, which only an administrator has any standing over.

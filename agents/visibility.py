@@ -727,6 +727,14 @@ def duplicate_conversation(principal, conversation, *, title: str):
     return copy
 
 
+# THE THREE FACTS, ONCE. `is_editable_turn_row` asks them of a row in
+# hand; a queryset caller (`agents.chat.service.branch_point_ordinal`)
+# asks them of the database. ADR 0019 decision 10 says "spelled once",
+# and this is what makes that true rather than aspirational.
+EDITABLE_TURN_ROW_FIELDS = {"role": Turn.Role.USER, "depth": 0,
+                            "state": Turn.State.DONE}
+
+
 def is_editable_turn_row(turn) -> bool:
     """`may_edit_turn`'s PER-TURN half: a finished, root-depth USER row.
 
@@ -753,8 +761,8 @@ def is_editable_turn_row(turn) -> bool:
     direction -- `agents/chat/views/turns.py` and `views/thread.py`
     already do it, and the import law's rule is about the reverse.
     """
-    return (turn.role == Turn.Role.USER and turn.depth == 0
-            and turn.state == Turn.State.DONE)
+    return all(getattr(turn, field) == value
+              for field, value in EDITABLE_TURN_ROW_FIELDS.items())
 
 
 def may_edit_any_turn(principal, conversation, *, settings_row=None) -> bool:
@@ -1318,8 +1326,8 @@ def _validated_agent_fields(principal, fields, *, settings_row=None, existing=No
     blank its description and prompt -- correct for an HTML form POST,
     where an unchecked box is simply absent, and wrong for anything
     else. The one exception is `box_wide`, written only when the KEY IS
-    PRESENT, so an administrator unchecking a box-wide checkbox must
-    send the key explicitly or reach is one-way through the UI.
+    PRESENT, so an administrator flipping the box-wide reach control back
+    must send the key explicitly or reach is one-way through the UI.
     """
     errors: dict = {}
     name = (fields.get("name") or "").strip()

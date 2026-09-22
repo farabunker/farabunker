@@ -148,7 +148,7 @@ def agent_form_context(principal, *, agent=None, posted=None, errors=None,
     # NOT ASKED ON AN OPEN BOX (whole-branch review I-1), gated on
     # `accounts_on()` alone -- the ruling-A shape both list views already
     # take (`views/agents.py::_restriction_fold`,
-    # `views/agents_admin.py::agents_admin`). With accounts off a label
+    # `views/agents_admin.py::agents_admin_list`). With accounts off a label
     # restricts nobody (`visible_agents` returns at its `sees_all_content`
     # short-circuit before the label clause is reached) and the single
     # reader IS the administrator, so BOTH halves of the sentence

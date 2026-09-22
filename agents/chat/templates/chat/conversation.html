@@ -670,8 +670,8 @@ screen comment already documents for `.thread-scroll`.
     if (percentSpan && ceiling > 0) {
       var percent = Math.round((100 * context.estimated_tokens) / ceiling);
       percentSpan.textContent = String(percent);
-      meter.setAttribute("data-band",
-                         percent >= 90 ? "full" : (percent >= 70 ? "high" : "ok"));
+      var band = percent >= 90 ? "full" : (percent >= 70 ? "high" : "ok");
+      meter.setAttribute("data-band", band);
       meter.style.setProperty("--context-fill", percent + "%");
       // I-3: the band and its sentence move TOGETHER. The text is the
       // server's -- `context.full_clause`, written by `textContent` --
@@ -680,7 +680,7 @@ screen comment already documents for `.thread-scroll`.
       // a later tick contradicts.
       var full = document.getElementById("context-full");
       if (full) {
-        var isFull = percent >= 90 && !!context.full_clause;
+        var isFull = band === "full" && !!context.full_clause;
         full.textContent = isFull ? context.full_clause : "";
         full.hidden = !isFull;
       }

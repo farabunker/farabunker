@@ -48,7 +48,7 @@ from agents.models import Turn
 from agents.runtime.preflight import (
     AGENT_NOT_PERMITTED, MODEL_NOT_PERMITTED, dropped_tool_notes, preflight_turn,
 )
-from agents.visibility import chat_surface_conversations
+from agents.visibility import EDITABLE_TURN_ROW_FIELDS, chat_surface_conversations
 from agents.workstreams import workstream_scope
 from foundation.settings_area import preserve_assistant_flag
 from identity.access import labelling_entitlements
@@ -113,21 +113,20 @@ MAX_TRANSPORT_RETRIES = 3
 # response-timeout entry for the operator-facing note on this pairing.
 MAX_POLL_DURATION_MS = 7500 * 1000
 
-_BLANK = "Say something: the message cannot be blank."
+BLANK_MESSAGE = "Say something: the message cannot be blank."
 # C-7 (round-3 hardening, H39): `agents.limits.MAX_TURN_CHARS`, the fifth
 # number that bounds a turn -- see that module's own docstring.
-_TOO_LONG = f"That message is too long — the limit is {MAX_TURN_CHARS} characters."
-# THE SAME TWO SENTENCES, UNDER PUBLIC NAMES (chat cluster, feature C).
+TOO_LONG_MESSAGE = f"That message is too long — the limit is {MAX_TURN_CHARS} characters."
+# ONE DECLARATION, READ BY TWO CALLERS (chat cluster, feature C).
 # `agents.chat.views.turns.turn_edit` validates the edited text against
 # the SAME `MAX_TURN_CHARS` constant `start_turn` uses, BEFORE
 # `agents.visibility.branch_conversation` is called at all, so a refused
 # edit writes nothing -- no conversation row, no turns, no taint. It
-# therefore needs the refusal WORDING before `start_turn` has run, and
-# the house rule is one declaration per user-facing sentence: these are
-# aliases, not copies, so the blank/too-long message an edit shows and
-# the one a new turn shows can never drift apart.
-BLANK_MESSAGE = _BLANK
-TOO_LONG_MESSAGE = _TOO_LONG
+# therefore needs the refusal WORDING before `start_turn` has run, which
+# is why these are public here rather than module-private: the house
+# rule is one declaration per user-facing sentence, so the blank/too-long
+# message an edit shows and the one a new turn shows can never drift
+# apart.
 # FEATURE C's declared disclosure lead -- what pressing "Send from here"
 # is about to do, said before the button. DECLARED HERE, in the shared
 # leaf, rather than in `views/turns.py` where the view that consumes the
@@ -202,15 +201,16 @@ def branch_point_ordinal(parent, index: int) -> int:
     `agents/chat/tests/test_thread_meter.py::test_the_meter_costs_the_same_on_
     a_short_and_a_long_conversation` pins.
 
-    THE FILTER IS `is_editable_turn_row`'S OWN SET plus the role the
-    branch point always has: `agents.visibility.may_edit_turn` admits
-    only a finished root-depth USER turn, so by construction the answer
-    is at least 1. It can still be 0 if the parent's earlier rows were
-    deleted after the branch was taken, and `thread_context` renders no
-    number at all in that case rather than "at your message 0".
+    THE FILTER IS `is_editable_turn_row`'S OWN SET, literally --
+    `agents.visibility.EDITABLE_TURN_ROW_FIELDS`, not a second spelling
+    of it: `agents.visibility.may_edit_turn` admits only a finished
+    root-depth USER turn, so by construction the answer is at least 1.
+    It can still be 0 if the parent's earlier rows were deleted after
+    the branch was taken, and `thread_context` renders no number at all
+    in that case rather than "at your message 0".
     """
-    return parent.turns.filter(role=Turn.Role.USER, depth=0,
-                               state=Turn.State.DONE, index__lte=index).count()
+    return parent.turns.filter(**EDITABLE_TURN_ROW_FIELDS,
+                               index__lte=index).count()
 
 
 def branch_provenance_tail(ordinal: int) -> str:
@@ -362,9 +362,9 @@ def start_turn(conversation, text: str, *, connection: str = "", actor,
     """
     message = (text or "").strip()
     if not message:
-        return TurnStart(False, 400, _BLANK)
+        return TurnStart(False, 400, BLANK_MESSAGE)
     if len(message) > MAX_TURN_CHARS:
-        return TurnStart(False, 400, _TOO_LONG)
+        return TurnStart(False, 400, TOO_LONG_MESSAGE)
 
     files = [f for f in (files or []) if f]
     resolved_workstream_id = None

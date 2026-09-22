@@ -639,7 +639,7 @@ docker compose restart web watcher worker
 ```
 
 **Restart `web`, `watcher` and `worker` after this deploy.** The agents column's
-visibility module and its turn preflight both changed, and the two job processes
+visibility module changed, and the two job processes
 hold that code in memory for the life of the process — the same rule as any
 other change to code a job runs (see [docs/DEV.md](DEV.md)'s restart rule).
 `web` is in the set because everything this deploy makes visible — the context
@@ -655,8 +655,9 @@ every other restart set in this document already includes it.
 sidebar's Setup group, administrator-gated; a context line under the composer on
 every thread page; and an edit control on a reader's own finished messages, which
 creates a new conversation rather than rewriting the old one. On a box running
-without accounts the entitlement-restriction column on both agent lists is not
-rendered at all — deliberate, not a rendering fault; the reasoning is
+without accounts the entitlement-restriction column on `/settings/agents/` and
+the entitlement-restriction chip on `/chat/agents/` are not rendered at all —
+deliberate, not a rendering fault; the reasoning is
 [ADR 0019](adr/0019-chat-cluster.md), decision 6.
 
 ## Turning on accounts

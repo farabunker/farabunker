@@ -15,16 +15,14 @@ refusal asserted there would prove nothing at all.
 """
 from __future__ import annotations
 
-import itertools
-
 import pytest
 from django.urls import reverse
 from django.utils.html import escape
 
 from agents.chat.tests._helpers import (   # noqa: F401 -- the import IS the registration
     bind_chat_role, fake_queue_down, fake_queued_job, fake_running_job, fake_turn_queue,
-    make_admin, make_agent, make_conversation, make_turn, make_user, posture, sign_in,
-    user_principal,
+    make_admin, make_agent, make_conversation, make_editable_thread, make_turn, make_user,
+    posture, sign_in, user_principal,
 )
 from agents.models import Conversation, Share, Turn
 from identity.access import owner_fields
@@ -32,24 +30,6 @@ from identity.contracts.postures import POSTURE_ENTERPRISE
 from models.contracts.roles import CHAT_CONVERSE_ROLE
 
 pytestmark = pytest.mark.django_db
-
-_slugs = itertools.count()
-
-
-def _own_thread(owner, *, texts=("first", "second")):
-    """A conversation owned by `owner` whose every turn is a FINISHED
-    USER turn -- so `may_edit_turn`'s conversation-wide in-flight clause
-    passes and each of them is individually editable.
-
-    THE SLUG IS FRESH PER CALL because `Agent.slug` is unique
-    (`uniq_agent_slug_ci`) and several tests below build two threads.
-    """
-    conversation = make_conversation(
-        agent=make_agent(slug=f"edit-thread-{next(_slugs)}"),
-        **owner_fields(user_principal(owner)))
-    turns = [make_turn(conversation=conversation, role=Turn.Role.USER, text=text,
-                       state=Turn.State.DONE) for text in texts]
-    return conversation, turns
 
 
 class TestTheRowPredicateIsSharedNotSpelledTwice:
@@ -123,7 +103,7 @@ class TestTheRowPredicateIsSharedNotSpelledTwice:
         owner = make_user()
         bind_chat_role(CHAT_CONVERSE_ROLE, name="widen-role")
         with posture(POSTURE_ENTERPRISE):
-            conversation, _turns = _own_thread(owner)
+            conversation, _turns = make_editable_thread(owner)
             assistant = make_turn(conversation=conversation,
                                   role=Turn.Role.ASSISTANT, text="answer",
                                   state=Turn.State.DONE)
@@ -162,7 +142,7 @@ class TestTheDisclosure:
     def test_an_own_finished_user_turn_offers_it(self, client):
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, _turns = _own_thread(owner)
+            conversation, _turns = make_editable_thread(owner)
             sign_in(client, owner)
             body = client.get(
                 reverse("chat-conversation", args=[conversation.id])).content.decode()
@@ -172,7 +152,7 @@ class TestTheDisclosure:
     def test_it_says_what_will_happen_before_the_button(self, client):
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, _turns = _own_thread(owner)
+            conversation, _turns = make_editable_thread(owner)
             sign_in(client, owner)
             body = client.get(
                 reverse("chat-conversation", args=[conversation.id])).content.decode()
@@ -183,7 +163,7 @@ class TestTheDisclosure:
     def test_an_assistant_card_never_offers_it(self, client):
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, _turns = _own_thread(owner)
+            conversation, _turns = make_editable_thread(owner)
             make_turn(conversation=conversation, role=Turn.Role.ASSISTANT,
                       text="answer", state=Turn.State.DONE)
             sign_in(client, owner)
@@ -196,7 +176,7 @@ class TestTheDisclosure:
 
         owner, recipient = make_user(), make_user(username="recipient")
         with posture(POSTURE_ENTERPRISE):
-            conversation, _turns = _own_thread(owner)
+            conversation, _turns = make_editable_thread(owner)
             share_conversation(user_principal(owner), conversation, user=recipient,
                                level=Share.Level.VIEW)
             sign_in(client, recipient)
@@ -212,7 +192,7 @@ class TestTheDisclosure:
 
         owner, recipient = make_user(), make_user(username="use-recipient")
         with posture(POSTURE_ENTERPRISE):
-            conversation, _turns = _own_thread(owner)
+            conversation, _turns = make_editable_thread(owner)
             share_conversation(user_principal(owner), conversation, user=recipient,
                                level=Share.Level.USE)
             sign_in(client, recipient)
@@ -226,7 +206,7 @@ class TestTheDisclosure:
         button its own POST would 404 is the defect this pins."""
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, _turns = _own_thread(owner)
+            conversation, _turns = make_editable_thread(owner)
             make_turn(conversation=conversation, role=Turn.Role.ASSISTANT, text="",
                       state=Turn.State.QUEUED)
             sign_in(client, owner)
@@ -251,7 +231,7 @@ class TestTheDisclosure:
         """
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, _turns = _own_thread(owner)
+            conversation, _turns = make_editable_thread(owner)
             sign_in(client, owner)
             body = client.get(
                 reverse("chat-conversation", args=[conversation.id])).content.decode()
@@ -268,7 +248,7 @@ class TestTheDisclosure:
     def test_ten_editable_messages_still_render_four_script_tags(self, client):
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, _turns = _own_thread(
+            conversation, _turns = make_editable_thread(
                 owner, texts=tuple(f"m{i}" for i in range(10)))
             sign_in(client, owner)
             body = client.get(
@@ -332,7 +312,7 @@ class TestTheDisclosure:
         poller behaviour on this surface is pinned."""
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, _turns = _own_thread(owner)
+            conversation, _turns = make_editable_thread(owner)
             sign_in(client, owner)
             body = client.get(
                 reverse("chat-conversation", args=[conversation.id])).content.decode()
@@ -354,7 +334,7 @@ class TestTheDisclosure:
         else."""
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, _turns = _own_thread(owner)
+            conversation, _turns = make_editable_thread(owner)
             queued = make_turn(conversation=conversation, role=Turn.Role.ASSISTANT,
                                text="", state=Turn.State.QUEUED, queue_job_id=2)
             sign_in(client, owner)
@@ -373,10 +353,10 @@ class TestTheDisclosure:
 
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, _turns = _own_thread(owner)
+            conversation, _turns = make_editable_thread(owner)
             done = make_turn(conversation=conversation, role=Turn.Role.ASSISTANT,
                              text="answer", state=Turn.State.DONE, queue_job_id=3)
-            other, _t = _own_thread(owner, texts=tuple(f"n{i}" for i in range(12)))
+            other, _t = make_editable_thread(owner, texts=tuple(f"n{i}" for i in range(12)))
             other_done = make_turn(conversation=other, role=Turn.Role.ASSISTANT,
                                    text="answer", state=Turn.State.DONE, queue_job_id=4)
             sign_in(client, owner)
@@ -413,7 +393,7 @@ class TestTheDisclosure:
 
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, _turns = _own_thread(owner)
+            conversation, _turns = make_editable_thread(owner)
             done = make_turn(conversation=conversation, role=Turn.Role.ASSISTANT,
                              text="answer", state=Turn.State.DONE, queue_job_id=3)
             request = _polling_request(owner, conversation)
@@ -445,7 +425,7 @@ class TestTheDisclosure:
         bug, not an HTML-validity nit."""
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, _turns = _own_thread(owner, texts=("a", "b", "c"))
+            conversation, _turns = make_editable_thread(owner, texts=("a", "b", "c"))
             sign_in(client, owner)
             body = client.get(
                 reverse("chat-conversation", args=[conversation.id])).content.decode()
@@ -474,7 +454,7 @@ class TestTheDisclosure:
         the other half."""
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = _own_thread(owner, texts=("a", "b", "c"))
+            conversation, turns = make_editable_thread(owner, texts=("a", "b", "c"))
             sign_in(client, owner)
             body = client.get(
                 reverse("chat-conversation", args=[conversation.id])).content.decode()
@@ -500,7 +480,7 @@ class TestTheDisclosure:
         editable turn."""
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, _turns = _own_thread(owner)
+            conversation, _turns = make_editable_thread(owner)
             sign_in(client, owner)
             url = reverse("chat-conversation", args=[conversation.id])
             body = client.get(f"{url}?connection=7").content.decode()
@@ -514,7 +494,7 @@ class TestThePost:
         owner = make_user()
         bind_chat_role(CHAT_CONVERSE_ROLE, name="edit-role-1")
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = _own_thread(owner)
+            conversation, turns = make_editable_thread(owner)
             sign_in(client, owner)
             response = client.post(
                 reverse("chat-turn-edit", args=[conversation.id, turns[1].pk]),
@@ -530,7 +510,7 @@ class TestThePost:
         owner = make_user()
         bind_chat_role(CHAT_CONVERSE_ROLE, name="edit-role-2")
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = _own_thread(owner, texts=("a", "b", "c"))
+            conversation, turns = make_editable_thread(owner, texts=("a", "b", "c"))
             sign_in(client, owner)
             client.post(reverse("chat-turn-edit", args=[conversation.id, turns[2].pk]),
                         {"text": "edited"})
@@ -543,7 +523,7 @@ class TestThePost:
         owner = make_user()
         bind_chat_role(CHAT_CONVERSE_ROLE, name="edit-role-3")
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = _own_thread(owner, texts=("a", "b", "c"))
+            conversation, turns = make_editable_thread(owner, texts=("a", "b", "c"))
             before = list(conversation.turns.order_by("index")
                           .values_list("index", "text"))
             sign_in(client, owner)
@@ -576,7 +556,7 @@ class TestThePost:
     def test_a_blank_edit_writes_nothing_at_all(self, client):
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = _own_thread(owner)
+            conversation, turns = make_editable_thread(owner)
             before = Conversation.objects.count()
             sign_in(client, owner)
             response = client.post(
@@ -593,7 +573,7 @@ class TestThePost:
 
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = _own_thread(owner)
+            conversation, turns = make_editable_thread(owner)
             before = Conversation.objects.count()
             sign_in(client, owner)
             client.post(reverse("chat-turn-edit", args=[conversation.id, turns[1].pk]),
@@ -609,7 +589,7 @@ class TestThePost:
         owner = make_user()
         bind_chat_role(CHAT_CONVERSE_ROLE, name="edit-role-4")
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = _own_thread(owner)
+            conversation, turns = make_editable_thread(owner)
             sign_in(client, owner)
             response = client.post(
                 reverse("chat-turn-edit", args=[conversation.id, turns[1].pk]),
@@ -633,7 +613,7 @@ class TestThePost:
 
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = _own_thread(owner)
+            conversation, turns = make_editable_thread(owner)
             before = Conversation.objects.count()
             for index, level in enumerate((Share.Level.VIEW, Share.Level.USE)):
                 recipient = make_user(username=f"recipient-{index}")
@@ -695,7 +675,7 @@ class TestThePost:
         "no such row" from "not yours"."""
         owner = make_user()
         with posture(POSTURE_ENTERPRISE, admin_sees_content=False):
-            conversation, turns = _own_thread(owner)
+            conversation, turns = make_editable_thread(owner)
             before = Conversation.objects.count()
             sign_in(client, make_admin())
             response = client.post(
@@ -713,7 +693,7 @@ class TestThePost:
         owner = make_user()
         bind_chat_role(CHAT_CONVERSE_ROLE, name="admin-edit-role")
         with posture(POSTURE_ENTERPRISE, admin_sees_content=True):
-            conversation, turns = _own_thread(owner)
+            conversation, turns = make_editable_thread(owner)
             sign_in(client, make_admin())
             response = client.post(
                 reverse("chat-turn-edit", args=[conversation.id, turns[1].pk]),
@@ -729,7 +709,7 @@ class TestThePost:
         a 403 would confirm the conversation exists."""
         owner, stranger = make_user(), make_user(username="stranger")
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = _own_thread(owner)
+            conversation, turns = make_editable_thread(owner)
             before = Conversation.objects.count()
             sign_in(client, stranger)
             response = client.post(
@@ -741,7 +721,7 @@ class TestThePost:
     def test_an_assistant_turn_id_is_refused(self, client, fake_turn_queue):
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, _turns = _own_thread(owner)
+            conversation, _turns = make_editable_thread(owner)
             assistant = make_turn(conversation=conversation, role=Turn.Role.ASSISTANT,
                                   text="answer", state=Turn.State.DONE)
             before = Conversation.objects.count()
@@ -759,7 +739,7 @@ class TestThePost:
         anyway. Hiding a control is not a gate."""
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = _own_thread(owner)
+            conversation, turns = make_editable_thread(owner)
             make_turn(conversation=conversation, role=Turn.Role.ASSISTANT, text="",
                       state=Turn.State.QUEUED)
             before = Conversation.objects.count()
@@ -775,8 +755,8 @@ class TestThePost:
     ):
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, _turns = _own_thread(owner)
-            _elsewhere, other_turns = _own_thread(owner)
+            conversation, _turns = make_editable_thread(owner)
+            _elsewhere, other_turns = make_editable_thread(owner)
             sign_in(client, owner)
             response = client.post(
                 reverse("chat-turn-edit", args=[conversation.id, other_turns[1].pk]),
@@ -786,7 +766,7 @@ class TestThePost:
     def test_an_unknown_turn_id_is_a_404_not_a_500(self, client, fake_turn_queue):
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, _turns = _own_thread(owner)
+            conversation, _turns = make_editable_thread(owner)
             sign_in(client, owner)
             response = client.post(
                 reverse("chat-turn-edit", args=[conversation.id, 999999]),
@@ -796,7 +776,7 @@ class TestThePost:
     def test_a_get_is_a_405(self, client):
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = _own_thread(owner)
+            conversation, turns = make_editable_thread(owner)
             sign_in(client, owner)
             response = client.get(
                 reverse("chat-turn-edit", args=[conversation.id, turns[1].pk]))
@@ -811,7 +791,7 @@ class TestThePost:
         owner = make_user()
         bind_chat_role(CHAT_CONVERSE_ROLE, name="edit-role-5")
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = _own_thread(owner, texts=("a", "b", "c"))
+            conversation, turns = make_editable_thread(owner, texts=("a", "b", "c"))
             sign_in(client, owner)
             client.post(reverse("chat-turn-edit", args=[conversation.id, turns[2].pk]),
                         {"text": "edited"})
@@ -825,7 +805,7 @@ class TestThePost:
         owner = make_user()
         bind_chat_role(CHAT_CONVERSE_ROLE, name="edit-role-6")
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = _own_thread(owner, texts=("a", "b", "c"))
+            conversation, turns = make_editable_thread(owner, texts=("a", "b", "c"))
             sign_in(client, owner)
             client.post(reverse("chat-turn-edit", args=[conversation.id, turns[2].pk]),
                         {"text": "second thread"})
@@ -1013,7 +993,7 @@ class TestTheProvenanceLine:
         owner = make_user()
         bind_chat_role(CHAT_CONVERSE_ROLE, name="edit-role-ordinal")
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = _own_thread(owner, texts=("a", "b", "c"))
+            conversation, turns = make_editable_thread(owner, texts=("a", "b", "c"))
             sign_in(client, owner)
             client.post(reverse("chat-turn-edit", args=[conversation.id, turns[1].pk]),
                         {"text": "edited"})
@@ -1131,7 +1111,7 @@ class TestTheProvenanceLine:
     ):
         owner = make_user()
         with posture(POSTURE_ENTERPRISE):
-            conversation, turns = _own_thread(owner, texts=("a", "b"))
+            conversation, turns = make_editable_thread(owner, texts=("a", "b"))
             make_turn(conversation=conversation, role=Turn.Role.TOOL, text="result",
                       state=Turn.State.DONE, index=99,
                       tool_call={"tool": "rag.search", "tool_kwargs": {"q": "x"}})

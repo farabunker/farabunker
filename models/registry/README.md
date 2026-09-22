@@ -76,8 +76,8 @@ abstractions — the reason a module's code never has to change as hardware or m
 ### `context_window` is now read for display as well as sent
 
 `ModelConnection.context_window` rides into `ResolvedModel.config` through
-`resolved_from_connection` and is sent to the engine adapter. Since the chat
-context meter it is also **read for display**, through
+`resolved_from_connection` and is sent to the engine adapter. The chat
+cluster's context meter also **reads** it for display, through
 `models/contracts/bindings.py::effective_context_window`, which answers the
 operator's value when there is one and the engine adapter's own bounded
 default when there is not. **No engine probe was added**: nothing anywhere

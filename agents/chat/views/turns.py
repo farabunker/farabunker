@@ -571,16 +571,8 @@ def _done_body(turn, request) -> dict:
                                             principal=principal,
                                             settings_row=settings_row)),
         "attachments_pending": pending,
-        # TWO BODIES CARRY THE KEY, NOT ONE (spec review m7).
-        # `agents.chat.service.start_turn` writes the USER turn DONE in
-        # the SAME transaction as the QUEUED placeholder, so the
-        # replayed corpus grows at QUEUE time, not at finish -- a meter
-        # that waited for `done` would be stale for the whole in-flight
-        # window, which is exactly when the reader is deciding whether
-        # to compact, and is the same shape as round 13's stale-strip
-        # lesson. `_running_body`, `_failed_body` and `_cancelled_body`
-        # do NOT carry it: the corpus does not change between queue and
-        # finish, and a failed or cancelled turn adds no replayable text.
+        # The key `_queued_body` above explains: the corpus grows at QUEUE
+        # time, so both bodies carry it and the three terminal ones do not.
         "context": _context_body(turn),
     }
 

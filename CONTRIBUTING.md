@@ -79,8 +79,7 @@ automation is live, note in your PR that you have read and agree to [CLA.md](CLA
    Checklist` by hand in a browser.
 5. **Open a pull request** when the checklist in [AGENTS.md](AGENTS.md#merge-readiness) is
    satisfied. Describe *what* and *why*, link the issue, and confirm CLA agreement. Note its
-   last item in particular: the consolidation audit runs after the whole-branch review, and
-   its fix-now items land before the PR is opened.
+   last item in particular — the consolidation audit.
 
 ## Developer setup
 

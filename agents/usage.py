@@ -12,9 +12,10 @@ rows -- so this module's placement is about reuse, not about a boundary.
 
 ONE COUNTER, NOT TWO. `agents/limits.py::HISTORY_TURNS`' own docstring
 warns that a token counter beside the replay cap would be "a second,
-drifting one". `estimate_tokens` below is therefore the ONLY arithmetic
-in this feature, and chat compaction -- out of scope -- will call this
-same function rather than growing its own.
+drifting one". `estimate_tokens` below is therefore the ONE PUBLIC
+ENTRY to the ONLY arithmetic in this feature, and chat compaction --
+out of scope -- will call this same function rather than growing its
+own.
 
 THE ESTIMATE IS AN UNDER-COUNT, AND THAT IS STATED RATHER THAN HIDDEN.
 Six things the replayed prompt carries are not counted here:
@@ -141,11 +142,16 @@ DISCLOSURE_BODY = (
 )
 
 
-def estimate_tokens(text: str | None) -> int:
+def _tokens_from_chars(chars: int) -> int:
     """Characters over `CHARS_PER_TOKEN`, rounded up. The one arithmetic
     in this feature -- see the module docstring on why there is only
-    one."""
-    return math.ceil(len(text or "") / CHARS_PER_TOKEN)
+    one; `estimate_tokens` below is its one public entry."""
+    return math.ceil(chars / CHARS_PER_TOKEN)
+
+
+def estimate_tokens(text: str | None) -> int:
+    """One text's token estimate -- see `_tokens_from_chars`."""
+    return _tokens_from_chars(len(text or ""))
 
 
 def context_usage(conversation, agent, *, window: int, window_source: str) -> ContextUsage:
@@ -185,7 +191,7 @@ def context_usage(conversation, agent, *, window: int, window_source: str) -> Co
         chars += len(stream.instructions.strip())
     chars += sum(len(text or "") for text in recent)
 
-    estimated = math.ceil(chars / CHARS_PER_TOKEN)
+    estimated = _tokens_from_chars(chars)
     percent = round(100 * estimated / window) if window > 0 else None
     if percent is None:
         band = BAND_UNKNOWN

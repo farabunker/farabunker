@@ -75,24 +75,12 @@ def agents_admin_list(request):
     principal = principal_for_request(request, settings_row=settings_row)
     if not is_admin(principal, settings_row=settings_row):
         raise PermissionDenied
-    # ONE BATCH READ for every row's labels -- the discipline
-    # `/chat/access/` documents and `/chat/agents/`'s own
-    # `_restriction_fold` repeats -- so twenty-five agents cost one query
-    # here, not twenty-five. It reads every labelled agent on the box
-    # rather than only the rows listed, which is FLAT in rendered rows
-    # (`test_the_list_costs_the_same_at_one_agent_and_at_twenty_five`)
-    # and unbounded in the size of the `AgentEntitlement` table; the
-    # repair, if that table ever outgrows the page, is a pk-narrowed
-    # reader in `agents/labels.py`, never a per-row read here.
-    #
-    # AND NOT READ AT ALL ON AN OPEN BOX (review I1), gated on
-    # `accounts_on()` alone -- the ruling-A shape `views/workstreams.py`
-    # takes, and what puts this route in `identity/tests/
-    # test_zero_queries.py::_MOUNTS`. A label restricts nobody with
-    # accounts off (`visible_agents` returns at its `sees_all_content`
-    # short-circuit before the label clause is reached, spec 4.3.1), so a
-    # "Restrictions" count there would report a restriction that
-    # restricts no one.
+    # ONE BATCH READ for every row's labels, and none at all on an open
+    # box. `agents/chat/views/agents.py::_restriction_fold` carries the
+    # whole argument -- the flat/unbounded trade, the repair if the table
+    # outgrows the page, and why the open-box gate is correctness rather
+    # than economy. This page takes the identical shape, except it counts
+    # every label rather than subtracting `mine`.
     accounts = accounts_on(settings_row=settings_row)
     labels = agent_entitlement_ids() if accounts else {}
     # `labellable_agents()` RETURNS A LIST, so the fold below costs no

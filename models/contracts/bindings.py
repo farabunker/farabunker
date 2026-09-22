@@ -111,14 +111,9 @@ def effective_context_window(resolved: ResolvedModel) -> tuple[int, str]:
     way -- it is not a ceiling anybody could act on.
 
     IT ANSWERS DIFFERENTLY FROM `tools.rag.views.
-    _resolved_answer_context_window`, ON PURPOSE. That reader returns
-    "unknown" where this one returns the adapter's bounded default,
-    because it decides whether to run a top-k FIT CHECK at all: skipping
-    a check on a guessed number is safe, and refusing a legitimate `k`
-    for a reason the operator never configured is not. This one must
-    DISPLAY something, and the adapter's default is what the engine will
-    actually be asked for. The two also ask about different bindings.
-    `models/registry/README.md` records the reconciliation.
+    _resolved_answer_context_window`, ON PURPOSE -- a fit check may skip
+    a guessed number, a display may not. `models/registry/README.md`
+    records the reconciliation.
     """
     raw = (resolved.config or {}).get("context_window")
     if raw is not None:
