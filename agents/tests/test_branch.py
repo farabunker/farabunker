@@ -291,7 +291,24 @@ class TestBranchConversation:
         assert copied.queue_job_id is None
         assert copied.invocation_id is None
 
-    def test_non_terminal_turns_are_not_copied(self):
+    def test_a_cancelled_turn_before_the_index_IS_copied_because_it_is_terminal(self):
+        """"Terminal" is not "successful". `CANCELLED` is one of
+        `_TERMINAL_TURN_STATES`, so a cancelled turn is part of what
+        happened in this thread and comes across -- dropping it would
+        make the branch a tidied-up version of a conversation that did
+        not go that way, which is the rule `duplicate_conversation`
+        already holds.
+
+        NO TURN IN FLIGHT CAN REACH THIS FUNCTION, so there is no such
+        case to pin from here: `may_edit_turn` refuses while ANY turn in
+        the conversation is non-terminal, and a turn that started
+        between the gate and the copy would have an index at or above
+        the branch point and is already excluded by the bound. The
+        copier's state filter earns its place through the OTHER caller
+        -- `agents/chat/tests/test_conversation_actions.py::
+        TestDuplicate::test_a_mid_run_turn_is_left_behind_and_the_
+        indexes_close_up` is where it does real work.
+        """
         from agents.visibility import branch_conversation
 
         owner = make_user()
@@ -301,12 +318,11 @@ class TestBranchConversation:
                       state=Turn.State.CANCELLED)
             last = make_turn(conversation=conversation, role=Turn.Role.USER, text="z",
                              state=Turn.State.DONE)
-            # A queued turn would block the gate, so this asserts the
-            # copier's own filter directly rather than through the view.
             branch = branch_conversation(user_principal(owner), conversation, last,
                                          title="Branch")
-            texts = list(branch.turns.order_by("index").values_list("text", flat=True))
-        assert texts == ["a", ""]
+            states = list(branch.turns.order_by("index")
+                          .values_list("text", "state"))
+        assert states == [("a", Turn.State.DONE), ("", Turn.State.CANCELLED)]
 
     def test_it_copies_every_taint_row_including_one_after_the_branch_point(self):
         """Over-tainting is safe; under-tainting is a leak. `first_turn`
@@ -450,6 +466,40 @@ class TestBranchConversation:
                                     title="Branch")
         assert len(many_copied) == len(two_copied)
 
+    def test_a_threaded_settings_row_is_not_re_read(self):
+        """M2. `may_edit_turn` carries `settings_row=` so a caller that
+        already holds the singleton need not make the predicate fetch it
+        again -- and until `branch_conversation` accepted and threaded
+        one, that keyword had no reachable caller and was decorative.
+
+        NON-VACUOUS THE SAME WAY THE TURN PIN IS: the two calls are
+        compared for EQUALITY MINUS ONE, the one being the read the
+        unthreaded call makes and the threaded one does not. A test that
+        only asserted "the threaded call is no worse" would stay green
+        if the keyword were dropped on the floor.
+        """
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from agents.visibility import branch_conversation
+        from identity.models import IdentitySettings
+
+        owner = make_user()
+        with posture(POSTURE_ENTERPRISE):
+            first, first_turns = self._thread_of(owner, ["a", "b"], slug="row-unthreaded")
+            second, second_turns = self._thread_of(owner, ["a", "b"], slug="row-threaded")
+            row = IdentitySettings.get_solo()
+            with CaptureQueriesContext(connection) as unthreaded:
+                branch_conversation(user_principal(owner), first, first_turns[1],
+                                    title="Branch")
+            with CaptureQueriesContext(connection) as threaded:
+                branch_conversation(user_principal(owner), second, second_turns[1],
+                                    title="Branch", settings_row=row)
+            settings_table = IdentitySettings._meta.db_table
+        assert len(threaded) == len(unthreaded) - 1
+        assert not [q for q in threaded.captured_queries
+                    if settings_table in q["sql"]]
+
     def test_it_is_callable_with_no_HTTP_anywhere_in_reach(self):
         """Spec review M7. The import-law gate covers the general rule;
         this pins the specific direction the split exists to preserve:
@@ -457,14 +507,23 @@ class TestBranchConversation:
         this function cannot call the chat column's turn starter and is
         not a view.
 
-        READ THROUGH `ast`, NOT AS A SUBSTRING OF THE SOURCE, and the
-        difference matters twice. A substring grep cannot tell an
-        `import` from a sentence, and this module's docstrings NAME the
-        chat column repeatedly -- the rule is written down where it
-        binds, so a prose-blind grep is red on a module that obeys the
-        rule perfectly. The walk is also STRICTLY STRONGER: it sees a
-        function-local import, which is exactly the shape that would
-        smuggle the cycle past a module-header check.
+        READ THROUGH `ast`, NOT AS A SUBSTRING OF THE SOURCE. A
+        substring grep cannot tell an `import` from a sentence, and this
+        module's docstrings NAME the chat column repeatedly -- the rule
+        is written down where it binds -- so a whole-source grep is red
+        on a module that obeys the rule perfectly.
+
+        WHAT THIS WALK IS AND IS NOT, stated exactly, because the honest
+        comparison depends on the baseline. It is STRONGER THAN A
+        MODULE-HEADER CHECK: `ast.walk` descends into function bodies,
+        so a function-local import cannot slip past it. It is
+        PROSE-BLIND where a whole-source grep is not. It is NOT strictly
+        stronger than that grep: a dynamic `importlib.import_module(
+        "agents.chat.service")` is a string literal, not an `Import`
+        node, so this test cannot see it. `foundation/ops/tests/
+        test_import_law.py` is the repo-wide backstop for that shape,
+        and its own deliberate gap -- relative imports are not matched
+        -- is closed here by reading `node.level`.
         """
         import ast
         import inspect
@@ -472,14 +531,21 @@ class TestBranchConversation:
         from agents import visibility
 
         tree = ast.parse(inspect.getsource(visibility))
+        # `from .chat import service` inside `agents/visibility.py` has
+        # `module="chat"`, which starts with neither "agents" nor
+        # "agents.chat"; resolving it against this module's own package
+        # is what closes that hole. A level above 1 walks out of
+        # `agents/` entirely and cannot name the chat column at all.
+        package = visibility.__package__
         imported = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 imported.update(alias.name for alias in node.names)
             elif isinstance(node, ast.ImportFrom):
-                imported.add(node.module or "")
-                imported.update(f"{node.module}.{alias.name}"
-                                for alias in node.names)
+                prefix = package if node.level == 1 else ""
+                module = ".".join(part for part in (prefix, node.module) if part)
+                imported.add(module)
+                imported.update(f"{module}.{alias.name}" for alias in node.names)
         assert not [name for name in imported if name.startswith("agents.chat")]
         assert "django.shortcuts" not in imported
         assert not hasattr(visibility, "start_turn")

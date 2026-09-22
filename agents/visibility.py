@@ -565,6 +565,87 @@ def set_conversation_pinned(principal, conversation, *, pinned: bool) -> bool:
 _TERMINAL_TURN_STATES = (Turn.State.DONE, Turn.State.FAILED, Turn.State.CANCELLED)
 
 
+def _copy_turns_into(target, source, *, before_index=None) -> None:
+    """Copy `source`'s terminal turns into `target`, renumbered from 0.
+
+    ONE COPY OF THE FIELD LIST, FOR THE TWO PUBLIC COPIERS BELOW, and
+    the reason is written in this module's own history rather than
+    borrowed from a style guide: `Turn.author_id` was added to the model
+    and `duplicate_conversation` silently stopped carrying it, which
+    inverted `agents.runtime.prompt._is_foreign_user_turn`'s fence on
+    every duplicate of a thread somebody else had posted into. The fix
+    had to be typed twice, five lines apart, the day
+    `branch_conversation` landed. A twelfth column on `Turn` faces the
+    identical coin-flip, and this helper is how it stops being a
+    coin-flip: the field list exists ONCE, so the two copiers cannot
+    disagree about it.
+
+    WHAT THIS IS NOT is a shared BODY for the two public functions. They
+    keep their own gate, their own `Conversation.objects.create(...)` --
+    which is where they genuinely differ, one stamping provenance and
+    one not -- their own docstring and their own tests. Sibling
+    functions, shared private copier.
+
+    `before_index`: copy only turns whose index is strictly below it.
+    `None` -- the default -- copies the whole thread, which is
+    `duplicate_conversation`'s rule; an integer is
+    `branch_conversation`'s bound.
+
+    `state__in=_TERMINAL_TURN_STATES` IS REACHABLE, and only through one
+    of the two callers. `duplicate_conversation`'s gate
+    (`may_manage_conversation`) says nothing about turns in flight, so a
+    duplicate really can be taken mid-answer and this filter really does
+    leave the placeholder behind -- `agents/chat/tests/
+    test_conversation_actions.py::TestDuplicate::
+    test_a_mid_run_turn_is_left_behind_and_the_indexes_close_up` is the
+    pin. It can never exclude anything for `branch_conversation`, whose
+    own gate refuses while ANY turn in the conversation is non-terminal;
+    there the gate is what keeps a running turn out, not this filter.
+
+    NOT COPIED, and each is `duplicate_conversation`'s own recorded
+    decision: `invocation` (an audit row belongs to exactly ONE
+    conversation, and is never re-pointed or re-invented) and
+    `queue_job_id` (a copy was produced by nothing).
+    """
+    rows = Turn.objects.filter(conversation=source, state__in=_TERMINAL_TURN_STATES)
+    if before_index is not None:
+        rows = rows.filter(index__lt=before_index)
+    Turn.objects.bulk_create([
+        Turn(
+            conversation=target, index=index, role=row.role, text=row.text,
+            tool_call=row.tool_call, data=row.data, artifacts=row.artifacts,
+            depth=row.depth, state=row.state, error=row.error,
+            author_id=row.author_id,
+        )
+        for index, row in enumerate(rows.order_by("index"))
+    ])
+
+
+def _copy_taint_into(target, source) -> None:
+    """Copy every `ConversationTaint` row of `source` onto `target`.
+
+    ALWAYS, and VERBATIM -- `first_turn` included, even when it names an
+    index the copy does not contain. Over-tainting is safe;
+    under-tainting is a leak, and the field is a plain integer precisely
+    so it can name the turn that really caused the tag, in the
+    conversation where it really happened.
+
+    Not only for a stream conversation: a loose thread's tags are
+    recorded too (author decision 9), and a copy that dropped them would
+    launder a loose conversation exactly as it would a stream one.
+
+    No `WorkstreamTaint` is written by either caller. Both keep the
+    parent's `workstream`, and the stream's materialised union already
+    holds every one of these tags -- each was unioned upward when it was
+    stamped. Nothing new enters the stream.
+    """
+    ConversationTaint.objects.bulk_create([
+        ConversationTaint(conversation=target, entitlement_id=tag.entitlement_id,
+                          first_turn=tag.first_turn)
+        for tag in source.taint_tags.all()
+    ])
+
+
 def duplicate_conversation(principal, conversation, *, title: str):
     """A new conversation with `conversation`'s finished history, owned
     by `principal` -- or `None` if they may not.
@@ -641,27 +722,8 @@ def duplicate_conversation(principal, conversation, *, title: str):
             workstream=conversation.workstream,      # THE COPY STAYS IN THE STREAM
             **owner_fields(principal),
         )
-        Turn.objects.bulk_create([
-            Turn(
-                conversation=copy, index=index, role=turn.role, text=turn.text,
-                tool_call=turn.tool_call, data=turn.data, artifacts=turn.artifacts,
-                depth=turn.depth, state=turn.state, error=turn.error,
-                author_id=turn.author_id,
-            )
-            for index, turn in enumerate(
-                Turn.objects.filter(conversation=conversation,
-                                    state__in=_TERMINAL_TURN_STATES).order_by("index")
-            )
-        ])
-        # ALWAYS, not only for a stream conversation (ruling D): a loose
-        # thread's tags are recorded too (author decision 9), and a copy
-        # that dropped them would launder a loose conversation exactly as
-        # it would a stream one.
-        ConversationTaint.objects.bulk_create([
-            ConversationTaint(conversation=copy, entitlement_id=t.entitlement_id,
-                              first_turn=t.first_turn)
-            for t in conversation.taint_tags.all()
-        ])
+        _copy_turns_into(copy, conversation)
+        _copy_taint_into(copy, conversation)
     return copy
 
 
@@ -706,17 +768,39 @@ def may_edit_turn(principal, conversation, turn, *, settings_row=None) -> bool:
         state__in=_TERMINAL_TURN_STATES).exists()
 
 
-def branch_conversation(principal, conversation, turn, *, title: str):
+def branch_conversation(principal, conversation, turn, *, title: str,
+                        settings_row=None):
     """A new conversation holding everything BEFORE `turn`, owned by
     `principal` -- or `None` if they may not.
 
+    `settings_row`: an already-fetched `IdentitySettings`, OPTIONAL and
+    keyword-only, threaded straight into `may_edit_turn` and on into
+    `sees_all_content`. THE CALLER THAT WILL HOLD ONE IS THE EDIT VIEW,
+    which asks the predicate first (to decide whether to render the
+    control at all) and then writes -- two singleton reads for one
+    request without it, which is the shape the middleware's single-row
+    rule exists to prevent. Without this keyword the row a caller
+    already has could not reach the predicate at all, and the keyword
+    `may_edit_turn` carries would have no reachable caller. Passing
+    nothing costs the one read it always did.
+
     A SIBLING OF `duplicate_conversation`, NOT A PARAMETER ON IT (spec
     decision 14). The two answer different questions -- copy the whole
-    thing / carry on from here -- and have different rules about the
-    last turn and about the index bound. They share the same predicate
-    and the same constants, which is an argument FOR the sibling shape
-    rather than against it: one gate, two operations, neither reaching
-    into the other's body.
+    thing / carry on from here -- and differ in the three places that
+    matter: the index bound, the provenance columns, and what their gate
+    has already established about turns in flight. Collapsing them into
+    `duplicate_conversation(..., before_index=None)` would put a mode
+    flag on a shipped function and make one docstring argue with itself.
+
+    TWO PUBLIC FUNCTIONS, ONE PRIVATE COPIER, and the distinction is the
+    whole of the answer. What is NOT justified is two copies of the copy
+    body: the field list and the taint block live once, in
+    `_copy_turns_into` / `_copy_taint_into` above, because this module
+    has already paid for the alternative -- `author_id` drifted out of
+    `duplicate_conversation` unnoticed, and the fix had to be typed
+    twice. What IS justified is two entry points, each with its own
+    gate, its own `Conversation.objects.create(...)`, its own docstring
+    and its own tests.
 
     STEPS 1-2 ONLY. This function knows nothing about HTTP, the queue,
     or where the reader goes next: the chat package imports THIS module,
@@ -736,33 +820,30 @@ def branch_conversation(principal, conversation, turn, *, title: str):
     `**owner_fields(principal)` (the brancher owns it), the same
     `title`, and the two provenance columns.
 
-    WHAT IS COPIED PER TURN: `role`, `text`, `tool_call`, `data`,
-    `artifacts`, `depth`, `state`, `error` -- AND `author_id`, which
-    `duplicate_conversation` did not copy until this change and now
-    does, in the same commit, because `agents.runtime.prompt.
-    _is_foreign_user_turn` reads it to fence another person's words in a
-    replay.
+    WHAT IS COPIED PER TURN is `_copy_turns_into`'s own list, and
+    `author_id` is on it for the reason that helper records.
 
-    WHAT IS NOT: `invocation` (an audit row belongs to exactly ONE
-    conversation and is never re-pointed or re-invented),
-    `queue_job_id` (a copy was produced by nothing), any non-terminal
-    turn, any `DocumentAttachment` row (there is no copier seam, and the
-    edit form says so before the button), any share, and any pin or
-    archive state.
+    WHAT IS NOT, beyond that helper's `invocation` and `queue_job_id`:
+    any `DocumentAttachment` row (there is no copier seam, and the edit
+    form says so before the button), any share, and any pin or archive
+    state.
 
-    THE TAINT IS COPIED VERBATIM, INCLUDING TAGS WHOSE `first_turn` LIES
-    AFTER THE BRANCH POINT. Over-tainting is safe; under-tainting is a
-    leak, and the field is a plain integer precisely so it can name the
-    turn that really caused it, in the conversation where it really
-    happened. No `WorkstreamTaint` is written: the branch stays in the
-    parent's stream, whose materialised union already holds every one of
-    the parent's tags.
+    NO TURN IN FLIGHT COMES ACROSS, AND THE GATE IS WHY -- not the
+    copier's state filter, which can never exclude anything here.
+    `may_edit_turn` refuses while ANY turn in the conversation is
+    non-terminal, so by the time this runs there is none to leave
+    behind. (`duplicate_conversation` is the caller for which that
+    filter does real work; its gate says nothing about turns in flight.)
+
+    THE TAINT IS COPIED VERBATIM by `_copy_taint_into`, INCLUDING TAGS
+    WHOSE `first_turn` LIES AFTER THE BRANCH POINT, and no
+    `WorkstreamTaint` is written -- that helper records both reasons.
 
     THE ORIGINAL IS NOT TOUCHED: this is a BRANCH, never a rewind. No
     turn of `conversation` is edited, renumbered or deleted, and the
     reader keeps both threads.
     """
-    if not may_edit_turn(principal, conversation, turn):
+    if not may_edit_turn(principal, conversation, turn, settings_row=settings_row):
         return None
     with transaction.atomic():
         branch = Conversation.objects.create(
@@ -771,23 +852,8 @@ def branch_conversation(principal, conversation, turn, *, title: str):
             branched_from=conversation, branched_at_index=turn.index,
             **owner_fields(principal),
         )
-        Turn.objects.bulk_create([
-            Turn(
-                conversation=branch, index=index, role=row.role, text=row.text,
-                tool_call=row.tool_call, data=row.data, artifacts=row.artifacts,
-                depth=row.depth, state=row.state, error=row.error,
-                author_id=row.author_id,
-            )
-            for index, row in enumerate(
-                Turn.objects.filter(conversation=conversation, index__lt=turn.index,
-                                    state__in=_TERMINAL_TURN_STATES).order_by("index")
-            )
-        ])
-        ConversationTaint.objects.bulk_create([
-            ConversationTaint(conversation=branch, entitlement_id=tag.entitlement_id,
-                              first_turn=tag.first_turn)
-            for tag in conversation.taint_tags.all()
-        ])
+        _copy_turns_into(branch, conversation, before_index=turn.index)
+        _copy_taint_into(branch, conversation)
     return branch
 
 

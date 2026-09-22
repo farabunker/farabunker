@@ -831,9 +831,19 @@ null is the honest value for it.
 (`may_manage_conversation`, through `may_edit_turn`), same constants, same rules
 about what an audit row and an attachment belong to — but bounded by an index
 and stamped with provenance. Two operations, one gate, neither reaching into the
-other's body. Both copy `author_id`; neither copies `invocation`, `queue_job_id`,
+other's body. The field list lives once, in `_copy_turns_into` / `_copy_taint_into`
+— two public functions, one private copier — because it had already drifted once:
+`author_id` fell out of `duplicate_conversation` unnoticed, and the fix had to be
+typed twice. Both copy `author_id`; neither copies `invocation`, `queue_job_id`,
 attachments or shares. The original is never edited, renumbered or truncated: a
 branch, never a rewind.
+
+**`duplicate_conversation` did not copy `author_id` until the chat cluster**, and
+that is an operator-visible change, not only an internal one: a duplicate carries
+no shares, and `agents/runtime/prompt.py::_is_foreign_user_turn` treats an
+author-less turn in an unshared thread as the reader's own, so a duplicate of a
+conversation somebody else had posted into used to replay that person's words to
+the model unfenced. It no longer does.
 
 `may_edit_turn` is the predicate both the card control and the writer answer to.
 A root-depth, finished `user` turn of this conversation, no turn anywhere in the
