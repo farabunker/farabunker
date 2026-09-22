@@ -2222,13 +2222,25 @@ class TestTheContextMeter:
         non-vacuous: every turn here really does render the disclosure,
         so the flat cost is being measured with the predicate live rather
         than on a page that never asks it.
+
+        TASK 14 EXTENDS IT AGAIN, THE SAME WAY: both threads are branches
+        of the SAME parent, so the provenance banner's own one-query
+        resolution (`thread.py`'s own `branched_from` lookup, threaded
+        through the SAME `settings_row`) runs on both renders this test
+        measures rather than on neither -- a bare `branched_from_id is
+        None` conversation would leave that lookup entirely unexercised
+        by this pin, and a later reader who moved it onto a per-turn
+        path would have nothing here to catch it. The two assertions
+        below the meter's own pair are what make that non-vacuous: the
+        banner really renders on both pages.
         """
         from agents.limits import HISTORY_TURNS
 
         agent = make_agent(slug="meter-scale")
-        short = make_conversation(agent=agent)
+        parent = make_conversation(agent=agent, title="Meter parent")
+        short = make_conversation(agent=agent, branched_from=parent, branched_at_index=0)
         make_turn(conversation=short, text="hi", state=Turn.State.DONE)
-        long_one = make_conversation(agent=agent)
+        long_one = make_conversation(agent=agent, branched_from=parent, branched_at_index=0)
         for _ in range(HISTORY_TURNS * 3):
             make_turn(conversation=long_one, text="hi", state=Turn.State.DONE)
         client.get(reverse("chat-conversation", args=[short.id]))   # warm-up, unmeasured
@@ -2239,9 +2251,12 @@ class TestTheContextMeter:
         assert short_response.status_code == 200
         assert long_response.status_code == 200
         assert len(many) == len(one)
-        assert short_response.content.decode().count("Send from here") == 1
-        assert long_response.content.decode().count(
-            "Send from here") == HISTORY_TURNS * 3
+        short_body = short_response.content.decode()
+        long_body = long_response.content.decode()
+        assert short_body.count("Send from here") == 1
+        assert long_body.count("Send from here") == HISTORY_TURNS * 3
+        assert short_body.count("Branched from") == 1
+        assert long_body.count("Branched from") == 1
 
     def test_a_reader_who_may_not_upload_pays_no_extra_query_for_the_stream(
         self, client, bound_chat_role

@@ -38,7 +38,10 @@ from agents.usage import (
     WINDOW_SOURCE_ENGINE_DEFAULT, WINDOW_SOURCE_UNBOUND, context_usage, meter_segments,
     truncation_clause,
 )
-from agents.visibility import may_edit_any_turn, may_post_to, may_read_conversation_shares
+from agents.visibility import (
+    BRANCH_PROVENANCE_LEAD, branch_provenance_sentence, may_edit_any_turn, may_post_to,
+    may_read_conversation_shares, visible_conversations,
+)
 from agents.workstreams import scope_for_conversation
 from identity.access import accounts_on, is_admin, share_subjects
 from identity.request import principal_for_request, settings_row_for
@@ -252,6 +255,31 @@ def thread_context(request, conversation, *, selected: str | None = None) -> dic
     # disclosure anyway would put a button on the page whose own POST
     # answers 404.
     may_edit_here = may_edit_any_turn(principal, conversation, settings_row=settings_row)
+    # FEATURE C's provenance line. RESOLVED THROUGH
+    # `visible_conversations`, NEVER A BARE PK READ: a title is content,
+    # and a branch an administrator made of somebody's thread must not
+    # leak the original's title back to whoever is reading the branch.
+    # One query, and only for a conversation that actually has a parent
+    # -- `settings_row` is the one this render already fetched, the same
+    # single-read rule every other visibility call on this page follows.
+    #
+    # `branched_from_id is None` AFTER `SET_NULL` (the parent was
+    # deleted) and "the parent exists but this principal may not read
+    # it" render IDENTICALLY here: `branched_from` is `None` either way,
+    # so the template's own `{% if branched_from %}` cannot tell them
+    # apart and never needs to -- both are "the honest version of this
+    # came from somewhere you cannot see", one because there is nothing
+    # left to see and one because it is not this reader's to see.
+    branched_from = None
+    if conversation.branched_from_id is not None:
+        branched_from = visible_conversations(principal, settings_row=settings_row) \
+            .filter(pk=conversation.branched_from_id).first()
+    # `branched_at_index` OUTLIVES `branched_from_id` (`SET_NULL` clears
+    # only the FK), so the sentence's tail renders even for a branch
+    # whose parent is gone -- `branched_from`, above, is what decides
+    # whether it is also a LINK.
+    branch_provenance = (branch_provenance_sentence(conversation.branched_at_index)
+                         if conversation.branched_at_index is not None else "")
     return {
         "conversation": conversation,
         "agent": conversation.agent,
@@ -269,6 +297,18 @@ def thread_context(request, conversation, *, selected: str | None = None) -> dic
         # `done` tick, so a swapped disclosure says what a reloaded one
         # says.
         "edit_lead": EDIT_LEAD,
+        # FEATURE C's provenance line, computed above. `branched_from`
+        # is a `Conversation` or `None` (no parent, a deleted one, or
+        # one this principal may not read -- see the comment above);
+        # `branch_provenance` is the declared sentence's tail, or `""`
+        # for a conversation that was never branched, which the
+        # template's own `{% if branch_provenance %}` treats as
+        # "nothing to show". `branch_provenance_lead` is the sentence's
+        # own fixed opening words, declared once in `agents.visibility`
+        # and never typed into the template.
+        "branched_from": branched_from,
+        "branch_provenance": branch_provenance,
+        "branch_provenance_lead": BRANCH_PROVENANCE_LEAD,
         "picker": chat_picker_options(principal, selected, wall=wall),
         "selected_connection": selected,
         # ROUND 18: `chat/_composer.html`'s own `composer_placeholder`

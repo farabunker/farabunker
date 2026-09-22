@@ -793,3 +793,104 @@ class TestThePost:
             second_branch = Conversation.objects.exclude(
                 pk__in=[conversation.pk, first_branch.pk]).get()
         assert second_branch.branched_from_id == first_branch.id
+
+
+class TestTheProvenanceLine:
+    """The banner on a branch's thread page: where it came from and at
+    which turn, resolved through `visible_conversations` -- never a bare
+    pk read -- so a parent this principal may not see is neither named
+    nor linked, and a deleted parent (`branched_from_id is None` after
+    `SET_NULL`) still leaves the page readable."""
+
+    def test_a_branch_says_where_it_came_from_and_links_back(self, client):
+        owner = make_user()
+        with posture(POSTURE_ENTERPRISE):
+            parent = make_conversation(agent=make_agent(slug="parent"),
+                                       title="The original",
+                                       **owner_fields(user_principal(owner)))
+            branch = make_conversation(agent=parent.agent, title="The original",
+                                       branched_from=parent, branched_at_index=3,
+                                       **owner_fields(user_principal(owner)))
+            sign_in(client, owner)
+            body = client.get(
+                reverse("chat-conversation", args=[branch.id])).content.decode()
+        assert "Branched from" in body
+        assert "message 3" in body
+        assert reverse("chat-conversation", args=[parent.id]) in body
+
+    def test_a_plain_conversation_says_nothing(self, client):
+        owner = make_user()
+        with posture(POSTURE_ENTERPRISE):
+            conversation = make_conversation(agent=make_agent(slug="plain-thread"),
+                                             **owner_fields(user_principal(owner)))
+            sign_in(client, owner)
+            body = client.get(
+                reverse("chat-conversation", args=[conversation.id])).content.decode()
+        assert "Branched from" not in body
+
+    def test_a_deleted_parent_leaves_the_line_unlinked_and_the_page_readable(
+        self, client
+    ):
+        owner = make_user()
+        with posture(POSTURE_ENTERPRISE):
+            parent = make_conversation(agent=make_agent(slug="doomed"),
+                                       title="Gone",
+                                       **owner_fields(user_principal(owner)))
+            branch = make_conversation(agent=parent.agent, title="Survivor",
+                                       branched_from=parent, branched_at_index=2,
+                                       **owner_fields(user_principal(owner)))
+            parent.delete()
+            sign_in(client, owner)
+            response = client.get(reverse("chat-conversation", args=[branch.id]))
+        body = response.content.decode()
+        assert response.status_code == 200
+        assert "Branched from" in body
+        assert "Gone" not in body
+
+    def test_a_parent_this_principal_may_not_see_is_neither_named_nor_linked(
+        self, client
+    ):
+        """Resolved through `visible_conversations`, never a bare pk
+        read: a title is content, and a branch an administrator made of
+        somebody's thread must not leak the original's title back to a
+        member who was handed the branch."""
+        owner, other = make_user(), make_user(username="other")
+        with posture(POSTURE_ENTERPRISE):
+            parent = make_conversation(agent=make_agent(slug="private-parent"),
+                                       title="Confidential title",
+                                       **owner_fields(user_principal(other)))
+            branch = make_conversation(agent=parent.agent, title="Branch",
+                                       branched_from=parent, branched_at_index=1,
+                                       **owner_fields(user_principal(owner)))
+            sign_in(client, owner)
+            body = client.get(
+                reverse("chat-conversation", args=[branch.id])).content.decode()
+        assert "Confidential title" not in body
+        assert reverse("chat-conversation", args=[parent.id]) not in body
+
+    def test_a_branch_carrying_a_tool_call_shows_the_tool_cards_and_no_audit_link(
+        self, client, fake_turn_queue
+    ):
+        owner = make_user()
+        with posture(POSTURE_ENTERPRISE):
+            conversation, turns = _own_thread(owner, texts=("a", "b"))
+            make_turn(conversation=conversation, role=Turn.Role.TOOL, text="result",
+                      state=Turn.State.DONE, index=99,
+                      tool_call={"tool": "rag.search", "tool_kwargs": {"q": "x"}})
+            last = make_turn(conversation=conversation, role=Turn.Role.USER, text="c",
+                             state=Turn.State.DONE)
+            sign_in(client, owner)
+            client.post(reverse("chat-turn-edit", args=[conversation.id, last.pk]),
+                        {"text": "edited"})
+            branch = Conversation.objects.exclude(pk=conversation.pk).get()
+            body = client.get(
+                reverse("chat-conversation", args=[branch.id])).content.decode()
+        # `agents.chat.rendering._tool_label` renders the REGISTERED
+        # spec's operator-facing label, never the dotted key, for any
+        # key `_TOOLS` still knows -- and `rag.search` is registered
+        # (`tools/rag/tools.py::RAG_SEARCH`), unconditionally of feature
+        # flags. "Search the library" is that label, so this is the
+        # string a real render of this real tool call actually produces;
+        # the raw key appears nowhere on the page for a registered tool.
+        assert "Search the library" in body
+        assert branch.turns.filter(invocation__isnull=False).count() == 0

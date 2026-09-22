@@ -253,6 +253,14 @@ tag needs no truncation logic of its own.
     .context-meter[data-band="full"] .context-bar > span { background: var(--danger); }
     .context-meter details { margin-top: .25rem; }
     .context-meter details > summary { cursor: pointer; color: var(--muted); }
+    {% comment %}
+    CHAT CLUSTER, FEATURE C's provenance line. Page-scoped (Task 8's own
+    ruling: a page-prefixed class, not a bare `.provenance` or
+    `.branch-line`, since this fragment has exactly one consumer -- this
+    page's own body, never `chat/_turn_block.html`, which is the other
+    template `chat/all.html`'s preview pane shares).
+    {% endcomment %}
+    .branch-provenance { margin: 0 0 .75rem; }
 {% endblock %}
 {% comment %}
 UI-3b: the same sidebar the index renders, from the same context
@@ -280,6 +288,26 @@ model.
 {% for note in notes %}
 <p class="muted">{{ note }}</p>
 {% endfor %}
+
+{% if branch_provenance %}
+{% comment %}
+CHAT CLUSTER, FEATURE C's provenance line. The title links back only
+while the parent is still visible to THIS principal (resolved in the
+view through `visible_conversations`); with the parent deleted or
+invisible the line renders without a link and without the title, which
+is the honest version of "this came from somewhere you cannot see" --
+never a leaked title for a branch this reader was only handed, not the
+original.
+
+STATIC, so the poller does not need to know about it: it renders once,
+outside `.thread` and `.thread-scroll`, and no swap this page performs
+(`insertBlock`/`swapBlock` below, both scoped to `.thread`'s own
+children) ever touches it.
+{% endcomment %}
+<p class="muted branch-provenance">{{ branch_provenance_lead }}
+  {% if branched_from %}<a href="{% url 'chat-conversation' branched_from.id %}">{{ branched_from.title|default:branched_from.agent.name }}</a>{% endif %}
+  {{ branch_provenance }}</p>
+{% endif %}
 
 {% comment %}
 OWNER-REQUESTED CHAT LAYOUT FIX: `.thread-scroll` is the ONE region on

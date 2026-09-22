@@ -933,6 +933,18 @@ def branch_conversation(principal, conversation, turn, *, title: str,
     return branch
 
 
+BRANCH_PROVENANCE_LEAD = "Branched from"
+
+
+def branch_provenance_sentence(index: int) -> str:
+    """The tail of the provenance line: where in the parent this thread
+    left off. The parent's own title (or its absence) is the template's
+    half, because whether it may be NAMED is a visibility question the
+    view answers through `visible_conversations` -- never this function's
+    business, since it is handed only the index, never the parent row."""
+    return f"at message {index}"
+
+
 def may_post_to(principal, conversation) -> bool:
     """Whether `principal` may add a TURN to `conversation`.
 
