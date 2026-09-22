@@ -814,6 +814,19 @@ the same migration since both are WS-2 additions to `Conversation`, ahead
 of the consolidation job that reads and writes them). No data migration:
 every column is nullable and every existing row already means "never".
 
+## Branch provenance
+
+`branched_from` / `branched_at_index` record that this conversation was made by
+editing a message in another one, and which message. Two nullable columns rather
+than a title convention, because "where did this thread come from" should be a
+fact you can query rather than a string you can only read. `SET_NULL`: deleting
+the parent leaves the branch readable, with a provenance line that no longer
+links.
+
+Migration: `agents/migrations/0013_conversation_branch.py` — additive, no data
+migration: every existing conversation was started rather than branched, and
+null is the honest value for it.
+
 Design: `docs/superpowers/specs/2026-09-03-workstreams-design.md`. The
 rest of this app's design: `docs/superpowers/specs/
 2026-08-25-agents-and-tools-design.md`.

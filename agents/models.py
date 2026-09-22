@@ -368,6 +368,27 @@ class Conversation(models.Model):
     # reads.
     consolidated_through_index = models.PositiveIntegerField(null=True, blank=True)
     consolidated_at = models.DateTimeField(null=True, blank=True)
+    # PROVENANCE (chat cluster, feature C). Null for every conversation
+    # that was started rather than branched.
+    #
+    # TWO COLUMNS RATHER THAN A TITLE SUFFIX (spec decision 16, owner
+    # ruling flag 4). Two rows with the same name and no stated
+    # relationship is exactly the sidebar an operator cannot explain to
+    # themselves a week later, and a title suffix is a string nobody can
+    # query. A relationship nobody can query is not a relationship.
+    #
+    # `SET_NULL`, NOT `CASCADE`: a branch is a conversation in its own
+    # right, and losing the row it came from is not a reason to lose it.
+    # `branched_at_index` survives that deletion deliberately, so the
+    # provenance line can still say WHERE this thread left off even when
+    # it can no longer say what it left.
+    branched_from = models.ForeignKey("self", null=True, blank=True,
+                                      on_delete=models.SET_NULL,
+                                      related_name="branches")
+    # THE PARENT'S index of the edited turn -- not this conversation's.
+    # A branch renumbers its copied turns from zero, so an index read
+    # against the branch would name the wrong message.
+    branched_at_index = models.PositiveIntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True, db_index=True)
 
