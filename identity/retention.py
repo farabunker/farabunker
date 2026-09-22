@@ -300,8 +300,35 @@ def sweep(*, limit: int = SWEEP_LIMIT, source: str = SOURCE_WEB) -> int:
         .filter(purge_on__lte=timezone.localdate(), hold_by_kind="")
         .order_by("purge_on", "pk")[:limit]
     )
+    return _purge_due(due, source=source)
+
+
+def _purge_due(due, *, source: str = SOURCE_WEB) -> int:
+    """`sweep`'s own per-ticket pass, factored out so the race it
+    guards against can be driven directly in a test without threads:
+    two sweep passes -- this delete's own prune-on-write sweep and,
+    say, `manage.py purge_deleted`, landing in the same window -- can
+    each already be holding the SAME ticket as due before either has
+    purged it. A normal SECOND `sweep()` call would not even see a
+    ticket the first one had, by then, already purged for real -- its
+    own `due` query would simply not include a row that is gone -- so
+    the two snapshots have to be handed to this pass directly to
+    reproduce what two GENUINELY overlapping passes would each see.
+
+    COUNTS ONLY REAL PURGES. `purge_ticket` answers `{}` both when it
+    purged an item with zero registered handlers and when the ticket
+    was ALREADY GONE by the time this pass reached it -- the two are
+    not distinguishable from that return value alone, so this checks
+    the ticket still existed immediately before calling `purge_ticket`,
+    and counts a purge only then. `manage.py purge_deleted` reports
+    this number back to whoever ran it; counting a no-op this pass
+    inherited from a competing one would tell them two items were
+    destroyed when only one was.
+    """
     purged = 0
     for ticket in due:
+        if not DeletionTicket.objects.filter(pk=ticket.pk).exists():
+            continue
         try:
             purge_ticket(SERVICE_PRINCIPAL, ticket, source=source)
         except RetentionRefused as exc:

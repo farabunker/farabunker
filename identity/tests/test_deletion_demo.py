@@ -334,7 +334,7 @@ class TestTheDemo:
             assert InferenceJob.objects.filter(
                 pk=world.generation_queue_job.pk).exists()
 
-    def test_step_4_the_ask_record_is_deleted_on_its_own(self, client, world):
+    def test_step_4_the_ask_record_is_not_deletable_until_slice_two(self, client, world):
         """SLICE 2 BUILDS THE ROUTE. Until then this asserts the record
         is still there and still listed -- the honest state -- and
         task 21 rewrites it to post the delete and assert its absence

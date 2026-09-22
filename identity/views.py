@@ -548,15 +548,23 @@ def deleted_page(request):
     middleware's; a sweep that actually purges pays one per ticket it
     purges.
 
-    THE LOG NAMES NOBODY'S ITEM THIS VIEWER COULD NOT ALREADY READ.
+    THE LOG IS THE VIEWER'S OWN ACTIVITY, UNLESS THEY SEE ALL CONTENT.
     `show_labels` is `sees_all_content(principal, settings_row=row)`,
-    computed once: every event still LISTS for every viewer (the log is
-    a record of what happened, not a per-viewer view of it), but its
-    `target_label` -- written only when `audit_detail` was on at write
-    time -- reaches the template only for a principal who could already
-    read everyone's content. Anybody else sees the same event with the
-    label blanked, exactly as an event carries no label at all when
-    `audit_detail` was off when it was written.
+    computed once: a principal who may already read everyone's content
+    sees every `content.*` event, same as before. Everybody else sees
+    only the events they themselves performed -- `actor_kind`/
+    `actor_key` equal to their own principal -- never somebody else's
+    kind, item key or name. `audit.by_action`'s own read is unscoped by
+    design (the audit trail is not a per-viewer view of itself), so the
+    scoping happens here, over what it returns, the same "identity.audit
+    is the only module that may touch `AuditEvent.objects`" reason the
+    label gate below already follows. A LABEL STILL NEEDS `show_labels`
+    ON TOP: an event surviving the actor filter is the viewer's own, but
+    its `target_label` -- written only when `audit_detail` was on at
+    write time -- reaches the template only for a principal who could
+    already read everyone's content, exactly as before; nobody else's
+    own events carry a label here either, the same way an event carries
+    no label at all when `audit_detail` was off when it was written.
     """
     retention.sweep()
     row = settings_row_for(request)
@@ -588,6 +596,8 @@ def deleted_page(request):
         }
         for event in audit.by_action(
             (CONTENT_PURGED, CONTENT_DELETED, CONTENT_RESTORED))
+        if show_labels or (event.actor_kind == principal.kind
+                            and event.actor_key == principal.key)
     ]
     return render(request, "identity/deleted.html", {
         "tickets": tickets,

@@ -219,6 +219,35 @@ class TestTheSweep:
         assert service.sweep() == 1
         assert REMOVED == ["5"]
 
+    def test_two_overlapping_sweeps_over_one_due_ticket_report_one_purge_in_total(self):
+        """Two sweep passes can each already be holding this SAME
+        ticket as due before either has purged it -- this delete's own
+        prune-on-write sweep and, say, `manage.py purge_deleted`
+        landing in the same window -- and `purge_ticket` on the ticket
+        the other pass already purged is a correct silent no-op
+        (`{}`, `test_a_purge_of_an_already_gone_ticket_is_a_silent_
+        no_op` above). The second pass must not count that no-op as a
+        purge of its own, or an operator running the command would be
+        told two items were destroyed when only one was. Modelled
+        directly, without threads: `_purge_due` is the sweep's own
+        per-ticket pass, given the SAME ticket twice -- exactly the two
+        due-list snapshots two genuinely overlapping `sweep()` calls
+        would each already be holding, since a normal SECOND `sweep()`
+        call's own due query would not even see a ticket the first
+        call had, by then, already purged for real."""
+        user = make_user()
+        ticket = service.delete_content(user_principal(user), kind=KIND_ASK,
+                                        key="5", owner=_owner(user))
+        DeletionTicket.objects.filter(pk=ticket.pk).update(
+            purge_on=timezone.localdate() - datetime.timedelta(days=1))
+        seen_by_pass_one = DeletionTicket.objects.get(pk=ticket.pk)
+        seen_by_pass_two = DeletionTicket.objects.get(pk=ticket.pk)
+
+        total = service._purge_due([seen_by_pass_one, seen_by_pass_two])
+
+        assert total == 1
+        assert REMOVED == ["5"]
+
     def test_it_skips_a_held_ticket(self):
         """Nothing in this delivery WRITES a hold, so the ticket is
         constructed with one directly -- the clause ships now so the

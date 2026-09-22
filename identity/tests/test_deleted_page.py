@@ -130,24 +130,11 @@ class TestThePurgedTab:
 class TestTheDeletionLogHidesOtherPeoplesLabels:
     """The toggle above (`test_with_the_toggle_on_the_labels_appear`)
     proves the label appears for the item's OWN viewer; this proves it
-    stops there. The log itself LISTS every `content.*` event to every
-    viewer -- it is a record of what happened, not a per-viewer view of
-    it -- but a viewer with no standing to read everyone's content must
-    not learn another person's item's own title through it, which is
-    exactly what `audit.by_action`'s unscoped read would leak with
-    nothing further checking who is looking."""
-
-    def test_a_principal_with_no_standing_over_the_item_sees_no_label(self, client):
-        with posture("personal"):
-            row = IdentitySettings.get_solo()
-            row.audit_detail = True
-            row.save()
-            owner, viewer = make_user(), make_user()
-            _ticket_for(owner, label="A private title")
-            sign_in(client, viewer)
-            body = client.get(reverse("identity-deleted")).content.decode()
-        assert copy.KIND_LABELS[copy.KIND_ASK] in body
-        assert "A private title" not in body
+    stops there for a viewer who DOES see the event (a `sees_all_
+    content` principal, or the viewer's own action) but has no standing
+    over ANOTHER person's item -- `TestTheDeletionLogIsScopedToTheViewers
+    OwnActivity` below covers the stronger case, where the viewer has no
+    standing over the event at all and it does not render."""
 
     def test_a_sees_all_content_principal_still_sees_it(self, client):
         """PURGED FIRST, so the label can only reach this viewer through
@@ -161,6 +148,51 @@ class TestTheDeletionLogHidesOtherPeoplesLabels:
             client.post(reverse("identity-deleted-purge", args=[ticket.pk]))
             body = client.get(reverse("identity-deleted")).content.decode()
         assert "A private title" in body
+
+
+class TestTheDeletionLogIsScopedToTheViewersOwnActivity:
+    """The log LISTS every `content.*` event only to a `sees_all_content`
+    principal -- every other principal sees only the events THEY
+    performed (`actor_kind`/`actor_key` equal to their own principal),
+    never a window onto what somebody else deleted, restored or
+    permanently deleted. An item that reached its own date and was
+    removed by the sweep -- always the service principal, never the
+    person who deleted it (`identity/retention.py::sweep`'s own
+    docstring) -- was nobody's own act either, so it never reaches a
+    member's log this way: the date line on the Deleted page was the
+    notice, and the full log is the administrator's
+    (`identity/README.md` section 9)."""
+
+    def test_a_principal_with_no_standing_sees_none_of_someone_elses_activity(self, client):
+        with posture("personal"):
+            a, b = make_user(), make_user()
+            ticket = _ticket_for(a, key="a-item", label="A's own title")
+            service.purge_ticket(user_principal(a), ticket)
+            sign_in(client, b)
+            body = client.get(reverse("identity-deleted")).content.decode()
+        assert a.username not in body
+        assert "a-item" not in body
+
+    def test_the_viewers_own_permanent_delete_still_shows_to_them(self, client):
+        with posture("personal"):
+            b = make_user()
+            ticket = _ticket_for(b, key="b-item", label="B's own title")
+            sign_in(client, b)
+            client.post(reverse("identity-deleted-purge", args=[ticket.pk]))
+            body = client.get(reverse("identity-deleted")).content.decode()
+        assert "b-item" in body
+        assert b.username in body
+
+    def test_a_sees_all_content_principal_sees_everyones_activity(self, client):
+        with posture("open"):
+            a, b = make_user(), make_user()
+            ticket_a = _ticket_for(a, key="a-item2", label="A's own title")
+            service.purge_ticket(user_principal(a), ticket_a)
+            ticket_b = _ticket_for(b, key="b-item2", label="B's own title")
+            service.purge_ticket(user_principal(b), ticket_b)
+            body = client.get(reverse("identity-deleted")).content.decode()
+        assert "a-item2" in body
+        assert "b-item2" in body
 
 
 class TestRestoreAndPurge:

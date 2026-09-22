@@ -527,12 +527,20 @@ with accounts a member is exactly who needs it. The GET prunes before it
 lists: `sweep()` runs first, so the page can never show a row whose
 promised date has already passed — one of the three callers alongside a
 delete and `manage.py purge_deleted`, with no scheduler and no new job
-kind. The log lists every `content.*` event to every viewer — it is a
-record of what happened, not a per-viewer view of it — but an event's
-own `target_label` reaches the page only for a `sees_all_content`
-principal, and only when `audit_detail` was already on at the moment
-that particular event was written; anybody else, or an event written
-while the setting was off, renders with the label blank.
+kind. The log lists every `content.*` event only to a `sees_all_content`
+principal; every other signed-in member sees only the events they
+themselves performed — their own deletes, restores and permanent
+deletes, never anybody else's kind, item key or name. An item of
+theirs that reached its own date and was removed by the sweep — always
+the service principal, whoever triggered it, never the person who
+deleted the item — was nobody's own act either, so it does not
+reappear in that member's log this way: the date line on the Deleted
+page was the notice, and the full log is the administrator's. An
+event's own `target_label` needs `sees_all_content` on top of that: it
+reaches the page only for a principal who could already read
+everyone's content, and only when `audit_detail` was already on at the
+moment that particular event was written; anybody else, or an event
+written while the setting was off, renders with the label blank.
 
 ## Tests
 
