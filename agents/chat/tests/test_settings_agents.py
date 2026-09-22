@@ -210,6 +210,53 @@ class TestTheSettingsList:
             body = client.get(reverse("settings-agents")).content.decode()
         assert "Restrictions" in body
 
+    def test_the_empty_state_spans_the_four_columns_that_are_there(self, client):
+        """WAVE r2. `colspan="{% templatetag openblock %} if
+        show_restrictions {% templatetag closeblock %}5{% templatetag
+        openblock %} else {% templatetag closeblock %}4..."` had an
+        undriven 4-branch: every empty-state test ran with accounts on.
+        A colspan wider than the header row is a cell that overhangs the
+        table."""
+        with posture(POSTURE_OPEN):
+            body = client.get(reverse("settings-agents")).content.decode()
+        assert 'colspan="4"' in body
+        assert "No agents on this box yet." in body
+
+    def test_and_it_spans_five_the_moment_accounts_are_on(self, client):
+        """ANTI-VACUOUS COMPANION: a hard-coded 4 would pass the test
+        above."""
+        with posture(POSTURE_ENTERPRISE):
+            sign_in(client, make_admin())
+            body = client.get(reverse("settings-agents")).content.decode()
+        assert 'colspan="5"' in body
+        assert "No agents on this box yet." in body
+
+    def test_the_tagline_does_not_promise_a_column_this_box_has_not_got(
+        self, client
+    ):
+        """WAVE r1. The page's FIRST sentence said "...and what restricts
+        it." over a table with no Restrictions column -- ADR 0019
+        decision 6 (hidden, never zeroed) contradicted in the words the
+        reader meets first. Both forms are declared in Python and picked
+        on the same `accounts` flag that drives the header, the cell and
+        the colspan."""
+        from agents.chat.views.agents_admin import TAGLINE
+
+        with posture(POSTURE_OPEN):
+            body = client.get(reverse("settings-agents")).content.decode()
+        assert TAGLINE in body
+        assert "restricts it" not in body
+
+    def test_and_the_tagline_names_restrictions_the_moment_accounts_are_on(
+        self, client
+    ):
+        from agents.chat.views.agents_admin import TAGLINE_WITH_RESTRICTIONS
+
+        with posture(POSTURE_ENTERPRISE):
+            sign_in(client, make_admin())
+            body = client.get(reverse("settings-agents")).content.decode()
+        assert TAGLINE_WITH_RESTRICTIONS in body
+
     def test_the_list_costs_the_same_at_one_agent_and_at_twenty_five(self, client):
         """TWO BATCH READS FOR THE WHOLE PAGE, never one per row --
         the discipline `/chat/access/` documents. Both bodies assert a

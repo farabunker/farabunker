@@ -622,6 +622,61 @@ class TestTheRestrictionCountIsNotAskedOnAnOpenBox:
             body = client.get(reverse("chat-agents")).content.decode()
         assert "1 restriction" in body
 
+    def test_the_editor_asks_the_same_question_and_says_nothing_there(self, client):
+        """WHOLE-BRANCH REVIEW I-1. The defect above had a THIRD
+        instance: the two list views were gated, the BUILDER both mounts
+        share was not, so every GET of `chat-agent-edit` on an open box
+        rendered "This agent also carries N restrictions set by an
+        administrator, which you cannot change here." -- a sentence whose
+        two halves are false exactly as they are false on the lists, to
+        the single reader who IS that administrator."""
+        with posture(POSTURE_ENTERPRISE):
+            agent = self._a_row_carrying_a_dormant_label()
+        with posture(POSTURE_OPEN):
+            response = client.get(reverse("chat-agent-edit", args=[agent.pk]))
+        body = response.content.decode()
+        assert response.status_code == 200
+        assert agent.name in body, "the editor itself must still render"
+        assert "also carries" not in body
+
+    def test_and_the_builder_reads_no_entitlement_row_there_either(self):
+        """The queries, not only the sentence: `agent_label_ids` and
+        `name_for_viewer`'s un-threaded `held_entitlement_ids` are two
+        reads paid for an answer nobody asked for."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from agents.chat.agentform import agent_form_context
+
+        with posture(POSTURE_ENTERPRISE):
+            agent = self._a_row_carrying_a_dormant_label()
+            reader = make_user()
+        with posture(POSTURE_OPEN):
+            principal = user_principal(reader)
+            with CaptureQueriesContext(connection) as captured:
+                context = agent_form_context(principal, agent=agent)
+        assert context["foreign_label_sentence"] == ""
+        offenders = [q["sql"] for q in captured.captured_queries
+                     if "entitlement" in q["sql"].lower()]
+        assert not offenders, offenders
+
+    def test_the_editors_sentence_is_back_the_moment_accounts_are_on(self):
+        """ANTI-VACUOUS COMPANION to the two above, the same shape
+        `test_the_chip_is_back_the_moment_accounts_are_on` takes for the
+        list: deleting the sentence outright would pass them both."""
+        from agents.chat.agentform import agent_form_context
+
+        member = make_user()
+        with posture(POSTURE_ENTERPRISE):
+            admin = make_admin()
+            agent = make_agent(slug="editor-restricted",
+                               **owner_fields(user_principal(member)))
+            set_agent_labels(user_principal(admin), agent,
+                             {make_entitlement(name="Legal").pk})
+            sentence = agent_form_context(user_principal(member),
+                                          agent=agent)["foreign_label_sentence"]
+        assert "1 restriction" in sentence
+
 
 class TestWhereCancelLands:
     """TASK 8 REVIEW N3, closed by the second mount that made it matter.

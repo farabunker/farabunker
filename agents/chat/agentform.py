@@ -27,7 +27,7 @@ from agents.chat.service import NO_ENTITLEMENTS_COPY, entitlement_panes
 from agents.labels import agent_label_ids
 from agents.limits import MAX_STEPS_CEILING, MAX_STEPS_DEFAULT
 from agents.visibility import name_for_viewer
-from identity.access import is_admin, labelling_entitlements
+from identity.access import accounts_on, is_admin, labelling_entitlements
 from models.contracts.roles import chat_capable_roles
 
 RESIDENT_WARNING = (
@@ -145,7 +145,20 @@ def agent_form_context(principal, *, agent=None, posted=None, errors=None,
 
     panel = None
     foreign_sentence = ""
-    if agent is not None:
+    # NOT ASKED ON AN OPEN BOX (whole-branch review I-1), gated on
+    # `accounts_on()` alone -- the ruling-A shape both list views already
+    # take (`views/agents.py::_restriction_fold`,
+    # `views/agents_admin.py::agents_admin`). With accounts off a label
+    # restricts nobody (`visible_agents` returns at its `sees_all_content`
+    # short-circuit before the label clause is reached) and the single
+    # reader IS the administrator, so BOTH halves of the sentence
+    # ("restrictions set by an administrator, which you cannot change
+    # here") would be false -- and the two reads behind it
+    # (`agent_label_ids`, plus `name_for_viewer`'s `held_entitlement_ids`)
+    # would be paid for an answer nobody asked for. The panel is
+    # unaffected: `labelling_entitlements` already answers `()` there, so
+    # `choices` was empty and no panel was built either way.
+    if agent is not None and accounts_on(settings_row=settings_row):
         # DEVIATION FROM THE BRIEF (named per the brief's own instruction:
         # the stalled attempt found this and the fix is recorded here
         # rather than rediscovered). The brief's Step 3 computed

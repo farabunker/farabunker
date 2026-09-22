@@ -537,6 +537,12 @@ class TestBranchConversation:
         # is what closes that hole. A level above 1 walks out of
         # `agents/` entirely and cannot name the chat column at all.
         package = visibility.__package__
+        # AND THE RESOLUTION ITSELF IS PINNED (wave r3). A `None` or
+        # empty `__package__` collapses `prefix` to `""`, `module`
+        # becomes bare `"chat"`, and the `agents.chat` assertion below
+        # FAILS OPEN -- this gate would then pass on the very import it
+        # exists to catch.
+        assert package == "agents", package
         imported = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

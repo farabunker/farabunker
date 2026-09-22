@@ -141,6 +141,13 @@ class TestTheRowPredicateIsSharedNotSpelledTwice:
             # imported the name rather than the module.
             widened = (lambda turn: turn.depth == 0
                        and turn.state == Turn.State.DONE)
+            # ONE DEFINITION, PINNED AS ONE (wave r4). Patching both
+            # names passes whether they hold one function or two, which
+            # is precisely what this test claims to prove; the identity
+            # assertion is the claim, the two patches are only how a
+            # from-import is rebound.
+            assert (rendering_module.is_editable_turn_row
+                    is visibility_module.is_editable_turn_row)
             monkeypatch.setattr(visibility_module, "is_editable_turn_row", widened)
             monkeypatch.setattr(rendering_module, "is_editable_turn_row", widened)
 

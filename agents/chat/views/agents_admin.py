@@ -48,6 +48,18 @@ from identity.request import principal_for_request, settings_row_for
 REACH_EVERYONE = "Everyone on this box"
 REACH_GIVEN = "The people it is given to"
 
+# THE PAGE'S OWN FIRST SENTENCE, in the same two-declared-forms shape and
+# for the same reason the Restrictions column has two states (ADR 0019
+# decision 6, hidden never zeroed): with accounts off the column is not
+# rendered, so a tagline promising "what restricts it" contradicts the
+# table under it in the reader's very first sentence (wave r1). Declared
+# here rather than `{% if %}`-ed inside a template-typed sentence, which
+# is the house rule that stops this recurring.
+TAGLINE_WITH_RESTRICTIONS = (
+    "Every agent on this box — who can reach it, who owns it, and what "
+    "restricts it.")
+TAGLINE = "Every agent on this box — who can reach it and who owns it."
+
 
 @require_safe
 def agents_admin_list(request):
@@ -98,6 +110,10 @@ def agents_admin_list(request):
         # this page needs the flag -- and printing `0` would be a third
         # wrong answer, meaning "none" where the truth is "not asked".
         "show_restrictions": accounts,
+        # ONE FLAG, EVERY DEPENDENT SENTENCE -- the header, the cell, the
+        # colspan and now the tagline all read `accounts`, so none of
+        # them can disagree with another.
+        "tagline": TAGLINE_WITH_RESTRICTIONS if accounts else TAGLINE,
         # WHERE THE EDITOR COMES BACK TO. `request.get_full_path()` is
         # this page including whatever query string it was reached with
         # (the assistant panel's own `?assistant=1` among them), and the
