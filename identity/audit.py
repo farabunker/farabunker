@@ -102,7 +102,7 @@ def by_action(actions, limit: int = 100) -> list[AuditEvent]:
 
     An empty `actions` answers `[]` without querying -- `action__in=()`
     is a query that can only return nothing, and the Deleted page's
-    Purged tab is a never-500 surface that should not pay for one.
+    Deletion log is a never-500 surface that should not pay for one.
     """
     actions = tuple(actions)
     if not actions:

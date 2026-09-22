@@ -41,7 +41,7 @@ from identity.contracts.actions import (
     CONTENT_DELETED, CONTENT_PURGED, CONTENT_RESTORED, SOURCE_WEB,
 )
 from identity.contracts.principals import SERVICE_PRINCIPAL
-from identity.contracts.retention import RETENTION_KINDS, RetentionRefused
+from identity.contracts.retention import RetentionRefused
 from identity.models import DeletionTicket, IdentitySettings
 
 logger = logging.getLogger(__name__)
@@ -159,8 +159,6 @@ def delete_content(actor, *, kind: str, key, owner, label: str = "",
     principal -- never the principal that triggered this call -- exactly
     as `sweep` below documents.
     """
-    if kind not in RETENTION_KINDS:
-        raise ValueError(f"{kind!r} is not a retention kind.")
     row = IdentitySettings.get_solo()
     purge_on = timezone.localdate() + datetime.timedelta(days=row.retention_days)
     with transaction.atomic():

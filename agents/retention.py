@@ -147,14 +147,7 @@ def purge_conversation(key: str) -> int:
     is not a UUID at all -- is not an error: the item may have been hard
     -deleted by an older path while its ticket stood.
 
-    ORDER, and every step's reason -- BYTES LAST (the registered
-    artifact-purge slot used to run SECOND,
-    right after collect, which meant a later step raising -- the
-    attachment cleanup, say -- rolled the ROW deletes back while the
-    files that slot had already removed from disk stayed gone; a
-    filesystem delete has no rollback, exactly the reason `agents.
-    attachments.delete_attachments_for`'s own docstring gives for its
-    document-file caveat):
+    ORDER, and every step's reason -- BYTES LAST:
       1. collect (see `_collect`) -- nothing is deleted yet;
       2. the row deletes: this conversation's `Share` rows, then
          `agents.attachments.delete_attachments_for` (which reaches
@@ -180,9 +173,7 @@ def purge_conversation(key: str) -> int:
          cleanup's own propagation, above, makes that true for step 2),
          and no file was ever
          deleted for a conversation whose ticket just survived to be
-         retried. The reverse order could delete a file whose row then
-         survived a later failure, with nothing left pointing at the
-         gap.
+         retried.
 
     A DELIBERATE, HONEST LEFTOVER: `agents.models.
     WorkstreamTaint.first_conversation` keeps this conversation's id BY

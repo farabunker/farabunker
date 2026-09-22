@@ -7,7 +7,7 @@ import uuid
 import pytest
 
 from agents.contracts import artifacts as artifacts_module
-from agents.contracts.artifacts import artifact_purge, register_artifact_purge
+from agents.contracts.artifacts import register_artifact_purge
 from agents.contracts.tests._helpers import isolated_attachment_registry  # noqa: F401
 from agents.models import Conversation, Share, ToolInvocation, Turn
 from agents.retention import purge_conversation, scrub_tool_records

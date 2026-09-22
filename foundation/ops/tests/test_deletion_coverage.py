@@ -55,9 +55,7 @@ from django.utils.module_loading import import_string
 from identity.access import owner_fields
 from identity.contracts.cascades import retention_handlers
 from identity.contracts.principals import OPEN_PRINCIPAL
-from identity.contracts.retention import (
-    KIND_ASK, KIND_CONVERSATION, KIND_DOCUMENT, KIND_VISION_JOB,
-)
+from identity.contracts.retention import KIND_CONVERSATION
 
 # Every model carrying user content, mapped to the ticket kinds whose
 # registered handlers reach it. Written from the content inventory in

@@ -106,7 +106,7 @@ class TestTheDeletedTab:
         assert response.status_code == 200
 
 
-class TestThePurgedTab:
+class TestTheDeletionLog:
     def test_it_shows_content_free_events_with_the_toggle_off(self, client):
         with posture("open"):
             user = make_user()

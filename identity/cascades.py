@@ -58,13 +58,6 @@ def run_retention(kind: str, key: str) -> dict[str, int]:
     the body lives here rather than in a `_run_retention` that would
     exist only to be called once.
 
-    The departure from `EntitlementCascade`'s two-mode shape is
-    deliberate: that registry needs `commit=False` because an
-    entitlement delete is irreversible the instant it is confirmed, so
-    the count IS the confirmation. A deletion's confirmation is the
-    Deleted page, where the item sits named and restorable, so there is
-    nothing here for a dry-run pass to tell anybody.
-
     NEVER SWALLOWS, exactly as `_run` does not: a handler that cannot be
     imported, or that raises, takes the whole purge down with it, so
     nothing is half-purged at the row level and the ticket survives to
@@ -77,15 +70,6 @@ def run_retention(kind: str, key: str) -> dict[str, int]:
         # handler, the `agents.attachments.delete_attachments_for`
         # discipline: NEITHER SWALLOWS, and the savepoint is what makes
         # that safe.
-        #
-        # `delete_attachments_for` used to catch a broken cleanup
-        # provider's failure so it would not block a delete the actor had
-        # already confirmed -- but a delete now only writes a ticket, so
-        # that reasoning stopped applying once this cascade moved to
-        # running at PURGE time instead: it now LOGS and RE-RAISES,
-        # exactly like every retention handler here, because a purge that
-        # reported success while leaving content behind is exactly the
-        # failure this whole feature exists to prevent.
         #
         # The savepoint is still required. Without it, a DATABASE-level
         # error inside a handler poisons the Postgres connection for the

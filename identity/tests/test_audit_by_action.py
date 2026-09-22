@@ -1,4 +1,4 @@
-"""`identity.audit.by_action` -- the Purged tab's one read."""
+"""`identity.audit.by_action` -- the Deletion log's one read."""
 from __future__ import annotations
 
 import pytest
