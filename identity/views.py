@@ -544,8 +544,9 @@ def deleted_page(request):
     `visible_tickets`, `sees_all_content` and every row's own
     `may_purge` call -- the same per-request-reuse norm `entitlement_edit`
     already follows -- so a row-per-ticket loop costs no per-row settings
-    query, and this GET costs no settings read beyond the middleware's
-    own.
+    query, and this GET costs no settings read of its own beyond the
+    middleware's; a sweep that actually purges pays one per ticket it
+    purges.
 
     THE LOG NAMES NOBODY'S ITEM THIS VIEWER COULD NOT ALREADY READ.
     `show_labels` is `sees_all_content(principal, settings_row=row)`,

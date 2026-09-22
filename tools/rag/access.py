@@ -316,10 +316,13 @@ def _deleted_document_ids() -> list[int]:
     box with at least one open conversation ticket pays the third query,
     still bounded by the number of TICKETS rather than documents.
 
-    COMPUTED ONCE PER CALL AND THREADED. Its three callers each call it
-    exactly once and pass the result down -- `attached_documents` in
-    particular would otherwise pay for it twice, once for its own
-    `chat_scoped` query and once inside `readable_documents`.
+    COMPUTED ONCE PER CALL AND THREADED. Its four callers --
+    `readable_documents`, `attached_documents`, `listable_documents`
+    (all in this module) and `tools.rag.retrieval.retrieve_nodes` --
+    each call it exactly once and pass the result down --
+    `attached_documents` in particular would otherwise pay for it
+    twice, once for its own `chat_scoped` query and once inside
+    `readable_documents`.
     """
     ids = [int(key) for key in ticketed_keys(KIND_DOCUMENT) if key.isdecimal()]
     ids.extend(
