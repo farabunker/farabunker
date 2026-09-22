@@ -50,7 +50,8 @@ from django.views.decorators.http import require_http_methods
 
 from agents.chat.agentform import ROLE_NOT_OFFERED, agent_form_context, chat_role_options
 from agents.chat.service import (
-    entitlement_change_flash, parse_entitlement_diff, validated_next_url,
+    entitlement_change_flash, parse_entitlement_diff, validated_next_link,
+    validated_next_url,
 )
 from agents.chat.sidebar import sidebar_context
 from agents.labels import agent_entitlement_ids, agent_label_ids, set_agent_labels
@@ -152,6 +153,30 @@ def _restriction_fold(principal, settings_row):
     return fold
 
 
+def _cancel_url(request, next_value):
+    """Where `Cancel` lands: the `next` this page arrived with, validated
+    for an href -- or this principal's own agent list.
+
+    TASK 8 REVIEW N3. The link used to go to `chat-agents`
+    unconditionally, which was the right call while `/chat/agents/` was
+    the only mount: an UNVALIDATED GET `next` must never become a
+    clickable href. `/settings/agents/` is the second mount, and from
+    there an administrator who cancels landed on the member-facing list
+    -- a page that does not even contain the row they were just looking
+    at. `agents.chat.service.validated_next_link` is what makes the
+    value safe enough to render: same-origin, same-scheme, AND a path on
+    this box. A hostile or foreign value falls back to the list, exactly
+    as it did before.
+
+    THE HREF AND THE HIDDEN FIELD ARE STILL DIFFERENT THINGS. The hidden
+    `next` is echoed raw (it is escaped by the template and validated
+    again at POST time by `validated_next_url`); only what a reader can
+    CLICK goes through the stricter guard, and only ever as the whole
+    href.
+    """
+    return validated_next_link(request, next_value) or reverse("chat-agents")
+
+
 def _unoffered_role_errors(principal, posted, settings_row):
     """`{"llm_role": ROLE_NOT_OFFERED}` when this body names a role the
     select never offered -- `{}` otherwise.
@@ -199,10 +224,16 @@ def agent_new(request):
     settings_row = settings_row_for(request)
     principal = principal_for_request(request, settings_row=settings_row)
     if request.method != "POST":
+        next_value = request.GET.get("next", "")
         return render(request, "chat/agent_edit.html", {
+            # NO `next_value=` INTO THE BUILDER HERE: the create route has
+            # no row to label yet, so `agent_form_context` returns no
+            # entitlement panel and there is no second form to carry a
+            # `next` for.
             **agent_form_context(principal, settings_row=settings_row),
             "form_action": reverse("chat-agent-new"),
-            "next_value": request.GET.get("next", ""),
+            "next_value": next_value,
+            "cancel_url": _cancel_url(request, next_value),
             **sidebar_context(principal, settings_row=settings_row),
         })
     fields = request.POST.dict()
@@ -211,11 +242,13 @@ def agent_new(request):
     if not errors:
         row, errors = create_agent(principal, fields, settings_row=settings_row)
     if errors:
+        next_value = request.POST.get("next", "")
         return render(request, "chat/agent_edit.html", {
             **agent_form_context(principal, posted=fields, errors=errors,
                                  settings_row=settings_row),
             "form_action": reverse("chat-agent-new"),
-            "next_value": request.POST.get("next", ""),
+            "next_value": next_value,
+            "cancel_url": _cancel_url(request, next_value),
             **sidebar_context(principal, settings_row=settings_row),
         })
     messages.info(request, f"Created {row.name}.")
@@ -258,21 +291,30 @@ def agent_edit(request, pk: int):
         if action == LABELS_ACTION:
             return _save_labels(request, principal, agent, settings_row)
         if action != FIELDS_ACTION:
+            next_value = request.POST.get("next", "")
             return render(request, "chat/agent_edit.html", {
                 **agent_form_context(principal, agent=agent,
+                                     next_value=next_value,
                                      settings_row=settings_row),
                 "form_action": reverse("chat-agent-edit", args=[agent.pk]),
-                "next_value": request.POST.get("next", ""),
+                "next_value": next_value,
+                "cancel_url": _cancel_url(request, next_value),
                 "page_error": AGENT_UNKNOWN_ACTION,
                 **sidebar_context(principal, settings_row=settings_row),
             }, status=400)
         return _save_fields(request, principal, agent, settings_row)
+    # THE GET ECHOES `?next=` AND DOES NOTHING ELSE WITH IT -- see this
+    # module's docstring. The ONE exception is the Cancel link, which is
+    # built through `validated_next_link`'s stricter same-box-path guard
+    # (`_cancel_url` above, review N3); the raw value still reaches only
+    # the hidden fields.
+    next_value = request.GET.get("next", "")
     return render(request, "chat/agent_edit.html", {
-        **agent_form_context(principal, agent=agent, settings_row=settings_row),
+        **agent_form_context(principal, agent=agent, next_value=next_value,
+                             settings_row=settings_row),
         "form_action": reverse("chat-agent-edit", args=[agent.pk]),
-        # THE GET ECHOES `?next=` AND DOES NOTHING ELSE WITH IT -- see
-        # this module's docstring.
-        "next_value": request.GET.get("next", ""),
+        "next_value": next_value,
+        "cancel_url": _cancel_url(request, next_value),
         **sidebar_context(principal, settings_row=settings_row),
     })
 
@@ -282,11 +324,14 @@ def _save_fields(request, principal, agent, settings_row):
     errors = (_unoffered_role_errors(principal, fields, settings_row)
               or update_agent(principal, agent, fields, settings_row=settings_row))
     if errors:
+        next_value = request.POST.get("next", "")
         return render(request, "chat/agent_edit.html", {
             **agent_form_context(principal, agent=agent, posted=fields,
-                                 errors=errors, settings_row=settings_row),
+                                 errors=errors, next_value=next_value,
+                                 settings_row=settings_row),
             "form_action": reverse("chat-agent-edit", args=[agent.pk]),
-            "next_value": request.POST.get("next", ""),
+            "next_value": next_value,
+            "cancel_url": _cancel_url(request, next_value),
             **sidebar_context(principal, settings_row=settings_row),
         })
     messages.info(request, f"Saved {agent.name}.")

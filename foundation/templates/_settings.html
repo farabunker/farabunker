@@ -257,6 +257,7 @@ blocks take the same width and their edges line up; see the
       <a href="{% url 'rag-settings' %}{{ assistant.open_query }}" class="{% block side_current_library %}{% endblock %}">Library</a>
       <a href="{% url 'chat-settings' %}{{ assistant.open_query }}" class="{% block side_current_chat %}{% endblock %}">Chat</a>
       <a href="{% url 'jobs-settings' %}{{ assistant.open_query }}" class="{% block side_current_jobs %}{% endblock %}">Job execution</a>
+      <a href="{% url 'settings-agents' %}{{ assistant.open_query }}" class="{% block side_current_agent_library %}{% endblock %}">Agent library</a>
       {% if "vision" in farabunker_features %}
       <a href="{% url 'vision-engine-files' %}{{ assistant.open_query }}" class="{% block side_current_engine_files %}{% endblock %}">Engine files</a>
       {% endif %}

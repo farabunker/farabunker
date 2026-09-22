@@ -303,6 +303,21 @@ ROUTE_RULES: dict[str, str] = {
     "settings-assistant-reset": "S",
     "settings-assistant-panel": "S",
 
+    # --- /settings/agents/ (the agent library, chat cluster feature B) --
+    # S, the same call `chat-settings` and `chat-tool-entitlements`
+    # already record: a page whose WHOLE body is an administrator-only
+    # listing has nothing to show anybody else, so it refuses at the gate
+    # rather than serving an empty shell. The view carries its own
+    # `is_admin` check as well, for the reason `settings-assistant-*`
+    # above does: the gate is not the only way a view function can be
+    # reached.
+    #
+    # NOT O, unlike `chat-agent-edit` below, and the two are not in
+    # tension: the EDIT route is class O precisely so a non-admin owner
+    # can open their own row, and this LISTING is the box-wide view of
+    # every row, which only an administrator has any standing over.
+    "settings-agents": "S",
+
     # --- /identity/ (new in IA-1) --------------------------------------
     "identity-login": "P",
     "identity-logout": "A",

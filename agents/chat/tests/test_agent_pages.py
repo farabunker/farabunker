@@ -509,6 +509,10 @@ class TestEditingAnAgent:
         body = response.content.decode()
         assert response.status_code == 200
         assert 'name="next"' in body
+        # AND IT IS NOT CLICKABLE (review N3, Task 10): the Cancel link
+        # is built through `validated_next_link`, so a hostile value
+        # reaches the hidden field and the hidden field only.
+        assert 'href="https://elsewhere.example/steal"' not in body
 
     def test_an_off_origin_next_on_the_POST_falls_back_to_the_list(self, client):
         owner = make_user()
@@ -554,6 +558,177 @@ class TestEditingAnAgent:
                     "system_prompt": "", "max_steps": value, "enabled": "on"})
                 assert response.status_code == 200
                 assert str(MAX_STEPS_CEILING) in response.content.decode()
+
+
+class TestWhereCancelLands:
+    """TASK 8 REVIEW N3, closed by the second mount that made it matter.
+
+    The Cancel link used to go to `chat-agents` unconditionally -- the
+    right call while `/chat/agents/` was the only mount, because an
+    UNVALIDATED GET `next` must never become a clickable href. With
+    `/settings/agents/` mounted, an administrator who cancelled landed
+    on the member-facing list instead of the page they came from. The
+    fix is a validator, not a raw echo: `agents.chat.service.
+    validated_next_link` requires same origin, same scheme AND a path on
+    this box, and anything else falls back to the list exactly as
+    before.
+    """
+
+    def _href_for(self, body: str) -> str:
+        import re
+
+        match = re.search(r'<a href="([^"]*)" class="muted">Cancel</a>', body)
+        assert match is not None, "the Cancel link is gone"
+        return match.group(1)
+
+    def test_a_same_box_next_becomes_the_cancel_target(self, client):
+        admin = make_admin()
+        with posture(POSTURE_ENTERPRISE):
+            agent = make_agent(slug="cancel-back",
+                               **owner_fields(user_principal(admin)))
+            sign_in(client, admin)
+            url = reverse("chat-agent-edit", args=[agent.pk])
+            body = client.get(
+                f"{url}?next={reverse('settings-agents')}").content.decode()
+        assert self._href_for(body) == reverse("settings-agents")
+
+    @pytest.mark.parametrize("hostile", [
+        "https://elsewhere.example/steal",   # another origin outright
+        "//elsewhere.example/steal",         # scheme-relative, the classic
+        "javascript:alert(1)",               # not a URL this box routes
+        "chat/agents/",                      # not even a path
+    ], ids=["off-origin", "scheme-relative", "script-scheme", "relative"])
+    def test_a_hostile_next_falls_back_to_the_chat_list(self, client, hostile):
+        admin = make_admin()
+        with posture(POSTURE_ENTERPRISE):
+            agent = make_agent(slug=f"cancel-{abs(hash(hostile)) % 9999}",
+                               **owner_fields(user_principal(admin)))
+            sign_in(client, admin)
+            url = reverse("chat-agent-edit", args=[agent.pk])
+            body = client.get(f"{url}?next={hostile}").content.decode()
+        assert self._href_for(body) == reverse("chat-agents")
+
+    def test_no_next_at_all_is_the_list_it_always_was(self, client):
+        """The unchanged half: nothing about the single-mount behaviour
+        moved."""
+        admin = make_admin()
+        with posture(POSTURE_ENTERPRISE):
+            agent = make_agent(slug="cancel-plain",
+                               **owner_fields(user_principal(admin)))
+            sign_in(client, admin)
+            body = client.get(
+                reverse("chat-agent-edit", args=[agent.pk])).content.decode()
+        assert self._href_for(body) == reverse("chat-agents")
+
+    def test_the_create_page_cancels_somewhere_too(self, client):
+        """`chat-agent-new` renders the same template, so a `cancel_url`
+        missing from ONE of the five render paths would ship an empty
+        `href` on that page and nowhere else."""
+        with posture(POSTURE_ENTERPRISE):
+            sign_in(client, make_user())
+            body = client.get(reverse("chat-agent-new")).content.decode()
+        assert self._href_for(body) == reverse("chat-agents")
+
+    def test_a_refused_save_keeps_the_cancel_target_it_arrived_with(self, client):
+        """The POST render paths carry it too -- a refusal that dropped
+        the target would strand an operator who was one bad field away
+        from getting back."""
+        admin = make_admin()
+        with posture(POSTURE_ENTERPRISE):
+            agent = make_agent(slug="cancel-refused",
+                               **owner_fields(user_principal(admin)))
+            sign_in(client, admin)
+            body = client.post(reverse("chat-agent-edit", args=[agent.pk]), {
+                "action": "fields", "name": "", "description": "",
+                "system_prompt": "", "max_steps": "2", "enabled": "on",
+                "next": reverse("settings-agents")}).content.decode()
+        assert self._href_for(body) == reverse("settings-agents")
+
+    def test_an_unknown_action_keeps_it_as_well(self, client):
+        admin = make_admin()
+        with posture(POSTURE_ENTERPRISE):
+            agent = make_agent(slug="cancel-unknown",
+                               **owner_fields(user_principal(admin)))
+            sign_in(client, admin)
+            response = client.post(reverse("chat-agent-edit", args=[agent.pk]), {
+                "action": "nonsense", "next": reverse("settings-agents")})
+        assert response.status_code == 400
+        assert self._href_for(response.content.decode()) == reverse("settings-agents")
+
+
+class TestTheLabelPanelCarriesTheMountsOwnNext:
+    """The panel renders its OWN `<form>` -- it must, since nested forms
+    are illegal HTML -- so the field form's hidden `next` does not reach
+    it. Without a copy, a label save from `/settings/agents/` lands back
+    on a row that has forgotten where it came from.
+
+    NO VIEW CHANGE, exactly as Task 9's report predicted:
+    `_save_labels` already honours `validated_next_url` first and falls
+    back to this row. The whole of the second mount's need is one hidden
+    field in `tp_fields`.
+    """
+
+    def _panel_with(self, next_value):
+        from agents.chat.agentform import agent_form_context
+
+        admin = make_admin()
+        make_entitlement(name="Anything")
+        agent = make_agent(slug=f"panel-next-{next_value or 'none'}"[:40],
+                           **owner_fields(user_principal(admin)))
+        return agent_form_context(user_principal(admin), agent=agent,
+                                  next_value=next_value)["entitlement_panel"]
+
+    def test_the_panel_ships_the_mounts_next_when_there_is_one(self):
+        with posture(POSTURE_ENTERPRISE):
+            panel = self._panel_with(reverse("settings-agents"))
+        assert panel is not None
+        assert panel["fields"]["next"] == reverse("settings-agents")
+
+    def test_the_chat_mounts_panel_is_byte_identical_to_what_it_was(self):
+        """An EMPTY hidden field is not the same markup as no hidden
+        field, and `_transfer_panel.html` renders `tp_fields` in order --
+        so the default really is the absence of the key, not an empty
+        string under it."""
+        with posture(POSTURE_ENTERPRISE):
+            panel = self._panel_with("")
+        assert panel is not None
+        assert "next" not in panel["fields"]
+        assert list(panel["fields"]) == ["pk", "action"]
+
+    def test_a_label_save_from_the_settings_mount_returns_there(self, client):
+        """END TO END, through the route rather than the builder: the
+        panel's own hidden field is what `validated_next_url` reads."""
+        admin = make_admin()
+        with posture(POSTURE_ENTERPRISE):
+            legal = make_entitlement(name="Legal")
+            grant(legal, user=admin, role="owner")
+            agent = make_agent(slug="labels-return",
+                               **owner_fields(user_principal(admin)))
+            sign_in(client, admin)
+            response = client.post(reverse("chat-agent-edit", args=[agent.pk]), {
+                "action": "labels", "op": "add", "add": str(legal.pk),
+                "next": reverse("settings-agents")})
+        assert response.status_code == 302
+        assert response["Location"] == reverse("settings-agents")
+        assert legal.pk in agent_label_ids(agent)
+
+    def test_the_rendered_page_really_carries_it_in_the_panels_own_form(self, client):
+        """The builder's key has to survive into the panel's markup --
+        `_transfer_panel.html` renders `tp_fields`, and a mount that
+        passed the value to a fragment that ignored it would pass every
+        test above."""
+        admin = make_admin()
+        with posture(POSTURE_ENTERPRISE):
+            make_entitlement(name="Anything")
+            agent = make_agent(slug="labels-rendered",
+                               **owner_fields(user_principal(admin)))
+            sign_in(client, admin)
+            url = reverse("chat-agent-edit", args=[agent.pk])
+            body = client.get(
+                f"{url}?next={reverse('settings-agents')}").content.decode()
+        panel_at = body.index('class="transfer-panel')
+        expected = f'<input type="hidden" name="next" value="{reverse("settings-agents")}">'
+        assert expected in body[panel_at:]
 
 
 class TestNoEntitlementNameLeaksFromTheseRoutes:
@@ -865,8 +1040,15 @@ class TestTheAudienceWriteInBothDirections:
         assert legal.pk not in offered
 
     def test_a_forged_remove_is_refused_and_the_row_survives(self, client):
+        """THE MEMBER OWNS SOMETHING ELSE FIRST (review M2). Without the
+        grant, `labelling_entitlements` answers `()`, `offered` is empty
+        and `wanted <= offered` refuses for the TRIVIAL reason -- this
+        would pass against a gate that simply refused everybody who owns
+        nothing. With it, the refusal is `{legal} ⊄ {mine}`, which is
+        the subset check actually doing the work."""
         with posture(POSTURE_ENTERPRISE):
             member, agent, legal = self._member_owned_agent_an_admin_labelled()
+            grant(make_entitlement(name="Mine"), user=member, role="owner")
             sign_in(client, member)
             response = client.post(reverse("chat-agent-edit", args=[agent.pk]), {
                 "action": "labels", "op": "remove", "remove": str(legal.pk)})
@@ -874,8 +1056,11 @@ class TestTheAudienceWriteInBothDirections:
         assert agent_label_ids(agent) == frozenset({legal.pk})
 
     def test_a_forged_add_is_refused_identically(self, client):
+        """The same non-empty `offered` as its sibling above, for the
+        same reason (review M2)."""
         with posture(POSTURE_ENTERPRISE):
             member, agent, _legal = self._member_owned_agent_an_admin_labelled()
+            grant(make_entitlement(name="Mine"), user=member, role="owner")
             unowned = make_entitlement(name="Finance")
             sign_in(client, member)
             client.post(reverse("chat-agent-edit", args=[agent.pk]), {
@@ -1184,52 +1369,19 @@ class TestTheTruthTable:
     label_permitted_q`, which is a truth table, not an exclusive choice.
     An administrator with `admin_sees_content` ON sees every enabled row
     whatever this table says, because the `sees_all_content`
-    short-circuit returns before the label clause is reached."""
+    short-circuit returns before the label clause is reached.
 
-    def test_all_four_rows(self):
-        from agents.visibility import visible_agents
-
-        holder, stranger, admin = (make_user(), make_user(username="stranger"),
-                                   make_admin())
-        legal = make_entitlement(name="Legal")
-        with posture(POSTURE_ENTERPRISE):
-            grant(legal, user=holder)
-            owner_bits = owner_fields(user_principal(holder))
-            private = make_agent(slug="r1-private", **owner_bits)
-            private_labelled = make_agent(slug="r2-private-labelled", **owner_bits)
-            wide = make_agent(slug="r3-wide", box_wide=True,
-                              **owner_fields(user_principal(admin)))
-            wide_labelled = make_agent(slug="r4-wide-labelled", box_wide=True,
-                                       **owner_fields(user_principal(admin)))
-            set_agent_labels(user_principal(admin), private_labelled, {legal.pk})
-            set_agent_labels(user_principal(admin), wide_labelled, {legal.pk})
-
-            holder_sees = set(visible_agents(user_principal(holder))
-                              .values_list("slug", flat=True))
-            stranger_sees = set(visible_agents(user_principal(stranger))
-                                .values_list("slug", flat=True))
-        assert private.slug in holder_sees and private.slug not in stranger_sees
-        assert private_labelled.slug in holder_sees
-        assert wide.slug in holder_sees and wide.slug in stranger_sees
-        assert wide_labelled.slug in holder_sees
-        assert wide_labelled.slug not in stranger_sees
-
-    def test_the_AND_still_restricts_an_owner_of_a_labelled_row(self):
-        """The AND applies to an owner too -- which is what makes
-        labelling one's own agent actually restrict it rather than being
-        bypassable by the person it is aimed at."""
-        from agents.visibility import visible_agents
-
-        owner, admin = make_user(), make_admin()
-        legal = make_entitlement(name="Legal")
-        with posture(POSTURE_ENTERPRISE):
-            agent = make_agent(slug="own-but-labelled",
-                               **owner_fields(user_principal(owner)))
-            set_agent_labels(user_principal(admin), agent, {legal.pk})
-            sees = set(visible_agents(user_principal(owner))
-                       .values_list("slug", flat=True))
-        assert "own-but-labelled" not in sees
-        assert agent.slug == "own-but-labelled"
+    THE TABLE ITSELF IS `agents/chat/tests/test_visibility.py`'s, NOT
+    THIS MODULE'S (review M4). Two tests here -- `test_all_four_rows` and
+    `test_the_AND_still_restricts_an_owner_of_a_labelled_row` -- called
+    `visible_agents` directly and touched no route, no template and no
+    client, re-pinning in a PAGE module what
+    `test_a_labelled_agent_is_visible_only_to_a_holder` and
+    `test_an_OWNER_loses_their_own_labelled_agent` already hold beside
+    the function they are about. They are deleted rather than moved: the
+    properties are unchanged and already covered there. What is left
+    here is the one test that earns a page module -- it drives the
+    narrowing through THIS page's own POST, which nothing else does."""
 
     def test_a_label_set_from_THIS_page_narrows_the_row_the_same_way(self, client):
         """THE LOOP CLOSED. The truth table above is asserted against
@@ -1282,11 +1434,20 @@ class TestTheInstallInteraction:
         assert row.name in body
 
     def test_the_row_still_reaches_everybody_exactly_as_it_did_before(self):
+        """UNDER `POSTURE_ENTERPRISE` (review M3). With no posture
+        context this ran on an OPEN box, where `sees_all_content`
+        answers True for every principal and `visible_agents` returns at
+        its short-circuit before any ownership or `box_wide` leg is
+        evaluated -- so it passed with `box_wide=False`, with the
+        `box_wide` leg deleted, or with the label clause removed. Inside
+        an accounts-on posture, a stranger's answer really is the
+        `box_wide` leg's, which is the property this test claims."""
         from agents.defaults import DEFAULT_AGENTS, install_default
         from agents.visibility import visible_agents
         from identity.contracts.principals import Principal
 
         slug = DEFAULT_AGENTS[0].slug
-        install_default("agent", slug, Principal("user", "5"))
-        assert slug in set(visible_agents(Principal("user", "9"))
-                           .values_list("slug", flat=True))
+        with posture(POSTURE_ENTERPRISE):
+            install_default("agent", slug, Principal("user", "5"))
+            assert slug in set(visible_agents(Principal("user", "9"))
+                               .values_list("slug", flat=True))

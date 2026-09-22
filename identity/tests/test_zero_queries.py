@@ -75,6 +75,27 @@ pytestmark = pytest.mark.django_db
 #   * `inference-model-sets` (`models/registry/views.py::model_sets`)
 #     reads `ModelSet.objects.prefetch_related(...).all()` -- the base
 #     query alone names `inference_modelset`.
+#   * `settings-agents` (`agents/chat/views/agents_admin.py`, the agent
+#     library, chat cluster feature B) and `chat-agents`
+#     (`agents/chat/views/agents.py`) both call `agent_entitlement_ids()`
+#     -- the same unconditional bare `SELECT ... FROM
+#     agents_agententitlement` that puts `chat-agent-entitlements` on
+#     this list, for the same reason and with the same answer. Each
+#     prints, per row, how many entitlements RESTRICT that agent; that
+#     count is the page's own subject, read on an empty database as on a
+#     full one, and never a decision about whether the open principal may
+#     see somebody else's row. Confirmed directly, the same way as every
+#     other entry here: GET-swept against the full twelve-table set on an
+#     empty database, and `agents_agententitlement` is named in a
+#     captured query on both.
+# `settings-agents` is the newest MOUNT in `config/urls.py`
+# (`settings/agents/`) and is therefore the one exclusion here that is
+# also a mount rather than only a page, which is why it is named
+# explicitly: the rule this module states is one representative GET per
+# mount, and a mount left silently unnamed reads as an oversight rather
+# than a decision. `settings/assistant/` is in the same position -- its
+# three routes are the settings assistant's own, swept by
+# `agents/chat/tests/test_assistant_panel.py`.
 # None of these four is a permission CHECK -- none of them decides
 # whether the open principal may see somebody ELSE's row, which is the
 # claim this module exists to pin (spec section 3.4). Each is the page

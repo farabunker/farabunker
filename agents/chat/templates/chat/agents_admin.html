@@ -1,0 +1,119 @@
+{% extends "_settings.html" %}
+{% comment %}
+THE AGENT LIBRARY (`/settings/agents/`, class S).
+
+EXTENDS `_settings.html`, NOT `chat/base.html` -- the same call
+`chat/settings.html` records for itself: this is a settings-area page
+and wants the settings shell's sidebar and two-column layout, not the
+chat rail. Being outside `chat/base.html`'s frame also puts it outside
+the chat CSS gate's scan (`foundation/ops/tests/test_css_ownership.py`
+scans `agents/chat/templates/chat/base.html` against the `chat/_*.html`
+fragments and the pages that render them); the gate that DOES cover it
+is the same file's `test_no_template_retypes_a_rule_one_of_its_
+ancestors_already_owns`, so nothing here re-types a rule `_settings.html`
+or `_shell.html` already owns -- `{{ block.super }}` below is what
+inherits them.
+
+EVERY ROW LINKS TO THE SAME EDIT ROUTE `/chat/agents/` links to. One
+edit route, two list pages; there is no second editor, no second form
+and no write endpoint on this page at all.
+
+THE OWNER COLUMN IS ADMINISTRATOR-ONLY DATA on an administrator-only
+route, which is where render-vs-gate lands for this page: the whole body
+is admin-only and the route class is the gate, so there is no non-admin
+render in which any of it is built.
+{% endcomment %}
+{% block title %}Agent library — farabunker{% endblock %}
+{% block side_current_agent_library %}current{% endblock %}
+{% block extra_style %}{{ block.super }}
+  {% comment %}
+  THE SETTINGS AREA'S INVENTORY-TABLE IDIOM, following `identity/
+  templates/identity/users.html` (Accounts) -- the card wrapper that
+  scrolls sideways rather than bursting the column, a quiet uppercase
+  header row, and one hairline between rows. Accounts, Entitlements and
+  this page are the three settings pages that list box inventory as a
+  table; the two access pages list theirs as `section.row` cards
+  instead, which is the shape for a row you OPEN rather than one you
+  scan.
+
+  NOT PROMOTED TO `_settings.html`, deliberately and for now. A shared
+  home for an inventory table would have to reconcile three pages in
+  two other columns that already disagree about it (Accounts writes
+  `table { width: 100%; border-collapse: collapse; }`, Entitlements adds
+  `font-size: .92rem`), which is a cross-column convergence of its own
+  and not this page's to make. Nothing here is byte-identical to either,
+  so `test_no_template_retypes_a_rule_one_of_its_ancestors_already_owns`
+  is not what is holding it back -- the honest reason is that the
+  promotion is a separate piece of work.
+  {% endcomment %}
+  .table-wrap {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.25rem 1rem;
+    overflow-x: auto;
+  }
+  table.agent-library { width: 100%; border-collapse: collapse; font-size: .92rem; }
+  table.agent-library thead th {
+    text-align: left;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 0.75rem 0.5rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+  table.agent-library td {
+    padding: 0.7rem 0.5rem;
+    border-top: 1px solid var(--border);
+    vertical-align: top;
+  }
+  table.agent-library tbody tr:first-child td { border-top: none; }
+{% endblock %}
+{% block settings_content %}
+<h1>Agent library</h1>
+<p class="tagline">Every agent on this box — who can reach it, who owns it, and what
+  restricts it.</p>
+
+{% include "_messages.html" %}
+
+{% comment %}
+THE ANCHOR THE HELP CARD CITES (`foundation/settings_help.py`), on the
+wrapper rather than on the table, so it survives a change of markup
+inside it -- and on a point that renders in EVERY state of this page,
+including the empty one, which is the rule `docs/EXTENDING.md`'s "The
+anchors" step states ("an id inside a conditional that a fresh box does
+not satisfy is an id the anchor assertion will not find").
+{% endcomment %}
+<div class="table-wrap" id="agent-library">
+  <table class="agent-library">
+    <thead>
+      <tr>
+        <th>Name</th><th>Key</th><th>Reach</th><th>Owner</th><th>Restrictions</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for row in rows %}
+      <tr>
+        {% comment %}
+        `?next=` CARRIES THIS PAGE, AND THE EDITOR VALIDATES IT -- it is
+        never redirected to, nor rendered as an href, without going
+        through `agents.chat.service`'s two guards first. `urlencode` so
+        a query string on this page (the assistant panel's own
+        `?assistant=1`) survives as one parameter instead of splitting
+        the link.
+        {% endcomment %}
+        <td><a href="{% url 'chat-agent-edit' row.agent.pk %}?next={{ next_url|urlencode }}">{{ row.agent.name }}</a></td>
+        <td><code>{{ row.agent.slug }}</code></td>
+        <td>{{ row.reach }}</td>
+        <td>{{ row.agent.owner_kind }}:{{ row.agent.owner_key }}</td>
+        <td>{{ row.label_count }}</td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="5" class="no-labels">No agents on this box yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

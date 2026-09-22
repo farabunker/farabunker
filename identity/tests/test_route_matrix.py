@@ -338,6 +338,13 @@ _DRIVERS: dict[str, Callable[["World"], tuple[str, str, dict]]] = {
         "post", reverse("settings-assistant-reset"), {}),
     "settings-assistant-panel": lambda w: (
         "get", reverse("settings-assistant-panel"), {}),
+    # The agent library. Class S, no row rule -- a plain GET, the same
+    # shape `chat-agent-entitlements` takes, and a GET is the whole
+    # vocabulary this route has (`require_safe`): every write it offers
+    # is a link to `chat-agent-edit`, which has its own driver above.
+    # `w.agent` (owned by `other`) is on the rendered page for an
+    # administrator, but the driver names no row.
+    "settings-agents": lambda w: ("get", reverse("settings-agents"), {}),
 
     # --- /identity/ --------------------------------------------------
     "identity-login": lambda w: ("get", reverse("identity-login"), {}),

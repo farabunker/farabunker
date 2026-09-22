@@ -774,6 +774,45 @@ def validated_next_url(request) -> str | None:
     return None
 
 
+def validated_next_link(request, next_url: str) -> str | None:
+    """A caller-supplied `next`, validated for use as an HREF -- or
+    `None`.
+
+    THE SAME GUARD AS `validated_next_url` ABOVE, PLUS ONE, AND FOR A
+    DIFFERENT MOMENT. That function reads `request.POST` and answers
+    where a completed write should LAND; this one takes a raw value the
+    page is about to RENDER as a link, which on this surface arrives on
+    a GET (`?next=`) and on a refused POST alike. The two exist
+    separately rather than one taking a dictionary, because "which
+    dictionary" is not the difference that matters -- the difference is
+    that a POST value has already been through a CSRF-protected form
+    this box rendered, and a GET value is whatever was in the address
+    bar.
+
+    THE EXTRA CHECK IS THAT IT IS A PATH ON THIS BOX. `url_has_allowed_
+    host_and_scheme` already refuses another origin, a scheme-relative
+    `//host`, and a `javascript:` URL -- but it ADMITS a fully-qualified
+    `https://this-host/...`, which is a correct answer for a redirect
+    and a needlessly wide one for an href. A link this page writes goes
+    to a path on this box or it does not exist, so that is what is
+    required, and the narrowing is here rather than in
+    `validated_next_url` precisely so no existing redirect's behaviour
+    moves.
+
+    `None` -- never a fallback URL -- when there is no usable value, the
+    same contract `validated_next_url` states: each caller picks its own
+    default, because they do not all share one.
+    """
+    next_url = (next_url or "").strip()
+    if not next_url.startswith("/") or next_url.startswith("//"):
+        return None
+    if not url_has_allowed_host_and_scheme(
+        next_url, allowed_hosts={request.get_host()}, require_https=request.is_secure()
+    ):
+        return None
+    return next_url
+
+
 # --- the two access pages' shared transfer-panel plumbing (phase 2) --------
 #
 # `/chat/tools/` and `/chat/access/` are "the same page written twice"

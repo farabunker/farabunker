@@ -492,6 +492,42 @@ CARDS: tuple[HelpCard, ...] = (
             ),
         ),
     ),
+    # Chat cluster, feature B. "Agent library", not "Agents": the Access
+    # group's own "Agent access" card below is a DIFFERENT page about a
+    # different job (which entitlements label a row), and rule 3 above
+    # wants a distinctive title besides -- a one-word "Agents" here would
+    # auto-link every exact-case occurrence of the word in any answer,
+    # and most of them are about agents rather than about this page.
+    HelpCard(
+        route_name="settings-agents",
+        title="Agent library",
+        gate=ADMIN,
+        purpose=(
+            "Every agent on this box in one list -- box-wide ones and every person's own -- "
+            "with who can reach it, who owns it, and how many entitlements restrict it. It is "
+            "the administrator's view of the same editor a person reaches from their own agent "
+            "list; opening a row here opens that one editor, not a second one."
+        ),
+        fields=(
+            HelpField(
+                name="Every agent on this box",
+                anchor="agent-library",
+                meaning=(
+                    "A read-only table: name, key, reach (everyone on this box, or only the "
+                    "people it is given to), owner, and the number of entitlements labelling "
+                    "it. Nothing is saved on this page -- each name is a link into the agent's "
+                    "own editor, which is where reach, the prompt and the labels are changed."
+                ),
+                effects=(
+                    "Opening a row from here returns here when it is saved or cancelled. The "
+                    "list shows every agent whatever the administrator-content setting says, "
+                    "because administering the box's agents is not reading somebody's content: "
+                    "an administrator who could not see a row could not turn a runaway agent "
+                    "off."
+                ),
+            ),
+        ),
+    ),
     HelpCard(
         route_name="vision-engine-files",
         title="Engine files",

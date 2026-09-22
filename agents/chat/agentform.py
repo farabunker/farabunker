@@ -89,13 +89,30 @@ def _foreign_label_sentence(named, unnamed_count) -> str:
 
 
 def agent_form_context(principal, *, agent=None, posted=None, errors=None,
-                       settings_row=None) -> dict:
+                       next_value="", settings_row=None) -> dict:
     """Everything `chat/_agent_form.html` needs, as plain data.
 
     `agent=None` is the CREATE form. `posted` is the raw POST body on a
     refused save, so nothing the operator typed is retyped; `errors` is
     the `{field: sentence}` map `agents.visibility.create_agent`/
     `update_agent` returned.
+
+    `next_value` IS THE MOUNT'S OWN "WHERE DID I COME FROM", and it is
+    the ONE thing the second mount adds to this builder -- no fork, no
+    second panel, no second spelling. The field form already carries a
+    hidden `next`; the entitlement panel renders its own `<form>` (it
+    must -- nested forms are illegal HTML), so it needs its own copy or
+    a label save from `/settings/agents/` lands back on a row that has
+    forgotten where it came from. `agents.chat.views.agents::_save_
+    labels` already honours `validated_next_url` first and falls back to
+    the row, so this is the whole of what that mount needs: one hidden
+    field, and no view change at all.
+
+    ECHOED, NEVER TRUSTED. The value goes into a hidden field and
+    nowhere else; the POST that carries it back is validated by
+    `agents.chat.service.validated_next_url`, and the only place it is
+    ever rendered as a clickable href goes through the stricter
+    `validated_next_link` in the view.
 
     RENDER-VS-GATE THROUGHOUT: the role options and the reach control
     are administrator-only DATA, and a non-admin's context never builds
@@ -165,7 +182,14 @@ def agent_form_context(principal, *, agent=None, posted=None, errors=None,
                 "available": available, "active": active,
                 "available_count": len(available), "active_count": len(active),
                 "total": len(choices),
-                "fields": {"pk": agent.pk, "action": "labels"},
+                # `next` LAST, AND ONLY WHEN THERE IS ONE, so the
+                # rendered panel on `/chat/agents/`'s own mount is
+                # byte-identical to what it was before the second mount
+                # existed -- an empty hidden field is not the same
+                # markup as no hidden field, and `_transfer_panel.html`
+                # renders `tp_fields` in order.
+                "fields": ({"pk": agent.pk, "action": "labels", "next": next_value}
+                           if next_value else {"pk": agent.pk, "action": "labels"}),
                 "anchor": f"agent-{agent.pk}",
                 "panel_anchor": f"panel-agent-{agent.pk}",
                 "no_entitlements": NO_ENTITLEMENTS_COPY,

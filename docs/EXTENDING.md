@@ -619,6 +619,25 @@ An entry in `identity/routes.py::ROUTE_RULES`, plus a `_DRIVERS` entry in
 *Skip it →* `test_every_route_has_a_driver` fails, and an unclassified
 name is treated as admin **and logged**.
 
+**If the view lives in another column, the route does not live in that
+column's own URLconf.** Two settings-area pages are in this position today —
+the settings assistant (`agents/chat/assistant_urls.py`, three routes) and the
+agent library (`agents/chat/agent_admin_urls.py`, one) — and both take the same
+shape: **its own URLconf module in the owning column**, mounted from
+`config/urls.py` beside `/settings/`, never an entry in that column's own
+`/chat/` URLconf. The URL an operator sees should match the area they are in,
+and `config/` is the composition root that already imports every column, so
+nothing crosses a boundary to put it in front.
+
+**That choice costs one test module.** A column's never-500 sweep derives
+itself from that column's own URLconf — `agents/chat/tests/test_never_500.py`
+reads `agents.chat.urls.urlpatterns` — and cannot see a route mounted from
+anywhere else, so a route mounted this way needs its own never-500 tests
+(`agents/chat/tests/test_settings_agents.py` is the worked instance: a normal
+read, an empty box, a row with unrepresentable data, and a POST that is a
+status rather than a traceback). Nothing fails if you forget; that is why it is
+written here.
+
 ### 3. The sidebar entry — in BOTH tables
 
 An `Entry(label, url_name, gate)` in

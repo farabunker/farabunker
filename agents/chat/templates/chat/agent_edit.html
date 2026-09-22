@@ -39,9 +39,20 @@ both selectors are already in `chat/base.html`; this adds no CSS.
 <form method="post" action="{{ form_action }}">
   {% csrf_token %}
   {% include "chat/_agent_form.html" %}
+  {% comment %}
+  CANCEL GOES WHERE THIS PAGE CAME FROM (Task 8 review N3). `cancel_url`
+  is built in the view by `agents/chat/views/agents.py::_cancel_url`,
+  which puts the `next` this page arrived with through
+  `agents.chat.service.validated_next_link` -- same origin, same scheme,
+  AND a path on this box -- and falls back to `/chat/agents/` for
+  anything else. NEVER `{% templatetag openvariable %} next_value
+  {% templatetag closevariable %}` here: that value is echoed raw into
+  the hidden fields, which is safe because the POST validates it again,
+  and an unvalidated GET value must never become a clickable href.
+  {% endcomment %}
   <p>
     <button type="submit">Save</button>
-    <a href="{% url 'chat-agents' %}" class="muted">Cancel</a>
+    <a href="{{ cancel_url }}" class="muted">Cancel</a>
   </p>
 </form>
 {% comment %}
@@ -91,7 +102,7 @@ THE PANES ARE `tp_available` / `tp_active`, the fragment's own parameter
 names -- not `available` / `active`, which would render two empty panes
 with no error at all.
 {% endcomment %}
-<details class="agent-labels">
+<details>
   <summary>Who may use this agent</summary>
   {% include "_transfer_panel.html" with tp_key=entitlement_panel.anchor tp_anchor=entitlement_panel.panel_anchor tp_fields=entitlement_panel.fields tp_bare=1 tp_available=entitlement_panel.available tp_active=entitlement_panel.active tp_available_count=entitlement_panel.available_count tp_active_count=entitlement_panel.active_count tp_total=entitlement_panel.total tp_empty_catalogue=entitlement_panel.no_entitlements %}
 </details>

@@ -2490,10 +2490,10 @@ the transfer panel itself is conditioned on there being something to offer
 condition** for the same reason: nested under the panel, the one reader it was
 written for would never see it.
 
-## The agent pages: the three routes (chat cluster, feature B)
+## The agent pages: the routes (chat cluster, feature B)
 
 The section above is the FORM — one builder, two mounts. These are the routes
-that mount it, and the list they sit on. No entry in the `## URL table` above:
+that mount it, and the two lists they sit on. No entry in the `## URL table` above:
 that table's own preamble scopes it to the tasks it was written for, and
 `/chat/w/`, `/chat/access/` and `/chat/tools/` are all documented in sections
 instead. This follows that shape.
@@ -2503,6 +2503,22 @@ instead. This follows that shape.
 | `chat-agents` | A | `/chat/agents/` — the agents I work on |
 | `chat-agent-new` | A | `/chat/agents/new/` — creation; there is no row yet |
 | `chat-agent-edit` | O | `/chat/agents/<pk>/` — the ONE edit route both mounts share |
+| `settings-agents` | S | `/settings/agents/` — the agent library, the second mount's list |
+
+**`settings-agents` is not a `/chat/` route**, which is why it has its own
+URLconf (`agents/chat/agent_admin_urls.py`) mounted from `config/urls.py` beside
+`/settings/` rather than an entry in `agents/chat/urls.py` — the same call
+`agents/chat/assistant_urls.py` already records for the settings assistant's own
+three routes. Its view (`agents/chat/views/agents_admin.py`) reads through
+`agents.visibility.labellable_agents`, the existing unfiltered read, for that
+function's own stated reason: class S already means every caller is an
+administrator, so `visible_agents(principal)` would hide a member's own agent
+from the page that exists to administer the box's agents whenever
+`admin_sees_content` is off. It has **no POST path at all** — `require_safe`, so
+a POST is a declared 405 — and every row links to `chat-agent-edit` with this
+page as its `?next=`. Because `agents/chat/tests/test_never_500.py` derives its
+sweep from `agents.chat.urls.urlpatterns`, this route's never-500 proof lives in
+`agents/chat/tests/test_settings_agents.py` instead.
 
 **`chat-agent-edit` is class O, not S**, and that is the whole feature: an S
 route refuses a non-admin at the middleware, which is exactly the person these
@@ -2558,8 +2574,25 @@ so a `?next=` arriving on a GET link is NOT validated by it and a naive
 `request.GET["next"]` redirect would be an open redirect off this box. So: the
 list's own links carry `?next=`, the GET **echoes it into a hidden field and
 does nothing else with it**, and the POST validates through
-`validated_next_url`, falling back to the list. The Cancel link goes to the list
-unconditionally — an unvalidated GET value must never become a clickable `href`.
+`validated_next_url`, falling back to the list.
+
+**The one thing a reader can click goes through a second, stricter guard.**
+`agents.chat.service.validated_next_link` requires same origin, same scheme
+**and** a path on this box — `url_has_allowed_host_and_scheme` alone admits a
+fully-qualified URL to this host, which is a correct answer for a redirect and a
+needlessly wide one for an `href` — and `views/agents.py::_cancel_url` falls
+back to `/chat/agents/` for anything else. The Cancel link used to go there
+unconditionally, which was right while `/chat/agents/` was the only mount and
+wrong the moment `/settings/agents/` became the second: an administrator who
+cancelled landed on the member-facing list instead of the page they came from.
+The raw value still reaches the hidden fields and nothing else.
+
+**The entitlement panel carries its own copy of `next`.** It renders its own
+`<form>` (it must — nested forms are illegal HTML), so the field form's hidden
+`next` does not reach it; `agent_form_context` puts the mount's value in the
+panel's `tp_fields` when there is one, and omits the key entirely when there is
+not, so `/chat/agents/`'s own panel is byte-identical to what it was. No view
+change: `_save_labels` already honours `validated_next_url` first.
 
 ### One action per POST, named
 

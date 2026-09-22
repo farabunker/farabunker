@@ -40,6 +40,7 @@ one-way chain above.
 """
 from agents.chat.views.access import agent_entitlements
 from agents.chat.views.agents import agent_edit, agent_list, agent_new
+from agents.chat.views.agents_admin import agents_admin_list
 from agents.chat.views.all_conversations import AllConversationsView
 from agents.chat.views.assistant import assistant_ask, assistant_panel, assistant_reset
 from agents.chat.views.conversations import (
@@ -60,7 +61,7 @@ from agents.chat.views.workstreams import (
 
 __all__ = [
     "AllConversationsView", "ChatIndexView", "ConversationView", "agent_edit",
-    "agent_entitlements", "agent_list", "agent_new",
+    "agent_entitlements", "agent_list", "agent_new", "agents_admin_list",
     "assistant_ask", "assistant_panel", "assistant_reset",
     "attachment_detach", "chat_settings", "conversation_archive", "conversation_delete",
     "conversation_duplicate", "conversation_pin", "conversation_rename",
