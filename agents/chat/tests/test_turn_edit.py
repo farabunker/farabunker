@@ -387,6 +387,52 @@ class TestTheDisclosure:
                 client.get(reverse("chat-turn-status", args=[other_done.pk]))
         assert len(two) == len(one)
 
+    def test_the_done_tick_costs_exactly_the_reads_it_budgets(self, client):
+        """WHOLE-BRANCH REVIEW I-4, THE ABSOLUTE PIN beside the flat one
+        above -- the shape `agents/chat/tests/test_thread.py::
+        test_the_context_key_costs_exactly_the_two_reads_it_budgets`
+        already uses for the other half of this same tick.
+
+        Equality-under-scale cannot notice a new CONSTANT read arriving,
+        and this branch added three of them to the hottest endpoint on
+        the box (`may_edit_any_turn`, `composer_attach_context`, and
+        `_context_body`'s own two) without anything measuring the total.
+        `_done_body` is asked DIRECTLY, over a turn loaded the way
+        `visible_turn` loads it and a request carrying the settings row
+        the middleware stashes, so the number below is this body's own
+        rather than the session and auth machinery's.
+
+        THE READS, NAMED, so a later widening has to argue for itself
+        rather than slide past an inequality. Print `captured.captured_
+        queries` when this goes red: the list is short enough to read.
+        """
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from agents.chat.views.turns import _done_body
+
+        owner = make_user()
+        with posture(POSTURE_ENTERPRISE):
+            conversation, _turns = _own_thread(owner)
+            done = make_turn(conversation=conversation, role=Turn.Role.ASSISTANT,
+                             text="answer", state=Turn.State.DONE, queue_job_id=3)
+            request = _polling_request(owner, conversation)
+            turn = Turn.objects.select_related(
+                "conversation", "conversation__agent",
+                "conversation__workstream").get(pk=done.pk)
+            _done_body(turn, request)                     # warm-up, unmeasured
+            with CaptureQueriesContext(connection) as captured:
+                _done_body(turn, request)
+        assert len(captured) == _DONE_TICK_READS, [
+            q["sql"][:120] for q in captured.captured_queries]
+        # THE DROP ITSELF, said directly rather than left implied by the
+        # total: the request already holds its `IdentitySettings` row, so
+        # a tick that SELECTs one has reached for the principal without
+        # threading it -- I-4(b) coming back. Red at 14 before the fix.
+        assert not [q for q in captured.captured_queries
+                    if "identity_identitysettings" in q["sql"]], (
+            "the done tick re-read the settings singleton")
+
     def test_two_editable_messages_render_no_duplicate_dom_id(self, client):
         """`chat/_attach_files.html` hardcodes `id="attach-files"` and a
         `<label for="attach-files">`, and the COMPOSER already renders
@@ -801,6 +847,68 @@ class TestThePost:
             second_branch = Conversation.objects.exclude(
                 pk__in=[conversation.pk, first_branch.pk]).get()
         assert second_branch.branched_from_id == first_branch.id
+
+
+# THE DONE TICK'S WHOLE READ BUDGET, as a literal (whole-branch review
+# I-4). Named here rather than left inline so the assertion reads as a
+# budget and the arithmetic is visible. Measured over `_done_body`
+# itself -- an OWNED, LOOSE conversation, the cheapest real shape -- in
+# the order the body runs them:
+#
+#    1  `_attachments_by_turn` -> `attachments_for` -> `attached_
+#       documents`: the conversation's own `rag_document` read
+#    2  ... its `identity_entitlementgrant` read (what this principal
+#       holds), and
+#    3  ... the DISTINCT visible-document read those two narrow to
+#    4  `_carrying_user_turn_id`: which user turn this job answered
+#    5  `_edit_context` -> `may_edit_any_turn`'s in-flight
+#       `Turn.exists()` probe (`may_manage_conversation` itself adds
+#       none for an owner)
+#    6  ... `composer_attach_context` -> `tool_access_for`'s own grant
+#       read, and
+#    7  ... its `agents_toolentitlement` read
+#    8  `_group_html` -> `turn_group_cards`: the preceding user turn
+#    9  ... and the group's own turn read
+#   10  ... and `models.registry.availability.bound_role_keys()`, read
+#       by the model-availability context processor during the render
+#       (its process cache is bypassed inside a transaction, which is
+#       every test and every write path)
+#   11  `_context_body` -> `context_usage`'s replayed-text slice, and
+#   12  ... its `.count()` -- the two `agents/chat/tests/test_thread.py::
+#       test_the_context_key_costs_exactly_the_two_reads_it_budgets`
+#       pins on their own
+#
+# NOT on the list, and that is the point of the number: an
+# `IdentitySettings` SELECT. `_done_body` resolves the principal ONCE,
+# off the row `IdentityGateMiddleware` already stashed; it used to
+# resolve it twice, bare, each time paying `accounts_on()` ->
+# `get_solo()` (whole-branch review I-4(b)). Dropping this constant from
+# 14 to 12 is what that fix did, and raising it again is what this pin
+# refuses.
+_DONE_TICK_READS = 12
+
+
+def _polling_request(owner, conversation):
+    """A request shaped like the one `turn_status` really hands
+    `_done_body`: signed in, and carrying `IdentityGateMiddleware`'s own
+    stashed `IdentitySettings` row.
+
+    THE STASH IS PART OF THE FIXTURE, not a convenience. `settings_row_
+    for(request)` is free only because the middleware ran; a body that
+    reached for the principal without threading that row would still pay
+    a real SELECT, which is exactly the regression `_DONE_TICK_READS`
+    exists to catch -- so the pin has to measure a request where the
+    stash is available and the body is free to ignore it.
+    """
+    from django.test import RequestFactory
+
+    from identity.models import IdentitySettings
+
+    request = RequestFactory().get(
+        reverse("chat-conversation", args=[conversation.id]))
+    request.user = owner
+    request.identity_settings_row = IdentitySettings.get_solo()
+    return request
 
 
 def _provenance_banner(body: str) -> str:

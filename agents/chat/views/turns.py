@@ -226,7 +226,8 @@ def turn_edit(request, conversation_id, turn_id: int):
     return redirect(conversation_url(branch, pending=result.turn.pk))
 
 
-def _attachments_by_turn(turn, request, *, stream=None) -> dict:
+def _attachments_by_turn(turn, request, *, stream=None, principal=None,
+                         settings_row=None) -> dict:
     """ROUND 13 (message-bound attachments, requirement D's LIVE
     STATUS): the SAME per-turn grouping `agents.chat.views.thread.
     thread_context` builds for a full-page render, rebuilt here for
@@ -263,10 +264,22 @@ def _attachments_by_turn(turn, request, *, stream=None) -> dict:
     answer a few lines later), so the two share a single resolution
     rather than reading the same stream twice on the same tick. `None`
     -- every other caller -- resolves it here exactly as before.
+
+    `principal` / `settings_row`, OPTIONAL (whole-branch review I-4):
+    the request's own, for a caller that has already resolved them. A
+    bare `principal_for_request(request)` runs `accounts_on()` ->
+    `IdentitySettings.get_solo()`, a REAL query, while
+    `settings_row_for(request)` is free (the middleware's stash) --
+    so resolving the principal without threading the row is one
+    avoidable SELECT per call. `_done_body` resolves both once and
+    hands them to all three of its helpers; every other caller leaves
+    them out and is unchanged.
     """
     conversation = turn.conversation
-    principal = principal_for_request(request)
-    settings_row = settings_row_for(request)
+    if settings_row is None:
+        settings_row = settings_row_for(request)
+    if principal is None:
+        principal = principal_for_request(request, settings_row=settings_row)
     stream_scope = stream if stream is not None else scope_for_conversation(
         principal, conversation)
     return attachments_for(principal, conversation, stream=stream_scope,
@@ -418,7 +431,8 @@ def _running_body(turn, request) -> dict:
     }
 
 
-def _edit_context(turn, request, *, scope=None) -> dict:
+def _edit_context(turn, request, *, scope=None, principal=None,
+                  settings_row=None) -> dict:
     """The three card keys the edit disclosure needs, for the ONE poll
     body that can honestly answer them.
 
@@ -444,6 +458,11 @@ def _edit_context(turn, request, *, scope=None) -> dict:
     the remember control. That is the defect this function exists to
     prevent, in a smaller shape.
 
+    `principal` / `settings_row`, OPTIONAL (whole-branch review I-4):
+    the request's own, threaded by `_done_body` so one tick resolves
+    them once. See `_attachments_by_turn` for why a bare
+    `principal_for_request(request)` is a real query and this is not.
+
     `scope`, OPTIONAL: an already-resolved `WorkstreamScope` for this
     conversation. `_done_body` holds one -- `_attachments_by_turn` needs
     the identical scope for `attachments_for(..., stream=...)`, whose
@@ -462,8 +481,10 @@ def _edit_context(turn, request, *, scope=None) -> dict:
     it is in hand on this path.
     """
     conversation = turn.conversation
-    settings_row = settings_row_for(request)
-    principal = principal_for_request(request, settings_row=settings_row)
+    if settings_row is None:
+        settings_row = settings_row_for(request)
+    if principal is None:
+        principal = principal_for_request(request, settings_row=settings_row)
     if not may_edit_any_turn(principal, conversation, settings_row=settings_row):
         return {"may_edit": False, "may_attach_files": False, "attach_workstream": None}
     if scope is None:
@@ -514,16 +535,28 @@ def _done_body(turn, request) -> dict:
     tick is untouched; `_edit_context` carries the full reasoning and
     the named price.
     """
+    # ONE PRINCIPAL RESOLUTION PER TICK (whole-branch review I-4), and
+    # it is the house pattern rather than a local optimisation: the
+    # `settings_row` comes from the middleware's stash for free, and
+    # `principal_for_request` then answers WITHOUT the
+    # `IdentitySettings.get_solo()` SELECT a bare call pays. This body
+    # used to resolve the principal twice bare -- once here, once
+    # inside `_attachments_by_turn` -- in the one function whose own
+    # comment insists on "ONE SCOPE RESOLUTION PER TICK, not two".
+    settings_row = settings_row_for(request)
+    principal = principal_for_request(request, settings_row=settings_row)
     # ONE SCOPE RESOLUTION PER TICK, not two. `_attachments_by_turn`
     # resolves this same scope for `attachments_for(..., stream=...)`
     # -- whose `stream=` keyword exists exactly so a caller holding one
     # does not re-resolve it -- and `_edit_context` needs the identical
-    # answer a few lines later. The flat pin in
-    # `test_the_done_tick_costs_at_most_the_budgeted_extra_reads` stays
-    # green either way, which is precisely why this is said here rather
-    # than left for a test not to catch.
-    scope = scope_for_conversation(principal_for_request(request), turn.conversation)
-    by_turn = _attachments_by_turn(turn, request, stream=scope)
+    # answer a few lines later. `test_the_done_tick_costs_at_most_the_
+    # budgeted_extra_reads` is flat either way, which is precisely why
+    # this is said here; the ABSOLUTE pin beside it
+    # (`test_the_done_tick_costs_exactly_the_reads_it_budgets`) is what
+    # actually holds both this and the threading above.
+    scope = scope_for_conversation(principal, turn.conversation)
+    by_turn = _attachments_by_turn(turn, request, stream=scope,
+                                   principal=principal, settings_row=settings_row)
     carrying = _carrying_user_turn_id(turn)
     pending = any(
         row.get("status") not in ("ready", "failed") for row in by_turn.get(carrying, [])
@@ -534,7 +567,9 @@ def _done_body(turn, request) -> dict:
         # on the poll path -- see `_edit_context`'s own docstring for why
         # `_queued_body` and `_running_body` pay nothing for them.
         "html": _group_html(turn, request, by_turn,
-                            **_edit_context(turn, request, scope=scope)),
+                            **_edit_context(turn, request, scope=scope,
+                                            principal=principal,
+                                            settings_row=settings_row)),
         "attachments_pending": pending,
         # TWO BODIES CARRY THE KEY, NOT ONE (spec review m7).
         # `agents.chat.service.start_turn` writes the USER turn DONE in
