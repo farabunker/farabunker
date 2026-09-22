@@ -251,10 +251,11 @@ def _string_constants(path: Path) -> list[str]:
     people delete.
 
     DOCSTRINGS AND BARE STRING STATEMENTS ARE EXCLUDED, which is not a
-    nicety: `_evict_exclusive_endpoints`'s own docstring quotes the
-    reason string it passes, so counting prose would let the ACTUAL
-    argument be reworded while the pin went on passing against the
-    sentence describing it. Proven by red-proofing exactly that edit."""
+    nicety: `_unload_endpoint`'s and `_log_unload`'s docstrings quote the
+    reason strings `_evict_exclusive_endpoints` and `_evict_for_budget`
+    pass, so counting prose would let the ACTUAL argument be reworded
+    while the pin went on passing against the sentences describing it.
+    Proven by red-proofing exactly that edit."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     prose = {
         id(node.value) for node in ast.walk(tree)

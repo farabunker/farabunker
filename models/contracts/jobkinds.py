@@ -287,16 +287,9 @@ class JobKind:
 
             THE RULE THAT COMES WITH IT, and it is not optional: a kind
             whose wait ceiling expires MUST NOT write a terminal outcome
-            while its engine still reports the work running. The exclusive
-            slot is released the instant the job row goes terminal, so a
-            kind that gives up waiting and reports success hands the
-            machine to the next admission while its own engine is still
-            sampling. Such a handler must either keep holding (continuing
-            to report progress, which keeps the row alive under the
-            worker's heartbeat) or cancel the engine-side work and confirm
-            the engine is terminal, and only then return. See `handler`'s
-            own docstring above for the full statement of this rule,
-            including where the queue's own enforcement stops.
+            while its engine still reports the work running. `handler`'s
+            own docstring above states it in full -- what such a handler
+            must do instead, and where the queue's own enforcement stops.
     """
 
     key: str

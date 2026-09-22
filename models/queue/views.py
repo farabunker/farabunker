@@ -52,7 +52,7 @@ from foundation.settings_area import settings_redirect
 from foundation.settings_bounds import (
     BIGINT_FIELD_MAX, POSITIVE_INT_FIELD_MAX, exceeds_field_ceiling,
 )
-from models.contracts.jobkinds import all_job_kinds, get_job_kind, resolve_dotted_path
+from models.contracts.jobkinds import all_job_kinds
 from models.contracts.queue import QueueUnavailable
 from models.queue.visibility import may_read_job_content, may_see_job_id, visible_rows
 
@@ -140,6 +140,11 @@ def _job_settings_context(settings_row: JobSettings | None) -> dict:
     None`) has no map to read at all, so every row's `value` is blank --
     the same "say nothing false" the rest of this branch already gives
     every other field."""
+    saved_waits = {} if settings_row is None else settings_row.kind_wait_seconds
+    kind_wait_rows = [
+        {"key": kind.key, "label": kind.label, "value": saved_waits.get(kind.key, "")}
+        for kind in all_job_kinds()
+    ]
     if settings_row is None:
         return {
             "memory_budget_bytes": None,
@@ -152,9 +157,7 @@ def _job_settings_context(settings_row: JobSettings | None) -> dict:
             "response_timeout_seconds": JobSettings.RESPONSE_TIMEOUT_SECONDS_DEFAULT,
             "detected_memory_human": None,
             "detected_memory_at": None,
-            "kind_wait_rows": [
-                {"key": kind.key, "label": kind.label, "value": ""} for kind in all_job_kinds()
-            ],
+            "kind_wait_rows": kind_wait_rows,
         }
     return {
         "memory_budget_bytes": settings_row.memory_budget_bytes,
@@ -170,14 +173,7 @@ def _job_settings_context(settings_row: JobSettings | None) -> dict:
         "response_timeout_seconds": settings_row.response_timeout_seconds,
         "detected_memory_human": _human_size(settings_row.detected_memory_bytes),
         "detected_memory_at": settings_row.detected_memory_at,
-        "kind_wait_rows": [
-            {
-                "key": kind.key,
-                "label": kind.label,
-                "value": settings_row.kind_wait_seconds.get(kind.key, ""),
-            }
-            for kind in all_job_kinds()
-        ],
+        "kind_wait_rows": kind_wait_rows,
     }
 
 

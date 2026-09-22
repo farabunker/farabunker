@@ -24,8 +24,9 @@ from agents.reconcile import (
 )
 from agents.runtime.jobs import on_turn_terminal, plan_turn, summarize_turn
 from agents.runtime.tests._helpers import (  # noqa: F401 -- the fixture
-    bind_chat_role, bound_chat_role, bound_embed_role, isolated_tool_registry,  # import
-    make_agent, make_conversation, make_flow, make_turn,  # IS its registration
+    _assistant_turn, _stranded_assistant_turn, bind_chat_role, bound_chat_role,  # import
+    bound_embed_role, isolated_tool_registry, make_agent, make_conversation,  # IS its
+    make_flow, make_turn,  # registration
 )
 from identity.testing import make_queue_job
 from models.contracts.roles import CHAT_CONVERSE_ROLE
@@ -58,28 +59,6 @@ def _payload(turn, **overrides):
                   connection=None, mode="chat")
     fields.update(overrides)
     return fields
-
-
-def _assistant_turn(*, state, queue_job_id, age_seconds: int):
-    """One ASSISTANT turn in `state`, pointing at `queue_job_id` (which
-    may name no row at all), whose row has been in that state for
-    `age_seconds` -- the three facts the stranded condition reads."""
-    turn = _turn_for(make_agent())
-    Turn.objects.filter(pk=turn.pk).update(
-        role=Turn.Role.ASSISTANT, state=state, queue_job_id=queue_job_id,
-        created_at=timezone.now() - timedelta(seconds=age_seconds),
-    )
-    turn.refresh_from_db()
-    return turn
-
-
-def _stranded_assistant_turn():
-    """The shape the poll path reconciles: past the grace, pointing at a
-    job row that does not exist."""
-    return _assistant_turn(
-        state=Turn.State.RUNNING, queue_job_id=4242,
-        age_seconds=STRANDED_TURN_GRACE_SECONDS + 10,
-    )
 
 
 class TestPlanTurn:
@@ -401,12 +380,8 @@ class TestReconcileStrandedTurn:
         assert reconcile_stranded_turn(turn) is False
 
     def test_a_user_turn_is_never_touched(self):
-        turn = _turn_for(make_agent())
-        Turn.objects.filter(pk=turn.pk).update(
-            role=Turn.Role.USER, state=Turn.State.RUNNING, queue_job_id=4242,
-            created_at=timezone.now() - timedelta(seconds=STRANDED_TURN_GRACE_SECONDS + 10),
-        )
-        turn.refresh_from_db()
+        turn = _assistant_turn(role=Turn.Role.USER, state=Turn.State.RUNNING, queue_job_id=4242,
+                               age_seconds=STRANDED_TURN_GRACE_SECONDS + 10)
 
         assert reconcile_stranded_turn(turn) is False
 

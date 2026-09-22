@@ -17,7 +17,7 @@ from agents.chat.tests._helpers import (   # noqa: F401 -- the import IS the reg
     make_user, posture, sign_in, user_principal,
 )
 from agents.models import ToolInvocation, Turn
-from agents.runtime.tests.test_jobs import _assistant_turn, _stranded_assistant_turn
+from agents.runtime.tests._helpers import _assistant_turn, _stranded_assistant_turn
 from agents.visibility import create_conversation
 from identity.contracts.postures import POSTURE_ENTERPRISE
 from models.contracts.queue import QueueUnavailable

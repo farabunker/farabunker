@@ -2100,7 +2100,7 @@ class Worker:
                 BARRIER_HOLDOFF_SECONDS,
             )
             if self._record_barrier_refusal(job_id):
-                count, first = self._barrier_refusals.get(job_id, (MAX_BARRIER_REFUSALS, 0.0))
+                first = self._barrier_refusals[job_id][1]
                 self._fail_barrier_refused(
                     descriptor, engine_name, endpoint, time.monotonic() - first,
                 )
