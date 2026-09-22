@@ -635,14 +635,21 @@ or not at all.
 
 ```bash
 manage.py migrate
-docker compose restart watcher worker
+docker compose restart web watcher worker
 ```
 
-**Restart `watcher` and `worker` after this deploy.** The agents column's
-visibility module and its turn preflight both changed, and those two processes
-hold that code in memory for the life of the process — a plain `docker compose
-restart watcher worker`, the same rule as any other change to code a job runs
-(see [docs/DEV.md](DEV.md)'s restart rule). `web` auto-reloads and needs nothing.
+**Restart `web`, `watcher` and `worker` after this deploy.** The agents column's
+visibility module and its turn preflight both changed, and the two job processes
+hold that code in memory for the life of the process — the same rule as any
+other change to code a job runs (see [docs/DEV.md](DEV.md)'s restart rule).
+`web` is in the set because everything this deploy makes visible — the context
+line, both agent mounts, the edit control — is web-request-path only, and the
+base `compose.yaml` runs uvicorn with no auto-reloader. Under the dev override
+(`compose.override.yaml`, auto-merged by a bare `docker compose`) `web` reloads
+itself and the restart is a no-op; on a production-style stack
+(`docker compose -f compose.yaml`) it is the difference between an operator
+seeing this deploy and not. Restarting it costs nothing either way, which is why
+every other restart set in this document already includes it.
 
 **What an operator sees afterwards:** an **Agent library** entry in the settings
 sidebar's Setup group, administrator-gated; a context line under the composer on

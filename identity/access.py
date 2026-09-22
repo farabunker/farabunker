@@ -168,6 +168,16 @@ def sees_all_content(principal, *, settings_row=None) -> bool:
     not switch a runaway agent off). `identity/tests/test_route_matrix.py`
     names that one cell in `_ADMIN_ALWAYS_ADMITTED_O`.
 
+    AND THAT EXCEPTION IS A READ AND A REWRITE, NOT ONLY A SWITCH
+    (whole-branch review I-6), said plainly here because the paragraph
+    above frames it as administration and a reader would not otherwise
+    learn it: the editor renders the agent's full `system_prompt` in a
+    textarea, so an administrator with `admin_sees_content` OFF -- the
+    ordinary posture -- can read and rewrite the text of any member's
+    agent on the box. That is the accepted price of one edit route
+    rather than two; agent CONFIGURATION is administer-class, and the
+    content toggle governs conversations and documents.
+
     `settings_row`: an already-fetched `IdentitySettings` row, OPTIONAL
     and keyword-only -- see `accounts_on` for why. Threading it through
     to `accounts_on`/`is_admin` below is what keeps this ONE

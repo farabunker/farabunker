@@ -40,6 +40,24 @@ window) signed in as a plain member on an accounts-on box.
 - [ ] **The band colours are legible in both themes.** Same line at a low, a high and a
       near-full percentage, in light and dark — all three read against the page background,
       and the near-full one is distinguishable from the high one at a glance.
+- [ ] **The `full` band's own sentence arrives WITH the band, not at the next reload.**
+      A conversation just under 90% of its ceiling, scripts ON — send a message long enough
+      to cross it and watch the poller's tick: the bar turns its danger colour AND the line
+      "Start a new conversation to keep the model's full attention." appears under it, in the
+      same tick, with no F5. Then send another and confirm it does not appear twice. This is
+      the one meter state whose text arrives over the wire rather than being unhidden, and
+      the suite can only assert the payload and the script's source.
+- [ ] **The two ceiling-free lines read as sentences.** `/chat/c/<id>/` on a conversation
+      whose connection declares no window — the line reads an estimate, no percentage and no
+      bar fill, ending "· no limit set for this connection". Then the same page for an agent
+      whose role is not bound at all: the line reads an estimate with NO trailing clause, and
+      the page's existing "unavailable" banner above it is what explains why. Confirm neither
+      renders a stray "·" or an empty parenthesis where the percentage would have been.
+- [ ] **The engine-default sentence renders for an administrator.** `/chat/c/<id>/` as an
+      ADMINISTRATOR, on a conversation whose connection has no window of its own so the
+      engine's default applies — the sentence appears under the line with a working "Models"
+      link beside it. (The member half of this pair is in section B; this is the positive
+      render, which nothing else walks.)
 
 ## B — the agent pages
 
@@ -69,6 +87,23 @@ window) signed in as a plain member on an accounts-on box.
 - [ ] **The reach control is absent from a member's page source.** View source as a member on
       the agent editor — "everyone on this box" appears nowhere in the HTML, not merely hidden
       by CSS. Same for the engine-default sentence on the thread page.
+- [ ] **The box-wide section's ADMINISTRATOR half.** `/chat/agents/` as an administrator, on a
+      default OPEN box — the same read-only section a member sees renders a DIFFERENT declared
+      sentence and a working link into the editor on each of those rows. On an open box the
+      administrator is that section's only reader, so this is the common case, and the member
+      half above is the one that was walked.
+- [ ] **A save from the agent editor, from both mounts.** Open an agent from `/chat/agents/`,
+      change its description, Save — the flash names the agent, the list shows the change, and
+      you land back on the list you came from. Repeat from `/settings/agents/` and confirm you
+      land back THERE. Then add and remove a label through the panel's own Save and confirm the
+      same, including the count on the list.
+- [ ] **Creating an agent, end to end.** `/chat/agents/new/` — the form renders with no label
+      panel (there is no row to label yet), submit it empty and confirm the refusal sentences
+      render beside the fields with nothing you typed lost; fill it in, Save, and confirm the
+      new row is in the list and usable as a conversation's agent.
+- [ ] **The two refusals are refusals, not tracebacks.** With the browser's dev tools, POST an
+      unknown `action` to the agent editor — a plain 400 page, not a 500. And POST anything at
+      all to `/settings/agents/` — a 405; that page has no write path by design.
 
 ## C — editing a past prompt
 
@@ -95,6 +130,16 @@ window) signed in as a plain member on an accounts-on box.
       the queued → running → done ticks swap the exchange in; the "Branched from …" banner at
       the top never flickers, never duplicates, and never ends up below the thread. On a
       branch of a branch, confirm it names the **immediate** parent.
+- [ ] **The provenance banner's two fallback sentences.** Take a branch, then DELETE its
+      parent conversation, and reload the branch — the banner reads "Branched from an earlier
+      conversation", a whole sentence with no gap where the title was, no link, and NO message
+      number. Then, as a second principal who cannot see the parent, open a branch you were
+      given: the identical sentence, and the parent's title nowhere in the page source. Both
+      are the paths where the banner has the least to say and the most to get wrong.
+- [ ] **The banner's number is the one you can count to.** On a branch taken from the third
+      message of a thread that had used a tool — the banner reads "at your message 3", not the
+      row index, and clicking the link lands on the parent where you can count the bubbles and
+      confirm it.
 - [ ] **A branch looks like an ordinary thread.** The copied history above, the edited message
       as the newest turn, the answer arriving into it, tool cards rendered **and no audit link
       on the branch**, and the original unchanged when you open it again.
