@@ -4262,7 +4262,7 @@ from identity.contracts.actions import CONTENT_PURGED, CONTENT_RESTORED
 from identity.contracts.cascades import RetentionHandler, register_retention_handler
 from identity.models import AuditEvent, DeletionTicket, IdentitySettings
 from identity.tests._helpers import (
-    make_admin, make_conversation, make_user, posture, sign_in, user_principal,
+    make_conversation, make_user, posture, sign_in, user_principal,
 )
 from identity import retention as service
 
@@ -4376,6 +4376,42 @@ class TestThePurgedTab:
         assert "A named question" in body
 
 
+class TestTheDeletionLogHidesOtherPeoplesLabels:
+    """The toggle above (`test_with_the_toggle_on_the_labels_appear`)
+    proves the label appears for the item's OWN viewer; this proves it
+    stops there. The log itself LISTS every `content.*` event to every
+    viewer -- it is a record of what happened, not a per-viewer view of
+    it -- but a viewer with no standing to read everyone's content must
+    not learn another person's item's own title through it, which is
+    exactly what `audit.by_action`'s unscoped read would leak with
+    nothing further checking who is looking."""
+
+    def test_a_principal_with_no_standing_over_the_item_sees_no_label(self, client):
+        with posture("personal"):
+            row = IdentitySettings.get_solo()
+            row.audit_detail = True
+            row.save()
+            owner, viewer = make_user(), make_user()
+            _ticket_for(owner, label="A private title")
+            sign_in(client, viewer)
+            body = client.get(reverse("identity-deleted")).content.decode()
+        assert copy.KIND_LABELS[copy.KIND_ASK] in body
+        assert "A private title" not in body
+
+    def test_a_sees_all_content_principal_still_sees_it(self, client):
+        """PURGED FIRST, so the label can only reach this viewer through
+        the log -- once the ticket is gone, `row.ticket.label` on the
+        Deleted-items list has nothing left to leak from either."""
+        with posture("open"):
+            row = IdentitySettings.get_solo()
+            row.audit_detail = True
+            row.save()
+            ticket = _ticket_for(make_user(), label="A private title")
+            client.post(reverse("identity-deleted-purge", args=[ticket.pk]))
+            body = client.get(reverse("identity-deleted")).content.decode()
+        assert "A private title" in body
+
+
 class TestRestoreAndPurge:
     def test_restore_removes_the_ticket_and_records_the_event(self, client):
         with posture("personal"):
@@ -4451,6 +4487,104 @@ class TestRestoreAndPurge:
         assert response.status_code == 200
         assert "a worker holds this job" in response.content.decode()
         assert DeletionTicket.objects.count() == 1
+
+    def test_a_broken_purge_flashes_the_fixed_sentence_and_keeps_the_ticket(
+            self, client, monkeypatch):
+        """THE OTHER CATCH -- the bare `except Exception` in
+        `deleted_purge`, for a failure with no operator-readable sentence
+        of its own (neither refusal type above)."""
+        from identity import views
+        monkeypatch.setattr(
+            views.retention, "purge_ticket",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("a database hiccup")))
+        with posture("personal"):
+            user = make_user()
+            sign_in(client, user)
+            ticket = _ticket_for(user)
+            response = client.post(
+                reverse("identity-deleted-purge", args=[ticket.pk]), follow=True)
+        assert response.redirect_chain[0][1] == 302
+        assert views._PURGE_FAILED_MESSAGE in response.content.decode()
+        assert DeletionTicket.objects.filter(pk=ticket.pk).exists()
+
+    def test_a_broken_restore_flashes_the_fixed_sentence_and_keeps_the_ticket(
+            self, client, monkeypatch):
+        """`deleted_restore`'s own bare `except Exception` -- the
+        identical never-500 shape, for the mutation with nothing of its
+        own to refuse."""
+        from identity import views
+        monkeypatch.setattr(
+            views.retention, "restore_content",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("a database hiccup")))
+        with posture("personal"):
+            user = make_user()
+            sign_in(client, user)
+            ticket = _ticket_for(user)
+            response = client.post(
+                reverse("identity-deleted-restore", args=[ticket.pk]), follow=True)
+        assert response.redirect_chain[0][1] == 302
+        assert views._RESTORE_FAILED_MESSAGE in response.content.decode()
+        assert DeletionTicket.objects.filter(pk=ticket.pk).exists()
+
+
+class TestTheQueryCost:
+    def test_the_page_costs_the_same_queries_at_one_ticket_and_at_many(self, client):
+        """THE FLAT-QUERY PIN. `deleted_page` reads `IdentitySettings`
+        once and threads that SAME row through `principal_for_request`,
+        `visible_tickets` and every row's own `may_purge(...,
+        settings_row=row)` call -- so a row-per-ticket loop must not cost
+        a settings read per row.
+
+        NON-VACUOUS BY CONSTRUCTION: dropping `settings_row=row` from
+        the view's own `may_purge` call -- the obvious wrong
+        implementation, and the one this page had before `may_purge`
+        grew the keyword -- costs one extra settings-row read per
+        ticket, so ten tickets fails this equality by nine queries, not
+        by a rounding error.
+        """
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with posture("open"):
+            _ticket_for(make_user(), key="one")
+            client.get(reverse("identity-deleted"))  # warm the session reads
+            with CaptureQueriesContext(connection) as one_ticket:
+                assert client.get(reverse("identity-deleted")).status_code == 200
+            for index in range(1, 10):
+                _ticket_for(make_user(), key=f"many-{index}")
+            with CaptureQueriesContext(connection) as many_tickets:
+                body = client.get(reverse("identity-deleted")).content.decode()
+
+        assert len(many_tickets) == len(one_ticket), (
+            len(one_ticket), len(many_tickets), [q["sql"] for q in many_tickets])
+        # Really ten rendered rows, not two empty pages agreeing by
+        # accident: `copy.ACTION_PURGE` is offered per row an admin may
+        # act on, and this admin `sees_all_content` on an open box.
+        assert body.count(copy.ACTION_PURGE) == 10
+
+    def test_the_get_reads_identitysettings_exactly_once(self, client):
+        """THE TRUTH BEHIND `deleted_page`'s OWN "one read" CLAIM.
+        `IdentityGateMiddleware` already reads `IdentitySettings` once
+        per request (`identity/tests/test_middleware.py::
+        TestTheSingleRowRead`'s own pin); `settings_row_for(request)`
+        reuses that SAME row rather than the view fetching a second copy
+        of its own with `IdentitySettings.get_solo()` -- the obvious
+        wrong implementation, and the one this view had before this
+        fix, which names the same table a second time and would fail
+        this equality at 2, not 1.
+        """
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with posture("open"):
+            _ticket_for(make_user())
+            client.get(reverse("identity-deleted"))  # warm the session reads
+            with CaptureQueriesContext(connection) as context:
+                assert client.get(reverse("identity-deleted")).status_code == 200
+
+        reads = sum(
+            1 for q in context.captured_queries if "identity_identitysettings" in q["sql"])
+        assert reads == 1, [q["sql"] for q in context.captured_queries]
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -4464,9 +4598,33 @@ In `identity/views.py`, import the service and the copy, and add after `settings
 
 ```python
 from identity import retention
+from identity.access import sees_all_content
 from identity.contracts import retention as retention_copy
 from identity.contracts.actions import (
     CONTENT_DELETED, CONTENT_PURGED, CONTENT_RESTORED,
+)
+
+
+# The three sentences the Deletion log reads, declared once, in Python.
+_EVENT_VERBS = {
+    CONTENT_DELETED: "deleted",
+    CONTENT_RESTORED: "restored",
+    CONTENT_PURGED: "destroyed",
+}
+
+# NEVER-500 FLASHES. A retention handler's own refusal (`ServiceRefused`,
+# `RetentionRefused`) carries its own operator-readable sentence and is
+# flashed verbatim; these two are the fallback for anything else a
+# handler or the restore path might raise -- a bare exception says
+# nothing safe to show a person, so the flash names no detail and the
+# traceback goes to the log instead, keyed on ids only.
+_PURGE_FAILED_MESSAGE = (
+    "That could not be deleted permanently just now. It is still in "
+    "Deleted, and it will be tried again."
+)
+_RESTORE_FAILED_MESSAGE = (
+    "That could not be restored just now. It is still in Deleted "
+    "— try again in a moment."
 )
 
 
@@ -4492,30 +4650,52 @@ def deleted_page(request):
     and this page says nothing about holds or about a purge an owner
     cannot perform: that behaviour is a deferred slice (spec section
     10.10) and the page must not imply a guarantee that is not built.
+
+    ONE `IdentitySettings` READ FOR THE WHOLE REQUEST, and it is not
+    this view's own: `settings_row_for(request)` reads
+    `IdentityGateMiddleware`'s own already-fetched row off the request
+    rather than calling `IdentitySettings.get_solo()` a second time, and
+    that one row is threaded through `principal_for_request`,
+    `visible_tickets`, `sees_all_content` and every row's own
+    `may_purge` call -- the same per-request-reuse norm `entitlement_edit`
+    already follows -- so a row-per-ticket loop costs no per-row settings
+    query, and this GET costs no settings read beyond the middleware's
+    own.
+
+    THE LOG NAMES NOBODY'S ITEM THIS VIEWER COULD NOT ALREADY READ.
+    `show_labels` is `sees_all_content(principal, settings_row=row)`,
+    computed once: every event still LISTS for every viewer (the log is
+    a record of what happened, not a per-viewer view of it), but its
+    `target_label` -- written only when `audit_detail` was on at write
+    time -- reaches the template only for a principal who could already
+    read everyone's content. Anybody else sees the same event with the
+    label blanked, exactly as an event carries no label at all when
+    `audit_detail` was off when it was written.
     """
     retention.sweep()
-    row = IdentitySettings.get_solo()
+    row = settings_row_for(request)
     principal = principal_for_request(request, settings_row=row)
+    show_labels = sees_all_content(principal, settings_row=row)
     tickets = [
         {
             "ticket": ticket,
             "kind_label": retention_copy.KIND_LABELS.get(ticket.kind, ticket.kind),
             "purge_on_line": retention_copy.purge_on_line(ticket.purge_on),
-            "may_purge": retention.may_purge(principal, ticket),
+            "may_purge": retention.may_purge(principal, ticket, settings_row=row),
         }
         for ticket in retention.visible_tickets(principal, settings_row=row)
     ]
     # BUILT HERE, NOT IN THE TEMPLATE. A Django template cannot index a
-    # dict by a variable, and the Purged tab needs one plain sentence per
-    # event chosen from three actions -- so the choosing happens in
-    # Python, where every other user-facing sentence in this repository
-    # is declared, and the template renders fields.
+    # dict by a variable, and the log needs one plain sentence per event
+    # chosen from three actions -- so the choosing happens in Python,
+    # where every other user-facing sentence in this repository is
+    # declared, and the template renders fields.
     events = [
         {
             "kind_label": retention_copy.KIND_LABELS.get(event.target_type,
                                                          event.target_type),
             "key": event.target_key,
-            "label": event.target_label,
+            "label": event.target_label if show_labels else "",
             "verb": _EVENT_VERBS[event.action],
             "actor_label": event.actor_label,
             "at": event.at,
@@ -4530,22 +4710,25 @@ def deleted_page(request):
     })
 
 
-# The three sentences the Purged tab reads, declared once, in Python.
-_EVENT_VERBS = {
-    CONTENT_DELETED: "deleted",
-    CONTENT_RESTORED: "restored",
-    CONTENT_PURGED: "destroyed",
-}
-
-
-def _own_ticket_or_404(request, pk: int):
+def _own_ticket_or_404(request, pk: int, *, settings_row):
     """The addressed ticket, if this principal has standing over it.
 
     404, NEVER 403 -- the class-O shape: a 403 on a row-addressed URL
-    confirms the row exists.
+    confirms the row exists. Serves the double-click/raced-sweep case
+    too -- a ticket a sweep already purged between page-load and click
+    is simply a ticket `visible_tickets` no longer lists, so this is the
+    one lookup both `deleted_restore` and `deleted_purge` need.
+
+    `settings_row` IS REQUIRED, NOT OPTIONAL, and that asymmetry with
+    `deleted_page`'s own no-argument reads is deliberate: both callers
+    already hold the request's one `IdentitySettings` row
+    (`settings_row_for(request)`) before reaching here, and threading it
+    into `principal_for_request` rather than calling that bare is the
+    same "the caller that already paid for the read passes it on" rule
+    `entitlement_edit`'s own comment states in full.
     """
-    principal = principal_for_request(request)
-    ticket = retention.visible_tickets(principal).filter(pk=pk).first()
+    principal = principal_for_request(request, settings_row=settings_row)
+    ticket = retention.visible_tickets(principal, settings_row=settings_row).filter(pk=pk).first()
     if ticket is None:
         raise Http404("No such deleted item.")
     return principal, ticket
@@ -4553,10 +4736,25 @@ def _own_ticket_or_404(request, pk: int):
 
 @require_POST
 def deleted_restore(request, pk: int):
-    """POST /identity/deleted/<pk>/restore/ -- put the item back."""
-    principal, ticket = _own_ticket_or_404(request, pk)
-    retention.restore_content(principal, ticket)
-    messages.info(request, "Restored.")
+    """POST /identity/deleted/<pk>/restore/ -- put the item back.
+
+    NEVER-500: `restore_content` is a plain delete-and-audit and has
+    nothing of its own to refuse, but a caller here still catches
+    anything it might raise rather than let a database hiccup turn a
+    settings-area click into a traceback. The ticket survives either
+    way -- restore never removes content, so there is nothing to retry
+    beyond the click itself.
+    """
+    row = settings_row_for(request)
+    principal, ticket = _own_ticket_or_404(request, pk, settings_row=row)
+    try:
+        retention.restore_content(principal, ticket)
+    except Exception:  # noqa: BLE001 -- never-500; the traceback goes to the log
+        logger.exception(
+            "identity.views: restore failed for ticket %s", ticket.pk)
+        messages.error(request, _RESTORE_FAILED_MESSAGE)
+    else:
+        messages.info(request, "Restored.")
     return settings_redirect(request, "identity-deleted")
 
 
@@ -4570,33 +4768,38 @@ def deleted_purge(request, pk: int):
     job, no worker hop, no `on_commit` hook, no cache -- so after the
     redirect the item is absent from every surface on this box.
 
-    TWO REFUSAL TYPES, BOTH FLASHED, NEITHER A TRACEBACK.
-    `identity.services.ServiceRefused` is this column's own;
-    `identity.contracts.retention.RetentionRefused` is the one a
-    RETENTION HANDLER may raise -- today only
-    `models.queue.retention.forget_conversation`, when a worker still
-    holds one of the conversation's jobs. It is a separate type because
-    `models/queue` may import `identity.contracts` and may NOT import
-    `identity.services` (`IDENTITY_PERMITTED`, pinned by
-    `foundation/ops/tests/test_import_law.py`), and it is a NAMED type
-    rather than a bare `RuntimeError` so this view catches a refusal
-    deliberately instead of swallowing every programming error a
-    handler might contain. Either way the ticket stays, the item stays
-    invisible, and the next sweep or the next click completes it.
+    THREE OUTCOMES, NONE OF THEM A TRACEBACK. A REFUSAL -- this column's
+    own `ServiceRefused`, or the `RetentionRefused` a retention handler
+    in a column that may not import `identity.services` raises instead
+    -- carries its own operator-readable sentence, flashed verbatim; the
+    ticket stays and the item stays invisible. ANY OTHER EXCEPTION a
+    handler leaves behind is logged with `logger.exception`, keyed on
+    ids only -- never this item's label or content -- and answered with
+    a fixed, contentless sentence; the ticket stays for the next sweep
+    or the next click either way. And a clean run flashes success. A
+    caller with no standing to purge (`may_purge` refuses) is a 404,
+    like every other row this principal may not act on.
     """
-    principal, ticket = _own_ticket_or_404(request, pk)
-    if not retention.may_purge(principal, ticket):
+    row = settings_row_for(request)
+    principal, ticket = _own_ticket_or_404(request, pk, settings_row=row)
+    if not retention.may_purge(principal, ticket, settings_row=row):
         raise Http404("No such deleted item.")
     try:
         retention.purge_ticket(principal, ticket)
     except (services.ServiceRefused, RetentionRefused) as exc:
         messages.error(request, str(exc))
+    except Exception:  # noqa: BLE001 -- never-500; the traceback goes to the log
+        logger.exception(
+            "identity.views: purge failed for ticket %s", ticket.pk)
+        messages.error(request, _PURGE_FAILED_MESSAGE)
     else:
         messages.info(request, "Deleted permanently.")
     return settings_redirect(request, "identity-deleted")
 ```
 
-`RetentionRefused` is imported at module top alongside the rest: `from identity.contracts.retention import RetentionRefused`. `require_POST` comes from `django.views.decorators.http`; check whether `identity/views.py` already imports it and add it if not.
+`RetentionRefused` is imported at module top alongside the rest: `from identity.contracts.retention import RetentionRefused`. `require_POST` comes from `django.views.decorators.http`; check whether `identity/views.py` already imports it and add it if not. `settings_row_for` (`identity.request`) is already imported for `entitlement_edit`'s own use. A `logger = logging.getLogger(__name__)` module-level logger is needed for the two `logger.exception` calls above, if `identity/views.py` does not already carry one.
+
+`identity.retention.may_purge` gains an optional `settings_row=None` keyword, the same shape `visible_tickets` already takes, so `deleted_page`'s row-per-ticket loop threads the one request-wide row through it instead of each call re-fetching `IdentitySettings` on its own no-argument form.
 
 - [ ] **Step 4: Mount the routes and classify them**
 
@@ -4624,7 +4827,9 @@ def deleted_purge(request, pk: int):
     "identity-deleted-purge": "O",
 ```
 
-`identity/tests/test_route_matrix.py::_DRIVERS`, beside the other identity entries — the world needs a ticket the class-O cells can address, so add one to `_build_world` (a `DeletionTicket` owned by `w.other`, kind `conversation`, key `str(w.conversation.pk)`) and:
+`identity/tests/test_route_matrix.py::_DRIVERS`, beside the other identity entries — the world needs a ticket the class-O cells can address, so add one to `_build_world` (a `DeletionTicket` owned by `w.other`, kind `conversation`) and:
+
+**The ticket must NOT address `w.conversation` itself.** A first pass that pointed it there (the natural reading of "kind `conversation`, key `str(w.conversation.pk)`") turned 24 unrelated cells red: `agents.visibility.visible_conversations` excludes every ticketed key (`identity.retention.ticketed_keys`), so ticketing the world's own shared conversation made it disappear for every OTHER driver that addresses it (`chat-conversation`, `chat-turn`, `chat-conversation-archive`, `chat-workstream-consolidate`, the sidebar-menu actions, and the rest) — their admin-content-on cells started answering 404 where they expect admission. The ticket instead addresses a DEDICATED conversation built solely for it (`ticket_conversation = make_conversation(agent=agent, **owner_fields(principal))`, owned by `other`, never shared with any other driver), and `purge_on` is thirty days out so no incidental sweep (the `identity-deleted` GET cell's own) removes it before the row-addressed cells get to address it:
 
 ```python
     "identity-deleted": lambda w: ("get", reverse("identity-deleted"), {}),
@@ -4653,9 +4858,17 @@ NO HOLD CONTROL, IN ANY POSTURE, and nothing here mentions a records
 obligation: the enterprise behaviour is deferred (spec section 10.10) and
 this page must not imply a guarantee that is not built.
 
-EVERY SENTENCE COMES FROM `identity/contracts/retention.py` through the
-`copy` context key -- user-facing strings are declared once in Python,
-never typed into a template.
+HEADINGS, BUTTONS AND THE DATE LINE COME FROM
+`identity/contracts/retention.py` through the `copy` context key --
+declared once in Python, never typed twice. The page's OWN sentences
+(the tagline, the confirm prompt, the two `helptext`s) are typed here,
+same as every other settings leaf's own prose.
+
+THE WORD "PURGE" NEVER APPEARS HERE. `copy.ACTION_PURGE` says "Delete
+permanently" and `copy.purge_on_line` says "Purge on <date>" -- the one
+place the word survives, because it names a promise a person can check
+against a calendar, not a mechanism. The URL path segment and the route
+names are not rendered copy and stay as they are.
 
 The delete confirm is a native `<details>`, modelled on
 `chat/_thread_actions.html` and `vision/_delete_control.html`: no
@@ -4680,7 +4893,7 @@ The delete confirm is a native `<details>`, modelled on
 
   {% include "_messages.html" %}
 
-  <section class="settings">
+  <section class="settings" id="deleted-items">
     <h2>{{ copy.PAGE_TITLE }}</h2>
     {% for row in tickets %}
     <div class="item">
@@ -4711,9 +4924,9 @@ The delete confirm is a native `<details>`, modelled on
     {% endfor %}
   </section>
 
-  <section class="settings">
+  <section class="settings" id="deletion-log">
     <h2>{{ copy.TAB_LOG }}</h2>
-    <p class="helptext">A record of what was deleted, restored and destroyed &mdash; who, what kind, and when. It never contains the deleted words.</p>
+    <p class="helptext">A record of what was deleted, restored and destroyed &mdash; who, what kind, and when. Content-free by default: item names appear only when the setting to show them was on when the entry was written.</p>
     {% for event in events %}
     <p class="event">
       {{ event.kind_label }} {{ event.key }}
@@ -4728,6 +4941,8 @@ The delete confirm is a native `<details>`, modelled on
 </main>
 {% endblock %}
 ```
+
+`id="deleted-items"`/`id="deletion-log"` are the anchors `foundation/settings_help.py`'s own `HelpField`s cite for this page (Step 6). `event.label` is already blanked in Python (`deleted_page`'s own `show_labels` gate) before it ever reaches this template -- the template renders whatever field it is given and asks no question of its own about who is looking.
 
 Every value the template reads is a field on a dict the view built — no dict indexed by a variable, no logic in the markup.
 
@@ -4756,7 +4971,7 @@ Every value the template reads is a field on a dict the view built — no dict i
     </div>
 ```
 
-`foundation/settings_help.py`, one `HelpCard` with `route_name="identity-deleted"`, `title="Deleted"`, `gate=EVERYONE`, a `purpose` saying what the page is for, and fields whose anchors exist on the rendered page. It says what Restore and Delete permanently do, **that the removal date is fixed at delete time so a changed setting governs future deletions only**, and **that backups are a separate layer the date does not reach**. It says nothing about holds.
+`foundation/settings_help.py`, one `HelpCard` with `route_name="identity-deleted"`, `title="Deleted"`, `gate=EVERYONE`, a `purpose` saying what the page is for, and fields whose anchors exist on the rendered page. It says what Restore and Delete permanently do, **that the removal date is fixed at delete time so a changed setting governs future deletions only**, and **that backups are a separate layer the date does not reach**. It says nothing about holds. Name the setting by its own field label in quotes (`"Keep deleted items for"`) rather than the word "retention" -- that word is as banned from this card's rendered prose as "purge"/"ticket"/"cliff" are, the identical copy constraint `identity/contracts/retention.py`'s own module docstring states for the page itself.
 
 `foundation/tests/test_page_names.py::_NAMES` — `"identity-deleted": "Deleted"`.
 
@@ -7067,3 +7282,4 @@ Checked end to end: `ticketed_keys` / `visible_tickets` / `may_purge` / `delete_
 - **Execution amendment (Task 11 review), 2026-09-21:** Task 11's first draft of `purge_artifacts` — the brief's own printed Step 4, `for job in GenerationJob.objects.filter(pk__in=job_ids): services.delete_job(job)` inside `tools/vision/retention.py` — was run against the real tree and found to trip `foundation/ops/tests/test_column_boundaries.py::test_no_vision_module_queries_generationjob_directly`, the IA-1 structural gate that closes `GenerationJob.objects` access in `tools/vision` to exactly two files (`visibility.py`, `services.py`); `retention.py` is a third site, and the implementer stopped and reported the conflict rather than editing that gate or guessing a fix. The controller's ruling: the gate stands (it is not this task's file, and not the vision steward's to relax) and `visibility.py` is not the right reroute either — that module answers "who may see this", and a purge must reach a ticketed job, or one owned by somebody else, that nobody may currently see, which is not a visibility question at all. The unscoped read moved beside the delete it feeds: `tools/vision/services.py` gained `delete_jobs(job_ids) -> int` (loops `GenerationJob.objects.filter(pk__in=job_ids)`, calling `delete_job` per row, catching nothing), and `retention.py` now imports no model but `GeneratedOutput`/`JobInput` and ends `return services.delete_jobs(job_ids)`. Two further consequences, both applied and reflected in Task 11's file list and code blocks above: `purge_artifacts` returns 0 for two empty lists without running any query or calling `delete_jobs` at all (pinned by `TestEmptyInputCostsNothing`, a `django_assert_num_queries(0)` test — CONTROLLER ADDITION (a) from this task's own dispatch, which the first pass had not yet added); and `delete_jobs`'s own tests live in `test_retention.py`, not `test_services.py`, because adding them to the latter pushed it to 2,132 lines, over `test_column_boundaries.py`'s own 2,100-line test-module split threshold gate — a second structural gate the same shape of fix (moving the test, not editing the gate) resolved.
 - **Execution amendment (Task 11 review round one), 2026-09-21:** three findings. (1) `output_file`/`input_file` bypass `visible_jobs` entirely (they load their row by primary key and call `may_read_job` directly), so Task 11's exclusion never reached them — a ticketed job's image stayed fetchable by its direct URL after deletion; `may_read_job` now refuses a ticketed job too, before its own `sees_all_content` branch, and the only other production callers of `may_read_job` (there is no sibling `may_manage_job`/`may_delete_job` in this module) are those same two routes, so no other predicate needed the same fix. (2) `purge_artifacts` logged the raw artifact reference and the raw generation id it failed to parse; both warnings now record only that one value failed to parse, pinned by a `caplog` test. (3) the module's own docstring promised a FAILED job with no output is reached only through its generation id; no test built one until now. All three, and the README sentence recording the file-view refusal, are reflected in Task 11's Files list and code/test blocks above.
 - **Execution amendment (Task 10 review round one), 2026-09-21:** two findings. (1) `purge_conversation_notes` caught every `OSError` from the note file's own unlink and logged-and-continued to delete the `Document` row regardless — `missing_ok=True` already forgives the one case that should be forgiven, "already gone"; any OTHER `OSError` (a permissions or I/O problem) is a genuine failure, and deleting the row while the file itself stayed stuck on disk would report a purge that never happened, with the row being the only remaining handle on that file. The catch is removed: the file goes first, the row survives when it could not be removed, and `identity/cascades.py::run_retention`'s own never-swallows contract fails the whole purge and retries it on the next sweep. (2) `tools/rag/retrieval.py::_visibility_filters` never consulted the deletion exclusion at all, so a soft-deleted item's chunks stayed retrievable into a fresh answer through any surface that function still governed (today only from inside a ticketed conversation itself, which can take no new turns — but the same gap would reopen the moment a library document can be ticketed on its own). Closed uniformly rather than per-caller: `retrieve_nodes` computes `tools.rag.access._deleted_document_ids()` once per call — never once per filter leg, never once per node — and threads it into `_visibility_filters`, which expresses it as one `file_id NOT IN (...)` clause using the installed Postgres store's own `NIN` operator, added only when the list is non-empty (an empty `NOT IN (...)` is not valid SQL, and "nothing is deleted" costs nothing extra, not an inert clause). Both fixes are reflected in Task 10's Files list, code blocks and test description above, and in `tools/rag/README.md`'s deletion section.
+- **Execution amendment (Task 12 review round one), 2026-09-21:** six findings, all reflected in Task 12's own code/test/help blocks above. (C1) `deleted_page`'s Deletion log leaked another person's item label to any signed-in viewer, because `audit.by_action`'s read is unscoped by design (the log lists every `content.*` event) and nothing further checked who was looking — `show_labels = sees_all_content(principal, settings_row=row)`, computed once, now gates `event.target_label` per event; the event itself still lists for every viewer, only the label is blanked for one with no standing to read everyone's content. (I2) The Deleted help card said "the retention setting" (the banned word) and omitted the backups sentence its own brief line requires — reworded to `"Keep deleted items for"` in quotes and the backups sentence added, modelled on the identical sentence on the Identity & security card. (I3) Both mutations' generic `except Exception` catches had no test of their own — `views.retention.restore_content`/`purge_ticket` patched to raise a bare `RuntimeError`, asserting the redirect, the fixed flash and the surviving ticket. (I4) `deleted_page`'s own "one read" docstring claim was false: `IdentityGateMiddleware` already reads `IdentitySettings` once per request, and the view's `IdentitySettings.get_solo()` was a second, needless read of the same table — replaced with `settings_row_for(request)` (the row the middleware already stashed), and `_own_ticket_or_404` now takes that row as a required keyword and threads it into `principal_for_request` rather than calling it bare, the same rule `entitlement_edit`'s own comment states; a new `CaptureQueriesContext` pin asserts exactly one `identity_identitysettings` statement per GET. (I5) `identity/README.md` section 9 gained a paragraph for the page itself — its three routes and their classes, the `EVERYONE` gate's reason, the prune-on-read GET, and the log's label-visibility rule — which the section had deferred to "the Deleted page's own tasks' code" until now. (M1/M2/M3/M4/M5) `_RESTORE_FAILED_MESSAGE` reworded ("nothing retries a restore" was itself untrue — the message no longer claims it); the log's own `helptext` reworded off "It never contains the deleted words" to name the real, setting-gated rule; the template's own comment corrected from "every sentence comes from the constants" (false — the page's own prose is typed in the template) to say which half is which; `may_purge`'s docstring gained one sentence naming it as today-inert and the hook for the deferred enterprise hold behaviour; the unused `make_admin` import was dropped from `identity/tests/test_deleted_page.py` (the two new label-visibility tests use `posture("open")` for their sees-all case rather than an administrator account, so the import stayed genuinely unused).
