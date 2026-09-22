@@ -43,8 +43,7 @@ docker compose up -d --build                           # run it locally, or afte
    Since 2026-09-20 `test_docs_model_names.py` walks the planning archive too.
 4. **No absolute local paths, and no personal data,** in anything committed. Use `<repo>`,
    `<worktree>`, `<home>`. No names, no email addresses, no hardware inventories.
-5. **Offline by default.** No runtime dependency on the public internet, in any code path, in
-   any posture.
+5. **Offline by default.** No runtime dependency on the public internet, in any code path or posture.
 6. **No hand edits to a database.** Schema and bookkeeping changes are checked-in migrations
    or tested management commands; read-only queries are fine. Shipped defaults are a catalogue
    installed on consent (`manage.py install_defaults`), never auto-created for an owner. An
@@ -69,8 +68,7 @@ docker compose up -d --build                           # run it locally, or afte
 - **Tests run natively, in the foreground, and you wait.** Never in a container (the
   git-dependent guard tests false-fail there). One pytest process per session, never while a
   live proof run uses the same stack, at most two full suites across the machine.
-- **The four runs above are the gate.** Identity, posture, or visibility work adds the two
-  posture-sweep runs.
+- **The four runs above are the gate.** Identity, posture or visibility work adds two posture sweeps.
 - **Restart the background services after a code change**: `web` auto-reloads, the ingest
   watcher and job worker do not, and an image change needs a rebuild
   ([docs/DEV.md](docs/DEV.md#8-the-verification-ladder) §8 rung 2).
@@ -93,9 +91,8 @@ docker compose up -d --build                           # run it locally, or afte
 
 ## Subagent-driven development
 
-Implementation here is subagent-driven: the orchestrating session does not write production
-code. It may write short orchestration artifacts — a spec, a brief, a ledger entry — and says
-so when it does.
+Implementation here is subagent-driven: the orchestrating session does not write production code.
+It may write orchestration artifacts — a spec, a brief, a ledger entry — and says so when it does.
 
 - Every plan is written before the code and reviewed adversarially before it is executed.
 - Every task gets its own review pass against the real tree, not the plan's claims, and the
@@ -116,6 +113,9 @@ Before you open a pull request:
 - [ ] The whole feature — the real workflows, not just the diff — walked end to end in a
       browser on this branch's stack (the plan's `## Smoke Checklist`, by hand).
 - [ ] Current `dev` is merged into the branch and resolved there.
+- [ ] The whole-branch review passed, and then a separate **read-only consolidation audit** of
+      the whole delta — efficient, concise, no duplication, no orphan or dead code, no needless
+      technical debt — whose fix-now items landed as one tidy-up commit through these gates.
 
 An issue you are unsure about is open; never offer or even mention merge while one is open.
 

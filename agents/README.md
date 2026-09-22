@@ -320,6 +320,14 @@ and never through a whole-set write. There is deliberately **no single audience
 writer** — one control writing both would either clobber a label its actor may not
 touch or refuse an edit it should allow.
 
+The one field with a closed vocabulary is `llm_role`, and that vocabulary is **not**
+spelled here: `models.contracts.roles.chat_capable_roles()` is the single filter, and
+it lives below both columns because this module may not import `agents.chat` and the
+form must offer exactly what `_validated_agent_fields` accepts — two spellings would
+be a form that offers what the writer rejects. `max_steps`' ceiling is likewise
+`agents/limits.py::MAX_STEPS_CEILING`, declared beside the default it bounds rather
+than inline in the form.
+
 ## Agents and flows carry their own labels too (Identity & Auth, Task 15)
 
 **`AgentEntitlement`/`FlowEntitlement`** (`agents/models.py`, read and

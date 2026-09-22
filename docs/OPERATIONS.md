@@ -613,6 +613,45 @@ two processes hold in memory for the life of the process — a plain
 `docker compose restart watcher worker` after the deploy, same as any
 other job-kind change (see [docs/DEV.md](DEV.md)'s restart rule).
 
+## Deploying the chat cluster to a live box
+
+**This deploy runs two migrations, and neither changes what anybody sees on the
+day it lands.** There is no hand step, no posture work, and nothing to decide
+before running it.
+
+`agents.0012_agent_box_wide` adds the agent **audience** column — who may use an
+agent, as distinct from the `resident` marker recording that it started life as a
+shipped default ([ADR 0019](adr/0019-chat-cluster.md), decision 3). It carries a
+`RunPython` step setting the new column from the old marker for every existing
+row, so every shipped default an operator had installed stays visible to
+everybody and every private agent stays private. Its reverse clears the column.
+
+`agents.0013_conversation_branch` adds two nullable columns to `Conversation` —
+the parent a branch came from (`SET_NULL`, so deleting the parent leaves the
+branch readable) and the index of the message it was branched at. **Nothing is
+back-filled**: every existing conversation was started rather than branched, and
+null is the honest value for it. It **depends on 0012**, so the two land together
+or not at all.
+
+```bash
+manage.py migrate
+docker compose restart watcher worker
+```
+
+**Restart `watcher` and `worker` after this deploy.** The agents column's
+visibility module and its turn preflight both changed, and those two processes
+hold that code in memory for the life of the process — a plain `docker compose
+restart watcher worker`, the same rule as any other change to code a job runs
+(see [docs/DEV.md](DEV.md)'s restart rule). `web` auto-reloads and needs nothing.
+
+**What an operator sees afterwards:** an **Agent library** entry in the settings
+sidebar's Setup group, administrator-gated; a context line under the composer on
+every thread page; and an edit control on a reader's own finished messages, which
+creates a new conversation rather than rewriting the old one. On a box running
+without accounts the entitlement-restriction column on both agent lists is not
+rendered at all — deliberate, because with accounts off a label restricts nobody,
+and a `0` there would say "none" where the truth is "not asked".
+
 ## Turning on accounts
 
 A box that has been running `open` (no accounts) has conversations, ask

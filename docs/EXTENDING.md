@@ -1011,8 +1011,12 @@ not "known only to whoever added the last field."
 
 ### Two more that are easy to get wrong and cheap to state
 
-- The page's `<h1>` and `<title>` must agree with the sidebar label
-  (`foundation/tests/test_page_names.py`).
+- The page's `<h1>` and `<title>` must agree with the sidebar label — and the route needs its
+  own row in `foundation/tests/test_page_names.py::_NAMES` before either half is checked at
+  all. That table's own sweep walks `SETTINGS_GROUPS` and fails on an entry it does not name,
+  so it is a registration place in its own right rather than a test detail. (Add it to that
+  module's `_ADMIN_ONLY` set only if the gate is the accounts-admin one: a plain `ADMIN` page
+  renders its real body on an open box, where everyone is an administrator.)
 - A leaf page overriding `{% block extra_style %}` writes
   `{{ block.super }}` **first**, or it silently drops `_settings.html`'s
   shared rules.
