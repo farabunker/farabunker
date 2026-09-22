@@ -49,10 +49,26 @@ from identity.request import principal_for_request, settings_row_for
 
 # TRUE, AND NOTHING ELSE ON THIS PAGE SAYS IT.
 BOX_WIDE_SECTION_TITLE = "Agents everyone on this box can use"
+# THE TWO SENTENCES THIS SECTION CAN SAY, and which one a reader gets is
+# `may_manage_agent`'s answer for that ROW, never the section's (fix round,
+# review I2). The note below used to be the section's ONLY sentence, which
+# made it a FALSE statement for an administrator -- who IS the "administrator"
+# it points at -- and on an open box, where `sees_all_content` answers True
+# for everybody, that administrator is the DEFAULT reader.
 BOX_WIDE_SECTION_NOTE = (
     "You installed this from the shipped catalogue, so it is available to everyone "
     "here. An administrator can change it."
 )
+BOX_WIDE_SECTION_ADMIN_NOTE = (
+    "You administer this box, so this one is yours to change — and an edit here "
+    "changes it for everyone."
+)
+
+# `agent_edit` accepts ONE action today (fix round, review M2). Task 9 adds
+# "labels" beside it; until then anything else is refused rather than silently
+# handled as a field save, which is what a branchless POST handler did.
+FIELDS_ACTION = "fields"
+AGENT_UNKNOWN_ACTION = "That is not something this page can do."
 
 
 def _restriction_fold(principal, settings_row):
@@ -75,6 +91,25 @@ def _restriction_fold(principal, settings_row):
     in one `values_list` (the discipline `/chat/access/` documents) and
     `labelling_entitlements` is one more -- and the per-row number is a
     FOLD over them rather than a query of its own.
+
+    `agent_entitlement_ids()` READS EVERY LABELLED AGENT ON THE BOX, not
+    only the rows being listed (review N1). That is FLAT in the number of
+    rows this page renders -- which is what `test_the_list_costs_the_same
+    _at_one_agent_and_at_twenty_five` pins -- and UNBOUNDED in the size of
+    the `AgentEntitlement` table. It is the same trade `/chat/access/`
+    takes for the same reason (one `values_list` beats one query per row);
+    if that table ever outgrows the page, the repair is a pk-narrowed
+    reader in `agents/labels.py`, never a per-row read here.
+
+    `manageable` IS `may_manage_agent`'s ANSWER FOR THAT ROW, threaded
+    with the `settings_row` this request already holds so the predicate
+    adds no query per row (fix round, review I2). ONE ROW SHAPE, not two:
+    for the editable section it is True by construction -- `editable_
+    agents` IS the rows this principal may edit -- and only the box-wide
+    section reads it, where an administrator and a member get genuinely
+    different answers. The one read this does not thread lives inside
+    `identity.access.may_read_owned_row` and is reached only for a
+    `service`-owned row.
     """
     labels = agent_entitlement_ids()
     mine = {pk for pk, _name in labelling_entitlements(principal,
@@ -82,7 +117,9 @@ def _restriction_fold(principal, settings_row):
 
     def fold(rows):
         return [{"agent": row,
-                 "restrictions": len(labels.get(row.pk, frozenset()) - mine)}
+                 "restrictions": len(labels.get(row.pk, frozenset()) - mine),
+                 "manageable": may_manage_agent(principal, row,
+                                                settings_row=settings_row)}
                 for row in rows]
 
     return fold
@@ -120,6 +157,7 @@ def agent_list(request):
         "box_wide_rows": counted(box_wide),
         "box_wide_section_title": BOX_WIDE_SECTION_TITLE,
         "box_wide_section_note": BOX_WIDE_SECTION_NOTE,
+        "box_wide_section_admin_note": BOX_WIDE_SECTION_ADMIN_NOTE,
         "next_url": request.get_full_path(),
         **sidebar_context(principal, settings_row=settings_row),
     })
@@ -181,6 +219,24 @@ def agent_edit(request, pk: int):
                                              settings_row=settings_row):
         raise Http404(f"No agent {pk} you may change.")
     if request.method == "POST":
+        # ONE ACTION TODAY, NAMED RATHER THAN ASSUMED (fix round, review
+        # M2). `chat/_agent_form.html` already ships the hidden
+        # `action=fields` field, so a body naming anything else is a stale
+        # form or a hand-made request -- and handling it as a field save is
+        # how an `action=labels` body would silently blank a row's prompt
+        # the day Task 9's panel starts posting one. Refused with the page
+        # re-rendered and a declared sentence, the house 400 shape
+        # (`views/workstreams.py`, `views/conversations.py`), never a save.
+        # Task 9's second path is then a pure insertion here.
+        if request.POST.get("action", "") != FIELDS_ACTION:
+            return render(request, "chat/agent_edit.html", {
+                **agent_form_context(principal, agent=agent,
+                                     settings_row=settings_row),
+                "form_action": reverse("chat-agent-edit", args=[agent.pk]),
+                "next_value": request.POST.get("next", ""),
+                "page_error": AGENT_UNKNOWN_ACTION,
+                **sidebar_context(principal, settings_row=settings_row),
+            }, status=400)
         return _save_fields(request, principal, agent, settings_row)
     return render(request, "chat/agent_edit.html", {
         **agent_form_context(principal, agent=agent, settings_row=settings_row),

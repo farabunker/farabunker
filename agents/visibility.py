@@ -63,6 +63,7 @@ from identity.access import (
     may_read_owned_row, owned_rows_q, owner_fields, sees_all_content,
 )
 from identity.contracts import actions
+from models.contracts.roles import chat_capable_roles
 
 
 def visible_conversations(principal, *, settings_row=None):
@@ -887,6 +888,14 @@ AGENT_MAX_STEPS_OUT_OF_RANGE = (
     f"Steps per turn must be between 1 and {MAX_STEPS_CEILING}."
 )
 AGENT_NOT_YOURS = "That agent is not yours to change."
+# THE WRITER'S OWN half of the role-vocabulary rule (fix round, review M1).
+# `agents.chat.agentform.ROLE_NOT_OFFERED` is the FORM's sentence for the same
+# refusal, worded for somebody looking at a select; this one is worded for a
+# caller who saw no form at all. Two layers of one rule, not two rules -- and
+# they cannot share a constant, because `agents/` may not import `agents.chat`
+# from here (import law), which is the same reason the vocabulary itself lives
+# in `models.contracts.roles.chat_capable_roles`.
+AGENT_ROLE_NOT_CHAT_CAPABLE = "That model role cannot back a chat agent."
 _SLUG_MAX = 64
 
 
@@ -1058,6 +1067,17 @@ def _validated_agent_fields(principal, fields, *, settings_row=None, existing=No
     }
     if is_admin(principal, settings_row=settings_row):
         if fields.get("llm_role"):
+            # THE VOCABULARY IS CHECKED HERE, NOT ONLY AT THE VIEW (fix
+            # round, review M1). Admin-ness is the only thing this branch
+            # used to ask, so any string an administrator sent was written
+            # -- including a role whose capability is `embeddings`, which no
+            # chat turn can resolve. `models.contracts.roles.
+            # chat_capable_roles` is the one filter the FORM offers from, so
+            # a second writer path (a management command, a future MCP edge)
+            # is now refused by the same vocabulary the select renders.
+            if fields["llm_role"] not in {key for key, _label in chat_capable_roles()}:
+                errors["llm_role"] = AGENT_ROLE_NOT_CHAT_CAPABLE
+                return {}, errors
             clean["llm_role"] = fields["llm_role"]
         if "box_wide" in fields:
             clean["box_wide"] = bool(fields["box_wide"])

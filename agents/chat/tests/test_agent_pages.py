@@ -226,6 +226,9 @@ class TestTheUserFacingList:
                                box_wide=True, **owner_fields(user_principal(member)))
             sign_in(client, member)
             body = client.get(reverse("chat-agents")).content.decode()
+        # THE POSITIVE CO-ASSERTION (review M3): a `not in` alone would
+        # stay green on a page that stopped rendering the section at all.
+        assert escape("Everyone's helper") in body
         assert reverse("chat-agent-edit", args=[agent.pk]) not in body
 
     def test_the_page_renders_a_bare_restriction_count_and_never_a_name(self, client):
@@ -350,13 +353,23 @@ class TestEditingAnAgent:
         assert agent.name == "Original"
 
     def test_a_box_wide_row_refuses_its_own_non_admin_owner_with_a_404(self, client):
+        """BOTH VERBS, matching the stranger test's own standard (review
+        M5): a GET-only pin would leave the write path unasserted for the
+        one refusal `may_manage_agent` makes that is not about ownership."""
         member = make_user()
         with posture(POSTURE_ENTERPRISE):
-            agent = make_agent(slug="everyones-edit", box_wide=True,
+            agent = make_agent(slug="everyones-edit", name="Original",
+                               box_wide=True,
                                **owner_fields(user_principal(member)))
             sign_in(client, member)
-            assert client.get(
-                reverse("chat-agent-edit", args=[agent.pk])).status_code == 404
+            get = client.get(reverse("chat-agent-edit", args=[agent.pk]))
+            post = client.post(reverse("chat-agent-edit", args=[agent.pk]), {
+                "action": "fields", "name": "Hijacked", "description": "",
+                "system_prompt": "", "max_steps": "2", "enabled": "on"})
+            agent.refresh_from_db()
+        assert get.status_code == 404
+        assert post.status_code == 404
+        assert agent.name == "Original"
 
     def test_the_reach_control_is_absent_from_a_members_page_source(self, client):
         member = make_user()
@@ -515,11 +528,20 @@ class TestNoEntitlementNameLeaksFromTheseRoutes:
             agent = make_agent(slug="swept", **owner_fields(user_principal(member)))
             set_agent_labels(user_principal(admin), agent, {entitlement.pk})
             sign_in(client, member)
-            bodies = [
-                client.get(reverse("chat-agents")).content.decode(),
-                client.get(reverse("chat-agent-new")).content.decode(),
-                client.get(reverse("chat-agent-edit", args=[agent.pk])).content.decode(),
+            responses = [
+                client.get(reverse("chat-agents")),
+                client.get(reverse("chat-agent-new")),
+                client.get(reverse("chat-agent-edit", args=[agent.pk])),
             ]
+            bodies = [response.content.decode() for response in responses]
+            headings = ["<h1>Agents</h1>", "<h1>New agent</h1>",
+                        f"<h1>{escape(agent.name)}</h1>"]
+        # THE POSITIVE CO-ASSERTIONS (review M3): three `not in`s over
+        # three bodies would all pass on three empty pages, or on three
+        # 404s. Each response has to really be the page it names.
+        assert [response.status_code for response in responses] == [200, 200, 200]
+        for heading, body in zip(headings, bodies):
+            assert heading in body, heading
         assert not any("Radioactive" in body for body in bodies)
 
     def test_the_count_this_page_DOES_carry_is_the_owners_own_standing(self, client):
@@ -540,3 +562,207 @@ class TestNoEntitlementNameLeaksFromTheseRoutes:
             body = client.get(reverse("chat-agents")).content.decode()
         assert "Radioactive" not in body
         assert "1 restriction" not in body
+
+
+class TestTheBoxWideSectionSpeaksToItsReader:
+    """Fix round, review I2. `box_wide_agents_owned_by` short-circuits on
+    `sees_all_content`, which answers True for EVERYBODY on an open box --
+    the default posture -- so the read-only section's one declared sentence
+    ("An administrator can change it") was being printed to the
+    administrator it points at, with the edit link withheld from the one
+    reader `may_manage_agent` admits. Which sentence a row gets is now that
+    predicate's answer for that row.
+
+    The member half of the pair lives in `TestTheUserFacingList` above
+    (`test_a_box_wide_row_this_member_owns_is_shown_read_only_with_a_reason`
+    and `test_the_read_only_section_offers_no_edit_link_for_that_row`),
+    unchanged -- the read-only sentence is TRUE for them and the link would
+    be a link to a 404.
+    """
+
+    def test_an_administrator_on_an_accounts_on_box_gets_the_link_and_the_admin_sentence(
+        self, client
+    ):
+        """OWNED BY THE ADMINISTRATOR deliberately: with
+        `admin_sees_content` off (the default), `sees_all_content` is False
+        even for an admin, so `box_wide_agents_owned_by` falls through to
+        `owned_rows_q` and lists their own rows only -- which is
+        `editable_agents`' own documented behaviour on an accounts-on box,
+        not a quirk of this test."""
+        from agents.chat.views.agents import (
+            BOX_WIDE_SECTION_ADMIN_NOTE, BOX_WIDE_SECTION_NOTE,
+        )
+
+        admin = make_admin()
+        with posture(POSTURE_ENTERPRISE):
+            agent = make_agent(slug="everyones-admin", name="Everyone's helper",
+                               box_wide=True,
+                               **owner_fields(user_principal(admin)))
+            sign_in(client, admin)
+            body = client.get(reverse("chat-agents")).content.decode()
+        assert escape("Everyone's helper") in body
+        assert reverse("chat-agent-edit", args=[agent.pk]) in body
+        assert BOX_WIDE_SECTION_ADMIN_NOTE in body
+        assert BOX_WIDE_SECTION_NOTE not in body
+
+    def test_on_an_open_box_the_default_reader_gets_the_link_not_the_read_only_sentence(
+        self, client
+    ):
+        """NO `posture(...)` HERE, and that is the point: the shipped
+        default is the open box, where `accounts_on` is False, nobody signs
+        in, and `is_admin` answers True for whoever is at the keyboard. That
+        made the open box the one configuration where the false sentence was
+        what EVERY reader saw -- and it was the configuration no test
+        rendered this page in."""
+        from agents.chat.views.agents import (
+            BOX_WIDE_SECTION_ADMIN_NOTE, BOX_WIDE_SECTION_NOTE,
+        )
+
+        agent = make_agent(slug="everyones-open", name="Everyone's helper",
+                           box_wide=True)
+        body = client.get(reverse("chat-agents")).content.decode()
+        assert escape("Everyone's helper") in body
+        assert reverse("chat-agent-edit", args=[agent.pk]) in body
+        assert BOX_WIDE_SECTION_ADMIN_NOTE in body
+        assert BOX_WIDE_SECTION_NOTE not in body
+
+    def test_the_admin_link_really_opens_the_editor(self, client):
+        """The other half: a link this section renders must not be a link
+        to a 404, which is the defect the whole section exists to prevent.
+        `may_manage_agent` decided to render it, so the same predicate must
+        admit the GET."""
+        admin = make_admin()
+        with posture(POSTURE_ENTERPRISE):
+            agent = make_agent(slug="everyones-reachable", box_wide=True,
+                               **owner_fields(user_principal(admin)))
+            sign_in(client, admin)
+            response = client.get(reverse("chat-agent-edit", args=[agent.pk]))
+        assert response.status_code == 200
+
+
+class TestTheEditRoutesActionBranch:
+    """Fix round, review M2. Any POST used to be handled as a field save,
+    `action=labels` and `action=nonsense` included. Task 9's panel is the
+    reason that matters: the day it starts posting a labels-shaped body,
+    a branchless handler would run it through `update_agent` and blank the
+    row's prompt."""
+
+    def test_an_unknown_action_is_refused_and_writes_nothing(self, client):
+        from agents.chat.views.agents import AGENT_UNKNOWN_ACTION
+
+        owner = make_user()
+        with posture(POSTURE_ENTERPRISE):
+            agent = make_agent(slug="odd-action", name="Original",
+                               system_prompt="keep me",
+                               **owner_fields(user_principal(owner)))
+            sign_in(client, owner)
+            response = client.post(reverse("chat-agent-edit", args=[agent.pk]), {
+                "action": "nonsense", "name": "Renamed", "description": "",
+                "system_prompt": "", "max_steps": "2", "enabled": "on"})
+            agent.refresh_from_db()
+        assert response.status_code == 400
+        assert AGENT_UNKNOWN_ACTION in response.content.decode()
+        assert agent.name == "Original"
+        assert agent.system_prompt == "keep me"
+
+    def test_a_missing_action_is_refused_too(self, client):
+        """An ABSENT `action` is the same shape as a wrong one -- the
+        fragment always ships the hidden field, so a body without it never
+        came from this page."""
+        owner = make_user()
+        with posture(POSTURE_ENTERPRISE):
+            agent = make_agent(slug="no-action", name="Original",
+                               **owner_fields(user_principal(owner)))
+            sign_in(client, owner)
+            response = client.post(reverse("chat-agent-edit", args=[agent.pk]), {
+                "name": "Renamed", "description": "", "system_prompt": "",
+                "max_steps": "2", "enabled": "on"})
+            agent.refresh_from_db()
+        assert response.status_code == 400
+        assert agent.name == "Original"
+
+    def test_the_fields_action_still_saves(self, client):
+        """The honest other half, so the branch above is a VOCABULARY
+        check rather than a route that refuses every POST."""
+        owner = make_user()
+        with posture(POSTURE_ENTERPRISE):
+            agent = make_agent(slug="fields-action",
+                               **owner_fields(user_principal(owner)))
+            sign_in(client, owner)
+            response = client.post(reverse("chat-agent-edit", args=[agent.pk]), {
+                "action": "fields", "name": "Renamed", "description": "",
+                "system_prompt": "", "max_steps": "2", "enabled": "on"})
+            agent.refresh_from_db()
+        assert response.status_code == 302
+        assert agent.name == "Renamed"
+
+
+def _page_content(body: str) -> str:
+    """JUST THIS PAGE'S OWN MARKUP, not the shell and rail around it.
+
+    Sliced for the reason `agents/chat/tests/test_sidebar.py::_nav` slices
+    the rail: an assertion about what a page does NOT contain must not be
+    answerable by the rest of the document. `chat/base.html` puts
+    `{% templatetag openblock %} block chat_content {% templatetag
+    closeblock %}` inside `<div class="chat-wrap">`, AFTER the sidebar
+    block -- and the sidebar brings `chat/_menu_exclusive.html`, the one
+    sanctioned script on this surface -- so an unsliced "no `<script>`"
+    assertion could never pass on any page that renders the rail, which
+    is all three of these.
+    """
+    marker = '<div class="chat-wrap">'
+    assert marker in body, "chat/base.html no longer wraps the content block"
+    return body.split(marker, 1)[1]
+
+
+class TestTheNewPagesAddNoScript:
+    """Fix round, review M4. The three pages are one plain POST form and
+    two lists of links -- the doctrine -- and nothing held that. Mirrors
+    `test_sidebar.py::test_every_action_is_a_details_and_a_post_form_never_
+    a_script`, sliced for the same reason (see `_page_content`)."""
+
+    def _assert_scriptless(self, body):
+        content = _page_content(body)
+        assert "<script" not in content
+        assert "onclick" not in content
+        assert "onsubmit" not in content
+
+    def test_the_list_page_carries_no_script_of_its_own(self, client):
+        member = make_user()
+        with posture(POSTURE_ENTERPRISE):
+            make_agent(slug="scriptless-list",
+                       **owner_fields(user_principal(member)))
+            make_agent(slug="scriptless-boxwide", box_wide=True,
+                       **owner_fields(user_principal(member)))
+            sign_in(client, member)
+            response = client.get(reverse("chat-agents"))
+        assert response.status_code == 200
+        # THE POSITIVE HALF: the slice really contains this page, so a
+        # "no script" claim is not a claim about an empty string.
+        assert "<h1>Agents</h1>" in _page_content(response.content.decode())
+        self._assert_scriptless(response.content.decode())
+
+    def test_the_create_page_carries_no_script_of_its_own(self, client):
+        member = make_user()
+        with posture(POSTURE_ENTERPRISE):
+            sign_in(client, member)
+            response = client.get(reverse("chat-agent-new"))
+        assert response.status_code == 200
+        assert "<h1>New agent</h1>" in _page_content(response.content.decode())
+        self._assert_scriptless(response.content.decode())
+
+    def test_the_edit_page_carries_no_script_of_its_own(self, client):
+        """Rendered as an ADMINISTRATOR, so the role select and the reach
+        fieldset -- the two controls a member's page never builds -- are
+        both in the slice being checked."""
+        admin = make_admin()
+        with posture(POSTURE_ENTERPRISE):
+            agent = make_agent(slug="scriptless-edit",
+                               **owner_fields(user_principal(admin)))
+            sign_in(client, admin)
+            response = client.get(reverse("chat-agent-edit", args=[agent.pk]))
+        content = _page_content(response.content.decode())
+        assert response.status_code == 200
+        assert 'name="llm_role"' in content
+        assert 'name="box_wide"' in content
+        self._assert_scriptless(response.content.decode())

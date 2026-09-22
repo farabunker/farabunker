@@ -444,6 +444,40 @@ class TestUpdateAgent:
         assert errors == {}
         assert agent.llm_role == RAG_ANSWER_ROLE
 
+    def test_an_administrator_cannot_set_a_role_that_is_not_chat_capable(self):
+        """THE WRITER'S OWN VOCABULARY CHECK (fix round, review M1). The
+        sibling above proves an administrator may write a role; this
+        proves the permission is bounded by CAPABILITY and not merely by
+        admin-ness. Before this, `is_admin` was the only question this
+        branch asked, so any string an administrator sent was written --
+        including an embeddings role no chat turn can resolve, which
+        would leave the agent unrunnable with nothing refused anywhere.
+
+        ASSERTED AT THE WRITER, not only at the view: `agents.chat.views.
+        agents` refuses this too, but the writer has other callers (a
+        management command, the MCP edge both `agents/visibility.py` and
+        `agents/chat/agentform.py` anticipate), and a rule enforced only
+        at one of several doors is not enforced. The shared filter is
+        `models.contracts.roles.chat_capable_roles`, which sits below both
+        columns because `agents/visibility.py` may not import
+        `agents.chat`."""
+        from agents.visibility import AGENT_ROLE_NOT_CHAT_CAPABLE, update_agent
+        from models.contracts.roles import CHAT_CONVERSE_ROLE, RAG_EMBED_ROLE
+
+        admin = make_admin()
+        with posture(POSTURE_ENTERPRISE):
+            agent = make_agent(slug="role-not-chat", llm_role=CHAT_CONVERSE_ROLE,
+                               **owner_fields(user_principal(admin)))
+            errors = update_agent(user_principal(admin), agent, dict(
+                name="renamed", description="", system_prompt="", max_steps=2,
+                enabled=True, llm_role=RAG_EMBED_ROLE))
+        agent.refresh_from_db()
+        assert errors == {"llm_role": AGENT_ROLE_NOT_CHAT_CAPABLE}
+        # NOTHING ELSE IN THE BODY LANDED EITHER: the refusal returns
+        # before the write, so the name in the same POST is untouched.
+        assert agent.llm_role == CHAT_CONVERSE_ROLE
+        assert agent.name != "renamed"
+
     def test_a_non_admin_cannot_set_box_wide_even_by_forging_the_field(self):
         from agents.visibility import update_agent
 

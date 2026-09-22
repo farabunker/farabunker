@@ -2487,3 +2487,106 @@ entitlement non-disclosure gate, and the route matrix sweeps these routes for it
 all still needs to be told their row carries an administrator-set restriction; only
 the transfer panel itself is conditioned on there being something to offer
 (`choices` non-empty).
+
+## The agent pages: the three routes (chat cluster, feature B)
+
+The section above is the FORM — one builder, two mounts. These are the routes
+that mount it, and the list they sit on. No entry in the `## URL table` above:
+that table's own preamble scopes it to the tasks it was written for, and
+`/chat/w/`, `/chat/access/` and `/chat/tools/` are all documented in sections
+instead. This follows that shape.
+
+| route name | class | what it is |
+| --- | --- | --- |
+| `chat-agents` | A | `/chat/agents/` — the agents I work on |
+| `chat-agent-new` | A | `/chat/agents/new/` — creation; there is no row yet |
+| `chat-agent-edit` | O | `/chat/agents/<pk>/` — the ONE edit route both mounts share |
+
+**`chat-agent-edit` is class O, not S**, and that is the whole feature: an S
+route refuses a non-admin at the middleware, which is exactly the person these
+pages exist for. It is row-addressed, and the view turns
+`agents.visibility.may_manage_agent` into the house 404 — the same shape
+`chat-conversation-rename` and its siblings carry. It is also the ONE class-O
+route whose administrator answer does not move with `admin_sees_content`:
+`may_manage_agent` short-circuits on `is_admin` because managing an agent is
+administering box inventory rather than reading somebody's content.
+`identity/tests/test_route_matrix.py` names that one cell in
+`_ADMIN_ALWAYS_ADMITTED_O`, and `identity.access.sees_all_content`'s docstring
+records the distinction.
+
+### Two sections on the list, and why the second exists
+
+**"The agents I work on"** is `editable_agents` — every non-`box_wide` row this
+principal may edit. On an accounts-on box an administrator sees their OWN rows
+here, because `sees_all_content` is `is_admin AND admin_sees_content` and the
+content setting is usually off; `/settings/agents/` is the box-wide view, one
+click away.
+
+**"Agents everyone on this box can use"** is `box_wide_agents_owned_by` — the
+`box_wide` rows this principal owns. It exists because of a route that predates
+this page: `chat-default-install` is class A and stamps the INSTALLING principal
+as the owner, so a member can own a row everybody on the box can use and that
+`may_manage_agent` refuses them. Without the section they would own a row that
+is absent from their list and refused by the editor, with nothing anywhere
+explaining why.
+
+**Which sentence a row in that section gets is `may_manage_agent`'s answer for
+THAT ROW**, never the section's. A member who owns one gets the read-only
+sentence and no link — a link would be a link to a 404, which is the defect the
+section exists to prevent, shipped in a different shape. An administrator gets
+the link and a different declared sentence, saying that they administer this box
+and an edit here changes the agent for everyone. That distinction is not
+cosmetic: `box_wide_agents_owned_by` short-circuits on `sees_all_content`, which
+answers True for **everybody on an open box** — the shipped default — so on a
+default box the administrator is the only reader the section ever has, and a
+single read-only sentence made it a false statement with the edit link withheld
+from the one person the predicate admits.
+
+**The restriction count is a bare number, never a name.** It is folded in the
+view from two batch reads — one `agent_entitlement_ids()` and one
+`labelling_entitlements` — shared by both sections through one closure, so
+twenty-five rows cost what one row costs and no per-row held-entitlement read
+happens here. A name would be the entitlement non-disclosure gate, which the
+route matrix sweeps these routes for.
+
+### `?next=` is echoed, never redirected to, on a GET
+
+`agents.chat.service.validated_next_url` reads `request.POST` and nothing else,
+so a `?next=` arriving on a GET link is NOT validated by it and a naive
+`request.GET["next"]` redirect would be an open redirect off this box. So: the
+list's own links carry `?next=`, the GET **echoes it into a hidden field and
+does nothing else with it**, and the POST validates through
+`validated_next_url`, falling back to the list. The Cancel link goes to the list
+unconditionally — an unvalidated GET value must never become a clickable `href`.
+
+### One action per POST, named
+
+`chat-agent-edit` reads an `action` field and accepts `fields` today. Anything
+else — an absent field, a stale form, Task 9's `labels` before it lands — is
+refused with the page re-rendered, a declared sentence and a 400, never handled
+as a field save. The role vocabulary is refused twice on purpose: the form owns
+which roles it offers (spec §4.4) and the writer refuses the same set at its own
+seam, so a caller that saw no form cannot stamp an agent with a role no chat
+turn can resolve. The one filter both ask lives in
+`models.contracts.roles.chat_capable_roles`, below both columns, because
+`agents/visibility.py` may not import `agents.chat`.
+
+### Where the CSS lives
+
+**All of it in `chat/base.html`**, from the day the fragment was created —
+`.chat-nav-link`, `.agent-row`, `.agent-row h2`, `.agent-group-head`,
+`.agent-reach` and its two descendants, `.form-error`. `chat/_agent_form.html`
+is a fragment with page consumers, and a fragment cannot own rules a page has to
+load; Django template blocks do not cascade sideways, so a rule parked in one
+leaf page's own style block is invisible in another's.
+`foundation/ops/tests/test_css_ownership.py` enforces exactly that. The
+selectors are prefixed (`.agent-row`, not `.row`) because the bare names already
+mean a settings page's card and section heading under
+`foundation/templates/_settings.html`.
+
+**No `<style>` and no `<script>` in any of the three templates.** The pages are
+one plain POST form with a CSRF token and two lists of links; the only script
+they carry is the rail's own `chat/_menu_exclusive.html`, which rides
+`chat/_sidebar.html`. `agents/chat/tests/test_agent_pages.py` pins that per
+page, slicing the content block away from the rail for the same reason
+`test_sidebar.py` slices the other way.

@@ -153,6 +153,21 @@ def sees_all_content(principal, *, settings_row=None) -> bool:
     different content on two boxes that had made the same choice -- and
     the choice is the SETTING, not the posture.
 
+    "AGENT AND FLOW BODIES" ABOVE MEANS THE **LISTS**, NOT AN AGENT'S OWN
+    EDIT SURFACE (recorded here by the chat cluster's agent pages, whose
+    commit made the distinction reachable). `agents.visibility.
+    editable_agents` / `box_wide_agents_owned_by` / `visible_agents` all
+    gate on this predicate, so with the toggle OFF an administrator's
+    `/chat/agents/` lists their OWN rows only. `agents.visibility.
+    may_manage_agent` deliberately does NOT read it: it short-circuits on
+    `is_admin` alone, because managing an agent is ADMINISTERING BOX
+    INVENTORY rather than reading somebody's content -- the same call
+    `labellable_agents` already records for `/chat/access/`. So an
+    administrator with the toggle off can still open a member's agent
+    editor (and must: an administrator who could not open the row could
+    not switch a runaway agent off). `identity/tests/test_route_matrix.py`
+    names that one cell in `_ADMIN_ALWAYS_ADMITTED_O`.
+
     `settings_row`: an already-fetched `IdentitySettings` row, OPTIONAL
     and keyword-only -- see `accounts_on` for why. Threading it through
     to `accounts_on`/`is_admin` below is what keeps this ONE

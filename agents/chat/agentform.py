@@ -28,9 +28,7 @@ from agents.labels import agent_label_ids
 from agents.limits import MAX_STEPS_CEILING, MAX_STEPS_DEFAULT
 from agents.visibility import name_for_viewer
 from identity.access import is_admin, labelling_entitlements
-from models.contracts.roles import all_roles
-
-_CHAT_CAPABILITY = "chat"
+from models.contracts.roles import chat_capable_roles
 
 RESIDENT_WARNING = (
     "This agent was installed from the shipped catalogue. Running "
@@ -45,19 +43,22 @@ def chat_role_options() -> tuple[tuple[str, str], ...]:
     """`((key, label), ...)` -- the chat-capable model roles this form
     offers, in key order.
 
-    A FUNCTION, NOT A LITERAL INSIDE THE BUILDER, because THE FORM OWNS
-    THE VOCABULARY (spec 4.4) and two callers now need it.
-    `agents.visibility::_validated_agent_fields` gates `llm_role` on
-    ADMIN alone and has no vocabulary of its own -- deliberately, since
-    it is the writer rather than the form -- so
-    `agents.chat.views.agents` refuses a POSTed role that is not one of
-    these before handing the body to the writer. A refusal keyed on a
-    SECOND spelling of this filter would be a select that offers what
-    the refusal rejects, which is the render-vs-gate bug in its other
-    direction.
+    THE FILTER ITSELF LIVES IN `models.contracts.roles.chat_capable_
+    roles` (fix round, review M1), not here: the WRITER
+    (`agents.visibility::_validated_agent_fields`) has to refuse the same
+    vocabulary at its own seam so a caller that is not this form -- a
+    management command, a future MCP edge, both anticipated in this
+    module's own header -- cannot stamp an agent with a role no chat turn
+    can resolve, and `agents/visibility.py` may not import `agents.chat`
+    (import law). One filter below both columns is the only way both can
+    ask the same question.
+
+    THIS FUNCTION STAYS, as the FORM's name for it: spec 4.4 assigns the
+    vocabulary to the form, `agents.chat.views.agents` refuses through
+    this name with the form's own sentence, and a second spelling of the
+    filter would be a select that offers what the refusal rejects.
     """
-    return tuple(sorted((role.key, role.label) for role in all_roles()
-                        if role.capability == _CHAT_CAPABILITY))
+    return chat_capable_roles()
 
 
 def _foreign_label_sentence(named, unnamed_count) -> str:

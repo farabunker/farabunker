@@ -45,13 +45,29 @@ rules belong in the nearest common ancestor from the day it is created.
 <h2 class="agent-group-head">{{ box_wide_section_title }}</h2>
 {% for row in box_wide_rows %}
 {% comment %}
-NO EDIT LINK HERE, deliberately: `may_manage_agent` refuses a box-wide
-row for a non-admin owner, so a link would be a link to a 404 -- the
-defect this section exists to prevent, shipped in a different shape.
+THE LINK AND THE SENTENCE BOTH FOLLOW `row.manageable`, which is
+`may_manage_agent`'s answer for THIS ROW AND THIS READER -- never the
+section's (fix round, review I2).
+
+FOR A MEMBER WHO OWNS ONE (`chat-default-install` is class A, so that
+happens) the editor refuses them, and a link would be a link to a 404 --
+the defect this section exists to prevent, shipped in a different shape.
+They get the read-only sentence, which is true for them.
+
+FOR AN ADMINISTRATOR -- and on an open box that is EVERY reader, since
+`sees_all_content` answers True with no accounts -- the same absence was
+the bug: the row the owner most wants to edit was listed with a sentence
+saying somebody else could change it and no way in. They get the link and
+a sentence that says what editing one of these actually does.
 {% endcomment %}
 <section class="agent-row">
+  {% if row.manageable %}
+  <h2><a href="{% url 'chat-agent-edit' row.agent.pk %}?next={{ next_url|urlencode }}">{{ row.agent.name }}</a></h2>
+  <p class="muted">{{ box_wide_section_admin_note }}</p>
+  {% else %}
   <h2>{{ row.agent.name }}</h2>
   <p class="muted">{{ box_wide_section_note }}</p>
+  {% endif %}
   {% if row.restrictions %}<p class="muted">{{ row.restrictions }} restriction{{ row.restrictions|pluralize }}</p>{% endif %}
 </section>
 {% endfor %}

@@ -20,6 +20,17 @@ form alone, which is all the create route ever needs.
 {% block chat_sidebar %}{% include "chat/_sidebar.html" %}{% endblock %}
 {% block chat_content %}
 <h1>{% if agent %}{{ agent.name }}{% else %}New agent{% endif %}</h1>
+{% comment %}
+THE PAGE-LEVEL REFUSAL SLOT, for a body this route has no branch for
+(`agents/chat/views/agents.py::AGENT_UNKNOWN_ACTION`, fix round review
+M2) -- as distinct from the per-field sentences the fragment renders.
+The `.banner.warn` + `.job-error` pair is the house shape
+`chat/workstream_new.html` and `chat/_form_errors.html` already use, and
+both selectors are already in `chat/base.html`; this adds no CSS.
+{% endcomment %}
+{% if page_error %}
+<div class="banner warn"><p class="job-error" role="alert">{{ page_error }}</p></div>
+{% endif %}
 {% include "chat/_messages.html" %}
 <form method="post" action="{{ form_action }}">
   {% csrf_token %}
