@@ -891,7 +891,7 @@ git commit -m "feat(identity): the deletion ticket and the three retention setti
 Nothing else in that module needs a re-pin: the uniqueness check (`len(set(AUDIT_ACTIONS)) == len(AUDIT_ACTIONS)`), the 64-character ceiling (`max(len(a) for a in AUDIT_ACTIONS) <= 64`) and the membership spot-checks all pass unchanged for the four new names.
 
 **Interfaces:**
-- Produces: `CONTENT_DELETED`, `CONTENT_RESTORED`, `CONTENT_PURGED`, `RETENTION_POLICY_CHANGED`; `identity.audit.by_action(actions, limit=100) -> list[AuditEvent]`.
+- Produces: `CONTENT_DELETED`, `CONTENT_RESTORED`, `CONTENT_PURGED`, `RETENTION_POLICY_CHANGED`; `identity.audit.by_action(actions, *, actor=None, limit=100) -> list[AuditEvent]` (steward closure, slice one: `actor`, a `Principal`-shaped object, narrows to that principal's own rows BEFORE the internal slice -- see Task 12's own updated code block for why the slice-then-filter shape it replaced was wrong).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1037,7 +1037,7 @@ and add them to the tuple, after `WORKSTREAM_CONSOLIDATED,`:
 After `for_target`:
 
 ```python
-def by_action(actions, limit: int = 100) -> list[AuditEvent]:
+def by_action(actions, *, actor=None, limit: int = 100) -> list[AuditEvent]:
     """Every row whose action is one of `actions`, newest first.
 
     HERE, not in the page that renders it, for the reason this module's
@@ -1050,11 +1050,26 @@ def by_action(actions, limit: int = 100) -> list[AuditEvent]:
     An empty `actions` answers `[]` without querying -- `action__in=()`
     is a query that can only return nothing, and the Deleted page's
     Purged tab is a never-500 surface that should not pay for one.
+
+    `actor`, OPTIONAL (steward closure, slice one), a `Principal`-shaped
+    object read the same way `record` above reads one (`getattr(actor,
+    "kind"/"key", "")`): narrows to that principal's own rows, filtered
+    BEFORE the slice. `None` (the default) is unscoped, exactly as this
+    function always was. THE ORDER MATTERS: a caller that sliced first
+    and filtered the Python list afterwards would truncate away a
+    viewer's own events on any box where `limit` OTHER principals had
+    produced more recent rows first -- the exact shape `identity/
+    views.py::deleted_page` used to have and the reason this parameter
+    exists.
     """
     actions = tuple(actions)
     if not actions:
         return []
-    return list(AuditEvent.objects.filter(action__in=actions)[:limit])
+    qs = AuditEvent.objects.filter(action__in=actions)
+    if actor is not None:
+        qs = qs.filter(actor_kind=getattr(actor, "kind", ""),
+                       actor_key=getattr(actor, "key", ""))
+    return list(qs[:limit])
 ```
 
 - [ ] **Step 5: Run the tests**
@@ -2480,7 +2495,7 @@ In `identity/templates/identity/settings.html`, add a Retention block after the 
     <div class="field" id="queue-retention">
       <label for="{{ form.queue_retention_days.id_for_label }}">{{ form.queue_retention_days.label }}</label>
       {{ form.queue_retention_days }}
-      <p class="helptext">Days. Finished jobs older than this are removed from the Queue page. Leave it blank to keep them until the queue's own row limit removes them.</p>
+      <p class="helptext">Days. Recorded now; the Queue page does not remove finished jobs by age yet -- that starts in a following change. Leave it blank for no age limit.</p>
       {% if form.queue_retention_days.errors %}<ul class="errorlist">{% for error in form.queue_retention_days.errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
     </div>
     <div class="field checkbox-field" id="audit-detail">
@@ -3333,10 +3348,10 @@ Re-pins agents/chat/tests/test_delete.py's four teardown classes, which now asse
 
 | Function | Extra queries | Why |
 |---|---|---|
-| `readable_documents` | **+2** with no open conversation ticket on the box; **+3** with one or more | `ticketed_keys("document")` and `ticketed_keys("conversation")` always run; the chat-scoped-document lookup, keyed off the conversation-ticket ids, is answered by the ORM without a database round trip when that id list is empty (a filter on an empty `__in` is known-empty at compile time), so it costs a query only once there is an id to filter on |
-| `listable_documents` | same **+2/+3** on the `is_admin` leg; **+0** on the member leg, which reaches them through `readable_documents` | one `_deleted_document_ids()` call either way |
-| `attached_documents` | **+2/+3**, never doubled | the ids are computed ONCE at the top and threaded into both its own `chat_scoped` query and its `readable_documents` call |
-| `retrieve_nodes` (review round one) | same **+2/+3**, on every call that does not take the `sees_nothing` early return | one `_deleted_document_ids()` call, threaded into `_visibility_filters` — see that review round's own note below |
+| `readable_documents` | **+2** with no open conversation ticket on the box; **+4** with one or more | `ticketed_keys("document")` and `ticketed_keys("conversation")` always run; the chat-scoped-document lookup AND the consolidation-note lookup (steward closure, slice one -- a third `_deleted_document_ids()` leg keyed off `Document.notes_conversation_id`), both keyed off the same conversation-ticket ids, are each answered by the ORM without a database round trip when that id list is empty (a filter on an empty `__in` is known-empty at compile time), so each costs a query only once there is an id to filter on |
+| `listable_documents` | same **+2/+4** on the `is_admin` leg; **+0** on the member leg, which reaches them through `readable_documents` | one `_deleted_document_ids()` call either way |
+| `attached_documents` | **+2/+4**, never doubled | the ids are computed ONCE at the top and threaded into both its own `chat_scoped` query and its `readable_documents` call |
+| `retrieve_nodes` (review round one) | same **+2/+4**, on every call that does not take the `sees_nothing` early return | one `_deleted_document_ids()` call, threaded into `_visibility_filters` — see that review round's own note below |
 
 This is a real saving, not a corner cut: the common box has no open conversation ticket at all, and the cheaper path is exactly that common case — the count stays bounded by the number of open tickets, never by the number of documents, on both sides of the split. An implementation that forced the third query to run unconditionally, just to keep every pin at a single flat number, would be paying a real query on the box's most common state purely so a test constant never had to carry a branch — the wrong trade.
 
@@ -3475,41 +3490,62 @@ Add one private helper beside the other module-level helpers:
 
 ```python
 def _deleted_document_ids() -> list[int]:
-    """Documents a ticket hides: the ones deleted outright, plus every
-    chat-scoped document whose CONVERSATION is deleted.
+    """Documents a ticket hides: the ones deleted outright, every
+    chat-scoped document whose CONVERSATION is deleted, and every
+    workstream consolidation note distilled FROM a deleted conversation.
 
     A `Document` with `scope=conversation` has exactly one
     `DocumentAttachment`, for one conversation (`delete_attachments`
     states and depends on that invariant), so a chat-scoped document
     follows its conversation and nothing else does. Universal and
-    stream-contained documents are UNTOUCHED: an attachment is a CLAIM a
-    conversation makes on a document, never the document's own
+    stream-contained documents are otherwise UNTOUCHED: an attachment is
+    a CLAIM a conversation makes on a document, never the document's own
     existence, and deleting a conversation must not hide a document
     another conversation still holds a claim on.
 
-    TWO QUERIES WHEN NOTHING IS TICKETED, THREE WHEN A CONVERSATION IS --
+    THE THIRD LEG (steward closure, slice one) is a DIFFERENT
+    relationship, not a second case of the second: `tools.rag.jobs`'s
+    consolidation job writes a note `Document` with `origin=NOTES` and
+    `notes_conversation_id` set to the conversation it distilled -- no
+    `DocumentAttachment` row, `scope` staying `UNIVERSAL` -- so it
+    matches neither of the first two legs on its own, while
+    `tools.rag.retention.purge_conversation_notes` destroys that same
+    document by the same `notes_conversation_id` at purge time. This
+    leg keeps hide and purge in agreement.
+
+    TWO QUERIES WHEN NOTHING IS TICKETED, FOUR WHEN A CONVERSATION IS --
     flat in the number of TICKETS rather than in the number of documents
     (the `agents.shares.shared_keys` cost model, unchanged), never
-    guessed. The two `ticketed_keys()` reads always run; the third, the
-    chat-scoped lookup keyed off the conversation ticket ids, is answered
-    by the ORM WITHOUT a database round trip when that id list is empty
-    -- filtering on an empty `__in` is known-empty at compile time, so
-    there is nothing for Postgres to be asked. That is a real saving,
-    not a corner being cut: the common box has no open conversation
-    ticket at all, and the cheaper path is exactly that common case. A
-    box with at least one open conversation ticket pays the third query,
-    still bounded by the number of TICKETS rather than documents.
+    guessed. The two `ticketed_keys()` reads always run; the conversation
+    ticket keys they return are threaded into BOTH the chat-scoped leg
+    and the notes leg rather than read twice. Each of those two
+    conditional lookups is answered by the ORM WITHOUT a database round
+    trip when that id list is empty -- filtering on an empty `__in` is
+    known-empty at compile time, so there is nothing for Postgres to be
+    asked. That is a real saving, not a corner being cut: the common box
+    has no open conversation ticket at all, and the cheaper path is
+    exactly that common case. A box with at least one open conversation
+    ticket pays both conditional queries, still bounded by the number of
+    TICKETS rather than documents.
 
-    COMPUTED ONCE PER CALL AND THREADED. Its three callers each call it
-    exactly once and pass the result down -- `attached_documents` in
-    particular would otherwise pay for it twice, once for its own
-    `chat_scoped` query and once inside `readable_documents`.
+    COMPUTED ONCE PER CALL AND THREADED. Its four callers -- `readable_
+    documents`, `attached_documents`, `listable_documents` and `tools.
+    rag.retrieval.retrieve_nodes` -- each call it exactly once and pass
+    the result down -- `attached_documents` in particular would
+    otherwise pay for it twice, once for its own `chat_scoped` query and
+    once inside `readable_documents`.
     """
     ids = [int(key) for key in ticketed_keys(KIND_DOCUMENT) if key.isdecimal()]
+    ticketed_conversation_keys = ticketed_keys(KIND_CONVERSATION)
     ids.extend(
         Document.objects.filter(
             scope=Document.Scope.CONVERSATION,
-            attachments__conversation_id__in=ticketed_keys(KIND_CONVERSATION),
+            attachments__conversation_id__in=ticketed_conversation_keys,
+        ).values_list("pk", flat=True)
+    )
+    ids.extend(
+        Document.objects.filter(
+            notes_conversation_id__in=ticketed_conversation_keys,
         ).values_list("pk", flat=True)
     )
     return ids
@@ -4705,9 +4741,8 @@ def deleted_page(request):
             "at": event.at,
         }
         for event in audit.by_action(
-            (CONTENT_PURGED, CONTENT_DELETED, CONTENT_RESTORED))
-        if show_labels or (event.actor_kind == principal.kind
-                            and event.actor_key == principal.key)
+            (CONTENT_PURGED, CONTENT_DELETED, CONTENT_RESTORED),
+            actor=None if show_labels else principal)
     ]
     return render(request, "identity/deleted.html", {
         "tickets": tickets,
@@ -7290,3 +7325,4 @@ Checked end to end: `ticketed_keys` / `visible_tickets` / `may_purge` / `delete_
 - **Execution amendment (Task 10 review round one), 2026-09-21:** two findings. (1) `purge_conversation_notes` caught every `OSError` from the note file's own unlink and logged-and-continued to delete the `Document` row regardless — `missing_ok=True` already forgives the one case that should be forgiven, "already gone"; any OTHER `OSError` (a permissions or I/O problem) is a genuine failure, and deleting the row while the file itself stayed stuck on disk would report a purge that never happened, with the row being the only remaining handle on that file. The catch is removed: the file goes first, the row survives when it could not be removed, and `identity/cascades.py::run_retention`'s own never-swallows contract fails the whole purge and retries it on the next sweep. (2) `tools/rag/retrieval.py::_visibility_filters` never consulted the deletion exclusion at all, so a soft-deleted item's chunks stayed retrievable into a fresh answer through any surface that function still governed (today only from inside a ticketed conversation itself, which can take no new turns — but the same gap would reopen the moment a library document can be ticketed on its own). Closed uniformly rather than per-caller: `retrieve_nodes` computes `tools.rag.access._deleted_document_ids()` once per call — never once per filter leg, never once per node — and threads it into `_visibility_filters`, which expresses it as one `file_id NOT IN (...)` clause using the installed Postgres store's own `NIN` operator, added only when the list is non-empty (an empty `NOT IN (...)` is not valid SQL, and "nothing is deleted" costs nothing extra, not an inert clause). Both fixes are reflected in Task 10's Files list, code blocks and test description above, and in `tools/rag/README.md`'s deletion section.
 - **Execution amendment (Task 12 review round one), 2026-09-21:** six findings, all reflected in Task 12's own code/test/help blocks above. (C1) `deleted_page`'s Deletion log leaked another person's item label to any signed-in viewer, because `audit.by_action`'s read is unscoped by design (the log lists every `content.*` event) and nothing further checked who was looking — `show_labels = sees_all_content(principal, settings_row=row)`, computed once, now gates `event.target_label` per event; the event itself still lists for every viewer, only the label is blanked for one with no standing to read everyone's content. (I2) The Deleted help card said "the retention setting" (the banned word) and omitted the backups sentence its own brief line requires — reworded to `"Keep deleted items for"` in quotes and the backups sentence added, modelled on the identical sentence on the Identity & security card. (I3) Both mutations' generic `except Exception` catches had no test of their own — `views.retention.restore_content`/`purge_ticket` patched to raise a bare `RuntimeError`, asserting the redirect, the fixed flash and the surviving ticket. (I4) `deleted_page`'s own "one read" docstring claim was false: `IdentityGateMiddleware` already reads `IdentitySettings` once per request, and the view's `IdentitySettings.get_solo()` was a second, needless read of the same table — replaced with `settings_row_for(request)` (the row the middleware already stashed), and `_own_ticket_or_404` now takes that row as a required keyword and threads it into `principal_for_request` rather than calling it bare, the same rule `entitlement_edit`'s own comment states; a new `CaptureQueriesContext` pin asserts exactly one `identity_identitysettings` statement per GET. (I5) `identity/README.md` section 9 gained a paragraph for the page itself — its three routes and their classes, the `EVERYONE` gate's reason, the prune-on-read GET, and the log's label-visibility rule — which the section had deferred to "the Deleted page's own tasks' code" until now. (M1/M2/M3/M4/M5) `_RESTORE_FAILED_MESSAGE` reworded ("nothing retries a restore" was itself untrue — the message no longer claims it); the log's own `helptext` reworded off "It never contains the deleted words" to name the real, setting-gated rule; the template's own comment corrected from "every sentence comes from the constants" (false — the page's own prose is typed in the template) to say which half is which; `may_purge`'s docstring gained one sentence naming it as today-inert and the hook for the deferred enterprise hold behaviour; the unused `make_admin` import was dropped from `identity/tests/test_deleted_page.py` (the two new label-visibility tests use `posture("open")` for their sees-all case rather than an administrator account, so the import stayed genuinely unused).
 - **Whole-branch fix wave (slice one), 2026-09-21:** the Deletion log is now scoped to the viewer's own activity unless they see all content (Task 12), not every viewer for every event; the chat delete confirm no longer promises a restore the box may not keep (Task 8); `identity/retention.py::sweep` counts only real purges, not a ticket another overlapping pass already purged.
+- **Steward closure (slice one), 2026-09-22:** seven blocking conditions from the `chat-cluster` steward's review of `0c835c9`, plus four cheap informational items, landed in one commit. `_deleted_document_ids()` (Task 10) gains a third leg for a workstream consolidation note, keyed off `notes_conversation_id` against the same ticketed conversation keys the chat-scoped leg already reads, closing the gap where hide and `purge_conversation_notes` disagreed; `by_action` (Task 3) gains an `actor=` keyword that filters BEFORE its slice, replacing `deleted_page`'s (Task 12) own after-the-slice Python filter, which could show a member "Nothing yet." on a box where a hundred other principals' events crowded their own out of the unscoped top 100; three surfaces claiming the queue's age limit is already live (the Identity & security help card, the Retention section's own helptext (Task 7), and the settings assistant's `queue_retention_line`) now say the value is recorded and the Queue page applies it starting in a following change; four docstrings naming `models.queue.retention.forget_conversation` and the queue-row teardown in the present tense now say so in the future tense, pointing at ADR 0019's residue list; and `docs/OPERATIONS.md` now states `purge_deleted`'s real per-run bound and the queue-row backup residue instead of promising the opposite of both.
