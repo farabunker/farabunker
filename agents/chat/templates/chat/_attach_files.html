@@ -75,11 +75,21 @@ GATING IS THE CALLER'S JOB, NOT THIS FRAGMENT'S: every composer surface
 only ever includes this behind `{% templatetag openblock %} if may_
 attach_files {% templatetag closeblock %}` -- this fragment assumes
 that gate already passed and renders unconditionally once reached.
+
+`attach_id`, OPTIONAL: the input's DOM id and its label's `for=`. The
+three composer surfaces omit it and get `attach-files`, exactly as
+before. The edit disclosure (`chat/_turn_card.html`, chat cluster
+feature C) renders this fragment ONCE PER ELIGIBLE USER TURN on a page
+that already carries the composer's copy, and a duplicate id would send
+every one of those label buttons to the COMPOSER's input -- staging the
+file onto a new turn instead of onto the branch. The value it passes is
+`card.attach_id`, built once in `agents.chat.rendering.turn_card` so
+there is a single spelling of it.
 {% endcomment %}
 <div class="attach-block">
   <div class="attach-row">
-    <label class="attach-label-button" for="attach-files">+ Add files</label>
-    <input type="file" id="attach-files" name="files" multiple class="attach-input">
+    <label class="attach-label-button" for="{{ attach_id|default:'attach-files' }}">+ Add files</label>
+    <input type="file" id="{{ attach_id|default:'attach-files' }}" name="files" multiple class="attach-input">
   </div>
   <ul class="staged-files" aria-live="polite"></ul>
   {% comment %}

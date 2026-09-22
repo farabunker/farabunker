@@ -65,6 +65,16 @@ ROUTE_RULES: dict[str, str] = {
     "chat-all": "A",
     "chat-conversation": "O",
     "chat-turn": "O",
+    # CHAT CLUSTER, FEATURE C (edit a past prompt): row-addressed by
+    # conversation + turn, POST-only, 404 unless
+    # `agents.visibility.may_edit_turn` -- which is
+    # `may_manage_conversation` plus two row facts, NOT the wider
+    # `may_post_to` (spec review M2: a branch is a COPY, and a share
+    # recipient minting a conversation they own that survives revocation
+    # of the share is a different decision from letting them post). The
+    # same "O" class `chat-conversation-duplicate` carries for the same
+    # gate.
+    "chat-turn-edit": "O",
     # ROUND 13 (message-bound attachments): row-addressed (conversation
     # + doc id), POST-only, gated in the view by `may_post_to` THEN
     # `agents.attachments.detach_attachment`'s own uploader-only check

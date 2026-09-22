@@ -53,7 +53,9 @@ from agents.chat.views.settings import chat_settings
 from agents.chat.views.shares import conversation_share
 from agents.chat.views.thread import ConversationView
 from agents.chat.views.tools import tool_entitlements
-from agents.chat.views.turns import attachment_detach, turn_create, turn_status
+from agents.chat.views.turns import (
+    attachment_detach, turn_create, turn_edit, turn_status,
+)
 from agents.chat.views.workstreams import (
     workstream_consolidate, workstream_edit, workstream_list, workstream_new,
     workstream_page, workstream_scope, workstream_settings, workstream_share,
@@ -67,7 +69,8 @@ __all__ = [
     "conversation_duplicate", "conversation_pin", "conversation_rename",
     "conversation_share", "conversation_start", "conversation_unarchive",
     "conversation_unpin", "default_install", "tool_entitlements",
-    "turn_create", "turn_status", "workstream_consolidate", "workstream_edit",
+    "turn_create", "turn_edit", "turn_status",
+    "workstream_consolidate", "workstream_edit",
     "workstream_list", "workstream_new", "workstream_page", "workstream_scope",
     "workstream_settings", "workstream_share",
 ]

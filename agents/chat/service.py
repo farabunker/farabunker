@@ -117,6 +117,34 @@ _BLANK = "Say something: the message cannot be blank."
 # C-7 (round-3 hardening, H39): `agents.limits.MAX_TURN_CHARS`, the fifth
 # number that bounds a turn -- see that module's own docstring.
 _TOO_LONG = f"That message is too long — the limit is {MAX_TURN_CHARS} characters."
+# THE SAME TWO SENTENCES, UNDER PUBLIC NAMES (chat cluster, feature C).
+# `agents.chat.views.turns.turn_edit` validates the edited text against
+# the SAME `MAX_TURN_CHARS` constant `start_turn` uses, BEFORE
+# `agents.visibility.branch_conversation` is called at all, so a refused
+# edit writes nothing -- no conversation row, no turns, no taint. It
+# therefore needs the refusal WORDING before `start_turn` has run, and
+# the house rule is one declaration per user-facing sentence: these are
+# aliases, not copies, so the blank/too-long message an edit shows and
+# the one a new turn shows can never drift apart.
+BLANK_MESSAGE = _BLANK
+TOO_LONG_MESSAGE = _TOO_LONG
+# FEATURE C's declared disclosure lead -- what pressing "Send from here"
+# is about to do, said before the button. DECLARED HERE, in the shared
+# leaf, rather than in `views/turns.py` where the view that consumes the
+# POST lives: `agents/chat/views/thread.py` renders it and may not
+# import `views/turns.py` (the package's one-way import direction,
+# `agents/chat/views/__init__.py`'s own docstring), and `views/turns.py`
+# renders it too on the poller's `done` tick, so the ONE module both
+# already import is the only place it can live without a cycle or a
+# second copy.
+#
+# THE TYPOGRAPHIC CHARACTERS ARE DELIBERATE and are never retyped: this
+# string is the sentence, and both renderers interpolate it.
+EDIT_LEAD = (
+    "This starts a new conversation with everything before this message. "
+    "The original stays as it is. Files attached earlier in this conversation "
+    "are not carried over."
+)
 # Public (no leading underscore): `agents.chat.views.turns` imports this
 # rather than keeping its own copy of the same sentence (CQ-11).
 QUEUE_UNAVAILABLE = (

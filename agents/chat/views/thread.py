@@ -26,7 +26,7 @@ from agents.chat.pickers import chat_picker_options
 from agents.chat.rendering import thread_cards
 from agents.chat.sidebar import sidebar_context
 from agents.chat.service import (
-    MAX_POLL_DURATION_MS, MAX_TRANSPORT_RETRIES, POLL_INTERVAL_MS,
+    EDIT_LEAD, MAX_POLL_DURATION_MS, MAX_TRANSPORT_RETRIES, POLL_INTERVAL_MS,
     composer_attach_context, visible_conversation_or_404,
 )
 from agents.entitlements import tool_access_for, wall_for
@@ -38,7 +38,7 @@ from agents.usage import (
     WINDOW_SOURCE_ENGINE_DEFAULT, WINDOW_SOURCE_UNBOUND, context_usage, meter_segments,
     truncation_clause,
 )
-from agents.visibility import may_post_to, may_read_conversation_shares
+from agents.visibility import may_edit_any_turn, may_post_to, may_read_conversation_shares
 from agents.workstreams import scope_for_conversation
 from identity.access import accounts_on, is_admin, share_subjects
 from identity.request import principal_for_request, settings_row_for
@@ -238,10 +238,37 @@ def thread_context(request, conversation, *, selected: str | None = None) -> dic
     # fresh, the same as it always called this same logic fresh.
     attachments_by_turn = attachments_for(principal, conversation, stream=stream_scope,
                                           settings_row=settings_row)
+    # FEATURE C's CONVERSATION-LEVEL HALF, computed ONCE for the whole
+    # render: may this principal manage the thread, and is nothing in
+    # flight. The per-turn half (a finished, root-depth USER row) is
+    # already on the card, so a thread of two hundred messages costs one
+    # predicate rather than two hundred -- and `settings_row` is the one
+    # this render already fetched, for exactly the reason
+    # `may_manage_conversation`'s own `settings_row=` docstring records.
+    #
+    # THE ANSWER HIDES THE CONTROL, it does not merely refuse the POST.
+    # The in-flight clause is conversation-wide, so while an answer is
+    # running EVERY message in the thread is unbranchable; rendering the
+    # disclosure anyway would put a button on the page whose own POST
+    # answers 404.
+    may_edit_here = may_edit_any_turn(principal, conversation, settings_row=settings_row)
     return {
         "conversation": conversation,
         "agent": conversation.agent,
-        "cards": thread_cards(conversation, attachments_by_turn=attachments_by_turn),
+        # Both attach keys are read DIRECTLY rather than through
+        # `.get(...)` with a default: `composer_attach_context` returns
+        # exactly those two keys, and a default would mask a rename
+        # instead of failing on it.
+        "cards": thread_cards(conversation, attachments_by_turn=attachments_by_turn,
+                              may_edit=may_edit_here,
+                              may_attach_files=attach_context["may_attach_files"],
+                              attach_workstream=attach_context["attach_workstream"]),
+        # FEATURE C's declared sentence, from `agents.chat.service` --
+        # never typed into the template, and the SAME object
+        # `agents.chat.views.turns._group_html` hands the poller's own
+        # `done` tick, so a swapped disclosure says what a reloaded one
+        # says.
+        "edit_lead": EDIT_LEAD,
         "picker": chat_picker_options(principal, selected, wall=wall),
         "selected_connection": selected,
         # ROUND 18: `chat/_composer.html`'s own `composer_placeholder`

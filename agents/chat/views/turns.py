@@ -31,15 +31,18 @@ from identity.request import principal_for_request, settings_row_for
 from agents.attachments import attachments_for, detach_attachment
 from agents.chat.rendering import turn_group_cards
 from agents.chat.service import (
-    QUEUE_UNAVAILABLE, attachment_problem_sentences, composer_attachment_fields,
+    BLANK_MESSAGE, EDIT_LEAD, QUEUE_UNAVAILABLE, TOO_LONG_MESSAGE,
+    attachment_problem_sentences, composer_attach_context, composer_attachment_fields,
     conversation_url, flash_attachment_outcomes, start_turn, validated_next_url,
     visible_conversation_or_404,
 )
 from agents.chat.views.thread import thread_context
-from agents.limits import TURN_TIMEOUT_ADMIN_HINT, TURN_TIMEOUT_ERROR
+from agents.limits import MAX_TURN_CHARS, TURN_TIMEOUT_ADMIN_HINT, TURN_TIMEOUT_ERROR
 from agents.models import Turn
 from agents.usage import WINDOW_SOURCE_UNBOUND, context_usage
-from agents.visibility import may_post_to, visible_turn
+from agents.visibility import (
+    branch_conversation, may_edit_any_turn, may_edit_turn, may_post_to, visible_turn,
+)
 from agents.workstreams import scope_for_conversation
 from models.contracts.queue import QueueUnavailable, get_job
 
@@ -151,7 +154,79 @@ def turn_create(request, conversation_id):
     )
 
 
-def _attachments_by_turn(turn, request) -> dict:
+@require_POST
+def turn_edit(request, conversation_id, turn_id: int):
+    """POST `/chat/c/<uuid>/turns/<id>/edit/` -- steps 3 and 4 of a
+    branch: validate, branch, start the turn, redirect.
+
+    THE SPLIT IS AN IMPORT-DIRECTION FACT, not a preference (spec review
+    M7). `agents/chat` imports `agents/visibility`, ONE WAY, so
+    `branch_conversation` cannot call `start_turn` and cannot redirect;
+    this view does both, after it returns.
+
+    VALIDATE BEFORE CREATING. The text is checked against the SAME
+    `MAX_TURN_CHARS` constant `start_turn` uses, BEFORE
+    `branch_conversation` is called at all, so a refused edit writes
+    nothing -- no conversation row, no turns, no taint. The two refusal
+    sentences are `agents.chat.service`'s own, under their public names,
+    so a blank or over-long EDIT says exactly what a blank or over-long
+    NEW MESSAGE says.
+
+    ONE START PATH, NOT TWO. The edited text is started through the same
+    `start_turn` the composer posts into, with the same
+    `composer_attachment_fields` reader for the same three attach-door
+    field names -- so files attached to the EDITED message are staged
+    exactly as any other send stages them, and a change to how a turn
+    starts cannot reach one surface and miss this one.
+
+    IF `start_turn` REFUSES AFTERWARDS (an unbound role, an unreachable
+    engine, a queue that is not migrated), the branch exists with its
+    copied history and no answer. `start_turn` writes both rows in one
+    transaction, so there is no half-written turn to clean up -- and the
+    thread page already renders that state honestly with its existing
+    banner. Accepted rather than papered over: the alternative would be
+    deleting a conversation the operator can already see in their
+    sidebar.
+
+    CLASS O: a refused POST is a 404, never a 403 (which would confirm
+    the row exists) and never a 500. `may_edit_turn` and
+    `branch_conversation` each answer False/None rather than raising, so
+    the refusal is this view's to spell -- and it spells it the same way
+    for a stranger, a share recipient, an assistant row, a turn from
+    another conversation, and a thread with an answer still running.
+    """
+    settings_row = settings_row_for(request)
+    principal = principal_for_request(request, settings_row=settings_row)
+    conversation = visible_conversation_or_404(principal, conversation_id)
+    turn = visible_turn(principal, turn_id)
+    if turn is None or not may_edit_turn(principal, conversation, turn,
+                                         settings_row=settings_row):
+        raise Http404(f"Turn {turn_id} is not one you may edit.")
+
+    text = (request.POST.get("text") or "").strip()
+    if not text or len(text) > MAX_TURN_CHARS:
+        messages.error(request, BLANK_MESSAGE if not text else TOO_LONG_MESSAGE)
+        return redirect(conversation_url(conversation))
+
+    # The SAME `settings_row` the predicate above used -- the whole
+    # reason `branch_conversation` grew the keyword (Task 12's own fix
+    # round): asking the predicate and then writing would otherwise cost
+    # two singleton reads on one request.
+    branch = branch_conversation(principal, conversation, turn,
+                                 title=conversation.title, settings_row=settings_row)
+    if branch is None:
+        raise Http404(f"Turn {turn_id} is not one you may edit.")
+
+    result = start_turn(branch, text, connection=request.POST.get("connection", ""),
+                        actor=principal, **composer_attachment_fields(request))
+    if not result.ok:
+        messages.error(request, result.error)
+        return redirect(conversation_url(branch))
+    flash_attachment_outcomes(request, result.attachments)
+    return redirect(conversation_url(branch, pending=result.turn.pk))
+
+
+def _attachments_by_turn(turn, request, *, stream=None) -> dict:
     """ROUND 13 (message-bound attachments, requirement D's LIVE
     STATUS): the SAME per-turn grouping `agents.chat.views.thread.
     thread_context` builds for a full-page render, rebuilt here for
@@ -179,16 +254,28 @@ def _attachments_by_turn(turn, request) -> dict:
     renders, or the turn `turn_status` resolved through `visible_turn`
     -- either way, `turn.conversation` is the SAME row `thread_context`
     would have built this from for a GET.
+
+    `stream`, OPTIONAL (chat cluster, feature C): an already-resolved
+    `WorkstreamScope` for this conversation, handed straight to
+    `attachments_for(..., stream=...)` -- whose own `stream=` keyword
+    exists precisely so a caller holding one does not re-resolve it.
+    `_done_body` now holds one (its `_edit_context` needs the identical
+    answer a few lines later), so the two share a single resolution
+    rather than reading the same stream twice on the same tick. `None`
+    -- every other caller -- resolves it here exactly as before.
     """
     conversation = turn.conversation
     principal = principal_for_request(request)
     settings_row = settings_row_for(request)
-    stream_scope = scope_for_conversation(principal, conversation)
+    stream_scope = stream if stream is not None else scope_for_conversation(
+        principal, conversation)
     return attachments_for(principal, conversation, stream=stream_scope,
                            settings_row=settings_row)
 
 
-def _group_html(turn, request, attachments_by_turn: dict | None = None) -> str:
+def _group_html(turn, request, attachments_by_turn: dict | None = None, *,
+                may_edit: bool = False, may_attach_files: bool = False,
+                attach_workstream=None) -> str:
     """`chat/_turn_block.html`, rendered over `turn_group_cards(turn)`
     -- the user's own message plus every card this turn's job wrote
     (D1, chat-polish P3.1). The ONE render call every body below (and
@@ -201,11 +288,31 @@ def _group_html(turn, request, attachments_by_turn: dict | None = None) -> str:
     own copy through here spares this call a second, identical query --
     every other caller leaves it unset, which computes it fresh
     (`_attachments_by_turn`).
+
+    `may_edit` / `may_attach_files` / `attach_workstream`, OPTIONAL
+    (chat cluster, feature C): passed straight through to
+    `turn_group_cards`, so the edit disclosure a polled `done` swap
+    inserts is the one a reload renders. `_done_body` is the ONE body
+    that supplies them (see `_edit_context` for the price and for why
+    the queued and running bodies pay none of it); defaulted so
+    `_queued_body`, `_running_body` and `turn_create`'s own 202 body
+    keep calling this exactly as they do today.
+
+    `edit_lead` IS IN THE RENDER CONTEXT, NOT ON THE CARD, because it is
+    ONE sentence for the whole fragment rather than a per-turn value --
+    the same object `agents.chat.views.thread.thread_context` puts in a
+    full render's context, read from `agents.chat.service` by both. A
+    swapped disclosure that opened onto a form saying nothing about what
+    the button does would be exactly the reload/poll divergence the four
+    docstrings in this module forbid.
     """
     if attachments_by_turn is None:
         attachments_by_turn = _attachments_by_turn(turn, request)
-    cards = turn_group_cards(turn, attachments_by_turn=attachments_by_turn)
-    return render_to_string("chat/_turn_block.html", {"cards": cards}, request=request)
+    cards = turn_group_cards(turn, attachments_by_turn=attachments_by_turn,
+                             may_edit=may_edit, may_attach_files=may_attach_files,
+                             attach_workstream=attach_workstream)
+    return render_to_string("chat/_turn_block.html",
+                            {"cards": cards, "edit_lead": EDIT_LEAD}, request=request)
 
 
 def _carrying_user_turn_id(turn):
@@ -297,6 +404,66 @@ def _running_body(turn, request) -> dict:
     }
 
 
+def _edit_context(turn, request, *, scope=None) -> dict:
+    """The three card keys the edit disclosure needs, for the ONE poll
+    body that can honestly answer them.
+
+    ON `queued` AND `running` THE ANSWER IS PROVABLY FALSE and this is
+    never called: `may_edit_any_turn` refuses while any turn of the
+    conversation is non-terminal, and on those two paths the turn being
+    polled IS one. So the every-two-seconds tick pays nothing, and the
+    price below is once per finished turn.
+
+    THE PRICE, NAMED: `may_manage_conversation` (at most one `_user_row`
+    read, memoised on the settings row the middleware already stashed)
+    plus one `.exists()`, plus `composer_attach_context`'s own
+    `tool_access_for`. Against a body that already runs `get_job`,
+    `_attachments_by_turn` and a full `render_to_string`, that is the
+    cost of keeping the invariant this module states four times over --
+    that a polled swap never shows less than a reload.
+
+    `attach_workstream` RIDES ALONG BECAUSE THE FRAGMENT READS IT:
+    `chat/_attach_files.html` gates TWO things on it -- the middle radio
+    of the placement chooser ("This workstream only") and the whole
+    remember-this-choice block -- so passing the boolean alone would
+    render a TWO-value chooser here where a reload renders three plus
+    the remember control. That is the defect this function exists to
+    prevent, in a smaller shape.
+
+    `scope`, OPTIONAL: an already-resolved `WorkstreamScope` for this
+    conversation. `_done_body` holds one -- `_attachments_by_turn` needs
+    the identical scope for `attachments_for(..., stream=...)`, whose
+    `stream=` keyword exists precisely so a caller holding one does not
+    re-resolve it -- so the two share a single resolution rather than
+    reading the same stream twice on the same tick. `None` re-resolves,
+    for a caller that has none.
+
+    THE FK IS STILL ONLY DEREFERENCED WHERE `thread_context`
+    DEREFERENCES IT (`workstream=... if may_upload else None`,
+    `workstream_id=` always), so the stream ROW is never returned to a
+    principal who may not upload. Widening a poll body is exactly where
+    a disclosure leak would hide; this one does not open it. The row
+    itself costs nothing to reach: `visible_turn`'s `select_related`
+    already carries `conversation__workstream` for the context meter, so
+    it is in hand on this path.
+    """
+    conversation = turn.conversation
+    settings_row = settings_row_for(request)
+    principal = principal_for_request(request, settings_row=settings_row)
+    if not may_edit_any_turn(principal, conversation, settings_row=settings_row):
+        return {"may_edit": False, "may_attach_files": False, "attach_workstream": None}
+    if scope is None:
+        scope = scope_for_conversation(principal, conversation)
+    may_upload = bool(scope is not None and scope.may_upload)
+    attach = composer_attach_context(
+        principal,
+        workstream=conversation.workstream if may_upload else None,
+        workstream_id=conversation.workstream_id,
+        settings_row=settings_row, may_upload=may_upload,
+    )
+    return {"may_edit": True, **attach}
+
+
 def _done_body(turn, request) -> dict:
     """`{"state", "html", "attachments_pending", "context"}` -- the whole
     exchange this job wrote, not one card (M6, extended by D1 to include
@@ -321,14 +488,39 @@ def _done_body(turn, request) -> dict:
     until ingestion catches up or `MAX_POLL_DURATION_MS` gives up --
     never a second script loop, the existing one just does not stop
     the instant the ANSWER is ready if a FILE is not.
+
+    FEATURE C (chat cluster) MAKES THIS THE ONE BODY THAT COMPUTES THE
+    EDIT DISCLOSURE'S THREE CARD KEYS, for the same invariant this
+    docstring's second paragraph already states: a swapped exchange must
+    show what a reload shows, and the just-answered bubble losing its
+    "Edit and carry on from here" until F5 would be strictly less. The
+    queued and running bodies compute nothing -- `may_edit_any_turn` is
+    provably False while a turn of this conversation is in flight, which
+    on those paths is the turn being polled -- so the every-two-seconds
+    tick is untouched; `_edit_context` carries the full reasoning and
+    the named price.
     """
-    by_turn = _attachments_by_turn(turn, request)
+    # ONE SCOPE RESOLUTION PER TICK, not two. `_attachments_by_turn`
+    # resolves this same scope for `attachments_for(..., stream=...)`
+    # -- whose `stream=` keyword exists exactly so a caller holding one
+    # does not re-resolve it -- and `_edit_context` needs the identical
+    # answer a few lines later. The flat pin in
+    # `test_the_done_tick_costs_at_most_the_budgeted_extra_reads` stays
+    # green either way, which is precisely why this is said here rather
+    # than left for a test not to catch.
+    scope = scope_for_conversation(principal_for_request(request), turn.conversation)
+    by_turn = _attachments_by_turn(turn, request, stream=scope)
     carrying = _carrying_user_turn_id(turn)
     pending = any(
         row.get("status") not in ("ready", "failed") for row in by_turn.get(carrying, [])
     )
     return {
-        "state": turn.state, "html": _group_html(turn, request, by_turn),
+        "state": turn.state,
+        # FEATURE C: the three card keys, computed HERE and nowhere else
+        # on the poll path -- see `_edit_context`'s own docstring for why
+        # `_queued_body` and `_running_body` pay nothing for them.
+        "html": _group_html(turn, request, by_turn,
+                            **_edit_context(turn, request, scope=scope)),
         "attachments_pending": pending,
         # TWO BODIES CARRY THE KEY, NOT ONE (spec review m7).
         # `agents.chat.service.start_turn` writes the USER turn DONE in

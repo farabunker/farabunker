@@ -15,8 +15,9 @@ from agents.chat.views import (
     conversation_duplicate,
     conversation_pin, conversation_rename, conversation_share, conversation_start,
     conversation_unarchive, conversation_unpin, default_install, tool_entitlements,
-    turn_create, turn_status, workstream_consolidate, workstream_edit, workstream_list,
-    workstream_new, workstream_page, workstream_scope, workstream_settings, workstream_share,
+    turn_create, turn_edit, turn_status, workstream_consolidate, workstream_edit,
+    workstream_list, workstream_new, workstream_page, workstream_scope,
+    workstream_settings, workstream_share,
 )
 
 urlpatterns = [
@@ -31,6 +32,12 @@ urlpatterns = [
     path("all/", AllConversationsView.as_view(), name="chat-all"),
     path("c/<uuid:conversation_id>/", ConversationView.as_view(), name="chat-conversation"),
     path("c/<uuid:conversation_id>/turn/", turn_create, name="chat-turn"),
+    # CHAT CLUSTER, FEATURE C (edit a past prompt and carry on in a
+    # branch). Row-addressed by TWO ids (conversation, turn), POST-only
+    # -- the same shape `chat-attachment-detach` just below already
+    # takes.
+    path("c/<uuid:conversation_id>/turns/<int:turn_id>/edit/", turn_edit,
+         name="chat-turn-edit"),
     # ROUND 13 (message-bound attachments), requirement E's post-send
     # remove: row-addressed, POST-only, matching the shape every other
     # per-conversation action on this list already takes.

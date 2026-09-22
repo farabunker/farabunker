@@ -132,6 +132,21 @@ _DRIVERS: dict[str, Callable[["World"], tuple[str, str, dict]]] = {
         "get", reverse("chat-conversation", args=[w.conversation.id]), {}),
     "chat-turn": lambda w: (
         "post", reverse("chat-turn", args=[w.conversation.id]), {"text": "hello"}),
+    # CHAT CLUSTER, FEATURE C: row-addressed by TWO ids (conversation,
+    # turn) -- `w.turn` is the world's own USER turn on `w.conversation`,
+    # written DONE by `Turn.state`'s own default, which is what makes it
+    # editable at all. Class O and gated by
+    # `agents.visibility.may_edit_turn`, so no override set applies: the
+    # base O mapping already says member -> 404, admin -> 404 or
+    # admitted with the content toggle, which is exactly
+    # `may_manage_conversation`'s answer -- the same predicate
+    # `chat-conversation-duplicate` above is gated by. The admitted leg
+    # lands on 302 (this fresh world binds no chat role, so `start_turn`
+    # refuses and the view redirects with a banner) rather than 200, and
+    # 302 is in `_ADMITTED`.
+    "chat-turn-edit": lambda w: (
+        "post", reverse("chat-turn-edit", args=[w.conversation.id, w.turn.pk]),
+        {"text": "edited from the matrix"}),
     "chat-conversation-delete": lambda w: (
         "post", reverse("chat-conversation-delete", args=[w.conversation.id]), {}),
     # ROUND 13 (message-bound attachments): row-addressed by TWO ids

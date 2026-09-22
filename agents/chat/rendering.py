@@ -96,7 +96,9 @@ _EMPTY_ARG_VALUES = (None, "", [], {})
 
 
 def thread_cards(conversation, *, queue_job_id: int | None = None,
-                 attachments_by_turn: dict | None = None) -> list[dict]:
+                 attachments_by_turn: dict | None = None,
+                 may_edit: bool = False, may_attach_files: bool = False,
+                 attach_workstream=None) -> list[dict]:
     """Every turn of `conversation`, in index order, as cards --
     `depth > 0` turns nested under the turn they belong to.
 
@@ -149,19 +151,30 @@ def thread_cards(conversation, *, queue_job_id: int | None = None,
     again: `test_thread.py::TestThePoller::
     test_the_full_render_and_the_polled_fragment_share_one_poll_block_
     marker` pins the parity directly.
+
+    `may_edit` / `may_attach_files` / `attach_workstream`, OPTIONAL
+    (chat cluster, feature C): the three keys the per-turn edit
+    disclosure needs, passed straight to every card this builds. Each is
+    a CONVERSATION-level answer the caller computed ONCE -- see
+    `turn_card`'s own note on why -- so they are threaded rather than
+    derived here: this module holds no principal and cannot ask.
     """
     turns = conversation.turns.select_related("invocation").all()
     if queue_job_id is not None:
         turns = turns.filter(queue_job_id=queue_job_id)
     by_turn = attachments_by_turn or {}
+    edit_keys = {"may_edit": may_edit, "may_attach_files": may_attach_files,
+                 "attach_workstream": attach_workstream}
     buffered: list[dict] = []
     cards: list[dict] = []
     pending_user_card: dict | None = None
     for turn in turns:
         if turn.depth:
-            buffered.append(turn_card(turn, attachments=by_turn.get(turn.pk)))
+            buffered.append(turn_card(turn, attachments=by_turn.get(turn.pk),
+                                      **edit_keys))
             continue
-        card = turn_card(turn, nested=buffered, attachments=by_turn.get(turn.pk))
+        card = turn_card(turn, nested=buffered, attachments=by_turn.get(turn.pk),
+                         **edit_keys)
         buffered = []
         if turn.role == Turn.Role.USER:
             pending_user_card = card
@@ -174,7 +187,9 @@ def thread_cards(conversation, *, queue_job_id: int | None = None,
 
 
 def turn_card(turn, nested: list[dict] | None = None, attachments: list[dict] | None = None,
-              attachment_detach_next: str | None = None) -> dict:
+              attachment_detach_next: str | None = None,
+              may_edit: bool = False, may_attach_files: bool = False,
+              attach_workstream=None) -> dict:
     """One turn as a fixed-key dict.
 
     FIXED KEYS, always present. A card that omitted a key on some paths
@@ -207,6 +222,11 @@ def turn_card(turn, nested: list[dict] | None = None, attachments: list[dict] | 
     filter/page/selected state included), so detaching from `/chat/
     all/`'s own preview pane returns the operator to that browse state
     instead of bouncing them into the thread.
+
+    `may_edit` / `may_attach_files` / `attach_workstream`, OPTIONAL
+    (CHAT CLUSTER, FEATURE C -- editing a past prompt): the three
+    conversation-level answers the per-turn edit disclosure needs. Their
+    own note sits beside the keys they set, below.
     """
     images, files = artifact_links(turn.artifacts or ())
     return {
@@ -258,10 +278,47 @@ def turn_card(turn, nested: list[dict] | None = None, attachments: list[dict] | 
         # exists). Every other caller of `turn_card` leaves this equal
         # to the row's own `queue_job_id`, unchanged from before.
         "poll_block": turn.queue_job_id,
+        # FEATURE C. `may_edit` is a CONVERSATION-level answer the
+        # caller computed once (`agents.visibility.may_edit_any_turn` --
+        # `may_edit_turn`'s own predicate minus the per-row half, which
+        # the card already carries in `role`/`depth`/`state`), so a
+        # thread of two hundred messages costs ONE predicate rather than
+        # two hundred. `may_attach_files` and `attach_workstream` are
+        # `agents.chat.service.composer_attach_context`'s two answers,
+        # threaded so the edit form's file input needs no second
+        # derivation -- and BOTH are needed, because `chat/_attach_
+        # files.html` reads `attach_workstream` to decide whether to
+        # offer the three-value placement chooser or the two-value one.
+        # Passing only the boolean would render a form on the POLL path
+        # that differs from the reload's, which is the very thing this
+        # threading exists to prevent.
+        #
+        # THEY DEFAULT FALSE/None ONLY FOR CALLERS THAT HAVE NO
+        # PRINCIPAL. `agents.chat.views.turns._done_body` DOES compute
+        # them and pass them through `turn_group_cards`, so a polled
+        # swap shows exactly what a reload shows -- the invariant
+        # `_done_body`, `_group_html`, `turn_group_cards` and
+        # `_attachments_by_turn` each state in their own words.
+        "may_edit": bool(may_edit and turn.role == Turn.Role.USER
+                         and turn.depth == 0 and turn.state == Turn.State.DONE),
+        "may_attach_files": bool(may_attach_files),
+        "attach_workstream": attach_workstream,
+        # THE PER-TURN DOM ID the edit form's file input and its label
+        # button share. Built HERE rather than composed in the template,
+        # so there is one spelling of it and a test can assert on the
+        # same string the markup uses. `chat/_attach_files.html`
+        # hardcodes `id="attach-files"` and the COMPOSER already renders
+        # one; every `<label for=...>` resolves to the FIRST match in
+        # document order, so without this each edit form's "+ Add files"
+        # would open the COMPOSER's picker and stage the file onto a new
+        # turn instead of onto the branch.
+        "attach_id": f"attach-files-{turn.pk}",
     }
 
 
-def turn_group_cards(turn, attachments_by_turn: dict | None = None) -> list[dict]:
+def turn_group_cards(turn, attachments_by_turn: dict | None = None, *,
+                     may_edit: bool = False, may_attach_files: bool = False,
+                     attach_workstream=None) -> list[dict]:
     """The whole visible exchange one ASSISTANT turn belongs to: the
     USER message that provoked it, plus every card its own job wrote --
     exactly what a full page reload already shows for this turn (D1,
@@ -297,10 +354,23 @@ def turn_group_cards(turn, attachments_by_turn: dict | None = None) -> list[dict
     `thread_cards`'s own N4 guard (`turn_status.py`'s former
     `_done_body`): grouping it with a nearby USER turn found by index
     alone would not be grounded in anything the row itself records.
+
+    `may_edit` / `may_attach_files` / `attach_workstream`, OPTIONAL
+    (chat cluster, feature C): the same three keys `thread_cards` takes,
+    threaded so a POLLED swap renders the edit disclosure identically to
+    a full page reload. `agents.chat.views.turns._done_body` is the one
+    caller that supplies them -- the queued and running bodies leave
+    them at their defaults, and are RIGHT to: `may_edit_any_turn` is
+    provably False while a turn of this conversation is in flight, which
+    on those two paths is the turn being polled. This is the same "never
+    render the group differently from a reload" rule this function's own
+    first paragraph states.
     """
     by_turn = attachments_by_turn or {}
+    edit_keys = {"may_edit": may_edit, "may_attach_files": may_attach_files,
+                 "attach_workstream": attach_workstream}
     if turn.queue_job_id is None:
-        return [turn_card(turn, attachments=by_turn.get(turn.pk))]
+        return [turn_card(turn, attachments=by_turn.get(turn.pk), **edit_keys)]
 
     conversation = turn.conversation
     cards: list[dict] = []
@@ -309,7 +379,8 @@ def turn_group_cards(turn, attachments_by_turn: dict | None = None) -> list[dict
         .order_by("-index").first()
     )
     if user_turn is not None:
-        user_card = turn_card(user_turn, attachments=by_turn.get(user_turn.pk))
+        user_card = turn_card(user_turn, attachments=by_turn.get(user_turn.pk),
+                              **edit_keys)
         # Grouped under the SAME marker as this job's own cards (not the
         # user row's real `queue_job_id`, which is always `NULL`) so the
         # poller's idempotent swap removes the STALE copy of the user's
@@ -319,7 +390,7 @@ def turn_group_cards(turn, attachments_by_turn: dict | None = None) -> list[dict
         user_card["poll_block"] = turn.queue_job_id
         cards.append(user_card)
     cards.extend(thread_cards(conversation, queue_job_id=turn.queue_job_id,
-                              attachments_by_turn=by_turn))
+                              attachments_by_turn=by_turn, **edit_keys))
     return cards
 
 

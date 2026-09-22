@@ -727,6 +727,35 @@ def duplicate_conversation(principal, conversation, *, title: str):
     return copy
 
 
+def may_edit_any_turn(principal, conversation, *, settings_row=None) -> bool:
+    """`may_edit_turn`'s CONVERSATION-LEVEL half, asked ONCE per render.
+
+    The per-turn half -- a finished, root-depth USER row -- is already on
+    the card (`agents.chat.rendering.turn_card` reads `role`/`depth`/
+    `state` off the row it is rendering anyway), so the thread page asks
+    THIS once rather than once per message: a thread of two hundred
+    turns costs one predicate, not two hundred. The two can never
+    disagree, because `may_edit_turn` itself calls this.
+
+    BOTH CLAUSES ARE CONVERSATION-WIDE, and that is why they can be
+    hoisted at all. `may_manage_conversation` is a question about the
+    conversation, and the in-flight `.exists()` asks whether ANY turn
+    anywhere in the thread is still running -- not whether THIS one is.
+    That second clause is also why `agents.chat.views.thread` HIDES the
+    control rather than only refusing the POST: a page that rendered a
+    button its own POST would 404 is a page that lies.
+
+    `settings_row`: an already-fetched `IdentitySettings`, OPTIONAL and
+    keyword-only, threaded straight into `may_manage_conversation` and
+    on into `sees_all_content` -- the same single-read rule that
+    predicate's own docstring records for the sidebar.
+    """
+    if not may_manage_conversation(principal, conversation, settings_row=settings_row):
+        return False
+    return not Turn.objects.filter(conversation=conversation).exclude(
+        state__in=_TERMINAL_TURN_STATES).exists()
+
+
 def may_edit_turn(principal, conversation, turn, *, settings_row=None) -> bool:
     """Whether `principal` may edit `turn` and carry on from there.
 
@@ -757,15 +786,18 @@ def may_edit_turn(principal, conversation, turn, *, settings_row=None) -> bool:
     `.exists()`. Editing while an answer is running would branch from a
     conversation whose shape is still changing, and the job would write
     its answer back to the ORIGINAL's row anyway.
+
+    THE LAST TWO CLAUSES LIVE IN `may_edit_any_turn` ABOVE, ONCE. They
+    are both conversation-level questions, and the thread page asks them
+    once for a whole render rather than once per rendered message; this
+    function calls that one rather than restating it, so the page's
+    answer and the POST's answer cannot drift apart.
     """
     if turn.conversation_id != conversation.id:
         return False
     if turn.role != Turn.Role.USER or turn.depth != 0 or turn.state != Turn.State.DONE:
         return False
-    if not may_manage_conversation(principal, conversation, settings_row=settings_row):
-        return False
-    return not Turn.objects.filter(conversation=conversation).exclude(
-        state__in=_TERMINAL_TURN_STATES).exists()
+    return may_edit_any_turn(principal, conversation, settings_row=settings_row)
 
 
 def branch_conversation(principal, conversation, turn, *, title: str,

@@ -313,6 +313,70 @@ def _turn_malformed_target(client, monkeypatch):
     return response
 
 
+# --- chat-turn-edit (chat cluster, feature C: edit a past prompt) --------
+
+def _editable_thread(slug_prefix):
+    """A conversation whose turns are all FINISHED USER turns, so
+    `agents.visibility.may_edit_turn`'s conversation-wide in-flight
+    clause passes and the second turn is really branchable. `make_
+    thread` cannot serve: its ASSISTANT row is finished too, but its
+    USER row is what an edit addresses and this wants two of them."""
+    conversation = make_conversation(agent=make_agent(slug=_unique_slug(slug_prefix)))
+    turns = [
+        make_turn(conversation=conversation, role=Turn.Role.USER, text=text,
+                  state=Turn.State.DONE)
+        for text in ("first", "second")
+    ]
+    return conversation, turns
+
+
+def _turn_edit_normal(client, monkeypatch):
+    bind_chat_role(CHAT_CONVERSE_ROLE, name=_unique_slug("chat-role"))
+    _patch_queue(monkeypatch)
+    conversation, turns = _editable_thread("edit-ok")
+    response = client.post(
+        reverse("chat-turn-edit", args=[conversation.id, turns[1].pk]),
+        {"text": "edited"},
+    )
+    assert response.status_code == 302
+    return response
+
+
+def _turn_edit_no_agents(client, monkeypatch):
+    import uuid
+
+    return client.post(
+        reverse("chat-turn-edit", args=[uuid.uuid4(), 1]), {"text": "edited"},
+    )
+
+
+def _turn_edit_queue_down(client, monkeypatch):
+    """THE ACCEPTED HALF-STATE, swept rather than hidden: the branch is
+    written, `start_turn` then refuses, and the operator is redirected
+    to a branch that holds its copied history and no answer -- a 302
+    with a banner, never a 500."""
+    bind_chat_role(CHAT_CONVERSE_ROLE, name=_unique_slug("chat-role"))
+    _patch_queue(monkeypatch, raises=QueueUnavailable("down"))
+    conversation, turns = _editable_thread("edit-down")
+    response = client.post(
+        reverse("chat-turn-edit", args=[conversation.id, turns[1].pk]),
+        {"text": "edited"},
+    )
+    assert response.status_code == 302
+    return response
+
+
+def _turn_edit_malformed_target(client, monkeypatch):
+    conversation, _turns = _editable_thread("edit-404")
+    get_response = client.get(
+        reverse("chat-turn-edit", args=[conversation.id, 999999]))
+    assert get_response.status_code == 405         # require_POST, before any row
+    missing = client.post(
+        reverse("chat-turn-edit", args=[conversation.id, 999999]), {"text": "edited"})
+    assert missing.status_code == 404
+    return missing
+
+
 # --- chat-attachment-detach (round 13, message-bound attachments) --------
 
 def _detach_document(conversation):
@@ -1208,6 +1272,10 @@ _DRIVERS: dict[str, tuple] = {
         _conversation_queue_down, _conversation_malformed_target,
     ),
     "chat-turn": (_turn_normal, _turn_no_agents, _turn_queue_down, _turn_malformed_target),
+    "chat-turn-edit": (
+        _turn_edit_normal, _turn_edit_no_agents,
+        _turn_edit_queue_down, _turn_edit_malformed_target,
+    ),
     "chat-attachment-detach": (
         _detach_normal, _detach_no_agents, _detach_queue_down, _detach_malformed_target,
     ),

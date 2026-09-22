@@ -609,6 +609,32 @@ screen comment already documents for `.thread-scroll`.
     if (truncation) { truncation.hidden = context.total_turns <= context.replayed_turns; }
   }
 
+  // CHAT CLUSTER, FEATURE C: THE PICKER'S SELECTION, CARRIED ACROSS A
+  // SWAP. `chat-turn-status` is polled by turn pk and never sees this
+  // page's `?connection=`, so a swapped block's edit form renders that
+  // field empty. This copies the COMPOSER's own SERVER-RENDERED value
+  // into it -- one field on this page into another field on this page.
+  // Not a number the client invented, not prose, not `innerHTML`, and
+  // nothing sent to the server: decisions 21 and 22 are untouched. With
+  // scripts off there is no swap to fix, and the page-rendered form
+  // already carries the pick.
+  //
+  // THE SOURCE SELECTOR IS ATTRIBUTE-ONLY (`[name="connection"]`), NOT
+  // `input[name="connection"]`: `chat/_composer.html` renders its own
+  // hidden input only when there is NO picker to render, and otherwise
+  // `chat/_picker.html` renders a `<select name="connection">`. A
+  // selector naming `input` would therefore find nothing on exactly the
+  // pages where the pick can actually differ from the default. The
+  // TARGET stays `input[...]`, because the edit form's field is always
+  // the hidden input this script writes into.
+  function carryConnection(block) {
+    var pick = document.querySelector('#turn-form [name="connection"]');
+    if (!pick || !block) { return; }
+    block.querySelectorAll('input[name="connection"]').forEach(function (field) {
+      field.value = pick.value;
+    });
+  }
+
   // D1 (chat-polish P3.1). `html` is a server-rendered `chat/
   // _turn_block.html` fragment -- `rendering.turn_group_cards`'s own
   // group, the user's own message included -- parsed into real nodes
@@ -744,6 +770,7 @@ screen comment already documents for `.thread-scroll`.
               var wasNearBottom = isNearThreadBottom();
               var refreshed = swapBlock(card, data.html, turnId);
               if (refreshed) { card = refreshed; }
+              carryConnection(refreshed);
               if (wasNearBottom) { scrollThreadToBottom(); }
             }
             updateNote(
@@ -763,6 +790,7 @@ screen comment already documents for `.thread-scroll`.
             // above, for the same reason.
             var wasNearBottom = isNearThreadBottom();
             var refreshed = swapBlock(card, data.html, turnId);
+            carryConnection(refreshed);
             if (refreshed) {
               card = refreshed;
               setFormBusy(false);

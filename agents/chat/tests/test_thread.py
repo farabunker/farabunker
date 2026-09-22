@@ -2211,7 +2211,18 @@ class TestTheContextMeter:
     ):
         """Equality under scale -- the pin this feature's query budget is
         actually made of. A new CONSTANT query is allowed here; a
-        per-turn one is not."""
+        per-turn one is not.
+
+        CHAT CLUSTER, FEATURE C EXTENDS IT RATHER THAN ADDING A SECOND
+        COPY: the per-turn edit disclosure asks a predicate that would be
+        the obvious per-row N+1 on exactly this page, so it is asked ONCE
+        per render (`agents.visibility.may_edit_any_turn`) and this
+        equality is what would go red if a later reader moved it onto the
+        card. The two assertions below the captures are what keep that
+        non-vacuous: every turn here really does render the disclosure,
+        so the flat cost is being measured with the predicate live rather
+        than on a page that never asks it.
+        """
         from agents.limits import HISTORY_TURNS
 
         agent = make_agent(slug="meter-scale")
@@ -2222,11 +2233,15 @@ class TestTheContextMeter:
             make_turn(conversation=long_one, text="hi", state=Turn.State.DONE)
         client.get(reverse("chat-conversation", args=[short.id]))   # warm-up, unmeasured
         with CaptureQueriesContext(connection) as one:
-            assert client.get(reverse("chat-conversation", args=[short.id])).status_code == 200
+            short_response = client.get(reverse("chat-conversation", args=[short.id]))
         with CaptureQueriesContext(connection) as many:
-            assert client.get(
-                reverse("chat-conversation", args=[long_one.id])).status_code == 200
+            long_response = client.get(reverse("chat-conversation", args=[long_one.id]))
+        assert short_response.status_code == 200
+        assert long_response.status_code == 200
         assert len(many) == len(one)
+        assert short_response.content.decode().count("Send from here") == 1
+        assert long_response.content.decode().count(
+            "Send from here") == HISTORY_TURNS * 3
 
     def test_a_reader_who_may_not_upload_pays_no_extra_query_for_the_stream(
         self, client, bound_chat_role

@@ -37,6 +37,7 @@ The full table this app grows into across Tasks 6–11.
 | `/chat/c/<uuid:conversation_id>/duplicate/` | `chat-conversation-duplicate` | `conversation_duplicate` | **UI-3b** |
 | `/chat/c/<uuid:conversation_id>/archive/` | `chat-conversation-archive` | `conversation_archive` | **UI-3b** |
 | `/chat/c/<uuid:conversation_id>/unarchive/` | `chat-conversation-unarchive` | `conversation_unarchive` | **UI-3b** |
+| `/chat/c/<uuid:conversation_id>/turns/<int:turn_id>/edit/` | `chat-turn-edit` | `turn_edit` | **chat cluster, feature C** — see "Editing a past prompt" below |
 
 **`chat-conversation` shipped as a route, not a page, in Task 6.**
 `agents.chat.service.conversation_url` and `conversation_start`'s
@@ -2712,3 +2713,70 @@ rides `chat/_sidebar.html`. `agents/chat/tests/test_agent_pages.py` pins both
 halves — no script at all where there is no panel, and exactly that one include
 where there is — slicing the content block away from the rail for the same
 reason `test_sidebar.py` slices the other way.
+
+## Editing a past prompt (chat cluster, feature C)
+
+Any of your own earlier messages carries an **Edit and carry on from here**
+disclosure. It opens a plain form — a textarea pre-filled with that message, an
+optional file input, one button — and submitting it creates a **new conversation**
+holding everything before that message, with your edited text as its newest turn.
+The original is untouched.
+
+It is a branch, not a rewind, and the reasons are recorded in the ADR: a rewind
+cannot honestly un-taint (taint rows are additive-only by design, and deleting
+one is precisely the laundering the platform forbids), it orphans audit rows and
+attachments, and in a shared conversation it would destroy somebody else's work.
+A branch you did not want is one delete away; a rewind you did not want is gone.
+
+**What a branch does not carry:** attachments on the copied turns (there is no
+copier seam; the form says so before the button), tool audit rows, pinned or
+archived state, and shares. Files attached to the *edited* message itself work
+normally — `start_turn` stages them exactly as any other send does, through the
+same `composer_attachment_fields` reader the composer posts into.
+
+**Who may:** the conversation's owner, or an administrator with content access.
+**Not** a share recipient, even on their own message — a branch is a copy, so it
+answers to the copy predicate (`agents.visibility.may_manage_conversation`, not
+the wider `may_post_to`), and a recipient minting a durable conversation they own
+that survives revocation of the share is a different decision from letting them
+post. Nobody may edit while a turn is in flight, and that clause is
+conversation-wide: the control is **hidden** for the whole thread while an answer
+is running, not merely refused, because a button whose own POST answers 404 is a
+page that lies. The POST refuses anyway — hiding a control is not a gate.
+
+**Where the work is split, and why it has to be.** `agents/chat` imports
+`agents/visibility`, one way, so `branch_conversation` cannot start a turn and
+cannot redirect. It writes the branch and returns it; `turn_edit` validates the
+text against the same `MAX_TURN_CHARS` constant `start_turn` uses **before**
+calling it (so a refused edit writes nothing at all — no conversation row, no
+turns, no taint), then starts the turn through the one existing turn-start
+service and redirects. If that start refuses afterwards — an unbound role, an
+unreachable engine, a queue that is not migrated — the branch exists with its
+copied history and no answer, a state the thread page already renders honestly
+with its existing banner. That is accepted and stated rather than papered over:
+the alternative would be deleting a conversation the operator can already see in
+their sidebar.
+
+**The poller keeps up.** The `done` tick supplies the same three card keys the
+page does, so a swapped exchange renders the disclosure exactly as a reload would
+— the invariant `_done_body`, `_group_html`, `turn_group_cards` and
+`_attachments_by_turn` each state in their own words. The queued and running
+ticks pay nothing for it: the predicate is provably false while a turn of that
+conversation is in flight, which on those two paths is the turn being polled. The
+one value that cannot travel on the wire is the picker's own selection, which
+lives in the thread page's query string and never reaches the poll endpoint — so
+the poller carries it across on the page instead, copying the composer's own
+server-rendered field into each swapped block. A no-JS page load never lost the
+pick; the polled swap was the only path that did, and it no longer does.
+
+**No new script, and one new template parameter.** The disclosure is a
+`<details>` plus a plain form — the house's zero-JS idiom — and it includes
+`chat/_attach_files.html` alone, never `chat/_composer.html`: that fragment ends
+with two script blocks, and this disclosure renders once per eligible user turn,
+so including it would multiply the page's pinned script counts (4 with the attach
+door, 3 without) by the number of editable messages. `_attach_files.html` gains
+one optional `attach_id`, defaulted so its three existing call sites are
+byte-identical: without it every "+ Add files" inside every edit form would
+resolve its `<label for="attach-files">` to the **composer's** input — the first
+match in document order — and stage the chosen file onto a new turn instead of
+onto the branch.
