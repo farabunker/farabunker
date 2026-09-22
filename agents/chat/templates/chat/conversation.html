@@ -469,7 +469,24 @@ screen comment already documents for `.thread-scroll`.
     <p class="context-line">{{ context_meter.lead }}<span id="context-tokens">{{ context_usage.estimated_tokens }}</span>{{ context_meter.middle }}{% if context_meter.has_percent %}<span id="context-percent">{{ context_usage.percent }}</span>{% endif %}{{ context_meter.tail }}</p>
     <div class="context-bar" aria-hidden="true"><span></span></div>
     <p class="context-line" id="context-truncation"{% if not context_usage.truncated %} hidden{% endif %}>{{ context_truncation_clause }}</p>
-    {% if context_full_clause %}<p class="context-line">{{ context_full_clause }}</p>{% endif %}
+    {% comment %}
+    THE `full` BAND'S OWN SENTENCE (whole-branch review I-3). Spec 3.4's
+    table puts it in the `>= 90%` row unconditionally, but the band flips
+    on a poll tick and this sentence used to wait for F5: the bar turned
+    `var(--danger)` with nothing on the page saying why.
+
+    THE ELEMENT IS ALWAYS HERE, EMPTY AND `hidden` BELOW THE BAND, and
+    the TEXT arrives in the poll body (`_context_body`'s `full_clause`,
+    the same `agents.usage.FULL_CLAUSE` object this page renders). Not
+    pre-rendered-and-hidden the way `#context-truncation` is, and
+    deliberately so: a hidden copy of the sentence would put it in the
+    source of every page under 90%, where `test_below_ninety_percent_it_
+    does_not` says it must not be, and "hidden in the markup" is a weaker
+    promise than "not sent at all". The script writes it with
+    `textContent`, never `innerHTML`, and composes no word of its own --
+    decisions 21-22 untouched.
+    {% endcomment %}
+    <p class="context-line" id="context-full"{% if not context_full_clause %} hidden{% endif %}>{{ context_full_clause }}</p>
     {% if context_engine_default_sentence %}
     <p class="context-line">{{ context_engine_default_sentence }}
       <a href="{{ setup_url }}">Models</a></p>
@@ -656,6 +673,17 @@ screen comment already documents for `.thread-scroll`.
       meter.setAttribute("data-band",
                          percent >= 90 ? "full" : (percent >= 70 ? "high" : "ok"));
       meter.style.setProperty("--context-fill", percent + "%");
+      // I-3: the band and its sentence move TOGETHER. The text is the
+      // server's -- `context.full_clause`, written by `textContent` --
+      // so nothing here composes prose, and the element is emptied
+      // again on the way back down rather than left holding a sentence
+      // a later tick contradicts.
+      var full = document.getElementById("context-full");
+      if (full) {
+        var isFull = percent >= 90 && !!context.full_clause;
+        full.textContent = isFull ? context.full_clause : "";
+        full.hidden = !isFull;
+      }
     }
     var truncation = document.getElementById("context-truncation");
     if (truncation) { truncation.hidden = context.total_turns <= context.replayed_turns; }

@@ -46,8 +46,12 @@ every poll tick, for the smallest term in the estimate.
 
 Under-counting is the right direction to be wrong in for a "when should
 I compact" signal ONLY IF THE READER IS TOLD. `DISCLOSURE_BODY` below
-tells them, and names tool calls explicitly because that is the one
-exclusion large enough to change a decision.
+tells them, and names the TWO exclusions large enough to change a
+decision -- attached files and tool traffic -- in so many words ("It
+does not count files attached to a message, or what a tool was asked
+and answered"). This paragraph said "the one" until wave item r8; ADR
+0019, `agents/README.md` and `agents/chat/README.md` all correctly said
+two, and this docstring was the outlier.
 """
 from __future__ import annotations
 
@@ -226,8 +230,20 @@ def meter_segments(usage: ContextUsage) -> MeterSegments:
 
 
 def truncation_clause(usage: ContextUsage) -> str:
-    """The one clause that can newly become true mid-session, which is
-    why the page renders it once and hides it rather than composing it
-    on a poll tick."""
+    """ONE OF THE TWO clauses that can newly become true mid-session,
+    which is why the page renders it once and hides it rather than
+    composing it on a poll tick.
+
+    `FULL_CLAUSE` IS THE OTHER, and this docstring used to say "the one",
+    which is how it went a whole branch without the same treatment
+    (whole-branch review I-3). The two are handled differently on
+    purpose: THIS one is pre-rendered and merely unhidden, because its
+    text is per-conversation (it names two counts) and a page under the
+    threshold gives nothing away by carrying it; `FULL_CLAUSE` is a
+    constant with no counts in it, and `test_below_ninety_percent_it_
+    does_not` says a page below the band must not carry it at all, so it
+    travels in the poll body instead and the script writes it with
+    `textContent`. Neither is composed in JavaScript.
+    """
     dropped = max(0, usage.total_turns - usage.replayed_turns)
     return f"the oldest {dropped} of {usage.total_turns} messages are no longer sent"

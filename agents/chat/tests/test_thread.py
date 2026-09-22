@@ -2031,6 +2031,31 @@ class TestTheWallOnAConversationOnlyShare:
         assert f'<option value="{outside.pk}"' not in body
 
 
+def _opening_tag(body: str, element_id: str) -> str:
+    """JUST the opening tag of `#<element_id>`, never a fixed number of
+    characters after it.
+
+    RE-PINNED, NOT REWRITTEN (whole-branch review I-3). The two
+    truncation-clause tests below used to slice 200 characters after
+    `id="context-truncation"` and ask whether "hidden" was anywhere in
+    them -- which stopped being a statement about that element the
+    moment a SECOND hideable clause was added underneath it (the `full`
+    band's own, three lines further down in `chat/conversation.html`).
+    Their claim is unchanged; only the slice is, from "somewhere nearby"
+    to "this tag".
+    """
+    start = body.index(f'id="{element_id}"')
+    return body[start:body.index(">", start)]
+
+
+def _element_text(body: str, element_id: str) -> str:
+    """What `#<element_id>` actually CONTAINS -- the empty string for an
+    element rendered with nothing in it, which is a different claim from
+    "the string is not on the page" and the one I-3 turns on."""
+    start = body.index(f'id="{element_id}"')
+    return body[body.index(">", start) + 1:body.index("</p>", start)]
+
+
 class TestTheContextMeter:
     """Feature A on the page: the line, the bar, the disclosure and the
     two clauses. Server-rendered, inside `.composer-block`, above the
@@ -2086,8 +2111,7 @@ class TestTheContextMeter:
         body = client.get(reverse("chat-conversation", args=[conversation.id])).content.decode()
         assert 'id="context-truncation"' in body
         assert "no longer sent" in body
-        marker = body[body.index('id="context-truncation"'):]
-        assert "hidden" in marker[:200]
+        assert "hidden" in _opening_tag(body, "context-truncation")
 
     def test_the_truncation_clause_is_unhidden_on_a_long_conversation(
         self, client, bound_chat_role
@@ -2098,8 +2122,7 @@ class TestTheContextMeter:
         for _ in range(HISTORY_TURNS + 3):
             make_turn(conversation=conversation, text="hi", state=Turn.State.DONE)
         body = client.get(reverse("chat-conversation", args=[conversation.id])).content.decode()
-        marker = body[body.index('id="context-truncation"'):]
-        assert "hidden" not in marker[:200]
+        assert "hidden" not in _opening_tag(body, "context-truncation")
         assert f"the oldest 3 of {HISTORY_TURNS + 3} messages are no longer sent" in body
 
     def test_at_ninety_percent_the_page_says_what_to_do_about_it(
@@ -2142,6 +2165,64 @@ class TestTheContextMeter:
         body = client.get(reverse("chat-conversation", args=[conversation.id])).content.decode()
         assert escape(FULL_CLAUSE) not in body
         assert 'data-band="ok"' in body
+
+    def test_below_the_band_the_element_is_there_but_empty_and_hidden(
+        self, client, bound_chat_role
+    ):
+        """WHOLE-BRANCH REVIEW I-3. The band flips on a poll tick and the
+        sentence explaining it used to wait for F5, because the clause
+        was behind a plain server-side `{% if %}` with no element for the
+        script to reach. There is now always an element -- and it is
+        EMPTY below the band, not a hidden copy of the sentence, which is
+        what keeps `test_below_ninety_percent_it_does_not` a real
+        assertion rather than one about markup visibility."""
+        from agents.usage import CHARS_PER_TOKEN
+
+        bound_chat_role.context_window = 100
+        bound_chat_role.save()
+        agent = self._long_prompt_agent(CHARS_PER_TOKEN * 10)
+        conversation = make_conversation(agent=agent)
+        body = client.get(reverse("chat-conversation", args=[conversation.id])).content.decode()
+        assert "hidden" in _opening_tag(body, "context-full")
+        assert _element_text(body, "context-full") == ""
+
+    def test_at_the_band_the_same_element_carries_the_clause_unhidden(
+        self, client, bound_chat_role
+    ):
+        """The other half, so "always empty" cannot pass both."""
+        from django.utils.html import escape
+
+        from agents.usage import CHARS_PER_TOKEN, FULL_CLAUSE
+
+        bound_chat_role.context_window = 100
+        bound_chat_role.save()
+        agent = self._long_prompt_agent(CHARS_PER_TOKEN * 95)
+        conversation = make_conversation(agent=agent)
+        body = client.get(reverse("chat-conversation", args=[conversation.id])).content.decode()
+        assert "hidden" not in _opening_tag(body, "context-full")
+        assert _element_text(body, "context-full") == escape(FULL_CLAUSE)
+
+    def test_the_script_unhides_it_from_the_servers_own_text_never_its_own(
+        self, client, bound_chat_role
+    ):
+        """DECISIONS 21-22 STILL HOLD. The script reaches the element by
+        id, writes `context.full_clause` -- the SERVER's string, from the
+        poll body -- with `textContent`, and composes no prose of its
+        own. Same `innerHTML`-free slice idiom
+        `test_turn_edit.py`'s `carryConnection` pin uses."""
+        conversation = make_conversation(agent=make_agent(slug="meter-full-script"))
+        body = client.get(reverse("chat-conversation", args=[conversation.id])).content.decode()
+        block = body.split("function applyContext(")[1]
+        block = block[:block.index("\n  }")]
+        assert 'getElementById("context-full")' in block
+        assert "context.full_clause" in block
+        assert "textContent" in block
+        assert "innerHTML" not in block
+        # NO PROSE TYPED HERE: the only quoted strings in the whole
+        # function are element ids, attribute names and band keys --
+        # never a sentence. The clause's own first word would be the
+        # cheapest way to break that, so it is the one pinned.
+        assert "Start a new conversation" not in block
 
     def test_a_refusal_that_still_has_a_binding_still_shows_a_ceiling(
         self, client, bound_chat_role, monkeypatch
@@ -2355,13 +2436,26 @@ class TestTheContextMeterOnThePollPath:
                               text="", state=Turn.State.QUEUED, queue_job_id=1)
         return conversation, assistant
 
-    def test_a_queued_body_carries_the_three_integers_and_nothing_else(
+    def test_a_queued_body_carries_the_three_integers_and_one_declared_clause(
         self, client, fake_queued_job
     ):
+        """DELIBERATE RE-PIN (whole-branch review I-3), named in the
+        commit body. The fourth key is not a fourth number and not a
+        decision: it is `agents.usage.FULL_CLAUSE` verbatim, the same
+        declared object the thread page renders, carried so the script
+        can put the `full` band's sentence on the page at the moment the
+        band flips rather than at the next F5. Every NUMBER on this body
+        is still an integer, which is the half of the old assertion that
+        was load-bearing."""
+        from agents.usage import FULL_CLAUSE
+
         _conversation, assistant = self._queued_pair()
         body = client.get(reverse("chat-turn-status", args=[assistant.pk])).json()
-        assert set(body["context"]) == {"estimated_tokens", "replayed_turns", "total_turns"}
-        assert all(isinstance(value, int) for value in body["context"].values())
+        assert set(body["context"]) == {"estimated_tokens", "replayed_turns",
+                                        "total_turns", "full_clause"}
+        assert all(isinstance(body["context"][key], int)
+                   for key in ("estimated_tokens", "replayed_turns", "total_turns"))
+        assert body["context"]["full_clause"] == FULL_CLAUSE
 
     def test_the_corpus_grows_at_QUEUE_time_not_only_at_finish(
         self, client, fake_queued_job
@@ -2383,26 +2477,63 @@ class TestTheContextMeterOnThePollPath:
         body = client.get(reverse("chat-turn-status", args=[assistant.pk])).json()
         assert body["context"]["replayed_turns"] == 2
 
-    def test_no_window_no_percentage_and_no_sentence_ever_travel(self, client):
+    def test_no_window_and_no_COMPOSED_sentence_ever_travel(self, client):
         """DEVIATION FROM THE BRIEF: the brief's own `assert "estimate"
         not in serialized` cannot pass alongside the interface's own
         mandated key name -- `"estimated_tokens"` starts with the
         eight letters "estimate", so the substring is present in EVERY
-        legal body, including the one `_context_body`'s own docstring
-        and `test_a_queued_body_carries_the_three_integers_and_nothing_
-        else` require. Re-pinned to the assertion's real intent -- no
-        rendered SENTENCE (a "~30% estimate" clause, the page's own
-        prose) rides the JSON body -- by counting occurrences: "estimate"
-        may appear only as the fixed prefix of the key name itself,
-        never as a free word a second time."""
+        legal body. Re-pinned to the assertion's real intent by counting
+        occurrences: "estimate" may appear only as the fixed prefix of
+        the key name itself, never as a free word a second time.
+
+        DELIBERATE RE-PIN AND RENAME (whole-branch review I-3), named in
+        the commit body. The old name said "no sentence"; one sentence
+        now does travel, and the honest invariant is narrower and
+        sharper: no sentence COMPOSED for this response. `FULL_CLAUSE`
+        is a module constant with no number, no window and no percentage
+        in it -- the assertions below still hold over it verbatim --
+        whereas a "~30% estimate" clause, or the meter's own segments,
+        would be the page's prose re-derived on a path that deliberately
+        holds no render context. The equality against the declared
+        object is what stops it drifting into a second spelling."""
+        from agents.usage import FULL_CLAUSE
+
         conversation = make_conversation(agent=make_agent(slug="poll-window"))
         assistant = make_turn(conversation=conversation, role=Turn.Role.ASSISTANT,
                               text="a", state=Turn.State.DONE, queue_job_id=3)
-        serialized = str(client.get(
-            reverse("chat-turn-status", args=[assistant.pk])).json())
+        payload = client.get(reverse("chat-turn-status", args=[assistant.pk])).json()
+        serialized = str(payload)
         assert "window" not in serialized
         assert "percent" not in serialized
         assert serialized.count("estimate") == serialized.count("estimated_tokens")
+        assert payload["context"]["full_clause"] == FULL_CLAUSE
+        assert not any(character.isdigit() for character in FULL_CLAUSE)
+
+    def test_the_clause_the_poll_body_carries_is_the_page_s_own(
+        self, client, bound_chat_role
+    ):
+        """PARITY, whole-branch review I-3: the sentence a reader sees
+        after a poll tick and the sentence a reader sees after F5 are the
+        SAME object, not two spellings that agree today. One declared
+        constant, rendered by the page and carried by the body."""
+        from django.utils.html import escape
+
+        from agents.usage import CHARS_PER_TOKEN, FULL_CLAUSE
+
+        bound_chat_role.context_window = 100
+        bound_chat_role.save()
+        conversation = make_conversation(
+            agent=make_agent(slug="poll-full-parity",
+                             system_prompt="x" * (CHARS_PER_TOKEN * 95)))
+        assistant = make_turn(conversation=conversation, role=Turn.Role.ASSISTANT,
+                              text="a", state=Turn.State.DONE, queue_job_id=14)
+        page = client.get(
+            reverse("chat-conversation", args=[conversation.id])).content.decode()
+        polled = client.get(
+            reverse("chat-turn-status", args=[assistant.pk])).json()["context"]
+        assert 'data-band="full"' in page, "the page must really be at the band"
+        assert escape(FULL_CLAUSE) in page
+        assert polled["full_clause"] == FULL_CLAUSE
 
     def test_a_running_body_carries_no_context_key(self, client, fake_running_job):
         conversation = make_conversation(agent=make_agent(slug="poll-running"))
@@ -2468,7 +2599,8 @@ class TestTheContextMeterOnThePollPath:
                 pk=turn.pk)
         with CaptureQueriesContext(connection) as captured:
             body = _context_body(turn)
-        assert set(body) == {"estimated_tokens", "replayed_turns", "total_turns"}
+        assert set(body) == {"estimated_tokens", "replayed_turns", "total_turns",
+                             "full_clause"}
         assert len(captured) == 2, [q["sql"] for q in captured.captured_queries]
 
     def test_the_select_related_is_wide_enough_to_keep_the_budget_honest(self, client):

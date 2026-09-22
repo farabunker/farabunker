@@ -39,7 +39,7 @@ from agents.chat.service import (
 from agents.chat.views.thread import thread_context
 from agents.limits import MAX_TURN_CHARS, TURN_TIMEOUT_ADMIN_HINT, TURN_TIMEOUT_ERROR
 from agents.models import Turn
-from agents.usage import WINDOW_SOURCE_UNBOUND, context_usage
+from agents.usage import FULL_CLAUSE, WINDOW_SOURCE_UNBOUND, context_usage
 from agents.visibility import (
     branch_conversation, may_edit_any_turn, may_edit_turn, may_post_to, visible_turn,
 )
@@ -348,6 +348,19 @@ def _context_body(turn) -> dict:
     anybody renders: only `estimated_tokens`, `replayed_turns` and
     `total_turns` are read off the result, and the page's own
     server-written `data-window` is the only denominator that exists.
+
+    PLUS ONE STRING, AND IT IS NOT A FOURTH NUMBER (whole-branch review
+    I-3). `full_clause` is `agents.usage.FULL_CLAUSE` itself -- the same
+    declared object the thread page renders -- carried so the script can
+    put the `full` band's own sentence on the page at the moment the
+    band flips, with `textContent` and never `innerHTML`. Spec 3.4's
+    table puts that sentence in the `>= 90%` row unconditionally; before
+    this, crossing 90% mid-session turned the bar red and left the
+    sentence explaining it until the next F5. It is a CONSTANT, not a
+    per-conversation computation -- no window, no percentage and no
+    decision is made here, exactly as the paragraphs above require --
+    and `agents/chat/tests/test_thread.py` pins it against the page's
+    own render so the two can never drift into two sentences.
     """
     usage = context_usage(turn.conversation, turn.conversation.agent,
                           window=0, window_source=WINDOW_SOURCE_UNBOUND)
@@ -355,6 +368,7 @@ def _context_body(turn) -> dict:
         "estimated_tokens": usage.estimated_tokens,
         "replayed_turns": usage.replayed_turns,
         "total_turns": usage.total_turns,
+        "full_clause": FULL_CLAUSE,
     }
 
 
