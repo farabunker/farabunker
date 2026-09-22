@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -20,8 +21,9 @@ from django.utils import timezone
 
 from agents.models import Conversation, ToolInvocation, Turn
 from agents.visibility import visible_conversations
+from identity import audit
 from identity.contracts import retention as copy
-from identity.contracts.actions import CONTENT_DELETED, CONTENT_PURGED
+from identity.contracts.actions import CONTENT_DELETED, CONTENT_PURGED, CONTENT_RESTORED
 from identity.models import AuditEvent, DeletionTicket, IdentitySettings
 from identity.tests._helpers import (
     make_conversation, make_document, make_generation, make_output,
@@ -30,6 +32,7 @@ from identity.tests._helpers import (
 from tools.rag import index as rag_index
 from tools.rag.access import readable_documents, visible_ask_records
 from tools.rag.models import AskRecord, Document, DocumentAttachment
+from tools.vision import store as vision_store
 
 pytestmark = pytest.mark.django_db
 
@@ -114,6 +117,7 @@ def world(tmp_path, settings, monkeypatch):
     the reason that class's own docstring gives.
     """
     settings.NOTES_DIR = tmp_path
+    settings.GENERATED_DIR = tmp_path / "generated"
     monkeypatch.setattr(rag_index, "get_vector_store", lambda: _FakeChunkStore())
 
     user = make_user()
@@ -122,11 +126,20 @@ def world(tmp_path, settings, monkeypatch):
     conversation = make_conversation(title="A thread", **owner)
 
     # The generated image, its output row, and the queue row that made it.
+    # A REAL FILE, written through `tools.vision.store.store_output` --
+    # the same function `services.generate`'s own write path calls --
+    # so its path has the exact `<GENERATED_DIR>/<job_id>/<index>-<name>`
+    # shape `store.remove_job_files` (called by `services.delete_job`)
+    # removes by `shutil.rmtree`-ing the job's whole directory. `path=
+    # "/dev/null"` (`make_output`'s own default) would pass every
+    # assertion the demo made before -- there was no file to check.
     generation_queue_job = make_queue_job(
         kind="vision.generate", state="succeeded", priority=200,
         payload={"operation": "txt2img", "params": {"prompt": "a lighthouse"}})
     job = make_generation(queue_job_id=generation_queue_job.pk, **owner)
-    output = make_output(job=job)
+    output_path = vision_store.store_output(
+        job.pk, 0, "lighthouse.png", b"not a real PNG, just bytes on disk")
+    output = make_output(job=job, path=output_path)
 
     # The tool record whose words the purge scrubs, and the tool turn
     # that reaches BOTH channels: an artifact reference AND a generation
@@ -173,6 +186,7 @@ def world(tmp_path, settings, monkeypatch):
         document=document,
         job=job,
         output=output,
+        output_path=output_path,
         ask=ask,
         note_path=note_path,
         turn_queue_job=turn_queue_job,
@@ -196,9 +210,52 @@ class TestTheDemo:
             assert copy.purge_on_line(ticket.purge_on) in body
             assert ticket.purge_on == timezone.localdate() + datetime.timedelta(days=30)
 
-            # NOTHING HAS BEEN PURGED YET: the rows are all still there.
+            # NOTHING HAS BEEN PURGED YET: the rows are all still there --
+            # every fixture item, not just the conversation and its turns.
             assert Conversation.objects.filter(pk=world.conversation.pk).exists()
             assert Turn.objects.filter(conversation_id=world.conversation.pk).exists()
+            assert DocumentAttachment.objects.filter(
+                document=world.document, conversation_id=world.conversation.id).exists()
+            invocation = ToolInvocation.objects.get(pk=world.invocation.pk)
+            assert invocation.args and invocation.text
+            if "vision" in settings.FARABUNKER_FEATURES:
+                assert apps.get_model("vision.GenerationJob").objects.filter(
+                    pk=world.job.pk).exists()
+                assert Path(world.output_path).exists()
+            assert world.chunk_count_for_document() == 1
+
+    def test_step_2b_restore_brings_it_back_before_step_3_deletes_it_again(
+            self, client, world):
+        """THE RESTORE DOOR step 2's own notice promises: the same
+        thread deleted, restored, and deleted again -- one demo, not
+        two -- so step 3 (permanent delete) still starts from a freshly
+        deleted ticket, exactly as it always has."""
+        with posture("personal"):
+            sign_in(client, world.user)
+            client.post(reverse("chat-conversation-delete",
+                                args=[world.conversation.id]))
+            principal = user_principal(world.user)
+            assert list(visible_conversations(principal)) == []
+
+            body = client.get(reverse("identity-deleted")).content.decode()
+            assert world.conversation.title in body
+            ticket = DeletionTicket.objects.get(kind=copy.KIND_CONVERSATION)
+
+            client.post(reverse("identity-deleted-restore", args=[ticket.pk]))
+
+            assert world.conversation in list(visible_conversations(principal))
+            assert not DeletionTicket.objects.filter(pk=ticket.pk).exists()
+            restored = audit.by_action([CONTENT_RESTORED])
+            assert len(restored) == 1
+            assert restored[0].target_key == str(world.conversation.pk)
+
+            # DELETE AGAIN -- a fresh ticket, so the rest of the demo
+            # (step 3's permanent delete) starts from the same state it
+            # always has.
+            client.post(reverse("chat-conversation-delete",
+                                args=[world.conversation.id]))
+            assert list(visible_conversations(principal)) == []
+            assert DeletionTicket.objects.filter(kind=copy.KIND_CONVERSATION).count() == 1
 
     def test_step_3_delete_permanently_leaves_nothing_on_this_box(self, client, world):
         with posture("personal"):
@@ -222,9 +279,13 @@ class TestTheDemo:
             if "vision" in settings.FARABUNKER_FEATURES:
                 assert not apps.get_model("vision.GenerationJob").objects.filter(
                     pk=world.job.pk).exists()
-            # The chat-scoped document, its chunks and its bytes.
+                assert not Path(world.output_path).exists()
+            # The chat-scoped document, its attachment claim, its chunks
+            # and its bytes.
             assert not apps.get_model("rag.Document").objects.filter(
                 pk=world.document.pk).exists()
+            assert not DocumentAttachment.objects.filter(
+                document_id=world.document.pk).exists()
             assert world.chunk_count_for_document() == 0
             # The staging note file.
             assert not world.note_path.exists()
