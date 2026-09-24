@@ -1110,6 +1110,9 @@ actually act on**.
 These lines come from the `worker` service (`docker compose logs -f worker`); the last one
 comes from whichever process wrote a footprint, which in practice is also the worker.
 
+The INFO lines below are on by default; set `FARABUNKER_QUEUE_LOG_LEVEL=WARNING` in `.env` to
+quiet them down to the WARNING table further down, without touching any other logger.
+
 ### INFO — normal operation, nothing to do
 
 | Line | What it means |
