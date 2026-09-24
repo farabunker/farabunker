@@ -145,6 +145,14 @@ class TestQueueLogLevelEnvVar:
         finally:
             self._reload(monkeypatch, None)
 
+    def test_an_explicitly_empty_value_falls_back_to_info(self, monkeypatch):
+        shipped = self._reload(monkeypatch, "")
+        try:
+            assert shipped.LOGGING["loggers"]["models.queue"]["level"] == "INFO"
+            assert shipped.LOGGING["loggers"]["models.contracts.engines"]["level"] == "INFO"
+        finally:
+            self._reload(monkeypatch, None)
+
     def test_case_is_normalised(self, monkeypatch):
         shipped = self._reload(monkeypatch, "warning")
         try:

@@ -446,14 +446,14 @@ VISION_STAGED_UPLOAD_TTL = timedelta(
 # replacement. DEBUG behaviour is untouched for the same reason.
 def _queue_log_level() -> str:
     """`FARABUNKER_QUEUE_LOG_LEVEL`, validated against the standard level
-    names (`logging._nameToLevel`). Unset, blank, or unrecognized all fall
-    back to `"INFO"` -- a typo in this variable governs verbosity, not
-    correctness, and must never crash boot.
+    names (`logging.getLevelNamesMapping()`). Unset, blank, or unrecognized
+    all fall back to `"INFO"` -- a typo in this variable governs verbosity,
+    not correctness, and must never crash boot.
     """
     import logging as _logging
 
     raw = os.environ.get("FARABUNKER_QUEUE_LOG_LEVEL", "INFO").strip().upper()
-    return raw if raw in _logging._nameToLevel else "INFO"
+    return raw if raw in _logging.getLevelNamesMapping() else "INFO"
 
 
 _QUEUE_LOG_LEVEL = _queue_log_level()
