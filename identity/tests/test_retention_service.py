@@ -23,6 +23,8 @@ from identity.tests._helpers import (
 pytestmark = pytest.mark.django_db
 
 REMOVED: list[str] = []
+CHILDREN: list[tuple[str, str]] = [(KIND_DOCUMENT, "doc-1"), (KIND_DOCUMENT, "doc-2")]
+CALLED: list[str] = []
 
 
 def ask_handler(key: str) -> int:
@@ -38,6 +40,24 @@ def refused(key: str) -> int:
     raise RetentionRefused("a worker still holds this item")
 
 
+def conversation_handler(key: str) -> int:
+    REMOVED.append(f"conversation:{key}")
+    return 1
+
+
+def document_handler(key: str) -> int:
+    REMOVED.append(f"document:{key}")
+    return 1
+
+
+def fake_children(key: str) -> list[tuple[str, str]]:
+    """Recomputed from the parent's own rows in production; a constant
+    here, because what this module tests is what the SERVICE does with
+    the pairs, not how a column finds them."""
+    CALLED.append(key)
+    return list(CHILDREN)
+
+
 @pytest.fixture(autouse=True)
 def _isolated_registry():
     """Save, clear, register, restore -- the shape
@@ -47,15 +67,29 @@ def _isolated_registry():
     registration that escaped this module would reach every later purge
     in the same pytest process. Both collection orders are the gate, so
     ordering luck cannot cover it.
+
+    `CALLED` is this module's own list (`identity/tests/
+    test_retention_runner.py` has one of its own; nothing is shared
+    between the two modules).
     """
     saved = dict(cascades_module._RETENTION)
     cascades_module._RETENTION.clear()
     REMOVED.clear()
+    CALLED.clear()
     register_retention_handler(RetentionHandler(
         kind=KIND_ASK, key="t.ask", label="Ask records",
         handler=f"{__name__}.ask_handler"))
+    register_retention_handler(RetentionHandler(
+        kind=KIND_CONVERSATION, key="t.conversation",
+        label="Conversation and turns",
+        handler=f"{__name__}.conversation_handler",
+        children=f"{__name__}.fake_children"))
+    register_retention_handler(RetentionHandler(
+        kind=KIND_DOCUMENT, key="t.document", label="Document",
+        handler=f"{__name__}.document_handler"))
     yield
     REMOVED.clear()
+    CALLED.clear()
     cascades_module._RETENTION.clear()
     cascades_module._RETENTION.update(saved)
 
@@ -400,3 +434,232 @@ class TestStanding:
             assert [t.key for t in service.visible_tickets(user_principal(mine))] == ["1"]
         with posture("open"):
             assert len(service.visible_tickets(user_principal(mine))) == 2
+
+
+class TestChildTickets:
+    def test_a_delete_tickets_the_children_with_the_same_date_and_owner(self):
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(
+            user_principal(user), kind=KIND_CONVERSATION, key=item.pk,
+            owner=item, label="A thread")
+
+        children = DeletionTicket.objects.filter(kind=KIND_DOCUMENT).order_by("key")
+        assert [t.key for t in children] == ["doc-1", "doc-2"]
+        for child in children:
+            assert child.parent_id == parent.pk
+            assert child.purge_on == parent.purge_on
+            assert child.owner_kind == parent.owner_kind
+            assert child.owner_key == parent.owner_key
+            assert child.deleted_by_key == str(user.pk)
+            # THE PARENT'S NAME IS NOT THE CHILD'S: a child ticket
+            # carries no label at all, so the page shows its kind.
+            assert child.label == ""
+        assert REMOVED == []
+
+    def test_each_child_gets_its_own_content_free_event(self):
+        user = make_user()
+        item = _owner(user)
+        service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                               key=item.pk, owner=item, label="A thread")
+        events = AuditEvent.objects.filter(action=CONTENT_DELETED,
+                                           target_type=KIND_DOCUMENT)
+        assert events.count() == 2
+        assert {e.target_label for e in events} == {""}
+        assert {e.actor_key for e in events} == {str(user.pk)}
+
+    def test_a_child_that_already_has_a_ticket_keeps_its_date_and_stays_its_own(self):
+        """Unique on (kind, key): an image deleted from the gallery
+        yesterday keeps ITS date, is NOT adopted by this delete, and
+        gets no second event."""
+        user = make_user()
+        item = _owner(user)
+        existing = service.delete_content(user_principal(user), kind=KIND_DOCUMENT,
+                                          key="doc-1", owner=item, label="Its own")
+        DeletionTicket.objects.filter(pk=existing.pk).update(
+            purge_on=timezone.localdate() + datetime.timedelta(days=90))
+        service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                               key=item.pk, owner=item)
+        existing.refresh_from_db()
+        assert existing.label == "Its own"
+        assert existing.parent_id is None
+        assert existing.purge_on == timezone.localdate() + datetime.timedelta(days=90)
+        assert AuditEvent.objects.filter(
+            action=CONTENT_DELETED, target_type=KIND_DOCUMENT,
+            target_key="doc-1").count() == 1
+
+    def test_a_handler_with_no_children_is_unchanged(self):
+        user = make_user()
+        service.delete_content(user_principal(user), kind=KIND_ASK, key="5",
+                               owner=_owner(user))
+        assert DeletionTicket.objects.count() == 1
+
+    def test_the_resolver_is_asked_at_the_delete_and_nowhere_else(self):
+        """ASKED ONCE, AT EACH DELETE. Restore and permanent delete
+        follow the link the delete wrote instead of asking again, so a
+        column whose rows have since changed cannot make either of them
+        reach a ticket this delete never created."""
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        assert CALLED == [str(item.pk)]
+        service.restore_content(user_principal(user), parent)
+        assert CALLED == [str(item.pk)]
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        service.purge_ticket(user_principal(user), parent)
+        assert CALLED == [str(item.pk), str(item.pk)]
+
+    def test_restoring_the_parent_removes_its_children(self):
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        service.restore_content(user_principal(user), parent)
+        assert DeletionTicket.objects.count() == 0
+        assert AuditEvent.objects.filter(
+            action=CONTENT_RESTORED, target_type=KIND_DOCUMENT).count() == 2
+        assert REMOVED == []
+
+    def test_a_child_restored_on_its_own_is_simply_absent(self):
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        child = DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-1")
+        service.restore_content(user_principal(user), child)
+        service.restore_content(user_principal(user), parent)
+        assert DeletionTicket.objects.count() == 0
+        assert AuditEvent.objects.filter(
+            action=CONTENT_RESTORED, target_type=KIND_DOCUMENT).count() == 2
+
+    def test_a_restore_leaves_a_ticket_this_delete_did_not_write(self):
+        """The image was deleted from the gallery on its own date. A
+        chat that happens to reference it is restored; the image is not
+        put back, because nobody said to put it back."""
+        user = make_user()
+        item = _owner(user)
+        own = service.delete_content(user_principal(user), kind=KIND_DOCUMENT,
+                                     key="doc-1", owner=item, label="Its own")
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        service.restore_content(user_principal(user), parent)
+        assert DeletionTicket.objects.filter(pk=own.pk).exists()
+        assert DeletionTicket.objects.filter(kind=KIND_DOCUMENT,
+                                             key="doc-2").count() == 0
+
+    def test_permanent_delete_runs_this_items_rows_before_any_childs_bytes(self):
+        """ORDER IS THE POINT, and it is the filesystem-last rule this
+        registry already states: a child's handler is the one that
+        removes bytes, and a row handler that raised after files were
+        gone would leave a resurrected row pointing at nothing. So every
+        row this click touches goes first, and the children follow."""
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        service.purge_ticket(user_principal(user), parent)
+        assert REMOVED == [f"conversation:{item.pk}",
+                           "document:doc-1", "document:doc-2"]
+        assert DeletionTicket.objects.count() == 0
+
+    def test_the_parents_event_counts_the_children_under_their_own_label(self):
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        removed = service.purge_ticket(user_principal(user), parent)
+        assert removed == {"Conversation and turns": 1, "Document": 2}
+        event = AuditEvent.objects.get(action=CONTENT_PURGED,
+                                       target_type=KIND_CONVERSATION)
+        assert event.detail["removed"] == {"Conversation and turns": 1,
+                                           "Document": 2}
+
+    def test_every_destroyed_ticket_writes_its_own_event(self):
+        """ONE EVENT PER TICKET DESTROYED, because the Deletion log
+        lists tickets: an image that was listed with a date of its own
+        is a line of its own when that date is spent."""
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        service.purge_ticket(user_principal(user), parent)
+        assert AuditEvent.objects.filter(
+            action=CONTENT_PURGED, target_type=KIND_DOCUMENT).count() == 2
+        assert AuditEvent.objects.filter(
+            action=CONTENT_PURGED, target_type=KIND_CONVERSATION).count() == 1
+
+    def test_a_child_restored_alone_survives_the_parents_permanent_delete(self):
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        service.restore_content(
+            user_principal(user),
+            DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-1"))
+        service.purge_ticket(user_principal(user), parent)
+        assert "document:doc-1" not in REMOVED
+        assert "document:doc-2" in REMOVED
+
+    def test_a_ticket_this_delete_did_not_write_survives_the_permanent_delete(self):
+        """Its own date was printed for it, and this click is not that
+        date."""
+        user = make_user()
+        item = _owner(user)
+        own = service.delete_content(user_principal(user), kind=KIND_DOCUMENT,
+                                     key="doc-1", owner=item, label="Its own")
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        service.purge_ticket(user_principal(user), parent)
+        assert DeletionTicket.objects.filter(pk=own.pk).exists()
+        assert "document:doc-1" not in REMOVED
+
+    def test_the_sweep_counts_every_ticket_it_addressed(self):
+        """A parent and two children are three items destroyed and three
+        rows gone; reporting one would tell an operator two pictures are
+        still there."""
+        user = make_user()
+        item = _owner(user)
+        service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                               key=item.pk, owner=item)
+        DeletionTicket.objects.all().update(
+            purge_on=timezone.localdate() - datetime.timedelta(days=1))
+        assert service.sweep() == 3
+        assert DeletionTicket.objects.count() == 0
+        assert sorted(REMOVED) == sorted(
+            ["document:doc-1", "document:doc-2", f"conversation:{item.pk}"])
+
+    def test_a_child_the_sweep_reached_first_is_simply_gone(self):
+        """Children are ordinary due tickets. If a pass purges one
+        before its parent, the parent's own purge finds one child fewer
+        and completes."""
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        child = DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-1")
+        service.purge_ticket(user_principal(user), child)
+        service.purge_ticket(user_principal(user), parent)
+        assert DeletionTicket.objects.count() == 0
+        assert sorted(REMOVED) == sorted(
+            ["document:doc-1", "document:doc-2", f"conversation:{item.pk}"])
+
+    def test_zero_days_purges_the_children_too(self):
+        """THE ZERO-DAY PROOF. `delete_content` runs no immediate purge
+        of its own: the children are written inside the same
+        transaction with the SAME `purge_on`, so the unconditional
+        prune-on-write sweep at the end of every delete finds parent
+        and children all due today, and the parent's own purge destroys
+        all three -- its rows first, then each child's bytes."""
+        row = IdentitySettings.get_solo()
+        row.retention_days = 0
+        row.save()
+        user = make_user()
+        item = _owner(user)
+        service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                               key=item.pk, owner=item)
+        assert REMOVED == [f"conversation:{item.pk}",
+                           "document:doc-1", "document:doc-2"]
+        assert DeletionTicket.objects.count() == 0
+        assert AuditEvent.objects.filter(action=CONTENT_PURGED).count() == 3

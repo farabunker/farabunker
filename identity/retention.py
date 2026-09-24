@@ -36,7 +36,7 @@ from django.utils import timezone
 
 from identity import audit
 from identity.access import may_read_owned_row, owned_rows_q, sees_all_content
-from identity.cascades import run_retention
+from identity.cascades import run_children, run_retention
 from identity.contracts.actions import (
     CONTENT_DELETED, CONTENT_PURGED, CONTENT_RESTORED, SOURCE_WEB,
 )
@@ -166,6 +166,19 @@ def delete_content(actor, *, kind: str, key, owner, label: str = "",
     this call just wrote may not be in that batch. The item is hidden at
     once regardless -- the exclusion is unconditional -- and purged by
     whichever sweep reaches it next.
+
+    A CHILD TICKET CARRIES NO LABEL: the parent's title is not the
+    child's name, and the child's own content is not copied into
+    bookkeeping the purge is meant to leave behind. It is stamped with
+    the PARENT ITEM's owner columns, deliberately -- those columns
+    answer "whose deletion is this", and whoever may restore or purge
+    the parent may do so for the whole cascade. AN ITEM ALREADY
+    TICKETED KEEPS ITS OWN DATE AND ITS OWN STANDING: `get_or_create` on
+    the unique `(kind, key)` returns the existing ticket unchanged,
+    neither re-dated nor adopted. NO SEPARATE ZERO-DAY PATH for the
+    children either: they are written with the SAME `purge_on` as the
+    parent, so they are due exactly when it is, and the unconditional
+    prune-on-write sweep below purges them in the same call.
     """
     row = IdentitySettings.get_solo()
     purge_on = timezone.localdate() + datetime.timedelta(days=row.retention_days)
@@ -186,6 +199,37 @@ def delete_content(actor, *, kind: str, key, owner, label: str = "",
                          target_key=str(key),
                          target_label=label if row.audit_detail else "",
                          source=source, kind=kind)
+            # THE CHILDREN GET THEIR OWN TICKETS, not a mention on the
+            # parent's. Same owner, same actor, SAME DATE -- the date is
+            # the promise, and two dates for one click would be two
+            # promises -- and `parent=ticket`, which is how the restore
+            # and the permanent delete below know which tickets this
+            # click created.
+            # A CHILD THAT ALREADY HAS A TICKET IS LEFT EXACTLY AS IT
+            # IS: `get_or_create` on the unique `(kind, key)` returns
+            # it, and it is neither re-dated nor adopted. Somebody
+            # deleted that item on its own and was shown a date for it;
+            # this delete does not get to move it.
+            # NO SEPARATE ZERO-DAY PATH: these rows are due exactly when
+            # the parent is, so the unconditional prune-on-write sweep
+            # below purges them in the same call.
+            for child_kind, child_key in run_children(kind, str(key)):
+                _child, child_created = DeletionTicket.objects.get_or_create(
+                    kind=child_kind, key=child_key,
+                    defaults=dict(
+                        label="",
+                        parent=ticket,
+                        purge_on=purge_on,
+                        deleted_by_kind=getattr(actor, "kind", ""),
+                        deleted_by_key=getattr(actor, "key", ""),
+                        owner_kind=getattr(owner, "owner_kind", ""),
+                        owner_key=str(getattr(owner, "owner_key", "")),
+                    ),
+                )
+                if child_created:
+                    audit.record(actor, CONTENT_DELETED, target_type=child_kind,
+                                 target_key=child_key, target_label="",
+                                 source=source, kind=child_kind)
     if created:
         sweep()
     return ticket
@@ -212,16 +256,60 @@ def restore_content(actor, ticket, *, source: str = SOURCE_WEB,
     `IdentitySettings` row passes it through here instead of paying a
     second read. `None` -- every caller before this parameter existed --
     reads it here, exactly as before.
+
+    A CHILD RESTORED ON ITS OWN EARLIER IS SIMPLY ABSENT by the time this
+    runs -- not an error, and it writes no event of its own here: each
+    child is removed and reported on its own, for the reason the parent
+    already is. A parent whose own delete reports nothing (already gone)
+    had no children left to put back either -- a ticket cannot outlive
+    its parent's row.
     """
     row = settings_row if settings_row is not None else IdentitySettings.get_solo()
     with transaction.atomic():
         kind, key, label = ticket.kind, ticket.key, ticket.label
+        # THE CHILDREN COME BACK WITH THE PARENT, and they go first and
+        # one at a time. The foreign key would cascade them away with
+        # the parent row, but a cascade reports nothing per row, and
+        # this function's own rule is that A RESTORE THAT DID NOT
+        # HAPPEN IS NEVER LOGGED: a child a competing sweep purged in
+        # the meantime must not get a `content.restored` event for an
+        # item that was in fact destroyed. Deleting by queryset per
+        # child answers that question the same way the parent's own
+        # delete below answers it.
+        # NO RESOLVER HERE -- the link is what this restore follows, so
+        # an item somebody deleted on its own, or one that went with a
+        # different parent, is not this restore's business and is left
+        # deleted with the date it was shown.
+        restored_children = []
+        for child in ticket.children.all().order_by("pk"):
+            removed_child, _ = DeletionTicket.objects.filter(
+                pk=child.pk).delete()
+            if removed_child:
+                restored_children.append(child)
         removed, _ = DeletionTicket.objects.filter(pk=ticket.pk).delete()
         if not removed:
             return
         audit.record(actor, CONTENT_RESTORED, target_type=kind, target_key=key,
                      target_label=label if row.audit_detail else "",
                      source=source, kind=kind)
+        for child in restored_children:
+            audit.record(actor, CONTENT_RESTORED, target_type=child.kind,
+                         target_key=child.key, target_label="",
+                         source=source, kind=child.kind)
+
+
+def _purge_child(actor, ticket, *, source: str, row) -> dict[str, int]:
+    """Run ONE child ticket's handlers, delete it, record its own
+    content-free event. NO CASCADE OF ITS OWN -- a child is never asked
+    for children, so a link that somehow pointed back at its own parent
+    could not recurse."""
+    removed = run_retention(ticket.kind, ticket.key)
+    kind, key, label = ticket.kind, ticket.key, ticket.label
+    ticket.delete()
+    audit.record(actor, CONTENT_PURGED, target_type=kind, target_key=key,
+                 target_label=label if row.audit_detail else "",
+                 source=source, kind=kind, removed=removed)
+    return removed
 
 
 def purge_ticket(actor, ticket, *, source: str = SOURCE_WEB,
@@ -254,13 +342,52 @@ def purge_ticket(actor, ticket, *, source: str = SOURCE_WEB,
     second read. `None` -- `sweep` below and `manage.py purge_deleted`,
     which purge one ticket per row on their own pass rather than one per
     request -- reads it here, once per ticket, exactly as before.
+
+    THE RETURNED MAP IS THIS CLICK'S WHOLE TOTAL: a child's counts are
+    merged in under that handler's own label ("Generated image": 2),
+    because what the person clicked destroyed all of it -- the map is
+    keyed by HANDLER LABEL, which is what the Deletion log renders, and
+    the labels that can meet in one such map are distinct, pinned by
+    `foundation/ops/tests/test_deletion_coverage.py::
+    test_labels_that_meet_in_one_purge_map_are_distinct` (distinct
+    within a kind, and no handler wearing another kind's plain name);
+    two labels colliding there would pool their numbers into a line
+    nobody could read apart. EVERY TICKET DESTROYED WRITES ITS OWN
+    `content.purged` EVENT, the children included, because the Deletion
+    log lists tickets -- an image listed with a date of its own is a
+    line of its own when that date is spent -- so one click can write
+    several content-free events and the parent's is the one that
+    carries the whole map. A CHILD RESTORED ON ITS OWN, OR AN ITEM THAT
+    ALREADY HAD A TICKET OF ITS OWN WHEN THIS DELETE RAN, has no link to
+    this ticket and is therefore not purged with it: somebody put that
+    image back, or was shown a different date for it, and this click is
+    not that date.
     """
     row = settings_row if settings_row is not None else IdentitySettings.get_solo()
     with transaction.atomic():
         current = DeletionTicket.objects.select_for_update().filter(pk=ticket.pk).first()
         if current is None:
             return {}
+        # THIS ITEM'S ROWS FIRST, THEN THE CHILDREN, AND THE ORDER IS
+        # LOAD-BEARING. It is the filesystem-last rule
+        # `identity/contracts/cascades.py` states: a filesystem delete
+        # has no rollback, so a row handler that raised AFTER files were
+        # removed would leave a resurrected row pointing at bytes that
+        # are gone. A child here is a generated image, whose handler is
+        # in the FILES band, so every row this click touches is gone
+        # before the first byte is.
+        # READ UNDER THE SAME LOCK, and read before anything is
+        # destroyed: the parent row's delete would cascade these away
+        # without ever running their handlers. `order_by("pk")` because
+        # the table's own ordering is newest-first, and the order this
+        # destroys things in is worth being the order they were written
+        # in rather than whichever way a timestamp fell.
+        children = list(current.children.select_for_update().order_by("pk"))
         removed = run_retention(current.kind, current.key)
+        for child in children:
+            child_removed = _purge_child(actor, child, source=source, row=row)
+            for child_label, count in child_removed.items():
+                removed[child_label] = removed.get(child_label, 0) + count
         kind, key, label = current.kind, current.key, current.label
         current.delete()
         audit.record(actor, CONTENT_PURGED, target_type=kind, target_key=key,
@@ -270,7 +397,9 @@ def purge_ticket(actor, ticket, *, source: str = SOURCE_WEB,
 
 
 def sweep(*, limit: int = SWEEP_LIMIT, source: str = SOURCE_WEB) -> int:
-    """Purge up to `limit` due tickets. Returns how many were purged.
+    """Purge up to `limit` due tickets. Returns how many ITEMS were
+    destroyed -- one per ticket, a parent's children included, not one
+    per due ticket this pass started from.
 
     ONE DUE-CONDITION: the promised date has arrived and nothing holds
     the ticket. There is no second clause, because there is no second
@@ -278,6 +407,13 @@ def sweep(*, limit: int = SWEEP_LIMIT, source: str = SOURCE_WEB) -> int:
     always true today -- nothing in this delivery writes a hold -- and it
     is in the query so the deferred enterprise slice is a control and a
     refusal, not a change to this function.
+
+    `limit` BOUNDS HOW MANY DUE TICKETS ONE PASS STARTS FROM, NOT HOW
+    MANY ITEMS IT ENDS UP DESTROYING: a pass that reaches a parent with
+    children destroys more than `limit` items, and the next pass simply
+    finds fewer. A child the sweep reaches before its parent is an
+    ordinary due ticket and purges on its own; the parent's own purge
+    then finds one child fewer and completes.
 
     ALWAYS ACTS AS THE SERVICE PRINCIPAL, whoever triggered it. A sweep
     that ran under the acting principal would write "this member purged
@@ -330,11 +466,19 @@ def _purge_due(due, *, source: str = SOURCE_WEB) -> int:
     this number back to whoever ran it; counting a no-op this pass
     inherited from a competing one would tell them two items were
     destroyed when only one was.
+
+    THE NUMBER IS ITEMS DESTROYED, not tickets this pass started from: a
+    due ticket with children destroys itself plus each of them, and each
+    of those is an item somebody was shown a date for.
     """
     purged = 0
     for ticket in due:
         if not DeletionTicket.objects.filter(pk=ticket.pk).exists():
             continue
+        # COUNTED BEFORE THE PURGE, because afterwards these rows are
+        # gone: one due ticket can destroy its children too, and each of
+        # those is an item somebody was shown a date for.
+        addressed = 1 + DeletionTicket.objects.filter(parent_id=ticket.pk).count()
         try:
             purge_ticket(SERVICE_PRINCIPAL, ticket, source=source)
         except RetentionRefused as exc:
@@ -347,5 +491,5 @@ def _purge_due(due, *, source: str = SOURCE_WEB) -> int:
                 "identity.retention: purge failed for %s:%s; it stays due",
                 ticket.kind, ticket.key)
             continue
-        purged += 1
+        purged += addressed
     return purged

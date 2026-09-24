@@ -25,7 +25,9 @@ class Command(BaseCommand):
     def add_arguments(self, parser) -> None:
         parser.add_argument(
             "--limit", type=int, default=SWEEP_LIMIT,
-            help=f"How many items to purge in this run (default {SWEEP_LIMIT}).")
+            help=(f"How many due items this run starts from (default "
+                  f"{SWEEP_LIMIT}); a parent item's children are destroyed "
+                  f"with it, so a run may destroy more than this."))
 
     def handle(self, *args, **options) -> None:
         purged = sweep(limit=options["limit"], source=SOURCE_CLI)

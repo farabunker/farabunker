@@ -55,7 +55,7 @@ from django.utils.module_loading import import_string
 from identity.access import owner_fields
 from identity.contracts.cascades import retention_handlers
 from identity.contracts.principals import OPEN_PRINCIPAL
-from identity.contracts.retention import KIND_CONVERSATION
+from identity.contracts.retention import KIND_CONVERSATION, KIND_LABELS, RETENTION_KINDS
 
 # Every model carrying user content, mapped to the ticket kinds whose
 # registered handlers reach it. Written from the content inventory in
@@ -194,3 +194,41 @@ def test_the_gate_would_actually_catch_a_missing_handler():
     """The failure this exists for, exercised: a kind nothing has
     registered for answers an empty list."""
     assert retention_handlers("not-a-kind") == []
+
+
+def test_labels_that_meet_in_one_purge_map_are_distinct():
+    """A LABEL IS A KEY, NOT A CAPTION. One permanent delete returns one
+    `{label: count}` map, and two sets of labels meet in it: the
+    handlers registered for the item's own kind, and -- merged in -- the
+    handlers of each child ticket that went with it. TWO RULES FOLLOW,
+    and deliberately only two.
+
+    WITHIN ONE KIND every handler label is distinct, because
+    `run_retention` writes them into a single dict and the second would
+    silently overwrite the first.
+
+    AND NO HANDLER WEARS ANOTHER KIND'S PLAIN NAME. A merged line reads
+    as the kind it destroyed -- "Generated image" -- so a handler
+    answering for something else under that same word would put two
+    different things on one line. A kind's own handler matching its own
+    name is the intended case, not a clash.
+
+    TWO DIFFERENT KINDS MAY SHARE A HANDLER LABEL (the queue's rows are
+    "Queue jobs" for more than one kind): those are separate maps unless
+    one kind is the other's child, and the case that can actually meet
+    is the one the second rule covers.
+    """
+    for kind in RETENTION_KINDS:
+        labels = [spec.label for spec in retention_handlers(kind)]
+        assert sorted(labels) == sorted(set(labels)), (
+            f"two handlers registered for {kind!r} share a label, so "
+            f"run_retention would report one count for both")
+
+    for kind in RETENTION_KINDS:
+        for spec in retention_handlers(kind):
+            worn = sorted(other for other, name in KIND_LABELS.items()
+                          if name == spec.label and other != kind)
+            assert worn == [], (
+                f"the handler {spec.key!r} answers for {kind!r} but is "
+                f"labelled {spec.label!r}, which is what a {worn} ticket is "
+                f"called on the Deleted page")

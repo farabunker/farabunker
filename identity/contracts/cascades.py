@@ -130,6 +130,20 @@ class RetentionHandler:
     handler that raised after some bytes were gone leaves the rows
     standing, the ticket standing and the item still hidden, and the
     next sweep retries.
+
+    `children` -- OPTIONAL, a dotted path to `(key: str) -> list[tuple[str,
+    str]]`, answering "what else is deleted when this item is". A
+    conversation's generated images are the case it exists for: they are
+    content of their own, on their own table, with their own visibility
+    rule, and a delete that hid the chat while leaving them in the
+    gallery would be a box whose "delete" and whose "destroy" disagreed.
+    **It is asked ONCE, at delete time**, and what it answers becomes
+    ordinary tickets -- their own row, their own date on the Deleted
+    page, their own handler, their own restore -- each one linked back
+    to the ticket whose delete created it. Restore and permanent delete
+    follow that link rather than asking again, so this resolver is never
+    the reason a ticket somebody else's delete wrote is put back or
+    destroyed early.
     """
 
     kind: str
@@ -137,6 +151,7 @@ class RetentionHandler:
     label: str
     handler: str
     order: int = ORDER_ROWS
+    children: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in RETENTION_KINDS:
@@ -151,6 +166,10 @@ class RetentionHandler:
             raise ValueError(
                 f"RetentionHandler({self.key!r}).handler must be a dotted path, "
                 f"got {self.handler!r}")
+        if self.children is not None and "." not in self.children:
+            raise ValueError(
+                f"RetentionHandler({self.key!r}).children must be a dotted path, "
+                f"got {self.children!r}")
 
 
 _RETENTION: dict[str, RetentionHandler] = {}

@@ -71,6 +71,22 @@ individually. Three reasons, in order of how concrete they are:
   together in a column that cannot know about three of the four tables, or a second table doing
   what the ticket table already does. The ticket table is that answer, built once.
 
+**The one-table decision stands, and a fourth column is written to it now: `parent`, a nullable
+self-reference, indexed like every foreign key.** A conversation's generated images are content
+of their own, on their own table, with their own visibility rule, and a delete that hid the chat
+while leaving them in the gallery would be a box whose "delete" and whose "destroy" disagreed. The
+link is a COLUMN on the same ticket table, not a second one, for the same reason the table itself
+is one: a child ticket — written for an item that went with another item's delete — is an
+ordinary deleted item that happens to have arrived with another, not a different kind of row. "The
+three hold columns written by nothing" above stays true of those three; `parent` is the fourth
+column, and it is written, at delete time, by `delete_content` alone. What it buys: an item that
+arrived with another can be put back with it, restored and destroyed on the same click as the item
+it came with — and one deleted on its own is never moved by somebody else's delete, keeping its
+own date and its own standing regardless of what else is deleted around it. What it costs: one
+nullable self-reference, indexed, added to the feature's single migration (`identity.0004`, edited
+in place rather than followed by a second one, because that migration has never run anywhere but
+test and preview databases).
+
 ### 3. The retention namespace lives on the existing cascade registry, not a second one
 
 `identity/contracts/cascades.py` already held `EntitlementCascade` — the registry an entitlement

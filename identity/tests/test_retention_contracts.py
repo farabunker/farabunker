@@ -153,3 +153,15 @@ class TestTheRegistry:
 
     def test_an_unregistered_kind_answers_an_empty_list_not_an_error(self):
         assert retention_handlers("not-a-kind") == []
+
+
+class TestTheChildrenField:
+    def test_it_defaults_to_nothing(self):
+        spec = RetentionHandler(kind=retention.KIND_CONVERSATION, key="k", label="L",
+                                handler="a.b")
+        assert spec.children is None
+
+    def test_it_must_be_a_dotted_path_when_given(self):
+        with pytest.raises(ValueError):
+            RetentionHandler(kind=retention.KIND_CONVERSATION, key="k", label="L",
+                             handler="a.b", children="notdotted")

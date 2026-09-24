@@ -228,6 +228,17 @@ class DeletionTicket(models.Model):
     columns it is a union over four querysets in three columns that
     `identity/` may not import.
 
+    THE `parent` LINK BELOW IS A COLUMN ON THIS SAME TABLE, not a second
+    one, for the same reason the table itself is one: a child ticket --
+    one written for an item that went with another item's delete, a
+    conversation's generated images being the case it exists for -- is an
+    ordinary deleted item that happens to have arrived with another. A
+    CHILD TICKET CARRIES THE PARENT ITEM'S OWNER COLUMNS, NOT ITS OWN
+    ITEM'S -- a recorded choice, not an accident: those columns answer
+    "whose deletion is this", which is what `visible_tickets` and
+    `may_purge` read, and whoever may restore or permanently delete the
+    chat may do so for everything that went with it.
+
     `key` IS THE ITEM'S PRIMARY KEY AS TEXT. The four kinds have three pk
     types (UUID, UUID, int, int); one text column is the
     `agents.models.Share.target_key` precedent, and
@@ -274,6 +285,17 @@ class DeletionTicket(models.Model):
     hold_by_kind = models.CharField(max_length=32, blank=True, default="")
     hold_by_key = models.CharField(max_length=200, blank=True, default="")
     hold_note = models.TextField(blank=True, default="")
+    # WHICH DELETE WROTE THIS TICKET. Blank for an item somebody deleted
+    # on its own; set for one that went with a parent item, so restore
+    # and permanent delete can reach exactly the tickets that click
+    # created and no others. An image deleted from the gallery on
+    # Monday keeps Monday's date even if a chat that used it is deleted
+    # on Tuesday -- and survives that chat being restored or destroyed.
+    # CASCADE because a ticket cannot outlive the ticket it hangs off:
+    # there is no orphan state to render and none to reason about.
+    parent = models.ForeignKey("self", null=True, blank=True,
+                               on_delete=models.CASCADE,
+                               related_name="children")
 
     class Meta:
         ordering = ["-deleted_at"]

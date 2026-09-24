@@ -100,10 +100,12 @@ accounting). An operator reading an `InferenceJob` payload from a backup for a c
 somebody deleted and purged today will find the message still there.
 
 An operator who would rather the retention date be enforced on a schedule than rely on the
-platform's own prune-on-write can run `manage.py purge_deleted` from cron: each run purges at
-most `--limit` items (default 25, the same bound the on-write sweep uses), never every item whose
-date has arrived in one pass. A box with more due items than the limit drains its backlog across
-several runs, not in the one that first catches up to it.
+platform's own prune-on-write can run `manage.py purge_deleted` from cron: each run **starts**
+from at most `--limit` due items (default 25, the same bound the on-write sweep uses), never every
+item whose date has arrived in one pass — but may **destroy** more than `--limit` items, because
+destroying a chat destroys the pictures it carried, each of which was listed with its own date on
+the Deleted page. A box with more due items than the limit drains its backlog across several runs,
+not in the one that first catches up to it.
 
 ## `data/notes/`: why the watcher must never be pointed at it
 

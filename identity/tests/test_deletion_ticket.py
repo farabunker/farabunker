@@ -75,3 +75,22 @@ class TestOrderingAndIndexes:
         first = _ticket(key="a")
         second = _ticket(key="b")
         assert list(DeletionTicket.objects.all()) == [second, first]
+
+
+class TestTheParentLink:
+    def test_a_ticket_has_no_parent_unless_one_was_given(self):
+        assert _ticket().parent_id is None
+
+    def test_deleting_a_parent_removes_its_children(self):
+        """CASCADE: a child ticket cannot outlive the ticket it arrived
+        with, so there is no orphan row to render or reason about."""
+        parent = _ticket(key="chat-1")
+        _ticket(kind=retention.KIND_VISION_JOB, key="job-1", parent=parent)
+        DeletionTicket.objects.filter(pk=parent.pk).delete()
+        assert DeletionTicket.objects.count() == 0
+
+    def test_deleting_a_child_leaves_its_parent(self):
+        parent = _ticket(key="chat-1")
+        child = _ticket(kind=retention.KIND_VISION_JOB, key="job-1", parent=parent)
+        DeletionTicket.objects.filter(pk=child.pk).delete()
+        assert list(DeletionTicket.objects.all()) == [parent]

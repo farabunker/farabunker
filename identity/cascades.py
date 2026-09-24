@@ -82,3 +82,35 @@ def run_retention(kind: str, key: str) -> dict[str, int]:
         with transaction.atomic():
             counts[spec.label] = handler(key)
     return counts
+
+
+def run_children(kind: str, key: str) -> list[tuple[str, str]]:
+    """The `(kind, key)` pairs that follow this item's own ticket.
+
+    ASKED AT DELETE TIME ONLY -- `identity.retention.delete_content` is
+    the one caller. What it answers is written as tickets linked to the
+    one this delete created, and restore and purge read that link
+    instead of asking again: the parent's rows are what this answer is
+    computed from, and by purge time this item's handler is about to
+    destroy them.
+
+    NEVER SWALLOWS, exactly as `run_retention` does not: a resolver
+    that cannot be imported, or that raises, takes the delete down with
+    it rather than silently leaving a child undeleted.
+
+    Deduped, in handler order -- ROWS band before FILES band, stable
+    within a band, whatever `retention_handlers` returns. A kind with no
+    resolver -- every kind but one, today -- answers `[]`, which is not
+    an error.
+    """
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for spec in retention_handlers(kind):
+        if spec.children is None:
+            continue
+        for child_kind, child_key in import_string(spec.children)(key):
+            pair = (str(child_kind), str(child_key))
+            if pair not in seen:
+                seen.add(pair)
+                pairs.append(pair)
+    return pairs

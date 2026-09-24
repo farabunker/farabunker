@@ -510,6 +510,30 @@ triggered it, and purges each due ticket in its OWN transaction, so one
 handler that raises (logged, never content) leaves that ticket standing
 for the next pass instead of blocking the rest of the batch.
 
+**A registered handler may also name its item's children.**
+`RetentionHandler.children`, OPTIONAL, is a dotted path to `(key: str)
+-> list[tuple[str, str]]` — the case it exists for is a conversation's
+generated images: content of their own, on their own table, with their
+own visibility rule, that would otherwise stay in the gallery while the
+chat that made them was hidden. It is asked ONCE, at `delete_content`
+time only, and what it answers is written as ORDINARY tickets — their
+own row, their own date on the Deleted page, their own handler, their
+own restore — each linked back to the ticket this delete created via
+`DeletionTicket.parent`. Restore and permanent delete follow that link
+rather than asking the resolver again, so a column whose rows have
+since changed can never make either of them reach a ticket a different
+delete created. Three things follow from the link: restoring the
+parent removes the children it wrote; permanently deleting the parent
+destroys the children's content after the parent's own rows (the
+filesystem-last rule, since a child here is a generated image); and the
+sweep counts every ticket a due purge addressed, a parent's children
+included, not one per due ticket it started from. Two things a person
+can observe: a child restored on its own survives its parent's later
+permanent delete (the link is followed forward only, never backward),
+and an item already deleted on its own keeps its own date and its own
+standing — it is never re-dated or adopted by a later delete that
+happens to reach it too.
+
 Every audit write for this feature goes through `identity/audit.py::
 record` (`CONTENT_DELETED`, `CONTENT_RESTORED`, `CONTENT_PURGED`), and
 every one is content-free by construction: the item's own title reaches
@@ -541,7 +565,11 @@ event's own `target_label` needs `sees_all_content` on top of that: it
 reaches the page only for a principal who could already read
 everyone's content, and only when `audit_detail` was already on at the
 moment that particular event was written; anybody else, or an event
-written while the setting was off, renders with the label blank.
+written while the setting was off, renders with the label blank. A
+child ticket — one written alongside a parent item's delete — looks
+like any other row on this page: its own kind, its own date, its own
+restore and its own permanent-delete action, with no visible marker
+tying it back to the item it arrived with.
 
 ## Tests
 

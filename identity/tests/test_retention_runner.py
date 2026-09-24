@@ -6,12 +6,12 @@ from __future__ import annotations
 import pytest
 from django.db import connection, transaction
 
-from identity.cascades import run_retention
+from identity.cascades import run_children, run_retention
 from identity.contracts import cascades as cascades_module
 from identity.contracts.cascades import (
     ORDER_FILES, RetentionHandler, register_retention_handler,
 )
-from identity.contracts.retention import KIND_ASK
+from identity.contracts.retention import KIND_ASK, KIND_DOCUMENT
 from identity.models import DeletionTicket
 
 pytestmark = pytest.mark.django_db
@@ -32,6 +32,16 @@ def files_handler(key: str) -> int:
 def raising_handler(key: str) -> int:
     CALLED.append(f"raise:{key}")
     raise RuntimeError("this column cannot finish")
+
+
+def first_children(key: str) -> list[tuple[str, str]]:
+    CALLED.append(f"first:{key}")
+    return [(KIND_DOCUMENT, "d-1"), (KIND_DOCUMENT, "d-2")]
+
+
+def second_children(key: str) -> list[tuple[str, str]]:
+    CALLED.append(f"second:{key}")
+    return [(KIND_DOCUMENT, "d-2")]
 
 
 def db_error_handler(key: str) -> int:
@@ -111,3 +121,47 @@ class TestTheRunner:
                 run_retention(KIND_ASK, "1")
             # The connection is healthy again: this is a real write.
             assert DeletionTicket.objects.count() == 0
+
+
+class TestRunChildren:
+    def test_it_returns_the_pairs_the_registered_resolver_answers(self):
+        register_retention_handler(RetentionHandler(
+            kind=KIND_ASK, key="t.rows", label="Rows",
+            handler=f"{__name__}.rows_handler",
+            children=f"{__name__}.first_children"))
+
+        assert run_children(KIND_ASK, "77") == [("document", "d-1"),
+                                                ("document", "d-2")]
+        assert CALLED == ["first:77"]
+
+    def test_a_kind_with_no_resolver_answers_an_empty_list(self):
+        register_retention_handler(RetentionHandler(
+            kind=KIND_ASK, key="t.rows", label="Rows",
+            handler=f"{__name__}.rows_handler"))
+
+        assert run_children(KIND_ASK, "77") == []
+        assert CALLED == []
+
+    def test_a_pair_two_handlers_both_name_is_returned_once(self):
+        register_retention_handler(RetentionHandler(
+            kind=KIND_ASK, key="t.rows", label="Rows",
+            handler=f"{__name__}.rows_handler",
+            children=f"{__name__}.first_children"))
+        register_retention_handler(RetentionHandler(
+            kind=KIND_ASK, key="t.files", label="Files",
+            handler=f"{__name__}.files_handler", order=ORDER_FILES,
+            children=f"{__name__}.second_children"))
+
+        assert run_children(KIND_ASK, "77") == [("document", "d-1"),
+                                                ("document", "d-2")]
+        assert CALLED == ["first:77", "second:77"]
+
+    def test_a_resolver_that_cannot_be_imported_takes_the_delete_down(self):
+        """NEVER SWALLOWS, the same contract `run_retention` has."""
+        register_retention_handler(RetentionHandler(
+            kind=KIND_ASK, key="t.rows", label="Rows",
+            handler=f"{__name__}.rows_handler",
+            children="identity.nope.not_a_resolver"))
+
+        with pytest.raises(ImportError):
+            run_children(KIND_ASK, "77")
