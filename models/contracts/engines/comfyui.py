@@ -475,6 +475,24 @@ class ComfyUIEngine:
     # scan knows about this engine, declared here, never in the scan loop.
     well_known_ports = (8188,)
 
+    # WHAT AN UNLOAD CALL HERE ACTUALLY FREES, declared for the execution
+    # queue's eviction pass (ADR 0013's queue memory-governance amendment).
+    # "endpoint": `POST /free` calls `unload_all_models()`, which frees
+    # EVERY model at this endpoint -- `model_id` is addressing, not
+    # selection (see `unload`'s own docstring). A caller that assumed
+    # per-model granularity would evict a needed checkpoint out from under
+    # a live attempt.
+    unload_scope = "endpoint"
+
+    # HOW MUCH THIS ENGINE'S RESIDENCY REPORT IS WORTH. "memo": the
+    # `loaded` flags `list_installed` carries come from this adapter's own
+    # TTL'd, process-local run memo, not from any residency endpoint the
+    # engine answers -- so "nothing resident" here means "this process does
+    # not remember anything", which a restart alone produces. The queue
+    # reads this to decide whether an empty residency answer is worth
+    # trusting before it launches an exclusive job.
+    residency_authority = "memo"
+
     # Which platform capability this engine can answer at all -- the setup
     # page's "Served by" column reads this; nothing else branches on it.
     serves_capabilities = ("image-generation",)

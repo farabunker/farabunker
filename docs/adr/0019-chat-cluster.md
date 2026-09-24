@@ -435,6 +435,17 @@ meter classes moving together — so the plan decision that put the poll-path cl
 page class is honoured, not overruled — and the exemption entry is gone. Left here as a gap
 that was closed, because the reasoning is the reusable part.
 
+*Amendment, 2026-09-24 (merging the queue memory-governance track into this branch).* The
+same rule bound a second time, and was applied the same way. Neither branch's `test_thread.py`
+was over the gate alone — this one at 2,031 lines, the queue track's at 2,100 — but the merge
+concatenated this branch's single re-wrapped import line with that track's seventy-line poller
+class and landed on 2,101. The exemption set was again not grown: the queue track's class was
+split out at the poller's own edge as `agents/chat/tests/test_thread_poll_bounds.py`, every
+test a move with no name and no assertion changed. `TestThePoller` stayed in `test_thread.py`,
+which pins the constants arriving on the page; the new module pins what the loop does with
+them. The reusable part is that a size gate crossed *by a merge* is still crossed, and the
+side that concatenates is the side that splits.
+
 **Not gaps, but boundaries this branch deliberately did not cross:** granting tools from the
 agent form, per-person agent sharing, a branch that carries its attachments, an audit action
 for a branch, and conversation compaction.

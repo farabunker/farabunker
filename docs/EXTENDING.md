@@ -1041,6 +1041,85 @@ Add one line of your own: write the runner's own test the way every
 existing one does — patch the service function it calls and assert the
 call.
 
+## Declaring a job kind's staleness and its wait ceiling
+
+A **job kind** is how a feature app declares a unit of model-consuming work to the
+execution queue (`models.contracts.jobkinds.JobKind`, registered from your
+`AppConfig.ready()`; ADR 0013 §5). Two of its fields are about TIME, both optional, both
+trailing and defaulted so an existing registration needs no change — and one of them
+carries a rule you must follow in your handler.
+
+```python
+register_job_kind(JobKind(
+    key="example.render",
+    label="Example render",
+    planner="example.jobs.plan_render",
+    handler="example.jobs.run_render",
+    summarizer="example.jobs.summarize_render",
+    # How long a RUNNING job of this kind may go without a heartbeat before
+    # the orphan sweep reclaims it. Omit for the worker's own global cutoff.
+    stale_after_seconds=900,
+    # How long this kind's handler may wait on its ENGINE before giving up.
+    # Omit (or None) for "this kind does not wait".
+    default_wait_seconds=600,
+))
+```
+
+**`stale_after_seconds` is code-declared and is not an operator setting.** A kind's
+staleness is a property of what the work DOES — a sub-second embed and a job that
+cold-loads a large model for minutes cannot share one number — in the same spirit as
+`default_priority`. The orphan sweep resolves the whole kind→threshold map itself and
+sweeps with one grouped query; a kind the registry does not know falls back to the
+worker's global cutoff, so no row is left running for ever merely because nothing declared
+a number for it. Declare it if your kind can legitimately block for longer than two
+minutes without writing progress.
+
+**`default_wait_seconds` is code-declared, but the operator may override it per kind** on
+the Job execution settings page, whose rows are rendered straight from the registry — so a
+newly registered kind appears there with no template edit. The worker resolves operator
+override → your declaration → `None`, and stamps the winner on `JobContext.wait_seconds`,
+which your handler reads:
+
+```python
+def run_render(payload, models, ctx):
+    ceiling = ctx.wait_seconds          # float | None -- None means "no ceiling"
+    ...
+```
+
+A handler that never waits on an engine simply ignores it, exactly as it may ignore
+`models`.
+
+### The rule that comes with the ceiling, and it is not optional
+
+**A wait ceiling may never release the exclusive slot early.** A handler whose ceiling
+expires MUST NOT write a terminal outcome while its own engine still reports the work
+running.
+
+The reason is structural rather than stylistic: the queue releases the exclusive execution
+slot the instant the job row goes terminal. A handler that gives up waiting and returns
+success hands the machine to the next admission **while its own engine is still working** —
+which is exactly the incident that produced this field (a fixed 600-second wait fired while
+a first-load generation was still genuinely running and finished about fifteen minutes
+later, with the next job already admitted on top of it).
+
+A handler that reaches its ceiling has two honest options and no third:
+
+1. **Keep holding.** Carry on calling `ctx.report_progress(...)` and waiting. The row stays
+   alive under the worker's own heartbeat, and the slot stays correctly held. Use the
+   ceiling to change what you *report*, not to change what you *return*.
+2. **Cancel the engine-side work, confirm the engine is terminal, and only then return.**
+
+The queue enforces only ONE side of this, and you should know which: the memory barrier
+catches a still-working engine before the next **exclusive** job launches, because a
+barrier-polling adapter withholds success while a prompt is still running. The
+exclusive→non-exclusive case and the cross-engine case are **not** enforceable from the
+queue side (ADR 0013's 2026-09-21 amendment records both as named residuals) — which is
+precisely why this rule is published here rather than left implicit.
+
+Today **no shipped kind declares either field**; both are `None` everywhere, which is the
+prior behaviour exactly. The fields, the sweep, the settings form and this rule exist for
+the kind that needs them.
+
 ## What is not possible yet
 
 - **No plugin system or entry points.** A tool is code in this repository,

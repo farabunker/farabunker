@@ -334,17 +334,34 @@ class TestTheOverviewFieldCoverage:
 
         SEVENTEEN BECAME EIGHTEEN when the one-timeout task (2026-09-17)
         added `JobSettings.response_timeout_seconds`, for the identical
-        reason -- import law, not a policy choice about this one field."""
+        reason -- import law, not a policy choice about this one field.
+
+        EIGHTEEN BECAME NINETEEN when the queue memory-governance track
+        (`models/queue/migrations/0005`, 2026-09-21) added three
+        `JobSettings` fields, but only ONE of them is operator-editable:
+        `kind_wait_seconds` (the per-kind wait-ceiling map, edited on the
+        Job execution page's fourth form) joins the import-law unreported
+        set with its siblings, for the unchanged reason. `detected_memory_
+        bytes`/`detected_memory_at` are the OTHER shape -- worker-written
+        measurements, never operator-set (`_DETECTED_MEMORY_REASON` in the
+        module under test) -- so, exactly like the two `updated_at`
+        timestamps above, they are named in `UNREPORTED_SETTINGS_FIELDS`
+        but excluded from this operator-editable count by name below,
+        not folded into `import_law_unreported`."""
         from agents.settings_tools import REPORTED_SETTINGS_FIELDS, UNREPORTED_SETTINGS_FIELDS
 
+        # Worker-written measurements, not operator-editable settings --
+        # named the same way `updated_at` is excluded from this count
+        # (see the docstring above and `_DETECTED_MEMORY_REASON`).
+        job_settings_not_operator_editable = {"detected_memory_bytes", "detected_memory_at"}
         reported_count = sum(len(fields) for fields in REPORTED_SETTINGS_FIELDS.values())
         import_law_unreported = sum(
             len(fields) for model, fields in UNREPORTED_SETTINGS_FIELDS.items()
             if model in ("RagSettings", "JobSettings")
-        )
+        ) - len(job_settings_not_operator_editable)
         assert reported_count == 5
-        assert import_law_unreported == 13
-        assert reported_count + import_law_unreported == 18
+        assert import_law_unreported == 14
+        assert reported_count + import_law_unreported == 19
 
     def test_bookkeeping_fields_are_named_separately_from_import_law_fields(self):
         from agents.settings_tools import UNREPORTED_SETTINGS_FIELDS

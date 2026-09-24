@@ -64,21 +64,27 @@ disclosure, unlike `rank`, which is a plain fact and joins the other
 `<dt>`/`<dd>` pairs in the Edit disclosure's fact list. Both render only
 when set; no filler when they're blank.
 
-Memory footprint (T2b): up to two rows, in the same fact list, built from
-`ModelConnection`'s own footprint fields plus the human-size strings
-`_connection_views` precomputes (`item.footprint_override_display` /
-`item.measured_footprint_display` -- the template itself cannot format
-bytes). An override set with no measurement yet: one "Memory footprint"
-row, labeled "manual". An override set AND a measurement on record: that
-same row, PLUS a second "Last measured" row naming the measured size and
-date -- the override is what's actually in effect, but the last real
-measurement stays visible rather than disappearing the moment an operator
-overrides it. Only a measurement, no override: a single "Memory footprint"
-row with the "detected from the model server" label and date. Neither
-fact set: no rows at all -- provenance strings come from
-`footprint_source_labels` (== `_SOURCE_LABELS`, views.py) verbatim, same as
-`item.source_label` above, so there is no second copy of "manual"/
-"detected from the model server" to drift out of sync.
+Memory footprint (T2b, re-labelled by the queue memory-governance track,
+spec §3.1): up to two rows, in the same fact list, built entirely in the
+view -- `_connection_views` resolves the ladder itself
+(`ModelConnection.effective_footprint_bytes`, `.footprint_source`) into
+ONE `item.footprint_display` / `item.footprint_source_label` pair, so the
+template never picks a fact and a label independently of each other the
+way the old two-branch `{% if %}`/`{% elif %}` did. "Memory footprint"
+renders whenever the ladder answers at all -- override, a real
+measurement, or (T3) an engine-reported reading, each carrying its own
+`_FOOTPRINT_SOURCE_LABELS` phrase ("set by the operator" / "measured
+after a run" / "from the engine's residency snapshot") and, for the two
+rungs with a timestamp, its own date. A second "Last measured" row
+appears only when an override is set AND a real measurement is also on
+record: the override is what's actually in effect, but the last real
+measurement stays visible (`item.measured_footprint_display` /
+`item.measured_source_label`, always the "measured" label) rather than
+disappearing the moment an operator overrides it. Neither fact set: no
+rows at all. This vocabulary is `_FOOTPRINT_SOURCE_LABELS`
+(views.py), a SEPARATE map from `_SOURCE_LABELS` above -- reusing
+`item.source_label`'s "detected from the model server" for a footprint
+would claim the model server declared a size it never reports.
 {% endcomment %}
 <div class="registered-connection" id="conn-{{ item.connection.pk }}">
   <div class="registered-row" role="row">
@@ -106,13 +112,11 @@ fact set: no rows at all -- provenance strings come from
           {% if item.connection.rank %}
           <dt>Rank</dt><dd>{{ item.connection.rank }}</dd>
           {% endif %}
-          {% if item.connection.footprint_override_bytes %}
-          <dt>Memory footprint</dt><dd>{{ item.footprint_override_display }} — {{ footprint_source_labels.connection }}</dd>
-          {% if item.connection.measured_footprint_bytes %}
-          <dt>Last measured</dt><dd>{{ item.measured_footprint_display }} — {{ footprint_source_labels.engine }} on {{ item.connection.measured_footprint_at|date:"N j, Y" }}</dd>
+          {% if item.footprint_display %}
+          <dt>Memory footprint</dt><dd>{{ item.footprint_display }} — {{ item.footprint_source_label }}</dd>
+          {% if item.connection.footprint_override_bytes and item.connection.measured_footprint_bytes %}
+          <dt>Last measured</dt><dd>{{ item.measured_footprint_display }} — {{ item.measured_source_label }}</dd>
           {% endif %}
-          {% elif item.connection.measured_footprint_bytes %}
-          <dt>Memory footprint</dt><dd>{{ item.measured_footprint_display }} — {{ footprint_source_labels.engine }} on {{ item.connection.measured_footprint_at|date:"N j, Y" }}</dd>
           {% endif %}
         </dl>
         {% include "inference/_connection_edit.html" with connection=item.connection form_scope="reg" %}

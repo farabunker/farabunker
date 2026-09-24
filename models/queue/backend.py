@@ -593,6 +593,8 @@ class QueueRow:
     finished_at: datetime | None
     error: str
     progress: dict | None
+    not_before: datetime | None
+    passed_over: int
 
 
 @dataclass(frozen=True)
@@ -624,6 +626,8 @@ def _queue_row(job: InferenceJob) -> QueueRow:
         finished_at=job.finished_at,
         error=job.error,
         progress=job.progress,
+        not_before=job.not_before,
+        passed_over=job.passed_over,
     )
 
 

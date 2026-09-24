@@ -471,6 +471,29 @@ class InferenceEngine(Protocol):
         """
         ...
 
+    # --- Optional: what an unload frees, and what residency is worth ------
+    #
+    # Two DECLARATIONS, read by the execution queue's eviction pass the
+    # same defensive way the two methods above are (`getattr(engine,
+    # "unload_scope", None)`), never called and never required.
+    #
+    # `unload_scope`: "model" -- `unload(endpoint, model_id)` releases that
+    # model and leaves others. "endpoint" -- the call releases everything
+    # at the endpoint and `model_id` is addressing, not selection.
+    # ABSENT -> the queue assumes "endpoint", the safe assumption: it can
+    # cost a needless reload, never a destroyed cold load.
+    #
+    # `residency_authority`: "endpoint" -- `list_installed`'s `loaded`
+    # flags come from a real residency endpoint the engine answers live, so
+    # "nothing resident" is a FACT. "memo" -- they come from a TTL'd,
+    # process-local belief the adapter maintains itself, so "nothing
+    # resident" means "this process does not remember anything", which a
+    # restart alone produces. ABSENT -> the queue assumes "memo", the safe
+    # default: it triggers a precautionary barrier call rather than
+    # trusting an empty answer.
+    unload_scope: str
+    residency_authority: str
+
     def supports_tool_calling(self, model_id: str, endpoint: str) -> bool | None:
         """Whether `model_id` at `endpoint` can be driven with TOOL CALLS,
         or `None` if this engine does not report it -- the same

@@ -731,6 +731,118 @@ forked from it since — its own tuning constants read from
 resume this section describes — so this is a note of the resemblance,
 not a call to re-unify the three.
 
+## A stranded turn, and a poll loop that cannot tick silently for ever (2026-09-21)
+
+Two defects on this surface, both fixed by the queue memory-governance track, and one
+**standing obligation** the second of them creates. See
+[ADR 0013](../../docs/adr/0013-inference-execution-queue.md)'s 2026-09-21 amendment, §7.
+
+### A turn whose job row vanished
+
+An assistant turn is a placeholder row backed by a queued job row, closed by
+`agents.runtime.jobs.on_turn_terminal`, which is driven by **the job row's own terminal
+write**. If that row disappears under the turn — a database crash rolling it back is the
+realistic case — nothing is left to drive the hook, and the card reads "Queued — waiting…"
+for ever. Recovery was "delete the conversation and resend".
+
+**`agents/reconcile.py`** closes it. `reconcile_stranded_turn(turn)` fires only on a turn
+that is genuinely broken: an ASSISTANT turn, still `queued` or `running`, older than
+`STRANDED_TURN_GRACE_SECONDS` (60 — comfortably longer than the enqueue-then-commit window,
+so a turn whose job row merely has not been written yet is never raced), whose
+`queue_job_id` is null or names a job row that no longer exists. The write is ONE
+conditional `UPDATE` filtered on the two non-terminal states — the exact shape
+`on_turn_terminal` uses, and for the same reason: a still-alive worker can be writing DONE
+in the window between the read and the write, and the `state__in` guard makes clobbering it
+impossible. It also closes the turn's open invocation rows.
+
+**The module lives at the column root, not under `agents/runtime/`, and that is not a
+filing preference.** `reconcile_stranded_turn` calls `models.contracts.queue.get_job` —
+that call IS the condition, since asking the queue is the only way to know a row is gone —
+and `foundation/ops/tests/test_column_boundaries.py::
+test_no_runtime_module_blocks_on_a_queue_job` sweeps every module under `agents/runtime/`
+for exactly that call. That sweep exists because a turn's planner, loop, invoker and hooks
+all execute INSIDE the `agent.turn` job, holding the machine's one execution slot in
+sequential mode, where a `get_job` call can deadlock. This module never runs inside a job:
+it is called from the poll view and from a management command — a view answers one request
+and returns, and a command stands outside the queue waiting for it.
+
+**Where it is called from**, and why a GET may write:
+
+- `_queued_body` / `_running_body` (`agents/chat/views/turns.py`) — when `get_job` answers
+  `None`, they try the reconciliation before answering "queued" forever, then re-read and
+  re-render honestly within the same poll tick. `_failed_body` never reconciles, so the
+  recursion is at most one hop. A plain reload takes the same path through the rendered
+  card, so this is **not a JS-only repair** — turn JavaScript off and reload and the turn
+  still closes honestly.
+- `manage.py reconcile_turns [--dry-run]` — for the turn nobody is polling. `--dry-run`
+  reports the exact count a real run would close (`count_stranded_turns`, the read-only
+  half of the same condition, live `get_job` check included), never an approximation.
+
+`turn_status` is therefore **no longer purely read-only**, and its comment says so: a GET
+that lands on a stranded turn performs one sanctioned repair write. That is safe under a
+safe verb because the write is idempotent, conditionally guarded, and carries no
+request-supplied data. `require_safe` still names the right method pair.
+
+**There is no background sweeper, deliberately.** The condition is rare, the read surface
+already visits exactly the row that matters, and an always-on sweeper is machinery this
+evidence does not justify.
+
+### The poll loop's failure vocabulary
+
+`conversation.html`'s hand-rolled loop could tick silently for ever. Two shapes did it: a
+parseable body with **no recognized state** (the actual shape of two post-crash turns that
+polled at "Queued — waiting…" until `MAX_POLL_DURATION_MS` gave up hours later), and a
+**5xx whose body happened to parse**, which fell through to the state branches with no
+state to match and re-ticked in silence. Its unparseable twin was already counted in
+`.catch()`; this one was not.
+
+The rule now: **a response this page cannot act on is a failure, and it is counted.**
+
+| Answer | What the loop does |
+|---|---|
+| `queued` / `running` / `done` | Recognized. Renders, and **resets** `transportFailures`. |
+| `failed` / `cancelled` | Terminal. Shows the error; polling stops (no reset, because it never ticks again). |
+| Unrecognized state | Still RETRIED — forward compatibility for a state added later is kept — but **counted** against `MAX_TRANSPORT_RETRIES`. What it no longer buys is an unbounded loop. |
+| Any parseable `>= 500` | Counted and retried. |
+| **Terminal 503** (`QueueUnavailable`) | The queue is not configured. Shows the error with its `setup_url`; polling **stops** — retrying would spin for ever on a box that needs an operator, not another request. |
+| **Retryable 503** (`{"retryable": true}`) | The database was momentarily unavailable. Counted and retried, so a database that never comes back cannot make the page tick for ever either. |
+| Ceiling exceeded | "Lost contact with the server — reload this page." |
+
+**`transportFailures = 0` lives INSIDE the recognized-state branches, never at the top of
+the handler.** A reset at the top would run on the same tick the unrecognized-state branch
+increments, so the ceiling could never be reached and the loop would still be unbounded.
+Only an answer the page can ACT on clears the count. If you move that reset, you re-arm the
+defect.
+
+The retryable half is **best-effort and cannot be otherwise**: principal resolution and turn
+visibility touch the database before any body builder runs, and session middleware touches
+it before the view is entered at all, so a truly unavailable database can still produce a
+non-JSON 5xx that only the loop's own counting handles.
+
+### THE OBLIGATION: carry both onto the shared loop, or they are silently lost
+
+This page's poll loop is **hand-rolled**, held in `_EXEMPT` in
+`foundation/ops/tests/test_shared_poller.py` under a dated, self-deleting exemption whose
+companion test asserts the loop still exists. Fixing it in place is therefore correct
+today.
+
+**When the held follow-up repoints this page onto `foundation/templates/_poller.html`, the
+counting rules above must be carried onto that shared loop — both of them.** Specifically:
+
+1. **The unactionable-body counting.** An unrecognized state, and any parseable `>= 500`,
+   must increment the transport-failure count and honour the ceiling. The shared loop does
+   not do this by inheritance.
+2. **The retryable-503 handling.** The two 503s must stay told apart — terminal keeps its
+   `setup_url` and stops; retryable is counted and retried.
+
+And the reset placement travels with them: **only a recognized state may clear the count.**
+
+Neither is visible in a diff that merely swaps one `<script>` for another, and neither
+fails a test that only checks the page still polls. Moving to the shared loop without them
+restores the exact defect this section exists to describe — a turn that ticks for hours on
+an answer the page cannot read — so treat this list as part of that migration's definition
+of done, not as background reading.
+
 ## What a card knows
 
 `agents/chat/rendering.py` decides, once, over rows: (1) an open

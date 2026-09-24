@@ -179,6 +179,90 @@ templates read — so the composite rules ("Ask needs the answer role *and* the 
 role"; "Images needs the vision feature *and* the generate role") live in one place instead
 of being retyped in the shell and the landing page.
 
+## The footprint ladder, and the recorder that keeps the maximum
+
+A connection row stores **three** footprint facts, and they are three columns rather than
+one on purpose. The execution queue (`models/queue/`) only ever READS them, through
+`bindings.footprint_for`, resolved fresh on every planning round.
+
+- **`footprint_override_bytes`** — the operator's own word. Always wins, never written by
+  anything but an operator, and the documented correction path for every case below.
+- **`measured_footprint_bytes`** / **`measured_footprint_at`** — what the queue observed
+  after a run it executed, written opportunistically by the worker.
+- **`engine_reported_footprint_bytes`** / **`engine_reported_footprint_at`** — what an
+  engine said a loaded copy occupied, harvested from the residency snapshot the worker is
+  taking anyway. **Never a call made for this purpose**, and never written from a missing
+  or zero reading — a stored zero reads back as a real "this model is free" answer.
+
+`effective_footprint_bytes` walks those in order and then `None` ("unknown", which makes
+the job holding that model run alone). It walks on `is not None`, never on truthiness: a
+genuine zero is a value.
+
+**Why measured and engine-reported are separate columns.** They are facts of different
+quality — ours-after-a-run versus the engine's-while-loaded — the recorder rule below
+compares a reading only against its OWN standing value, and the console's label would be
+untrue again the moment one column had to answer for both.
+
+**The recorder keeps the maximum.** Both writes go through one function,
+`bindings._record_footprint`. No standing value: write. A reading greater than or equal to
+the standing value: write. A reading **below** it: refused outright — not the bytes, not
+the timestamp — with one line naming the connection, the standing value and the refused
+reading.
+
+**There is deliberately no tolerance band**, and the reasoning is the rule rather than a
+simplification. A percentage tolerance measured against the standing value ratchets
+geometrically: five successive "within tolerance" writes at 0.75× walk 26.4 GB down to
+6.2 GB, reproducing the exact incident the rule exists to refuse — and the condition is
+RECURRING (a model that under-measures whenever it is warm), so repeated warm runs are the
+normal path rather than an adversarial one. Keeping the maximum makes the standing value a
+high-water mark by construction, with no extra column and no constant to tune.
+`FOOTPRINT_DIP_WARNING_RATIO` (0.75) sets the LOG LEVEL only — a refusal under three
+quarters of the standing value is a WARNING naming the remedy, a smaller dip is INFO — and
+no reading below the standing value is written at any ratio. The accepted cost: a genuinely
+shrunk model stays high until an operator sets an override, which is the safe direction.
+
+### Two label vocabularies, and why they must stay apart
+
+`ModelConnection.footprint_source` answers `"override"` / `"measured"` /
+`"engine_reported"` / `None`, keyed to `views._FOOTPRINT_SOURCE_LABELS`:
+
+| Value | Rendered |
+|---|---|
+| `"override"` | set by the operator |
+| `"measured"` | measured after a run |
+| `"engine_reported"` | from the engine's residency snapshot |
+| `None` | not measured yet — this model runs alone |
+
+It is **not** keyed to `views._SOURCE_LABELS`, which is and stays the vocabulary for
+`DiscoveryRow.capability_source`. The two look interchangeable and are not: "detected from
+the model server" is true of a capability probe and a **lie** about a post-run delta
+measurement this platform took itself. Before the four-rung ladder, the footprint row
+borrowed that map and said exactly that lie; separating them is what makes the label
+honest, and folding them back together would re-introduce it.
+
+The label is resolved in the view (`views._footprint_source_label`), not in the template.
+The template used to key a raw map by hand beside a value it had chosen with its own
+`{% if %}` — two independent decisions about the same row, free to disagree. The date is
+localized (`timezone.localtime`) before formatting, because `date_format` alone does not
+and the template's own `|date` filter does; on a non-UTC box the difference is a visibly
+wrong day.
+
+### `registered_endpoints()` — one notion of "every engine endpoint"
+
+`bindings.registered_endpoints()` answers `(engine, normalized endpoint, model_ids
+registered there)` for every endpoint this box knows about: the **union** of the configured
+defaults (`settings.INFERENCE_DEFAULT_ENDPOINTS`) and every connection row's endpoint, per
+engine. Deriving it from connection rows alone would miss a second engine running at its
+configured address with no registered connection yet.
+
+Both the console's own per-engine discovery map and the execution queue's cross-engine
+eviction sweep read it, so a freshly configured engine cannot be visible to one and
+invisible to the other. The third element is not decoration: an unload call has to be
+addressed with SOME `model_id`, so a configured endpoint with no connection row yields an
+empty tuple and simply cannot be addressed — a named residual, never papered over with a
+synthetic id. The optional `connections` argument takes the caller's already-fetched rows,
+so the console page (pinned at a fixed query count) does not pay a query for it.
+
 ## The re-encode guard
 
 Binding a role to a different `ModelConnection` (a different model, or the same model at a

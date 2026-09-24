@@ -22,9 +22,12 @@ role, and how work gets queued and run.
   full account, including why `model_access_for` is re-exported from
   `models.registry.bindings` rather than imported from `.access`
   directly.
-- **[`queue/`](queue/)** — the execution queue: job kinds,
+- **[`queue/`](queue/README.md)** — the execution queue: job kinds,
   scheduling, and the worker that runs them. A Django app, label `jobs`,
-  column-private under rule 2. `JobSettings.max_queued_per_principal`
+  column-private under rule 2. See that column's README for the footprint
+  ladder as the queue consumes it, eviction's reach and its protected-key
+  rule, the log vocabulary an operator sees, and what an unset memory
+  budget does and no longer does. `JobSettings.max_queued_per_principal`
   (round-3 hardening C-7/H39) is an operator-editable cap on how many
   QUEUED-or-RUNNING jobs one principal's own payloads may hold at once
   — null (the shipped default) means no cap, matching `memory_budget_
