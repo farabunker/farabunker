@@ -13,8 +13,10 @@ from __future__ import annotations
 import pytest
 
 from models.queue.scheduler import (
+    MAX_PASSOVERS,
     SchedCandidate,
     SchedModel,
+    affinity_order,
     effectively_exclusive,
     plan_admissions,
     resident_bytes,
@@ -41,6 +43,22 @@ def candidate(
     return SchedCandidate(job_id=job_id, priority=priority, exclusive=exclusive, models=models)
 
 
+def _candidate(
+    job_id: int, *, priority: int = 100, keys: list[tuple[str, str, str]] | None = None,
+    passed_over: int = 0,
+) -> SchedCandidate:
+    """`candidate()` plus the two things the affinity tests need: REAL
+    three-segment keys (affinity compares them against the worker's
+    believed-resident set, so the existing `model()` helper's
+    `(key, key, key)` shorthand would not read naturally here) and
+    `passed_over`, the new durable field."""
+    return SchedCandidate(
+        job_id=job_id, priority=priority, exclusive=False,
+        models=tuple(SchedModel(key=key, footprint_bytes=1) for key in (keys or [])),
+        passed_over=passed_over,
+    )
+
+
 # --- priority order / tie-break --------------------------------------------
 
 
@@ -60,6 +78,110 @@ class TestPriorityOrder:
         admitted = plan_admissions([second, first], [], budget_bytes=10 * GB, max_concurrent=1)
 
         assert admitted == [10]
+
+
+# --- model-affinity ordering, with an aging bound --------------------------
+
+
+class TestAffinityOrder:
+    """Rule 10 (spec 3.6): within ONE priority number, a candidate whose
+    models are all already resident sorts ahead of one that would have to
+    load something -- bounded by `max_passovers`, after which the passed-
+    over candidate is pinned to strict id order for ever."""
+
+    def test_an_affine_candidate_sorts_ahead_within_a_priority(self):
+        warm = _candidate(job_id=9, priority=100, keys=[("e", "http://x", "warm")])
+        cold = _candidate(job_id=2, priority=100, keys=[("e", "http://x", "cold")])
+
+        ordered = affinity_order(
+            [cold, warm], resident_keys=frozenset({("e", "http://x", "warm")}),
+            max_passovers=3,
+        )
+
+        assert [c.job_id for c in ordered] == [9, 2]
+
+    def test_priority_is_never_crossed(self):
+        warm_low = _candidate(job_id=9, priority=200, keys=[("e", "http://x", "warm")])
+        cold_high = _candidate(job_id=2, priority=100, keys=[("e", "http://x", "cold")])
+
+        ordered = affinity_order(
+            [warm_low, cold_high], resident_keys=frozenset({("e", "http://x", "warm")}),
+            max_passovers=3,
+        )
+
+        assert [c.job_id for c in ordered] == [2, 9]
+
+    def test_a_pinned_candidate_sorts_by_id_and_is_never_reordered_again(self):
+        pinned = _candidate(job_id=2, priority=100, keys=[("e", "http://x", "cold")],
+                            passed_over=3)
+        warm = _candidate(job_id=9, priority=100, keys=[("e", "http://x", "warm")])
+
+        ordered = affinity_order(
+            [warm, pinned], resident_keys=frozenset({("e", "http://x", "warm")}),
+            max_passovers=3,
+        )
+
+        assert [c.job_id for c in ordered] == [2, 9]
+
+    def test_with_no_snapshot_it_is_plain_priority_id_order(self):
+        ordered = affinity_order(
+            [_candidate(job_id=9, priority=100), _candidate(job_id=2, priority=100)],
+            resident_keys=frozenset(), max_passovers=3,
+        )
+
+        assert [c.job_id for c in ordered] == [2, 9]
+
+    def test_a_candidate_with_no_models_is_never_affine(self):
+        """"All of its keys are resident" must not be vacuously true for a
+        job that declares none -- such a job is already effectively
+        exclusive (rule 2c) and must not jump a queue for free."""
+        empty = _candidate(job_id=9, priority=100, keys=[])
+        cold = _candidate(job_id=2, priority=100, keys=[("e", "http://x", "cold")])
+
+        ordered = affinity_order([empty, cold], resident_keys=frozenset({("e", "http://x", "warm")}),
+                                 max_passovers=3)
+
+        assert [c.job_id for c in ordered] == [2, 9]
+
+    def test_partially_resident_is_not_affine(self):
+        """Affinity means "would load NOTHING", not "would load less"."""
+        partial = _candidate(
+            job_id=9, priority=100,
+            keys=[("e", "http://x", "warm"), ("e", "http://x", "cold")],
+        )
+        wholly_cold = _candidate(job_id=2, priority=100, keys=[("e", "http://x", "cold")])
+
+        ordered = affinity_order(
+            [partial, wholly_cold], resident_keys=frozenset({("e", "http://x", "warm")}),
+            max_passovers=3,
+        )
+
+        # Neither is affine, so the only thing left to order by is the id
+        # -- `partial` holding one resident key buys it nothing.
+        assert [c.job_id for c in ordered] == [2, 9]
+
+    def test_plan_admissions_walks_the_same_order_this_helper_returns(self):
+        """One function, so the order the scheduler walks and the order the
+        claim code reasons about can never drift."""
+        cold = _candidate(job_id=2, priority=100, keys=[("e", "http://x", "cold")])
+        warm = _candidate(job_id=9, priority=100, keys=[("e", "http://x", "warm")])
+        pinned = _candidate(job_id=30, priority=100, keys=[("e", "http://x", "cold")],
+                            passed_over=MAX_PASSOVERS)
+        resident = frozenset({("e", "http://x", "warm")})
+        candidates = [cold, warm, pinned]
+
+        ordered = affinity_order(candidates, resident_keys=resident,
+                                 max_passovers=MAX_PASSOVERS)
+        admitted = plan_admissions(
+            candidates, [], budget_bytes=100 * GB, max_concurrent=99,
+            resident_keys=resident, max_passovers=MAX_PASSOVERS,
+        )
+
+        # Every candidate fits and the cap is never reached, so admission
+        # order IS the walk order -- asserted against the helper's own
+        # answer on the same candidates rather than a copy of it.
+        assert admitted == [c.job_id for c in ordered]
+        assert admitted == [30, 9, 2]
 
 
 # --- sequential mode (budget_bytes is None) --------------------------------
@@ -84,6 +206,20 @@ class TestSequentialMode:
 
     def test_empty_candidates_admits_nothing(self):
         assert plan_admissions([], [], budget_bytes=None, max_concurrent=4) == []
+
+    def test_the_affine_candidate_is_the_one_head_admitted(self):
+        """Sequential mode is exactly where batching matters most -- the
+        head of the round is the head of the AFFINITY order, not of the
+        id order."""
+        cold = candidate(1, priority=100, models=(model("cold", 1 * GB),))
+        warm = candidate(2, priority=100, models=(model("warm", 1 * GB),))
+
+        admitted = plan_admissions(
+            [cold, warm], [], budget_bytes=None, max_concurrent=4,
+            resident_keys=frozenset({("warm", "warm", "warm")}),
+        )
+
+        assert admitted == [2]
 
 
 # --- the headline case: two small jobs both fit ----------------------------
@@ -230,6 +366,20 @@ class TestOversizeExclusive:
         assert admitted == [1]
         assert effectively_exclusive(not_oversize, budget_bytes=25 * GB) is None
 
+    def test_an_affine_oversize_head_is_still_admitted_alone_when_idle(self):
+        """Affinity only reorders; rule 6 still owns what happens next.
+        Promoted to the head, an oversize candidate is admitted alone into
+        an idle machine and still blocks everything behind it."""
+        cold = candidate(1, priority=100, models=(model("cold", 1 * GB),))
+        oversize_warm = candidate(2, priority=100, models=(model("warm", 50 * GB),))
+
+        admitted = plan_admissions(
+            [cold, oversize_warm], [], budget_bytes=10 * GB, max_concurrent=4,
+            resident_keys=frozenset({("warm", "warm", "warm")}),
+        )
+
+        assert admitted == [2]
+
 
 # --- strict order: no backfill past a blocked head -------------------------
 
@@ -250,6 +400,23 @@ class TestStrictOrderNoBackfill:
 
         assert admitted == []
         assert effectively_exclusive(big, budget_bytes=10 * GB) is None
+
+    def test_an_affine_head_that_does_not_fit_still_blocks_the_follower(self):
+        """Affinity decides the ORDER; it never buys an admission. The
+        believed-resident snapshot is the worker's, not this module's
+        budget fold, so a promoted candidate can still cost full marginal
+        bytes -- and when it does not fit, the walk stops there exactly as
+        before rather than backfilling the 1GB job behind it."""
+        running = [candidate(99, priority=1, models=(model("r", 8 * GB),))]
+        cold = candidate(1, priority=100, models=(model("cold", 1 * GB),))
+        warm_big = candidate(2, priority=100, models=(model("warm", 5 * GB),))
+
+        admitted = plan_admissions(
+            [cold, warm_big], running, budget_bytes=10 * GB, max_concurrent=4,
+            resident_keys=frozenset({("warm", "warm", "warm")}),
+        )
+
+        assert admitted == []
 
 
 # --- max_concurrent cap -----------------------------------------------------
@@ -286,6 +453,19 @@ class TestMaxConcurrentCap:
         a = candidate(1, priority=100)
 
         assert plan_admissions([a], [], budget_bytes=None, max_concurrent=0) == []
+
+    def test_the_cap_binds_on_the_affinity_order_not_the_id_order(self):
+        """One slot goes to whichever candidate the affinity order put
+        first -- the cap counts admissions, it does not restore id order."""
+        cold = candidate(1, priority=100, models=(model("cold", 1 * GB),))
+        warm = candidate(2, priority=100, models=(model("warm", 1 * GB),))
+
+        admitted = plan_admissions(
+            [cold, warm], [], budget_bytes=100 * GB, max_concurrent=1,
+            resident_keys=frozenset({("warm", "warm", "warm")}),
+        )
+
+        assert admitted == [2]
 
 
 # --- empty candidates / empty running edge cases ---------------------------

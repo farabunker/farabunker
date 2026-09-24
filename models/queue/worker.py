@@ -30,7 +30,9 @@ that shape puts on a worker specifically:
   each job-execution thread closes ITS OWN connection in a `finally` when
   the job finishes (Django's per-thread connection model means a thread
   that keeps running after its one job is done would otherwise leave that
-  connection open indefinitely too).
+  connection open indefinitely too), and the dedicated heartbeat thread
+  (`_heartbeat_forever`) calls `close_old_connections()` at the top of each
+  of its own iterations, for the same reason.
 
 Never-500 philosophy, worker edition: one job's handler raising must never
 take the worker process down or stop it claiming the next job -- every
@@ -48,13 +50,19 @@ import threading
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import timedelta
 
 from django.db import close_old_connections
 from django.db import connection as db_connection
 from django.db import transaction
+from django.db import OperationalError, ProgrammingError
 from django.utils import timezone
 
-from models.registry.bindings import record_measured_footprint
+from models.registry.bindings import (
+    record_engine_reported_footprint,
+    record_measured_footprint,
+    registered_endpoints,
+)
 from models.registry.discovery import norm_endpoint, norm_tag
 from models.queue.claim import claim_and_admit
 from models.queue.models import FAILED, QUEUED, RUNNING, SUCCEEDED, InferenceJob, JobSettings
@@ -154,6 +162,112 @@ SHUTDOWN_GRACE_SECONDS = 20
 # guarantee.
 MAX_UNLOADS_PER_TICK = 2
 
+# A tick whose WALL-CLOCK delta exceeds its MONOTONIC delta by this many
+# seconds did not take that long -- the host (or the container VM) was
+# suspended. Monotonic clocks on this platform do not advance across a
+# sleep; wall clock does. 60s is far beyond any scheduling delay a 0.5s
+# tick loop could accumulate and far below the shortest sleep worth
+# noticing. A false positive (a genuinely slow, non-sleep tick that
+# somehow drifted this far) costs exactly one skipped orphan sweep --
+# deliberately the cheap direction (spec §11): a job that is actually
+# dead waits one extra tick to be reclaimed, versus a job that is alive
+# being wrongly mass-orphaned.
+SLEEP_DETECT_SECONDS = 60
+
+# How long after a detected sleep the orphan sweep is skipped, so every
+# live worker's rows can re-stamp themselves before anything judges them.
+# Comfortably more than `HEARTBEAT_SECONDS` and less than
+# `STALE_AFTER_SECONDS`: long enough for a heartbeat to land, short enough
+# that a genuinely dead job is still reclaimed promptly.
+SLEEP_GRACE_SECONDS = 30
+
+# How many times, and how long apart, the CONSTRUCTOR waits for a racing
+# `migrate` before giving up and sizing the pool from the documented
+# default. Deliberately small: a worker that cannot read its settings row
+# after this long is better off running at the default cap than blocking a
+# compose boot, and the tick loop tolerates the same failure independently.
+BOOT_SCHEMA_WAIT_ATTEMPTS = 10
+BOOT_SCHEMA_WAIT_SECONDS = 3.0
+
+# The two values each optional engine declaration may carry (see
+# `models.contracts.engines.base.InferenceEngine`'s own seam comment).
+# Anything else -- absent, misspelled, a value invented by a future
+# adapter this worker predates -- reads as the SAFE member of its pair,
+# which is the LAST element of each tuple here.
+_UNLOAD_SCOPES = ("model", "endpoint")
+_RESIDENCY_AUTHORITIES = ("endpoint", "memo")
+
+# How long a barrier-refused (or protection-refused) job waits before it
+# may be claimed again, written to `InferenceJob.not_before`. COMFORTABLY
+# LONGER THAN ONE UNLOAD TIMEOUT (30s on the engine that polls), so a
+# refused job is not re-claimed on every 0.5s tick and the retries the
+# refusal bound counts are genuinely spaced.
+BARRIER_HOLDOFF_SECONDS = 45
+
+# How many INFORMATIVE barrier refusals a job may accumulate before it is
+# failed -- and see the span below, which must ALSO be satisfied. A
+# PROTECTION refusal is deliberately not counted here: that wait is
+# bounded by the live attempt's own end, and since an agent turn is
+# planned exclusive, counting it would fail three consecutive chat turns
+# for an ordinary long-running foreign job at a shared endpoint.
+MAX_BARRIER_REFUSALS = 3
+
+# ...because counting refusals alone is a trap. An informative `False` is
+# exactly what a BUSY engine returns (the adapter withholds True while a
+# prompt is still running), so three refusals could elapse in barely more
+# than the time three unload calls take. A job is failed only once BOTH
+# bounds are met, so "three attempts" can never mean "a second and a half".
+MIN_BARRIER_REFUSAL_SPAN_SECONDS = 300
+
+
+def _total_memory_bytes() -> int:
+    """What THIS machine reports as total physical memory. A module-level
+    function, not an inline `os.sysconf` call, purely so a test can patch
+    the worker's own name instead of the stdlib object every other test in
+    the process shares."""
+    return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+
+
+def _resolve_wait_seconds(settings_row: JobSettings, kind: str | None) -> float | None:
+    """This job's `JobContext.wait_seconds` (spec §3.5a): the OPERATOR's
+    per-kind override (`settings_row.kind_wait_seconds`) when one is
+    present, else the KIND's own code-declared `JobKind.
+    default_wait_seconds`, else `None` -- never a guess.
+
+    Takes `settings_row` rather than reading `JobSettings.get_solo()`
+    itself -- this rides on the SAME row `_build_job_context` already
+    fetched for `response_timeout_seconds`; a second read here would be
+    the query-count regression `JobSettings.kind_wait_seconds`'s own
+    field comment names, and is explicitly not how this is read.
+
+    The operator's key is checked FIRST and, when present, wins WITHOUT
+    ever resolving the kind through the registry -- an operator override
+    for a kind that has since been unregistered (or was mistyped) still
+    reads back exactly as saved; nothing about honouring it depends on
+    the kind existing. Only the FALLBACK path (no operator value for this
+    kind) needs `get_job_kind`, and its `ValueError` for an unregistered
+    kind is tolerated here, never raised -- `_build_job_context`'s own
+    caller (`Worker._execute`) sits outside a guard for this method (see
+    its docstring), so nothing this function does may strand a job
+    RUNNING forever over a kind lookup.
+
+    `kind=None` (`_build_job_context` reads it via `descriptor.get
+    ("kind")`, never `descriptor["kind"]`) degrades the same tolerant
+    way: some hand-built descriptors in this test suite name no `"kind"`
+    at all (they exercise `_build_job_context`'s progress/checkpoint
+    writers, not job-kind dispatch), and a real claim descriptor
+    (`models.queue.claim.claim_and_admit`) always carries one -- this is
+    a test-fixture accommodation, not a production path this function
+    expects to take."""
+    override = settings_row.kind_wait_seconds.get(kind)
+    if override is not None:
+        return float(override)
+    try:
+        default = get_job_kind(kind).default_wait_seconds
+    except ValueError:
+        return None
+    return None if default is None else float(default)
+
 
 class Worker:
     """One worker process: claims admitted jobs and runs them in a thread
@@ -239,7 +353,88 @@ class Worker:
         # `self._active_tokens`, which stays job_id-keyed and genuinely
         # needs the token-conditional pop documented above).
         self._futures: dict[tuple[int, uuid.UUID], Future] = {}
+
+        # Model refs per IN-FLIGHT ATTEMPT, keyed IDENTICALLY to
+        # `self._futures`. Eviction's protected set needs the KEYS a live
+        # attempt holds, and a `Future` does not carry them; the claim
+        # descriptor does. The only query-free alternative -- re-reading
+        # `InferenceJob.model_refs` for the live job ids -- would put a
+        # query on the 0.5s tick path.
+        #
+        # WRITTEN AND DROPPED IN LOCKSTEP WITH `self._futures`, on EVERY
+        # path, and that is not a nicety: an entry here that outlives its
+        # attempt PERMANENTLY protects a key and blocks eviction at that
+        # endpoint for the life of the process. So the write sits in the
+        # SAME statement block as the `_futures` insert at the bottom of
+        # `_launch` -- BELOW the duplicate-submit refusal's early return,
+        # never at the top of the method -- and `_prune_finished_futures`
+        # drops from both maps by the same key.
+        #
+        # Tick-thread-only, exactly like `_futures` (see
+        # `_prune_finished_futures`'s own docstring): no lock, because
+        # there is no second writer.
+        self._inflight_refs: dict[tuple[int, uuid.UUID], list[dict]] = {}
+
+        # THE AFFINITY SNAPSHOT (spec §3.6): what the last eviction pass
+        # believed was resident once its own unloads had been subtracted,
+        # cached for the NEXT claim round's ordering preference. Written
+        # and read on the tick thread alone, wholesale-replaced every
+        # admitting tick, bounded by the resident set -- so no lock and no
+        # pruning contract.
+        self._resident_keys: frozenset[tuple[str, str, str]] = frozenset()
+
+        # How many `unload()` calls the LAST `_unload_endpoint` invocation
+        # issued -- the companion of that method's key-set return, which
+        # cannot answer the question (at endpoint scope one call releases
+        # every key there). Read by the capped budget pass immediately
+        # after each call, on the tick thread alone.
+        self._last_unload_calls = 0
+
+        # `(actual resident bytes, admitted marginal bytes)` from the last
+        # residency snapshot -- the two figures the pass's own INFO line
+        # renders (§3.3g). Beside the snapshot's return rather than in
+        # it: they are how the budget verdict was reached, not part of it.
+        self._last_snapshot_bytes: tuple[int, int] = (0, 0)
+
+        # The believed-resident keys whose `unload()` call came back
+        # `False` during THIS eviction pass -- reset at the top of
+        # `_evict_to_match_plan` and read by `_barrier`. Spec §3.3d(4)
+        # honours `False` ONLY for a call made against a believed-resident
+        # model, and this set is exactly that population: a PRECAUTIONARY
+        # call's `False` never lands here, because the adapter cannot tell
+        # "nothing freed" from "nothing to free".
+        self._unload_refusals: set[tuple[str, str, str]] = set()
+
+        # {job_id: (informative refusal count, first refusal's monotonic
+        # reading)} -- the barrier's refusal bound, which is count AND
+        # wall clock (see `MAX_BARRIER_REFUSALS` /
+        # `MIN_BARRIER_REFUSAL_SPAN_SECONDS`). In-process on purpose: it
+        # is the bound on how long THIS worker keeps retrying, and the
+        # durable half of the mechanism is `InferenceJob.not_before`,
+        # which survives the restart this map does not.
+        self._barrier_refusals: dict[int, tuple[int, float]] = {}
+
         self._last_heartbeat_monotonic: float | None = None
+
+        # Sleep detection (spec §3.4c, Task 7): the wall-clock/monotonic
+        # pair from THIS tick, so the next one can compute both deltas and
+        # compare them -- `None` until the first tick ever runs, which
+        # therefore never trips the check (nothing to compare against
+        # yet). `_sweep_skip_until` is a MONOTONIC deadline (not a wall
+        # clock one, which is exactly the untrustworthy-after-a-sleep
+        # clock this whole mechanism exists to stop trusting): once a
+        # sleep is detected it holds `mono + SLEEP_GRACE_SECONDS`, and
+        # `tick()` skips the orphan sweep for as long as the current tick's
+        # monotonic reading stays below it.
+        self._last_tick_wall: float | None = None
+        self._last_tick_monotonic: float | None = None
+        self._sweep_skip_until: float | None = None
+
+        # The dedicated heartbeat thread (Q8, spec §3.4a). `None` until
+        # `run_forever` starts it -- NEVER started by this constructor: a
+        # single-tick diagnostic run (`manage.py run_jobs --once`) and
+        # every test in this suite build a `Worker` and must spawn nothing.
+        self._heartbeat_thread: threading.Thread | None = None
 
         # Pool size is read ONCE, here, at worker startup -- never re-read
         # per tick. `JobSettings.max_concurrent_jobs` is an operator-
@@ -255,8 +450,34 @@ class Worker:
         # WORKER POOL itself (not just admission) to reflect the new value
         # needs to restart the worker process -- a real, narrow limitation,
         # documented here rather than silently discovered later.
-        max_workers = max(JobSettings.get_solo().max_concurrent_jobs, 1)
+        row = self._settings_row_or_wait()
+        max_workers = max(
+            (row.max_concurrent_jobs if row is not None
+             else JobSettings.MAX_CONCURRENT_JOBS_DEFAULT),
+            1,
+        )
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="jobs-worker")
+
+    def _settings_row_or_wait(self) -> JobSettings | None:
+        """The settings row, waiting briefly for a racing `migrate`, or
+        `None` once the wait expires.
+
+        ONE INFO LINE, NEVER A TRACEBACK. On a cold compose boot the
+        worker and `migrate` start together and this read can genuinely
+        lose the race; a traceback there is noise an operator learns to
+        ignore, on the one boot where a real error would matter.
+        """
+        for attempt in range(BOOT_SCHEMA_WAIT_ATTEMPTS):
+            try:
+                return JobSettings.get_solo()
+            except (ProgrammingError, OperationalError):
+                if attempt == 0:
+                    logger.info(
+                        "worker: waiting for the database schema (the queue's tables are "
+                        "not there yet -- `migrate` is probably still running)",
+                    )
+                self._stopping.wait(BOOT_SCHEMA_WAIT_SECONDS)
+        return None
 
     # --- main loop -----------------------------------------------------
 
@@ -275,6 +496,8 @@ class Worker:
         clean `0` a deliberate, signal-initiated stop would."""
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
+        self._start_heartbeat_thread()
+        self._record_detected_memory()
         logger.info("worker %s: starting", self.worker_id)
         crashed = False
         try:
@@ -331,16 +554,70 @@ class Worker:
         advisory lock, not another statement inside the round every other
         admitter is waiting on. An operator's edit lands on the very next
         tick either way. Pinned by `models/queue/tests/test_worker.py::
-        TestTheSingleSettingsReadPerTick`."""
+        TestTheSingleSettingsReadPerTick`.
+
+        SLEEP DETECTION (spec §3.4c, Task 7), first: a suspended host (or
+        a ballooned container VM) leaves this process's monotonic clock
+        barely advanced while wall clock jumped hours -- on wake, EVERY
+        running row this or any other worker holds looks stale at once,
+        and the very next orphan sweep would reclaim all of them
+        regardless of whether they are still genuinely running. This tick
+        compares the two deltas since the last tick; a divergence past
+        `SLEEP_DETECT_SECONDS` says so honestly in the log, writes a fresh
+        heartbeat IMMEDIATELY (off the throttle -- every row this process
+        holds needs to re-stamp itself before anything judges it, and the
+        next admitter's sweep is not necessarily this process's own), and
+        skips the orphan sweep for `SLEEP_GRACE_SECONDS` so every live
+        worker gets the same chance."""
         close_old_connections()
         self._prune_finished_futures()
         self._maybe_heartbeat()
 
-        settings_row = JobSettings.get_solo()
+        wall, mono = time.time(), time.monotonic()
+        if self._last_tick_wall is not None:
+            drift = (wall - self._last_tick_wall) - (mono - self._last_tick_monotonic)
+            if drift > SLEEP_DETECT_SECONDS:
+                logger.warning(
+                    "worker %s: the host appears to have slept for about %.0f seconds "
+                    "(wall clock moved that much further than the monotonic clock); "
+                    "skipping the orphan sweep for %ss so live rows can re-stamp "
+                    "themselves before anything judges them",
+                    self.worker_id, drift, SLEEP_GRACE_SECONDS,
+                )
+                self._sweep_skip_until = mono + SLEEP_GRACE_SECONDS
+                # A fresh heartbeat IMMEDIATELY, not on the throttle: every
+                # row this worker holds looks stale at this instant, and
+                # the next admitter's sweep is not necessarily ours.
+                with self._active_lock:
+                    self._last_heartbeat_monotonic = None
+                self._maybe_heartbeat()
+        self._last_tick_wall, self._last_tick_monotonic = wall, mono
+
+        sweep = self._sweep_skip_until is None or mono >= self._sweep_skip_until
+
+        try:
+            settings_row = JobSettings.get_solo()
+        except (ProgrammingError, OperationalError):
+            # A tick that raises is treated by `run_forever` as a CRASH:
+            # traceback, loop stopped, non-zero exit. On a cold boot that
+            # is simply the wrong reading of "migrate has not finished
+            # yet", so the first ticks return quietly and the loop survives
+            # to try again (spec §3.10).
+            logger.info("worker %s: database schema not ready yet; skipping this tick",
+                        self.worker_id)
+            return
+
         claimed = claim_and_admit(
             self.worker_id,
             stale_after_seconds=STALE_AFTER_SECONDS,
             settings_row=settings_row,
+            sweep_orphans=sweep,
+            # THE AFFINITY SNAPSHOT (spec 3.6): what the last eviction
+            # pass believed was resident once its own unloads were
+            # subtracted. An ordering PREFERENCE and nothing else -- empty
+            # on a fresh worker, which simply gives admission plain
+            # `(priority, id)` order.
+            resident_keys=self._resident_keys,
         )
         if not claimed:
             return
@@ -349,14 +626,19 @@ class Worker:
             for descriptor in claimed:
                 self._active_tokens[descriptor["id"]] = descriptor["claim_token"]
 
-        self._evict_to_match_plan(claimed, settings_row=settings_row)
+        refused = self._evict_to_match_plan(claimed, settings_row=settings_row)
         self._maybe_heartbeat()
 
         if self._stopping.is_set():
-            self._requeue_unlaunched(claimed)
+            # A refused descriptor has already been handed back (and its
+            # token popped) by the refusal writers -- requeueing it twice
+            # would clobber the hold-off just written to it.
+            self._requeue_unlaunched([d for d in claimed if d["id"] not in refused])
             return
 
         for descriptor in claimed:
+            if descriptor["id"] in refused:
+                continue
             self._launch(descriptor)
 
     def _requeue_unlaunched(self, claimed: list[dict]) -> None:
@@ -425,7 +707,13 @@ class Worker:
         orphan sweep eventually requeues it, with no explanation of why.
         `timeout=0` is non-blocking -- every future checked here is
         already `done()`, so `.result()` returns (or re-raises) instantly;
-        this never waits on anything."""
+        this never waits on anything.
+
+        DROPS `self._inflight_refs` BY THE SAME SURVIVING KEY SET, and
+        forgetting that second map is not a mere leak: eviction's
+        protected set reads it, so an entry left behind here protects its
+        key -- and blocks eviction at that endpoint -- for the life of the
+        process."""
         remaining: dict[tuple[int, uuid.UUID], Future] = {}
         for key, future in self._futures.items():
             job_id, _claim_token = key
@@ -451,6 +739,9 @@ class Worker:
                     job_id,
                 )
         self._futures = remaining
+        self._inflight_refs = {
+            key: refs for key, refs in self._inflight_refs.items() if key in remaining
+        }
 
     # --- heartbeat -------------------------------------------------------
 
@@ -460,7 +751,16 @@ class Worker:
         the ONLY place any thread writes `heartbeat_at` -- job-execution
         threads (`_execute`) never touch it, so there is exactly one
         writer and no risk of a job thread's own slow write racing this
-        one.
+        one. It IS, however, now called from two threads -- the tick
+        thread's own calls in `tick()`, and the dedicated heartbeat thread
+        (`_heartbeat_forever`, Q8, spec §3.4a) -- so the throttle's own
+        read-modify-write (`_last_heartbeat_monotonic`) has to be atomic
+        across both, or two calls landing close together could both read
+        "not throttled yet" and both go on to write. `self._active_lock`
+        already exists for `self._active_tokens`; this method holds it for
+        the throttle check too, so a call from either thread either wins
+        outright (advances `_last_heartbeat_monotonic` and proceeds) or
+        loses and returns immediately -- never both proceeding at once.
 
         Filtered on `claim_token__in=tokens` alone -- NOT also
         `claimed_by=self.worker_id`. `InferenceJob.claim_token`'s
@@ -473,15 +773,14 @@ class Worker:
         drift from the token (it never should, but the token is the one
         fact this class is supposed to trust for a decision like this).
         """
-        now = time.monotonic()
-        if (
-            self._last_heartbeat_monotonic is not None
-            and now - self._last_heartbeat_monotonic < HEARTBEAT_SECONDS
-        ):
-            return
-        self._last_heartbeat_monotonic = now
-
         with self._active_lock:
+            now = time.monotonic()
+            if (
+                self._last_heartbeat_monotonic is not None
+                and now - self._last_heartbeat_monotonic < HEARTBEAT_SECONDS
+            ):
+                return
+            self._last_heartbeat_monotonic = now
             tokens = list(self._active_tokens.values())
         if not tokens:
             return
@@ -489,6 +788,126 @@ class Worker:
         InferenceJob.objects.filter(
             state=RUNNING, claim_token__in=tokens,
         ).update(heartbeat_at=timezone.now())
+
+    def _start_heartbeat_thread(self) -> None:
+        """Start the dedicated heartbeat thread. Called by `run_forever`
+        only -- see `__init__`'s own note on why not the constructor.
+
+        THE ATTRIBUTE IS SET BEFORE `start()` AND CLEARED IF IT RAISES,
+        which is the only order that serves both readers of it. Setting
+        it first is what makes the guard above idempotent even against a
+        re-entrant caller; clearing it on failure is what keeps
+        `_shutdown`'s `join(timeout=2.0)` honest, since joining a thread
+        that was never started raises `RuntimeError` rather than
+        returning -- and `_shutdown` runs on the crash path, where a
+        second exception is the last thing wanted. A thread object that
+        failed to start is not reusable, so the clear leaves the worker
+        free to try a fresh one rather than holding a dead handle."""
+        if self._heartbeat_thread is not None:
+            return
+        thread = threading.Thread(
+            target=self._heartbeat_forever, name="jobs-heartbeat", daemon=True,
+        )
+        self._heartbeat_thread = thread
+        try:
+            thread.start()
+        except RuntimeError:
+            self._heartbeat_thread = None
+            raise
+
+    def _record_detected_memory(self) -> None:
+        """Write what THIS PROCESS's machine reports as total memory onto
+        the settings row, once, at startup (spec §3.7).
+
+        WHY THE WORKER AND NOT THE CONSOLE: the console renders in the web
+        service and the budget governs the worker service -- separate
+        containers -- so memory detected in the web process describes the
+        wrong machine, in precisely the way the operator would be misled
+        by.
+
+        NOTHING IS APPLIED ON THE OPERATOR'S BEHALF. This is a PREFILL and
+        a label, never a budget: the container sees the VM's allocation
+        rather than the host's, and a silently derived budget would be
+        authoritative and wrong. The settings page renders the number with
+        the process and the date attached so an operator can judge it.
+
+        No new dependency: `os.sysconf` answers on both platforms this
+        runs on. A platform that does not answer writes NOTHING -- an
+        honestly absent number, like the budget itself -- rather than a
+        guess."""
+        try:
+            total = _total_memory_bytes()
+        except (AttributeError, ValueError, OSError):
+            return
+        if total <= 0:
+            return
+        try:
+            JobSettings.objects.filter(pk=1).update(
+                detected_memory_bytes=total, detected_memory_at=timezone.now(),
+            )
+        except (ProgrammingError, OperationalError):
+            return
+
+    def _heartbeat_forever(self) -> None:
+        """The heartbeat's own thread (Q8, spec §3.4a).
+
+        WHY IT EXISTS: the heartbeat used to be written from the tick
+        thread alone, so a tick that BLOCKS -- a synchronous eviction pass,
+        or a whole process starved during a cold load measured in minutes
+        -- stopped the heartbeat too, and the orphan sweep reclaimed a job
+        that was perfectly healthy. The cross-engine sweep this track adds
+        makes that worse before it makes it better: `_residency_snapshot`
+        contains no heartbeat call at all and each `list_installed` can
+        cost a full discovery timeout.
+
+        THE CONNECTION STORY IS THE WHOLE POINT, and getting it wrong
+        re-creates the bug it fixes:
+
+        - `close_old_connections()` at the TOP of every iteration. Django
+          connections are thread-local; nothing else in this process would
+          ever close or health-check the one this thread opens, so without
+          this it would hold a single connection open for ever and sail
+          straight through a database restart.
+        - the write is WRAPPED. A transient database error is logged and
+          retried on the next iteration rather than killing the thread.
+        - an exit is LOUD. A silently dead heartbeat writer mass-orphans
+          every healthy job this worker holds, which is precisely the
+          failure Q8 exists to remove.
+
+        Waits on `self._stopping` rather than sleeping, so a SIGTERM ends
+        this thread promptly instead of after one more full interval, and
+        polls at half the heartbeat cadence so the writer's own throttle
+        (`HEARTBEAT_SECONDS`, still shared with the tick thread's calls)
+        cannot stretch the effective interval to twice the constant.
+
+        The tick's own `_maybe_heartbeat()` calls REMAIN, harmlessly
+        throttled -- that is what keeps `--once` exactly as protected as
+        it is today, with no thread running at all.
+        """
+        logger.info("worker %s: heartbeat thread started", self.worker_id)
+        try:
+            # HALF the heartbeat cadence, with NO FLOOR. A floor (an
+            # earlier draft had `max(1.0, ...)`) makes a test that
+            # monkeypatches `HEARTBEAT_SECONDS` down to fractions of a
+            # second never execute this loop body at all, so the thread's
+            # own behaviour becomes unprovable. Polling at half the cadence
+            # is what stops the writer's own throttle -- still shared with
+            # the tick thread's calls -- from stretching the effective
+            # interval to twice the constant.
+            while not self._stopping.wait(HEARTBEAT_SECONDS / 2):
+                try:
+                    close_old_connections()
+                    self._maybe_heartbeat()
+                except Exception:  # noqa: BLE001 - log and retry next iteration; never die
+                    logger.warning(
+                        "worker %s: heartbeat write failed; retrying next iteration",
+                        self.worker_id, exc_info=True,
+                    )
+        finally:
+            logger.info(
+                "worker %s: heartbeat thread exiting -- every running row this worker "
+                "holds now depends on the tick thread alone", self.worker_id,
+            )
 
     # --- launching claimed jobs -------------------------------------------
 
@@ -509,7 +928,102 @@ class Worker:
         declaration comment in `__init__` for what this fixes."""
         job_id = descriptor["id"]
         claim_token = descriptor["claim_token"]
+
+        # NO DUPLICATE SUBMIT (spec §3.4d, the unbuilt half of the
+        # 2026-08-25 reclaim fix). A job this process is ALREADY executing
+        # can be orphaned (its own cold load starved the heartbeat),
+        # re-admitted, and launched a second time here: two handlers, one
+        # job, one set of models.
+        #
+        # The naive answer -- requeue the fresh claim -- is wrong in four
+        # ways at once: the row would sit `queued` with no token tracked,
+        # the live attempt would lose heartbeat protection, re-admission
+        # would come round again 0.5s later for the entire length of the
+        # cold load this exists for (each tick paying a widened eviction
+        # pass), and the live attempt's own token-conditional writeback
+        # would finally be discarded, running the job a THIRD time.
+        #
+        # So the refusal RESTORES the row to the live attempt instead: back
+        # to `running` under that attempt's own token, claimed by this
+        # worker, freshly heartbeaten. The row is then not a candidate, the
+        # live attempt is heartbeat-protected again, and its eventual
+        # writeback matches the row it is writing to.
+        live_token = self._live_attempt_token(job_id, exclude=claim_token)
+        if live_token is not None:
+            # NOTE FOR TASK 12: this `return` sits ABOVE the `_futures`
+            # insert at the bottom of this method, and Task 12 adds a
+            # companion `_inflight_refs` write beside that insert. That
+            # write MUST stay below this refusal -- written above it, a
+            # refused descriptor would leave an `_inflight_refs` entry with
+            # no matching `_futures` key, which `_prune_finished_futures`
+            # (it iterates `_futures`) could never drop, and eviction would
+            # protect that key for the life of the process.
+            logger.warning(
+                "worker %s: refusing to submit job %s twice -- an attempt is still in "
+                "flight here; restoring the row to it and discarding this claim",
+                self.worker_id, job_id,
+            )
+            # DEFENSE IN DEPTH, AND DEAD BY CONSTRUCTION -- deliberately,
+            # not by oversight. `_requeue_unlaunched` filters `pk AND
+            # state=RUNNING AND claim_token=<this same token>`, strictly
+            # stronger than the restore's `pk AND claim_token`, so any row
+            # the restore failed to match this cannot match either. What it
+            # DOES do is pop this claim's `_active_tokens` entry, which is
+            # the whole effect the discarded claim is entitled to. Do not
+            # delete it as dead without reading that, and do not "fix" it
+            # into a predicate that would actually rewrite a row another
+            # worker legitimately owns (ADR 0013 §4).
+            if not self._restore_to_live_attempt(descriptor, live_token):
+                self._requeue_unlaunched([descriptor])
+            return
+
+        # ONE statement block, so the two maps can never disagree about
+        # which attempts are live (see `_inflight_refs`'s declaration).
         self._futures[(job_id, claim_token)] = self._executor.submit(self._execute, descriptor)
+        self._inflight_refs[(job_id, claim_token)] = descriptor["model_refs"]
+
+    def _live_attempt_token(self, job_id: int, exclude: uuid.UUID) -> uuid.UUID | None:
+        """The claim token of an attempt for `job_id` this process still
+        has IN FLIGHT (a future that is not `done()`), other than
+        `exclude` -- or `None`.
+
+        `self._futures` is keyed per attempt (2026-08-25's second defect
+        fix), which is exactly what makes this answerable: a superseded
+        attempt and its successor are both present, under their own keys.
+        """
+        for (tracked_id, token), future in self._futures.items():
+            if tracked_id == job_id and token != exclude and not future.done():
+                return token
+        return None
+
+    def _restore_to_live_attempt(self, descriptor: dict, live_token: uuid.UUID) -> bool:
+        """Give the row back to the attempt that is genuinely still
+        running it, under THAT attempt's own claim token, and report
+        whether the write landed.
+
+        Conditional on the SUPERSEDING token, so this can only ever
+        rewrite the row this claim actually holds: if another worker
+        legitimately owns it by now, zero rows match, the fresh claim is
+        simply DISCARDED, and a row another worker legitimately owns is
+        never touched by this one. NOT "requeued the ordinary way" -- the
+        design note said that and the shipped code cannot do it, because
+        the caller's `_requeue_unlaunched` fallback filters on this same
+        token AND `state=running`, a strictly stronger predicate than
+        this `UPDATE`'s. See the call site's own comment, and ADR 0013 §4,
+        which records the correction.
+        """
+        job_id = descriptor["id"]
+        restored = InferenceJob.objects.filter(
+            pk=job_id, claim_token=descriptor["claim_token"],
+        ).update(
+            state=RUNNING, claim_token=live_token, claimed_by=self.worker_id,
+            heartbeat_at=timezone.now(),
+        )
+        if not restored:
+            return False
+        with self._active_lock:
+            self._active_tokens[job_id] = live_token
+        return True
 
     def _build_job_context(self, descriptor: dict) -> JobContext:
         """Build the `models.contracts.jobkinds.JobContext` `_execute` passes
@@ -555,6 +1069,13 @@ class Worker:
         the `JobContext` `agents.runtime.loop` reads it back from. One
         extra read per job execution, not per tick.
 
+        THE WAIT CEILING (spec §3.5a) RIDES ON THIS SAME READ. `get_solo()`
+        is called ONCE here, and BOTH `response_timeout_seconds` and
+        `wait_seconds` are derived off that one row (`_resolve_wait_
+        seconds` above never reads `JobSettings` itself) -- see that
+        function's own docstring for why a second `get_solo()` for the
+        wait map is explicitly not how this is read.
+
         GUARDED, NOT TRUSTED (fix round 1, B1): `_execute` -- THIS
         method's one caller -- is contracted to never raise past its own
         `try`/`finally` (see that method's own docstring); the call to
@@ -568,19 +1089,42 @@ class Worker:
         mid-deploy box) -- exactly the window `response_timeout_seconds
         =None`'s documented fallback (`agents.limits.TURN_DEADLINE_
         SECONDS`) exists for. So the read is wrapped here, not trusted:
-        an unreadable settings row degrades to that same `None` fallback
-        rather than ever propagating out of this method.
+        an unreadable settings row degrades BOTH `response_timeout_
+        seconds` and `wait_seconds` to that same `None` fallback rather
+        than ever propagating out of this method. An unregistered job
+        kind (`models.contracts.jobkinds.get_job_kind`'s `ValueError`,
+        resolved inside `_resolve_wait_seconds`) is tolerated the same
+        way -- `wait_seconds` degrades to `None`, never raises.
         """
         job_id = descriptor["id"]
         claim_token = descriptor["claim_token"]
         try:
-            response_timeout_seconds = float(JobSettings.get_solo().response_timeout_seconds)
+            settings_row = JobSettings.get_solo()
+            response_timeout_seconds = float(settings_row.response_timeout_seconds)
+            # Review F3: resolved INSIDE this same try, not after it --
+            # `_resolve_wait_seconds` can still raise on a malformed
+            # PERSISTED value (`float("abc")` if a non-numeric string
+            # ever lands in the map, `AttributeError` if `kind_wait_
+            # seconds` is ever not a dict at all), and this method's own
+            # docstring states the rule plainly: anything it lets escape
+            # strands the job RUNNING forever, because the call to THIS
+            # method sits outside `_execute`'s own guard. Today's only
+            # writer (`models.queue.views._update_kind_waits`) cannot
+            # produce either shape, but a hand-edited row or a future
+            # writer is exactly the "not-yet-migrated column on a
+            # mid-deploy box" class of surprise the paragraph below
+            # already accepts for `get_solo()` itself -- one degradation
+            # path should cover all three values, not two of three.
+            wait_seconds = _resolve_wait_seconds(settings_row, descriptor.get("kind"))
         except Exception:  # noqa: BLE001 -- never-500 parity: degrade, never strand the job
             logger.exception(
-                "worker: job %s could not read the response timeout; falling back to "
-                "agents.limits.TURN_DEADLINE_SECONDS", job_id,
+                "worker: job %s could not read the response timeout or the per-kind wait "
+                "ceiling; both fall back to None (the response timeout to "
+                "agents.limits.TURN_DEADLINE_SECONDS, the wait ceiling to no ceiling)",
+                job_id,
             )
             response_timeout_seconds = None
+            wait_seconds = None
         last_progress_monotonic: list[float | None] = [None]
 
         def _report(progress: dict) -> None:
@@ -607,6 +1151,7 @@ class Worker:
             _report=_report,
             _checkpoint=_checkpoint,
             response_timeout_seconds=response_timeout_seconds,
+            wait_seconds=wait_seconds,
         )
 
     def _execute(self, descriptor: dict) -> None:
@@ -852,68 +1397,206 @@ class Worker:
 
     # --- pre-launch eviction -----------------------------------------------
 
-    def _eviction_targets(
-        self, claimed: list[dict]
-    ) -> tuple[set[tuple[str, str, str]], set[tuple[str, str]], set[tuple[str, str]]] | None:
+    @staticmethod
+    def _unload_scope(engine_obj) -> str:
+        """`"model"` or `"endpoint"` -- what ONE `unload()` call frees at
+        this engine, read from its OPTIONAL `unload_scope` declaration
+        (`models.contracts.engines.base.InferenceEngine`'s seam).
+
+        ANYTHING ABSENT OR UNRECOGNISED READS AS `"endpoint"`, the safe
+        value: assuming the call frees the whole endpoint costs at worst a
+        needless reload, while wrongly assuming per-model granularity
+        destroys a live cold load that is measured in minutes on this
+        hardware.
+        """
+        declared = getattr(engine_obj, "unload_scope", None)
+        return declared if declared in _UNLOAD_SCOPES else "endpoint"
+
+    @staticmethod
+    def _residency_authority(engine_obj) -> str:
+        """`"endpoint"` or `"memo"` -- how much this engine's residency
+        report is worth, read from its OPTIONAL `residency_authority`
+        declaration the same defensive way.
+
+        ANYTHING ABSENT OR UNRECOGNISED READS AS `"memo"`, the safe
+        value: treating an empty residency answer as merely "this process
+        does not remember anything" costs one precautionary barrier call,
+        while trusting it as fact launches an exclusive job on top of
+        memory nobody ever released.
+        """
+        declared = getattr(engine_obj, "residency_authority", None)
+        return declared if declared in _RESIDENCY_AUTHORITIES else "memo"
+
+    @staticmethod
+    def _key(engine_name: str, endpoint: str, model_id: str) -> tuple[str, str, str]:
+        """The ONE spelling of an eviction key: engine name, NORMALIZED
+        endpoint, NORMALIZED model tag. Every set in this pass is built
+        through here, so a trailing slash or a bare-vs-tagged model id
+        can never make two spellings of the same model look like two
+        different models (the mismatch `models.registry.discovery`'s
+        module docstring describes for `discover()`'s own merge)."""
+        return (engine_name, norm_endpoint(endpoint), norm_tag(model_id))
+
+    @staticmethod
+    def _own_keys_by_job(claimed: list[dict]) -> dict[int, set[tuple[str, str, str]]]:
+        """Each admitted-EXCLUSIVE job's OWN keys, by job id. A
+        non-exclusive admission contributes nothing: the §3.3(c)
+        exception, and the barrier, are both written for the job that was
+        entitled to the whole machine, never for an ordinary peer."""
+        return {
+            descriptor["id"]: {
+                Worker._key(ref["engine"], ref["endpoint"], ref["model_id"])
+                for ref in descriptor["model_refs"]
+            }
+            for descriptor in claimed
+            if descriptor.get("exclusive")
+        }
+
+    def _protected_keys(self) -> set[tuple[str, str, str]]:
+        """THE ONE SAFETY SET (spec §3.3c): every model key this process
+        must not take out from under live work. Two halves, and each
+        covers a case the other cannot see.
+
+        FIRST HALF, every RUNNING job's keys. `claim_and_admit` has
+        already persisted THIS tick's admissions as `running` by the time
+        any of this runs, so one query covers "running union admitted"
+        without merging two collections -- which matters concretely
+        because an agent turn is planned EXCLUSIVE, so every chat turn
+        runs this pass, and an unprotected definition would unload that
+        turn's own warm chat model and cold-load it again on every single
+        message.
+
+        SECOND HALF, every attempt still IN FLIGHT in this process
+        (`self._inflight_refs`). An attempt the orphan sweep requeued
+        while its handler is genuinely still mid-cold-load has a row back
+        at `queued` -- invisible to the RUNNING query above -- for exactly
+        as long as that cold load takes, which is the window this half
+        exists for (Q11).
+
+        No `claimed` parameter, deliberately: everything here comes from
+        the RUNNING query and from this process's own map. Both maps are
+        read without a lock, because both are tick-thread-only (see
+        `_prune_finished_futures`'s docstring).
+        """
+        keys: set[tuple[str, str, str]] = set()
+        for model_refs in InferenceJob.objects.filter(state=RUNNING).values_list(
+            "model_refs", flat=True
+        ):
+            for ref in model_refs:
+                keys.add(self._key(ref["engine"], ref["endpoint"], ref["model_id"]))
+        for refs in list(self._inflight_refs.values()):
+            for ref in refs:
+                keys.add(self._key(ref["engine"], ref["endpoint"], ref["model_id"]))
+        return keys
+
+    def _eviction_targets(self, claimed: list[dict]) -> tuple[
+        set[tuple[str, str]],
+        set[tuple[str, str]],
+        dict[tuple[str, str], tuple[str, ...]],
+    ] | None:
         """PHASE 1 of `_evict_to_match_plan` (which see for the whole
         argument): what the machine is supposed to be holding.
 
-        `(needed_keys, endpoints, exclusive_endpoints)`, or `None` when
-        no job is RUNNING -- the caller returns immediately on `None`,
-        which is what stops the engine being probed for nothing.
+        `(endpoints, own_endpoints, model_ids_by_endpoint)`, or `None`
+        when no job is RUNNING -- the caller returns immediately on
+        `None`, which is what stops the engine being probed for nothing.
 
-        `needed_keys`/`endpoints` come from RUNNING jobs' `model_refs`.
-        By the time this runs, `claim_and_admit` has already persisted
-        THIS tick's admissions as `running`, so one query covers
-        "running union admitted" without merging two collections.
-        `exclusive_endpoints` comes from `claimed` instead -- an
-        admitted-and-exclusive job's own endpoints, derived from THIS
-        tick's batch and never recomputed later."""
+        `endpoints` is the set to SWEEP this tick. It starts as the
+        RUNNING jobs' own endpoints and is unioned with
+        `models.registry.bindings.registered_endpoints()` -- the one
+        notion of "every engine endpoint this box knows about" -- ONLY ON
+        A TICK THAT ADMITS AN EXCLUSIVE JOB (spec §3.3e). That bound is
+        the whole cost control: only the admission entitled to the whole
+        machine pays for the whole machine to be probed, and a
+        non-exclusive tick keeps exactly today's reach. A model left warm
+        on an IDLE engine was never visited before, which is the literal
+        host-crash shape this widening exists for (Q4).
+
+        The widening also makes `over_budget` mean something WIDER on
+        those ticks -- more endpoints counted means more resident bytes
+        counted. Deliberate: under-counting resident memory is the
+        direction that crashes hosts.
+
+        `own_endpoints` is the admitted exclusive job's OWN endpoints,
+        derived from THIS tick's batch and never recomputed later.
+
+        AND IT IS THE WIDENING PREDICATE TOO, not "any exclusive
+        descriptor" -- the two used to be different expressions and could
+        disagree on one reachable case: an exclusive job declaring NO
+        `model_refs` at all. `own_endpoints` is built from those refs, so
+        it is empty for such a job, while `any(exclusive)` was true -- a
+        tick that paid the whole `registered_endpoints()` cross-engine
+        probe and then evicted nothing and barriered nothing, because
+        `_evict_to_match_plan` gates pass 1 and the barrier on
+        `own_endpoints`. One expression now, so the sweep widens on
+        exactly the condition the pass fires on, and such a job keeps
+        today's reach instead of buying a probe it cannot use.
+
+        `model_ids_by_endpoint` is what each endpoint can be ADDRESSED by,
+        from the same `registered_endpoints()` call -- the unload seam
+        takes a `model_id`, so a foreign endpoint with no connection row
+        yields an empty tuple and cannot be addressed at all (a named
+        residual, spec §11, never papered over with a synthetic id).
+        """
         running_refs = list(
             InferenceJob.objects.filter(state=RUNNING).values_list("model_refs", flat=True)
         )
         if not running_refs:
             return None
 
-        needed_keys: set[tuple[str, str, str]] = set()
         endpoints: set[tuple[str, str]] = set()
         for model_refs in running_refs:
             for ref in model_refs:
-                key = (ref["engine"], norm_endpoint(ref["endpoint"]), norm_tag(ref["model_id"]))
-                needed_keys.add(key)
-                endpoints.add((key[0], key[1]))
+                endpoints.add((ref["engine"], norm_endpoint(ref["endpoint"])))
 
-        exclusive_endpoints: set[tuple[str, str]] = {
+        own_endpoints: set[tuple[str, str]] = {
             (ref["engine"], norm_endpoint(ref["endpoint"]))
             for descriptor in claimed
             if descriptor.get("exclusive")
             for ref in descriptor["model_refs"]
         }
-        return needed_keys, endpoints, exclusive_endpoints
+
+        model_ids_by_endpoint: dict[tuple[str, str], tuple[str, ...]] = {}
+        if own_endpoints:
+            for engine_name, endpoint, model_ids in registered_endpoints():
+                endpoints.add((engine_name, endpoint))
+                model_ids_by_endpoint[(engine_name, endpoint)] = model_ids
+
+        return endpoints, own_endpoints, model_ids_by_endpoint
 
     def _residency_snapshot(
         self,
         endpoints: set[tuple[str, str]],
         claimed: list[dict],
-        budget_bytes: int,
-    ) -> tuple[dict[tuple[str, str], list], bool]:
+        budget_bytes: int | None,
+    ) -> tuple[dict[tuple[str, str], list], set[tuple[str, str, str]], bool]:
         """PHASE 2 of `_evict_to_match_plan` (which see): what the
         machine is ACTUALLY holding, and whether that plus what is about
         to load exceeds the budget.
 
-        `(installed_by_endpoint, over_budget)`. An endpoint is in the
-        dict ONLY if its engine resolved, offered `list_installed`, and
-        that call returned -- so an engine that lacks the method (warned
-        once, per engine+method) or whose call raised (logged; eviction
-        must never block a launch) is absent from the dict and is
-        therefore untouched by both eviction passes.
+        `(installed_by_endpoint, believed_resident, over_budget)`. An
+        endpoint is in the dict ONLY if its engine resolved, offered
+        `list_installed`, and that call returned -- so an engine that
+        lacks the method (warned once, per engine+method) or whose call
+        raised (logged; eviction must never block a launch) is absent from
+        the dict and is therefore untouched by both eviction passes. The
+        barrier reads that same absence as "the belief here is worth
+        nothing" (§3.3d(3)).
+
+        `believed_resident` is every key this snapshot says is loaded --
+        the pre-eviction belief spec §3.6's affinity cache subtracts this
+        pass's own releases from.
 
         `over_budget` is `actual_resident_bytes + admitted_marginal >
-        budget_bytes`. Both halves keep their exact prior arithmetic --
-        see the two inline comments below, which are the reasoning for
-        the deliberate under-count and for the MAX fold, and are the
-        parts of this function most likely to be 'tidied' into a bug."""
+        budget_bytes`, and is `False` WHENEVER `budget_bytes` is `None`:
+        it is the one verdict in this pass that is arithmetic against a
+        number that may not exist. Both halves keep their exact prior
+        arithmetic -- see the two inline comments below, which are the
+        reasoning for the deliberate under-count and for the MAX fold, and
+        are the parts of this function most likely to be 'tidied' into a
+        bug."""
         installed_by_endpoint: dict[tuple[str, str], list] = {}
+        believed_resident: set[tuple[str, str, str]] = set()
         resident_sizes: dict[tuple[str, str, str], int | None] = {}
         for engine_name, endpoint in endpoints:
             engine_obj = self._get_engine_or_none(engine_name)
@@ -926,8 +1609,15 @@ class Worker:
             try:
                 installed = list_installed(endpoint)
             except Exception:  # noqa: BLE001 - eviction must never block a launch
-                logger.warning(
-                    "worker: eviction could not list installed models at %s (%s)",
+                # A SKIP a human would otherwise have to infer from an
+                # eviction that simply never happened (§3.3g). INFO, not
+                # WARNING: there is nothing an operator does about one
+                # engine being briefly unreachable, and the barrier
+                # already treats this absence as "the belief here is
+                # worth nothing".
+                logger.info(
+                    "worker: eviction could not list installed models at %s (%s) -- "
+                    "that endpoint is skipped this tick",
                     endpoint, engine_name,
                 )
                 continue
@@ -935,8 +1625,19 @@ class Worker:
             for model in installed:
                 if not model.loaded:
                     continue
-                key = (engine_name, norm_endpoint(endpoint), norm_tag(model.model_id))
+                key = self._key(engine_name, endpoint, model.model_id)
+                believed_resident.add(key)
                 resident_sizes[key] = getattr(model, "loaded_size", None)
+
+                if getattr(model, "loaded_size", None):
+                    # RUNG 3 (spec §3.1), from a snapshot already on the
+                    # wire -- never a call made for this purpose. Only a
+                    # POSITIVE reading is written: a `None` or zero size
+                    # writes nothing, never a zero, because a zero would
+                    # read back as a real "this model is free" answer.
+                    record_engine_reported_footprint(
+                        engine_name, endpoint, model.model_id, model.loaded_size,
+                    )
 
         # `resident_sizes[key]` is `None` for a model `list_installed`
         # reports as loaded but with no size attached (an adapter/engine
@@ -965,132 +1666,570 @@ class Worker:
         admitted_new_keys: dict[tuple[str, str, str], int] = {}
         for descriptor in claimed:
             for ref in descriptor["model_refs"]:
-                key = (ref["engine"], norm_endpoint(ref["endpoint"]), norm_tag(ref["model_id"]))
+                key = self._key(ref["engine"], ref["endpoint"], ref["model_id"])
                 if key in resident_sizes:
                     continue
                 size = ref.get("footprint_bytes") or 0
                 admitted_new_keys[key] = max(admitted_new_keys.get(key, 0), size)
         admitted_marginal = sum(admitted_new_keys.values())
-        over_budget = actual_resident_bytes + admitted_marginal > budget_bytes
-        return installed_by_endpoint, over_budget
+
+        over_budget = (
+            budget_bytes is not None
+            and actual_resident_bytes + admitted_marginal > budget_bytes
+        )
+        # The two numbers the pass's own INFO line renders (§3.3g),
+        # reported beside the three-element return rather than folded
+        # into it -- they are how the verdict was reached, not part of
+        # the verdict.
+        self._last_snapshot_bytes = (actual_resident_bytes, admitted_marginal)
+        return installed_by_endpoint, believed_resident, over_budget
+
+    def _unload_endpoint(
+        self, engine_name: str, endpoint: str, installed: list, *,
+        protected_keys: set[tuple[str, str, str]],
+        own_keys: set[tuple[str, str, str]],
+        reason: str,
+        limit: int | None = None,
+    ) -> set[tuple[str, str, str]]:
+        """Unload what may be unloaded at ONE endpoint, and return the set
+        of keys that were actually RELEASED.
+
+        THE RETURN IS A KEY SET, NOT A COUNT, for one concrete reason: at
+        `"endpoint"` scope a single call frees EVERY believed-resident
+        model there, so "what was released" is not "the key that was
+        addressed", and spec §3.6's affinity cache has to subtract the
+        real set.
+
+        THE PROTECTION RULE, applied per scope (spec §3.3c):
+
+        - `"model"` scope -- skip protected keys one by one; everything
+          else at the endpoint is unloaded individually.
+        - `"endpoint"` scope -- ONE call frees everything here, so the
+          WHOLE endpoint is skipped if any protected key lives at it...
+        - ...UNLESS every protected key here belongs to `own_keys`: the
+          admitted exclusive job's OWN keys at its OWN endpoint. Freeing
+          that endpoint unavoidably takes its own model with it and there
+          is no per-model call to make instead, so the barrier proceeds and
+          the job pays at worst one reload. `own_keys` is EMPTY for every
+          other caller, which is what keeps this exception to the one case
+          it is written for.
+
+        `reason` is the log vocabulary's "why" (`not needed at an exclusive
+        endpoint` / `over budget` / `precautionary barrier`). DECLARED HERE
+        IN COMMIT 1 AND FIRST READ IN COMMIT 3, deliberately: the signature
+        is final from the start so no later commit revises it.
+
+        `limit` caps the calls issued here, for the budget-driven pass's
+        share of `MAX_UNLOADS_PER_TICK`; `None` is uncapped. How many
+        calls were actually issued is reported in
+        `self._last_unload_calls`, reset at the top of every invocation
+        and read by the capped pass immediately afterwards -- it cannot
+        be read off the return value, because a released key is not a
+        call (at endpoint scope ONE call releases every key there).
+
+        `self._maybe_heartbeat()` is called after EVERY unload call, not
+        once around the loop -- that is what makes an uncapped exclusive
+        pass safe, and hoisting it out reintroduces the stale-row window
+        this pass was fixed to close.
+        """
+        self._last_unload_calls = 0
+        engine_obj = self._get_engine_or_none(engine_name)
+        if engine_obj is None:
+            return set()
+        unload = getattr(engine_obj, "unload", None)
+        if unload is None:
+            self._warn_missing_method_once(engine_name, "unload")
+            return set()
+
+        resident = [model for model in installed if model.loaded]
+        if not resident:
+            return set()
+
+        if self._unload_scope(engine_obj) == "endpoint":
+            return self._unload_whole_endpoint(
+                unload, engine_name, endpoint, resident,
+                protected_keys=protected_keys, own_keys=own_keys, reason=reason, limit=limit,
+            )
+
+        released: set[tuple[str, str, str]] = set()
+        issued = 0
+        for model in resident:
+            if limit is not None and issued >= limit:
+                break
+            key = self._key(engine_name, endpoint, model.model_id)
+            if key in protected_keys:
+                continue
+            issued += 1
+            self._last_unload_calls += 1
+            accepted = unload(endpoint, model.model_id)
+            if accepted:
+                released.add(key)
+            else:
+                # An INFORMATIVE refusal: the call was made against a
+                # model this snapshot says is resident, so `False` means
+                # what it says (§3.3d(4)) and the barrier may honour it.
+                # INFO here, not WARNING: the line an operator can act on
+                # is `_barrier`'s, which knows whether this refusal
+                # actually blocked a launch.
+                self._unload_refusals.add(key)
+            self._log_unload(engine_name, endpoint, model.model_id, "model", reason, accepted)
+            # After EVERY call, never once around the loop -- see this
+            # method's docstring. `_maybe_heartbeat`'s own
+            # `HEARTBEAT_SECONDS` throttle bounds this to at most one
+            # actual UPDATE every 10s however many times it is called.
+            self._maybe_heartbeat()
+        return released
+
+    def _unload_whole_endpoint(
+        self, unload, engine_name: str, endpoint: str, resident: list, *,
+        protected_keys: set[tuple[str, str, str]],
+        own_keys: set[tuple[str, str, str]],
+        reason: str,
+        limit: int | None,
+    ) -> set[tuple[str, str, str]]:
+        """`_unload_endpoint`'s `"endpoint"`-scope half, split out only so
+        neither branch has to be read through the other. ONE call, which
+        frees everything believed resident here -- so the decision is
+        all-or-nothing and `model_id` is addressing, not selection."""
+        keys = {self._key(engine_name, endpoint, model.model_id) for model in resident}
+        protected_here = keys & protected_keys
+        if protected_here and not protected_here <= own_keys:
+            logger.warning(
+                "worker: eviction skipped the whole endpoint %s (%s) -- one unload there "
+                "frees everything, and %s is protected by live work (%s)",
+                endpoint, engine_name,
+                ", ".join(sorted(key[2] for key in protected_here)),
+                reason,
+            )
+            return set()
+        if limit is not None and limit < 1:
+            return set()
+
+        addressed = resident[0].model_id
+        self._last_unload_calls += 1
+        accepted = unload(endpoint, addressed)
+        self._maybe_heartbeat()
+        self._log_unload(engine_name, endpoint, addressed, "endpoint", reason, accepted)
+        if not accepted:
+            # Informative for every key here, not only the one addressed:
+            # at this scope the call was made against the whole
+            # believed-resident set (§3.3d(4)).
+            self._unload_refusals |= keys
+            return set()
+        return keys
+
+    @staticmethod
+    def _log_unload(
+        engine_name: str, endpoint: str, model_id: str, scope: str, reason: str, accepted: bool,
+    ) -> None:
+        """ONE INFO LINE PER UNLOAD ATTEMPT, in the stable vocabulary spec
+        §3.3(g) fixes: who (engine, endpoint, model), at what granularity
+        (`model` / `endpoint`), WHY (`not needed at an exclusive endpoint`
+        / `over budget` / `precautionary barrier` -- `_unload_endpoint`'s
+        `reason`), and the RESULT (`accepted` / `refused`; `unavailable`
+        is the third result and belongs to an engine offering no
+        `unload()` at all, said once per engine+method by
+        `_warn_missing_method_once`).
+
+        Deliberately not a WARNING even when refused: a successful
+        eviction used to be silent and a `False` was the only thing this
+        pass ever logged, which is precisely the asymmetry that left an
+        operator watching a host fill up unable to tell "nothing needed
+        evicting" from "everything was skipped". WARNING is reserved for
+        what an operator can act on, and whether a refusal is actionable
+        is `_barrier`'s question, not this one's."""
+        logger.info(
+            "worker: unload %s at %s (%s), scope %s, %s -- %s",
+            model_id, endpoint, engine_name, scope, reason,
+            "accepted" if accepted else "refused",
+        )
 
     def _evict_exclusive_endpoints(
         self,
-        exclusive_endpoints: set[tuple[str, str]],
+        endpoints: set[tuple[str, str]],
         installed_by_endpoint: dict[tuple[str, str], list],
-        needed_keys: set[tuple[str, str, str]],
-    ) -> None:
+        protected_keys: set[tuple[str, str, str]],
+        own_keys: set[tuple[str, str, str]],
+    ) -> set[tuple[str, str, str]]:
         """PASS 1 of `_evict_to_match_plan` (which see for the full
-        argument): every non-needed resident model at an endpoint an
-        admitted-EXCLUSIVE job owns is unloaded, full stop.
+        argument): on a tick that admits an EXCLUSIVE job, every
+        non-protected resident model at every endpoint in the swept set is
+        unloaded, full stop. Returns the union of released keys.
+
+        THE SWEPT SET, NOT ONLY THE JOB'S OWN ENDPOINTS (spec §3.3e): a
+        model left warm on an idle FOREIGN engine occupies the same
+        memory as one at the job's own address, and it was the endpoint
+        this pass never visited.
 
         UNCAPPED, deliberately -- NOT subject to `MAX_UNLOADS_PER_TICK`.
         The safety mechanism is not the cap: `tick()` registers this
-        batch's tokens in `self._active_tokens` BEFORE calling the
-        caller at all, so `self._maybe_heartbeat()` -- called after every
-        unload attempt in the loop below, not once around it --
-        genuinely refreshes the exclusive job's row DURING this pass.
-        Removing that call, or hoisting it out of the loop, reintroduces
-        the stale-row window this pass was fixed to close."""
-        # Pass 1: exclusive-endpoint eviction -- UNCAPPED (see this
-        # function's docstring for why). Every non-needed resident model
-        # at an endpoint an admitted-exclusive job owns is unloaded,
-        # full stop.
-        for engine_name, endpoint in exclusive_endpoints:
-            installed = installed_by_endpoint.get((engine_name, endpoint))
+        batch's tokens in `self._active_tokens` BEFORE calling the caller
+        at all, so `self._maybe_heartbeat()` -- called after every unload
+        attempt inside `_unload_endpoint`, not once around it -- genuinely
+        refreshes the exclusive job's row DURING this pass. Removing that
+        call, or hoisting it out of the loop, reintroduces the stale-row
+        window this pass was fixed to close."""
+        released: set[tuple[str, str, str]] = set()
+        for key in sorted(endpoints):
+            installed = installed_by_endpoint.get(key)
             if installed is None:
                 continue
-            engine_obj = self._get_engine_or_none(engine_name)
-            if engine_obj is None:
-                continue
-            unload = getattr(engine_obj, "unload", None)
-            if unload is None:
-                self._warn_missing_method_once(engine_name, "unload")
-                continue
-
-            for model in installed:
-                if not model.loaded:
-                    continue
-                key = (engine_name, endpoint, norm_tag(model.model_id))
-                if key in needed_keys:
-                    continue
-                if not unload(endpoint, model.model_id):
-                    logger.warning(
-                        "worker: eviction unload refused for %s at %s (%s)",
-                        model.model_id, endpoint, engine_name,
-                    )
-                # Uncapped pass -- refresh the heartbeat after every
-                # unload attempt, not just once before/after the whole
-                # pass. `_maybe_heartbeat`'s own `HEARTBEAT_SECONDS`
-                # throttle bounds this to at most one actual UPDATE every
-                # 10s regardless of how many times it's called here (still
-                # single-writer, still this same tick thread) -- this is
-                # what makes an uncapped exclusive pass of any length safe
-                # (see this function's docstring, point (c)).
-                self._maybe_heartbeat()
+            engine_name, endpoint = key
+            released |= self._unload_endpoint(
+                engine_name, endpoint, installed,
+                protected_keys=protected_keys, own_keys=own_keys,
+                reason="not needed at an exclusive endpoint",
+            )
+        return released
 
     def _evict_for_budget(
         self,
         installed_by_endpoint: dict[tuple[str, str], list],
-        exclusive_endpoints: set[tuple[str, str]],
-        needed_keys: set[tuple[str, str, str]],
-    ) -> None:
+        already_swept: set[tuple[str, str]],
+        protected_keys: set[tuple[str, str, str]],
+    ) -> set[tuple[str, str, str]]:
         """PASS 2 of `_evict_to_match_plan` (which see): non-exclusive,
         budget-driven eviction, CAPPED at `MAX_UNLOADS_PER_TICK` unload
-        calls per call.
+        calls per call. Returns the union of released keys.
 
-        Called only when phase 2 said `over_budget` -- the caller makes
-        that decision, so this method's own loop no longer re-checks a
-        flag that cannot change inside it.
+        Called only when phase 2 said `over_budget` -- which is itself
+        only ever true when a budget exists, so this is the ONE mechanism
+        in the pass that still needs one. The caller makes that decision,
+        so this method's own loop no longer re-checks a flag that cannot
+        change inside it.
 
-        `unloads_this_tick` is ONE counter across the endpoint loop and
-        the model loop, with a `break` in each: the cap bounds total
-        unload calls, not calls per endpoint. This runs on the heartbeat
-        thread, and an unbounded run of slow `unload()` calls would eat
-        the margin `STALE_AFTER_SECONDS` assumes. Whatever this cap
-        leaves undone is picked up on a later tick that itself admits
-        something -- not necessarily the next one."""
-        # Pass 2: non-exclusive, budget-driven eviction -- capped at
-        # MAX_UNLOADS_PER_TICK (see that constant's comment). Exclusive
-        # endpoints are skipped here -- pass 1 above already handled them,
-        # uncapped.
-        unloads_this_tick = 0
-        for (engine_name, endpoint), installed in installed_by_endpoint.items():
-            if (engine_name, endpoint) in exclusive_endpoints:
-                continue
-            if unloads_this_tick >= MAX_UNLOADS_PER_TICK:
+        `remaining` is ONE allowance across the endpoint loop: the cap
+        bounds total unload calls, not calls per endpoint. This runs on
+        the tick thread, and an unbounded run of slow `unload()` calls
+        would eat the margin `STALE_AFTER_SECONDS` assumes. Whatever this
+        cap leaves undone is picked up on a later tick that itself admits
+        something -- not necessarily the next one.
+
+        `already_swept` is whatever pass 1 covered, skipped here so an
+        endpoint it emptied uncapped is not nibbled at again under the
+        cap.
+
+        THIS PASS'S UNLOAD REFUSALS ARE NEVER BARRIER EVIDENCE, and the
+        reason is an ORDERING rather than a filter. `_unload_endpoint`
+        records a `False` answer in `self._unload_refusals`, shared with
+        pass 1 -- but the caller runs `_barrier` BEFORE this pass and
+        `_evict_to_match_plan` rebinds the set at the top of the next
+        one, so what this pass writes there is read by nothing and the
+        writes are inert. That is correct: §3.3d(4) sanctions barrier
+        evidence from the exclusive pass only, so a budget-driven
+        refusal -- which is about memory pressure, not about an engine
+        declining to release a model the admitted job needs -- must not
+        fail a job. IF THE ORDERING EVER CHANGES and the barrier comes to
+        read the set after this pass, the set must be scoped to pass 1
+        (an out-parameter on `_unload_endpoint`, or a separate set here)
+        rather than left shared, or budget refusals will start failing
+        exclusive jobs silently."""
+        released: set[tuple[str, str, str]] = set()
+        remaining = MAX_UNLOADS_PER_TICK
+        for key in sorted(installed_by_endpoint):
+            if remaining < 1:
                 break
+            if key in already_swept:
+                continue
+            engine_name, endpoint = key
+            released |= self._unload_endpoint(
+                engine_name, endpoint, installed_by_endpoint[key],
+                protected_keys=protected_keys, own_keys=set(),
+                reason="over budget", limit=remaining,
+            )
+            # The allowance is spent per CALL ISSUED, which is what the
+            # cap bounds -- not per key RELEASED, which at endpoint scope
+            # would charge one call several times over. That is why the
+            # count comes back beside the key set rather than in it.
+            remaining -= self._last_unload_calls
+        if remaining < 1:
+            # A SKIP a human would otherwise have to infer (§3.3g): an
+            # eviction that stopped short looks identical to one that had
+            # nothing left to do.
+            logger.info(
+                "worker: budget-driven eviction hit its cap of %s unload calls this tick; "
+                "whatever is left is picked up on a later admitting tick",
+                MAX_UNLOADS_PER_TICK,
+            )
+        return released
+
+    # --- the exclusive barrier (spec §3.3d) ---------------------------------
+
+    def _protection_refusal(
+        self, claimed: list[dict], endpoints: set[tuple[str, str]],
+        protected_keys: set[tuple[str, str, str]],
+        own_keys_by_job: dict[int, set[tuple[str, str, str]]],
+    ) -> set[int]:
+        """PART 2 of the barrier (§3.3d(2)): an admitted EXCLUSIVE job is
+        not launched this tick if ANY endpoint in the swept set holds a
+        protected key that is not its own. Returns the job ids refused,
+        having already handed each one back to the queue.
+
+        BEFORE ANY HTTP -- `_evict_to_match_plan`'s FIFTH ORDERING RULE,
+        and the ordering is about cost, not taste: `protected_keys` comes
+        from database rows and this process's own maps and needs no
+        network at all, while evaluating it AFTER the residency snapshot
+        would pay a full cross-engine probe on every 0.5s tick for the
+        entire life of the protecting attempt -- a cold load measured in
+        minutes on this hardware.
+
+        THE §3.3(c) EXCEPTION IS INCLUDED, which is why `own_keys_by_job`
+        is a parameter: the admitted job's OWN key at its OWN endpoint
+        does not refuse its own launch. Anything else does, at either
+        unload scope -- a model-scope endpoint can spare the protected
+        model, but the memory it occupies is memory the exclusive job was
+        promised and is not going to get this tick.
+
+        NEVER TOUCHES `self._barrier_refusals` (review M6). Spec §3.3d(5)
+        counts INFORMATIVE refusals; this wait is bounded by the live
+        attempt's own end, and since an agent turn is planned exclusive,
+        counting it would fail three consecutive chat turns for an
+        ordinary long-running foreign job at a shared endpoint -- a job
+        the queue was correctly waiting for.
+        """
+        refused: set[int] = set()
+        for descriptor in claimed:
+            own_keys = own_keys_by_job.get(descriptor["id"])
+            if own_keys is None:
+                continue
+            blocking = sorted(
+                key for key in protected_keys
+                if (key[0], key[1]) in endpoints and key not in own_keys
+            )
+            if not blocking:
+                continue
+            engine_name, endpoint, _model_id = blocking[0]
+            logger.warning(
+                "worker: not launching exclusive job %s this tick -- %s at %s (engine %r) "
+                "is protected by live work; the job is queued again for %ss",
+                descriptor["id"], ", ".join(key[2] for key in blocking), endpoint,
+                engine_name, BARRIER_HOLDOFF_SECONDS,
+            )
+            self._requeue_refused(descriptor)
+            refused.add(descriptor["id"])
+        return refused
+
+    def _barrier(
+        self, claimed: list[dict], endpoints: set[tuple[str, str]],
+        installed_by_endpoint: dict[tuple[str, str], list],
+        model_ids_by_endpoint: dict[tuple[str, str], tuple[str, ...]],
+        protected_keys: set[tuple[str, str, str]],
+        own_keys_by_job: dict[int, set[tuple[str, str, str]]],
+    ) -> set[int]:
+        """PARTS 3 AND 4 of the barrier: the PRECAUTIONARY calls, and then
+        reading what the unload calls actually said. Returns the job ids
+        refused by an INFORMATIVE `False`, having already handed each one
+        back to the queue (or failed it, once both bounds are met).
+
+        Runs AFTER `_evict_exclusive_endpoints`, whose calls against
+        believed-resident models are the ones whose answers count -- they
+        arrive here through `self._unload_refusals`.
+
+        A PRECAUTIONARY CALL is issued at an endpoint where the belief is
+        worth nothing: either `installed_by_endpoint` has no entry for it
+        (the snapshot was unavailable or raised) or the entry has no
+        loaded model AND the engine declares -- or defaults to --
+        `residency_authority="memo"`. An engine declaring
+        `residency_authority="endpoint"` that reports nothing gets NO
+        call: it actually knows nothing is resident, so there is nothing
+        to barrier and nothing its answer could add, and that narrowing is
+        what keeps a 30s no-rise poll off every chat turn.
+
+        A PRECAUTIONARY `False` IS INFO AND DOES NOT REFUSE (§3.3d(4)):
+        the adapter cannot tell "nothing freed" from "nothing to free",
+        and a cold, empty endpoint is the common case after a restart --
+        a rule that refused there would make an exclusive job
+        unlaunchable not for one tick but for ever.
+        """
+        for endpoint_key in sorted(endpoints):
+            engine_name, endpoint = endpoint_key
+            installed = installed_by_endpoint.get(endpoint_key)
+            if installed is not None and any(model.loaded for model in installed):
+                continue
             engine_obj = self._get_engine_or_none(engine_name)
             if engine_obj is None:
+                continue
+            if installed is not None and self._residency_authority(engine_obj) == "endpoint":
                 continue
             unload = getattr(engine_obj, "unload", None)
             if unload is None:
                 self._warn_missing_method_once(engine_name, "unload")
                 continue
+            addressed = self._barrier_address(endpoint_key, claimed, model_ids_by_endpoint)
+            if addressed is None:
+                logger.info(
+                    "worker: no precautionary barrier call at %s (%s) -- nothing registered "
+                    "there supplies a model id to address the unload with",
+                    endpoint, engine_name,
+                )
+                continue
 
-            for model in installed:
-                if unloads_this_tick >= MAX_UNLOADS_PER_TICK:
-                    break
-                if not model.loaded:
-                    continue
-                key = (engine_name, endpoint, norm_tag(model.model_id))
-                if key in needed_keys:
-                    continue
-                unloads_this_tick += 1
-                if not unload(endpoint, model.model_id):
-                    logger.warning(
-                        "worker: eviction unload refused for %s at %s (%s)",
-                        model.model_id, endpoint, engine_name,
-                    )
+            # THE PRECAUTIONARY CALL DOES NOT ROUTE THROUGH
+            # `_unload_endpoint`, and cannot: there is no
+            # believed-resident model to iterate. `_unload_endpoint` is
+            # the one place a BELIEVED-RESIDENT model is unloaded; this
+            # is the one place a call is made precisely because the
+            # belief is worth nothing. Its `False` is INFO and does not
+            # refuse (§3.3d(4)).
+            accepted = unload(endpoint, addressed)
+            self._maybe_heartbeat()
+            self._log_unload(
+                engine_name, endpoint, addressed, self._unload_scope(engine_obj),
+                "precautionary barrier", accepted,
+            )
+
+        if not self._unload_refusals:
+            # A SUCCESSFUL barrier resets the count -- an engine that
+            # released its memory this time has not been failing for
+            # three spaced attempts.
+            for job_id in own_keys_by_job:
+                self._barrier_refusals.pop(job_id, None)
+            return set()
+
+        engine_name, endpoint, _model_id = sorted(self._unload_refusals)[0]
+        refused: set[int] = set()
+        for descriptor in claimed:
+            job_id = descriptor["id"]
+            if job_id not in own_keys_by_job:
+                continue
+            logger.warning(
+                "worker: not launching exclusive job %s this tick -- engine %r at %s refused "
+                "to release %s; the job is queued again for %ss",
+                job_id, engine_name, endpoint,
+                ", ".join(sorted(key[2] for key in self._unload_refusals)),
+                BARRIER_HOLDOFF_SECONDS,
+            )
+            if self._record_barrier_refusal(job_id):
+                first = self._barrier_refusals[job_id][1]
+                self._fail_barrier_refused(
+                    descriptor, engine_name, endpoint, time.monotonic() - first,
+                )
+            else:
+                self._requeue_refused(descriptor)
+            refused.add(job_id)
+        return refused
+
+    @staticmethod
+    def _barrier_address(
+        endpoint_key: tuple[str, str], claimed: list[dict],
+        model_ids_by_endpoint: dict[tuple[str, str], tuple[str, ...]],
+    ) -> str | None:
+        """SOME model id to address a precautionary unload at this
+        endpoint with, or `None` when nothing supplies one.
+
+        The admitted exclusive job's OWN ref wins where the endpoint is
+        its own -- that is the model it is about to load, named in the
+        spelling the job itself uses. Otherwise the endpoint's registered
+        connection ids, from `registered_endpoints()`. A CONFIGURED
+        endpoint with no connection row yields neither, and is simply not
+        barriered: a named residual (spec §11), never papered over with a
+        synthetic id the engine would not recognise.
+        """
+        for descriptor in claimed:
+            if not descriptor.get("exclusive"):
+                continue
+            for ref in descriptor["model_refs"]:
+                if (ref["engine"], norm_endpoint(ref["endpoint"])) == endpoint_key:
+                    return ref["model_id"]
+        model_ids = model_ids_by_endpoint.get(endpoint_key) or ()
+        return model_ids[0] if model_ids else None
+
+    def _record_barrier_refusal(self, job_id: int) -> bool:
+        """Count one INFORMATIVE refusal for `job_id`, and answer whether
+        the job should now be FAILED -- `True` only once BOTH bounds are
+        met: `MAX_BARRIER_REFUSALS` refusals AND
+        `MIN_BARRIER_REFUSAL_SPAN_SECONDS` elapsed since the first.
+
+        Both, because counting refusals alone is a trap: an informative
+        `False` is exactly what a BUSY engine returns, so three of them
+        could elapse in barely more than the time three unload calls
+        take, and "three attempts" would mean "a second and a half".
+        """
+        count, first = self._barrier_refusals.get(job_id, (0, time.monotonic()))
+        count += 1
+        self._barrier_refusals[job_id] = (count, first)
+        return (
+            count >= MAX_BARRIER_REFUSALS
+            and (time.monotonic() - first) >= MIN_BARRIER_REFUSAL_SPAN_SECONDS
+        )
+
+    def _requeue_refused(self, descriptor: dict) -> None:
+        """Hand a REFUSED descriptor back to the queue with a hold-off.
+
+        POPS `self._active_tokens[job_id]` UNDER THE LOCK FIRST, before
+        the conditional UPDATE, matching `_requeue_unlaunched`'s shape and
+        for the reason that method's own docstring gives: a refused
+        descriptor never reaches `_launch`, so no `Future` exists for it
+        and `_prune_finished_futures` can never clean it up; a lingering
+        token would have `_maybe_heartbeat` refreshing a row that is
+        `queued` again, for ever.
+
+        `attempts` IS DELIBERATELY UNTOUCHED -- the job never ran. What
+        is written is the durable half of the mechanism: `not_before =
+        now + BARRIER_HOLDOFF_SECONDS`, which the candidate query honours
+        (`models.queue.claim`), so the job is not re-claimed on every
+        0.5s tick against an engine that is still holding memory.
+        Token-conditional for the same reason every other writeback in
+        this module is.
+        """
+        job_id = descriptor["id"]
+        with self._active_lock:
+            self._active_tokens.pop(job_id, None)
+        InferenceJob.objects.filter(
+            pk=job_id, state=RUNNING, claim_token=descriptor["claim_token"],
+        ).update(
+            state=QUEUED, claimed_by="", claim_token=None,
+            started_at=None, heartbeat_at=None,
+            not_before=timezone.now() + timedelta(seconds=BARRIER_HOLDOFF_SECONDS),
+        )
+
+    def _fail_barrier_refused(
+        self, descriptor: dict, engine_name: str, endpoint: str, span_seconds: float,
+    ) -> None:
+        """Fail a job that has now met BOTH refusal bounds, with an error
+        an operator can act on: which engine, at which address, refused to
+        release memory, how many attempts, over how long (owner decision
+        6 -- an honest job failure, never a silent forever-wait).
+
+        Pops the active token under the lock FIRST, exactly like
+        `_requeue_refused`, and schedules the kind's `on_terminal` hook
+        with `transaction.on_commit` the way
+        `models.queue.claim._sweep_orphans`'s second-orphaning branch
+        does -- a feature-app hook is arbitrary code and never runs inline
+        on this path.
+        """
+        job_id = descriptor["id"]
+        minutes = max(1, round(span_seconds / 60)) if span_seconds >= 30 else 0
+        error = (
+            "engine '%s' at %s did not release memory for this exclusive job after "
+            "%s attempts over %s minutes; it was not retried again"
+            % (engine_name, endpoint, MAX_BARRIER_REFUSALS, minutes)
+        )
+        with self._active_lock:
+            self._active_tokens.pop(job_id, None)
+        failed = InferenceJob.objects.filter(
+            pk=job_id, state=RUNNING, claim_token=descriptor["claim_token"],
+        ).update(state=FAILED, finished_at=timezone.now(), error=error)
+        self._barrier_refusals.pop(job_id, None)
+        if not failed:
+            return
+        logger.warning("worker: job %s failed -- %s", job_id, error)
+        transaction.on_commit(
+            lambda kind=descriptor["kind"], payload=descriptor["payload"]:
+            invoke_on_terminal(kind, payload, "failed")
+        )
 
     def _evict_to_match_plan(
         self, claimed: list[dict], *, settings_row: JobSettings | None = None,
-    ) -> None:
+    ) -> set[int]:
         """Admission (`models.queue.claim.claim_and_admit`) plans against
         RUNNING jobs' declared footprints; this function makes the
         machine's ACTUAL resident memory match that plan before any newly
         admitted job's handler starts -- called once per tick, right
         after `claim_and_admit`, before any of `claimed` is launched.
+        Returns the set of job ids this tick REFUSED to launch -- each
+        already handed back to the queue with a hold-off (or failed, once
+        both refusal bounds are met); `tick()` simply skips them.
 
         `settings_row` (S6) is `tick()`'s own already-fetched row,
         threaded in so the tick pays ONE `JobSettings` read rather than
@@ -1102,71 +2241,68 @@ class Worker:
         directly throughout) and eviction and admission still read the
         same budget when they are called separately.
 
-        A no-op in sequential mode (`memory_budget_bytes is None`): with no
-        budget, admission never runs more than one job at a time, so there
-        is nothing to evict for. Otherwise:
+        THE BUDGET GATES ONE PASS, NOT THE WHOLE FUNCTION. Phases 1 and 2,
+        the protected set, and the exclusive pass all run regardless of
+        `memory_budget_bytes`; only the capped, budget-driven pass checks
+        it, because it is the one mechanism whose decision is arithmetic
+        against a number that may not exist. This is not a tidy-up: "no
+        budget set" is the posture the field actually ran in, and a
+        whole-function early return there made every mechanism below dead
+        code exactly where it was needed.
 
-        1. `needed_keys`/`endpoints` -- every model key (and its engine,
-           endpoint) belonging to a currently-`running` job. By the time
-           this runs, `claim_and_admit` has already persisted this tick's
-           admissions as `running`, so one query covers "running ∪
-           admitted" without needing to merge two separate collections.
-        2. For each needed endpoint, read ACTUAL residency via the
-           engine's OPTIONAL `list_installed` (loaded flags) -- ground
-           truth, never a job row's merely-declared footprint.
-        3. Any RESIDENT model at a needed endpoint whose key is NOT in
-           `needed_keys` is a candidate for eviction. It is evicted
-           unconditionally if it sits at an endpoint an admitted-and-
-           EXCLUSIVE job owns (that job needs the machine, at its
-           endpoints, to itself); otherwise only if keeping it around
-           would exceed budget: `actual_resident_bytes + admitted_marginal
-           > budget_bytes`, where `admitted_marginal` is this tick's
-           admitted jobs' own footprint total for keys not already
-           actually resident (the memory they are ABOUT to consume once
-           their handler starts, which `list_installed` cannot see yet),
-           dedup'd/MAX-folded by key the same way `models.queue.scheduler`
-           dedups a resident set (rule 4).
+        1. `_eviction_targets` -- the endpoints to sweep, the admitted
+           exclusive job's own endpoints, and what each endpoint can be
+           addressed by. On an exclusive-admitting tick the swept set is
+           unioned with every registered engine endpoint (spec §3.3e).
+        2. `_protected_keys` -- every RUNNING job's keys (this tick's
+           admitted batch included, since the claim committed before this
+           pass runs) plus every attempt still in flight in this process.
+        3. `_residency_snapshot` -- ACTUAL residency at each swept
+           endpoint via the engine's OPTIONAL `list_installed` (loaded
+           flags), ground truth, never a job row's merely-declared
+           footprint; plus the rung-3 footprint harvest and the budget
+           verdict.
+        4. Pass 1, the exclusive pass, uncapped; then pass 2, the capped
+           budget-driven pass, only when the budget says so.
 
-        Exclusive-endpoint eviction (an admitted-EXCLUSIVE job's own
-        endpoints) is UNCAPPED -- deliberately NOT subject to
-        `MAX_UNLOADS_PER_TICK` (review finding, T4 round 3). Reasoning:
-        (a) this function is only ever called from `tick()`'s
+        FIVE ORDERING RULES, and none of them is optional: phase 1
+        answering `None` is what stops phase 2 probing an engine for
+        nothing; phase 2's `over_budget` is what gates pass 2 and nothing
+        else; pass 1 must run before pass 2 so an exclusive endpoint is
+        emptied uncapped rather than nibbled at under the cap; the
+        barrier's answers can only be read after pass 1 has made the
+        calls; and -- THE FIFTH -- the protection check runs BEFORE the
+        residency snapshot, because it needs no network and evaluating it
+        after would pay a full cross-engine probe on every 0.5s tick for
+        the entire life of the protecting attempt.
+
+        Exclusive-endpoint eviction is UNCAPPED -- deliberately NOT
+        subject to `MAX_UNLOADS_PER_TICK` (review finding, T4 round 3).
+        Reasoning: (a) this function is only ever called from `tick()`'s
         `if not claimed: return` branch, so it never runs at all on a
         tick that admits nothing; (b) once an exclusive job IS admitted,
         `models.queue.scheduler` rule 3 blocks every other admission for
         as long as it runs, so there is no future ADMITTING tick for a
-        capped leftover to be "picked up" on; and (c) `exclusive_endpoints`
-        is derived from THIS tick's own `claimed` batch, never
-        recomputed later, so a capped eviction here would leave unneeded
-        models permanently resident alongside a job that is supposed to
-        have its endpoints entirely to itself, for the rest of that job's
-        run. This is safe to leave uncapped for the REAL reason (an earlier
-        version of this docstring claimed the row's "freshly stamped"
-        heartbeat alone was protection enough, which was never actually
-        true on its own): `tick()`
-        registers this batch's tokens in `self._active_tokens` BEFORE
-        calling this function at all (moved there specifically for this),
-        so `self._maybe_heartbeat()`, called again inside this pass's own
-        model loop below, genuinely refreshes the exclusive job's row
-        DURING an uncapped, potentially long-running pass -- not just once,
-        before or after it. The loop is additionally bounded in practice by
-        however many models can physically be loaded at one endpoint (a
-        handful, not an adversarial N), but that is a secondary comfort,
-        not the actual safety mechanism.
+        capped leftover to be "picked up" on; and (c) the swept set is
+        derived from THIS tick's own `claimed` batch, never recomputed
+        later, so a capped eviction here would leave unneeded models
+        permanently resident alongside a job that is supposed to have the
+        machine to itself, for the rest of that job's run. It is safe to
+        leave uncapped because `tick()` registers this batch's tokens in
+        `self._active_tokens` BEFORE calling this function at all, so
+        `self._maybe_heartbeat()`, called inside `_unload_endpoint` after
+        every unload attempt, genuinely refreshes the exclusive job's row
+        DURING an uncapped, potentially long-running pass.
 
-        Non-exclusive, BUDGET-DRIVEN eviction (every other endpoint) IS
-        capped at `MAX_UNLOADS_PER_TICK` `unload()` calls per call to this
-        function -- this runs synchronously on the SAME thread `tick()`
-        calls it from (the heartbeat thread), and an unbounded loop of
-        slow/wedged `unload()` calls would eat directly into the margin
-        `STALE_AFTER_SECONDS` assumes (see that constant's comment);
-        `tick()` also writes a fresh heartbeat again immediately after
-        this function returns, before launching anything, precisely to
-        bound how much of that margin this function's own wall-clock time
-        can consume. Whatever budget-driven eviction this cap leaves
-        undone is picked up on a LATER tick -- but only one that itself
-        admits something (see `MAX_UNLOADS_PER_TICK`'s own comment); it is
-        not guaranteed to be the very next one.
+        Non-exclusive, BUDGET-DRIVEN eviction IS capped at
+        `MAX_UNLOADS_PER_TICK` `unload()` calls per call to this function
+        -- this runs synchronously on the SAME thread `tick()` calls it
+        from, and an unbounded loop of slow/wedged `unload()` calls would
+        eat directly into the margin `STALE_AFTER_SECONDS` assumes (see
+        that constant's comment); `tick()` also writes a fresh heartbeat
+        again immediately after this function returns, before launching
+        anything, precisely to bound how much of that margin this
+        function's own wall-clock time can consume.
 
         Every step degrades, never raises: an engine lacking
         `list_installed`/`unload` (read via `getattr`, per the engine
@@ -1176,32 +2312,93 @@ class Worker:
 
         The guiding principle, in one line: admission plans against
         running jobs; eviction makes the machine match the plan.
-
-        FOUR PHASES, FOUR METHODS (C-48a). This function is the ORDER; each
-        phase's own reasoning lives on its own method's docstring. Nothing
-        about the sequence is optional: phase 1 answering `None` is what stops
-        phase 2 probing an engine for nothing, phase 2's `over_budget` is what
-        gates pass 2 and nothing else, and pass 1 must run before pass 2 so an
-        exclusive endpoint is emptied uncapped rather than nibbled at under
-        the cap.
         """
         row = settings_row if settings_row is not None else JobSettings.get_solo()
         budget_bytes = row.memory_budget_bytes
-        if budget_bytes is None:
-            return
+        self._unload_refusals = set()
 
         targets = self._eviction_targets(claimed)
         if targets is None:
-            return
-        needed_keys, endpoints, exclusive_endpoints = targets
+            return set()
+        endpoints, own_endpoints, model_ids_by_endpoint = targets
 
-        installed_by_endpoint, over_budget = self._residency_snapshot(
-            endpoints, claimed, budget_bytes)
+        protected_keys = self._protected_keys()
+        own_keys_by_job = self._own_keys_by_job(claimed)
 
-        self._evict_exclusive_endpoints(exclusive_endpoints, installed_by_endpoint, needed_keys)
+        # THE FIFTH ORDERING RULE (§3.3d(2)): protection is evaluated
+        # BEFORE phase 2's residency snapshot, and the reason is cost
+        # rather than taste -- see `_protection_refusal`'s own docstring.
+        # A tick refused here has made no HTTP call at all, which is what
+        # keeps a refusal from costing a full cross-engine probe every
+        # 0.5s for the whole life of the protecting attempt.
+        refused = self._protection_refusal(
+            claimed, endpoints, protected_keys, own_keys_by_job,
+        )
+        if refused:
+            # No snapshot was taken, so there is no belief to cache -- and
+            # a STALE one is worse than none: this path repeats every tick
+            # for the life of the protecting attempt, which the spec
+            # measures in minutes, so §3.6's ordering preference would
+            # spend all of it preferring keys nothing re-checked.
+            self._resident_keys = frozenset()
+            return refused
+
+        installed_by_endpoint, believed_resident, over_budget = self._residency_snapshot(
+            endpoints, claimed, budget_bytes,
+        )
+
+        released: set[tuple[str, str, str]] = set()
+        swept_exclusively: set[tuple[str, str]] = set()
+        if own_endpoints:
+            own_keys: set[tuple[str, str, str]] = set()
+            for keys in own_keys_by_job.values():
+                own_keys |= keys
+            swept_exclusively = endpoints
+            released |= self._evict_exclusive_endpoints(
+                endpoints, installed_by_endpoint, protected_keys, own_keys,
+            )
+            refused = self._barrier(
+                claimed, endpoints, installed_by_endpoint, model_ids_by_endpoint,
+                protected_keys, own_keys_by_job,
+            )
 
         if over_budget:
-            self._evict_for_budget(installed_by_endpoint, exclusive_endpoints, needed_keys)
+            released |= self._evict_for_budget(
+                installed_by_endpoint, swept_exclusively, protected_keys,
+            )
+
+        # The affinity snapshot (spec §3.6), cached for the NEXT claim
+        # round: the pre-eviction belief MINUS what this pass actually
+        # released. `believed_resident` comes from `_residency_snapshot`;
+        # `released` is the union of what each `_unload_endpoint` call
+        # returned. Naming a model this same pass then unloaded would make
+        # the ordering preference systematically wrong.
+        #
+        # Wholesale-replaced every admitting tick, bounded by the resident
+        # set, written and read on the tick thread alone: no lock and no
+        # pruning contract.
+        self._resident_keys = frozenset(believed_resident - released)
+
+        # ONE INFO LINE PER TICK THAT EVICTS AT ALL (§3.3g), which is any
+        # tick with a trigger: a successful eviction used to be silent, so
+        # an operator watching a host fill up could not tell "nothing
+        # needed evicting" from "everything was skipped". Budget renders
+        # as `unset` rather than `None`, because that is the posture, not
+        # a missing value.
+        triggers = []
+        if own_endpoints:
+            triggers.append("exclusive admission")
+        if over_budget:
+            triggers.append("over budget")
+        if triggers:
+            resident_bytes, admitted_marginal = self._last_snapshot_bytes
+            logger.info(
+                "worker: eviction pass (%s): swept %s endpoints, %s resident, "
+                "%s admitted marginal, budget %s",
+                " and ".join(triggers), len(endpoints), resident_bytes, admitted_marginal,
+                budget_bytes if budget_bytes is not None else "unset",
+            )
+        return refused
 
     _warned_missing_methods: set[tuple[str, str]] = set()
 
@@ -1414,6 +2611,20 @@ class Worker:
         interpreter teardown.
         """
         requeued = self._drain_inflight(SHUTDOWN_GRACE_SECONDS)
+
+        # `self._stopping` is already set on the ordinary, signal-initiated
+        # path (`_handle_signal`) -- `.set()` here is what covers the
+        # `crashed=True` path, where `tick()` raised without a signal ever
+        # arriving. Only after it is set does the heartbeat thread's own
+        # `_stopping.wait()` loop (`_heartbeat_forever`) return, so the
+        # join below is what actually observes it exit. A short timeout,
+        # not `None`: this is a daemon thread, so a join that times out
+        # here can never hold the process open -- the thread simply gets
+        # abandoned along with everything else `os._exit` below abandons.
+        self._stopping.set()
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=2.0)
+
         # Lock acquisition is vestigial here too, kept as cheap defense in depth.
         with self._active_lock:
             still_running = [

@@ -136,6 +136,13 @@ class JobContext:
     # limits.TURN_DEADLINE_SECONDS` is the fallback a reader substitutes
     # for `None`, not something this class guesses on its own behalf.
     response_timeout_seconds: float | None = None
+    # THE KIND'S WAIT CEILING (spec §3.5a), stamped by
+    # `models.queue.worker.Worker._build_job_context` off the SAME
+    # settings row `response_timeout_seconds` above rides on -- never a
+    # second read. `None` means this kind declares no ceiling and the
+    # operator set none: a handler that does not wait on an engine simply
+    # never looks at it, exactly as it may ignore `models`.
+    wait_seconds: float | None = None
 
     def report_progress(
         self, done: int | float, total: int | float | None = None, *, unit: str, label: str = "",
@@ -210,6 +217,25 @@ class JobKind:
             Worker._execute`; a handler may ignore it entirely, same as it
             may already ignore `models` (see `JobContext`'s own
             docstring).
+
+            THE RULE THAT COMES WITH `ctx.wait_seconds` (spec §3.5b), and
+            it is not optional: a handler whose wait ceiling expires MUST
+            NOT write a terminal outcome while its own engine still
+            reports the work running. The exclusive slot is released the
+            instant the job row goes terminal, so a handler that gives up
+            waiting and reports success (or failure) hands the machine to
+            the next admission while its own engine is still sampling.
+            Such a handler must either keep holding (continuing to report
+            progress, which keeps the row alive under the worker's
+            heartbeat) or cancel the engine-side work and confirm the
+            engine is terminal, and only then return. The queue enforces
+            the OTHER side of this from spec §3.3(d): the barrier catches
+            a still-working engine before the next EXCLUSIVE job launches,
+            because the barrier-polling adapter withholds `True` while a
+            prompt is still running -- but the exclusive->non-exclusive
+            case and the cross-engine case stay unenforceable (spec §11),
+            which is exactly why this rule has to be published here
+            rather than left implicit.
         summarizer: Dotted path to `callable(payload: dict) -> str` -- a
             one-line row summary for operator-facing job listings.
         default_priority: This kind's rung of the priority chain, or `None`
@@ -243,6 +269,27 @@ class JobKind:
             that can ever leave a stranded side-effect behind (nothing
             external to fix up once a job never ran at all) correctly
             leaves this `None`.
+        stale_after_seconds: How long this kind's running job may go without
+            a heartbeat before the orphan sweep reclaims it, or `None` to
+            use the worker's own global cutoff. CODE-DECLARED, never
+            operator-editable: a kind's staleness is a property of what the
+            work DOES -- a sub-second embed and a job that cold-loads a
+            large model for minutes cannot share one number -- in the same
+            spirit as `default_priority` above. Read by
+            `models.queue.claim._sweep_orphans`, which resolves the whole
+            kind->threshold map itself; nothing else branches on it.
+        default_wait_seconds: How long this kind's handler may wait on its
+            ENGINE before it gives up, or `None` for "this kind does not
+            wait". CODE-DECLARED like `stale_after_seconds`; the OPERATOR
+            may override it per kind on the job-execution settings page
+            (`models.queue.models.JobSettings.kind_wait_seconds`), and the
+            worker stamps whichever wins onto `JobContext.wait_seconds`.
+
+            THE RULE THAT COMES WITH IT, and it is not optional: a kind
+            whose wait ceiling expires MUST NOT write a terminal outcome
+            while its engine still reports the work running. `handler`'s
+            own docstring above states it in full -- what such a handler
+            must do instead, and where the queue's own enforcement stops.
     """
 
     key: str
@@ -252,6 +299,8 @@ class JobKind:
     summarizer: str
     default_priority: int | None = None
     on_terminal: str | None = None
+    stale_after_seconds: int | None = None
+    default_wait_seconds: int | None = None
 
 
 _JOB_KINDS: dict[str, JobKind] = {}

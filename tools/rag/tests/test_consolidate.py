@@ -54,6 +54,7 @@ from identity.contracts.principals import OPEN_PRINCIPAL
 from identity.testing import (
     make_entitlement, make_user, posture, sign_in, user_principal,
 )
+from models.contracts.testing import hermetic_engine_endpoints  # noqa: F401 -- autouse fence
 from tools.rag import ingest, jobs, store
 from tools.rag.access import readable_documents
 from tools.rag.distil import CONSOLIDATION_MAX_TURNS

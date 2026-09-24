@@ -212,6 +212,25 @@ _BOOKKEEPING_REASON = (
     "for 'how is this box configured' to say about it."
 )
 
+# `JobSettings.detected_memory_bytes`/`detected_memory_at` (queue
+# memory-governance track, `models/queue/migrations/0005`) are the SAME
+# SHAPE as `updated_at` above, not a second `_IMPORT_LAW_REASON` field:
+# the worker process writes them ONCE, at boot, as a measurement, never as
+# something an operator sets (`models.queue.models.JobSettings`:282-291).
+# They render on the Job execution page as a labelled prefill note --
+# "detected by the worker process on <date>" -- and are NEVER applied to
+# the memory budget on the operator's behalf. So, like `updated_at`, they
+# are not one of the audit's operator-editable fields in the first place;
+# named here with their own reason rather than folded into
+# `_IMPORT_LAW_REASON`, whose siblings are all fields an operator DOES
+# set and this tool merely cannot read.
+_DETECTED_MEMORY_REASON = (
+    "written once by the worker process at boot as a measurement, not an "
+    "operator-editable setting -- rendered on the Job execution page as a "
+    "labelled prefill note ('detected by the worker process on <date>') and "
+    "never applied to the memory budget on the operator's behalf."
+)
+
 UNREPORTED_SETTINGS_FIELDS: dict[str, dict[str, str]] = {
     "IdentitySettings": {
         "updated_at": _BOOKKEEPING_REASON,
@@ -235,6 +254,15 @@ UNREPORTED_SETTINGS_FIELDS: dict[str, dict[str, str]] = {
         "retention_limit": _IMPORT_LAW_REASON,
         "max_queued_per_principal": _IMPORT_LAW_REASON,
         "response_timeout_seconds": _IMPORT_LAW_REASON,
+        # Queue memory-governance track (2026-09-21): the operator's
+        # per-kind wait-ceiling map, edited on the Job execution page's
+        # fourth form (`id="kind-waits"`) -- operator-editable, same
+        # reason as its five siblings above.
+        "kind_wait_seconds": _IMPORT_LAW_REASON,
+        # Worker-detected, not operator-editable -- see
+        # `_DETECTED_MEMORY_REASON` above.
+        "detected_memory_bytes": _DETECTED_MEMORY_REASON,
+        "detected_memory_at": _DETECTED_MEMORY_REASON,
     },
 }
 
@@ -351,8 +379,9 @@ def run_overview(args: dict, ctx: ToolContext) -> ToolResult:
         # is unchanged by the move.
         "Job execution": (
             f"{len(UNREPORTED_SETTINGS_FIELDS['JobSettings'])} fields (memory budget, max "
-            "concurrent jobs, retention limit, default priority, per-principal queue cap) "
-            "-- call settings.card('jobs-settings'), or check that page."
+            "concurrent jobs, retention limit, default priority, per-principal queue cap, "
+            "response timeout, per-kind wait ceilings, worker-detected memory and its "
+            "detection date) -- call settings.card('jobs-settings'), or check that page."
         ),
     }
     data = {

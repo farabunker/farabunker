@@ -20,6 +20,7 @@ degrade-to-`None` a different caller chose for a different reason.
 from __future__ import annotations
 
 from django.contrib import messages
+from django.db import OperationalError
 from django.http import Http404, HttpResponseForbidden, JsonResponse
 from django.shortcuts import redirect, render
 from django.template.loader import render_to_string
@@ -38,6 +39,7 @@ from agents.chat.service import (
 from agents.chat.views.thread import thread_context
 from agents.limits import TURN_TIMEOUT_ADMIN_HINT, TURN_TIMEOUT_ERROR
 from agents.models import Turn
+from agents.reconcile import reconcile_stranded_turn
 from agents.visibility import may_post_to, visible_turn
 from agents.workstreams import scope_for_conversation
 from models.contracts.queue import QueueUnavailable, get_job
@@ -230,8 +232,25 @@ def _queued_body(turn, request) -> dict:
     script's swap needs the user's own bubble at EVERY poll tick, not
     only the final one, or a requeued poll after an earlier swap would
     have nothing to re-anchor to.
+
+    OWNER DECISION 7: a `None` job here is also the one place a STRANDED
+    turn (its job row gone, past `STRANDED_TURN_GRACE_SECONDS`) becomes
+    visible -- so before answering "queued" forever, this tries
+    `reconcile_stranded_turn`, and re-reads and re-renders honestly when
+    it closed something. `agents.reconcile.reconcile_stranded_turn`'s own
+    docstring carries the condition and why it is safe to call from a
+    polled GET.
     """
     job = get_job(turn.queue_job_id)
+    if job is None and reconcile_stranded_turn(turn):
+        # The strand is visible HERE, at the one surface that was going
+        # to answer "Queued — waiting…" for ever. Re-read and answer
+        # with the honest state instead, within this same poll tick --
+        # a plain reload takes the same path through the rendered card,
+        # so this is not a JS-only repair. `_failed_body` (what this
+        # recurses into) never reconciles, so this recurses at most once.
+        turn.refresh_from_db()
+        return _BODY_BUILDERS[turn.state](turn, request)
     return {
         "state": turn.state,
         "position": job.position if job is not None else None,
@@ -244,8 +263,14 @@ def _running_body(turn, request) -> dict:
     """`{"state", "progress", "step", "label", "html"}` -- `progress`
     verbatim, `step`/`label` lifted out of it too (spec section 8.3) so
     the script can show them without knowing the dict's shape. `html`
-    is D1's own fix, the same as `_queued_body`'s."""
+    is D1's own fix, the same as `_queued_body`'s.
+
+    OWNER DECISION 7: the same stranded-turn reconciliation `_queued_
+    body` runs, and for the same reason -- see its own docstring."""
     job = get_job(turn.queue_job_id)
+    if job is None and reconcile_stranded_turn(turn):
+        turn.refresh_from_db()
+        return _BODY_BUILDERS[turn.state](turn, request)
     progress = job.progress if job is not None else None
     return {
         "state": turn.state,
@@ -345,8 +370,14 @@ _BODY_BUILDERS = {
 }
 
 
-# R7 (audit 2, S22): read-only, and now declared so. A POST to this URL
-# is a 405 before any row is resolved.
+# R7 (audit 2, S22): a POST to this URL is a 405 before any row is
+# resolved. NOT PURELY READ-ONLY as of owner decision 7: a GET that
+# lands on a stranded turn (`_queued_body`/`_running_body`) performs one
+# sanctioned repair write via `reconcile_stranded_turn` -- safe under a
+# safe verb because it is idempotent, conditionally guarded, and carries
+# no request-supplied data; see that function's own docstring. `require_
+# safe` still names the right method pair; only "read-only" no longer
+# describes what a GET here can do.
 #
 # `require_safe`, NOT `require_GET` (audit-2 confirm, observation 7):
 # `require_GET` is `require_http_methods(["GET"])` and rejects HEAD,
@@ -385,19 +416,83 @@ def turn_status(request, turn_id: int) -> JsonResponse:
     CONVERSATION, never by bare pk, and answers `None` for an unknown id
     and an invisible one alike, so this view cannot tell them apart
     either -- both are this same 404.
+
+    TWO DIFFERENT 503s, and the poller acts on the difference. The
+    terminal one keeps its `setup_url`; the retryable one carries
+    `"retryable": true`. The retryable half is BEST-EFFORT and cannot be
+    a guard around the body builders alone: principal resolution and
+    turn visibility touch the database BEFORE any builder runs, and
+    session middleware touches it before this view is entered at all, so
+    a truly unavailable database can still produce a non-JSON 5xx that
+    only the loop's own counting handles.
+
+    AND THE RETRYABLE HALF HAS TO LOOK THROUGH `QueueUnavailable`, which
+    is the least obvious thing in this view. `_queued_body`/
+    `_running_body` reach the database through `models.contracts.queue.
+    get_job`, and the backend wraps every public function in a guard
+    (`models/queue/backend.py::_guarded`) that converts an ORM
+    `ProgrammingError`/`OperationalError` into `QueueUnavailable`. So on
+    exactly the queued/running turn the retryable answer exists for, a
+    recovering database arrives here as `QueueUnavailable`, not as
+    `OperationalError` -- and answering the terminal 503 there would stop
+    the poll loop and blame a setup page that is not the problem. The
+    guard chains the original (`raise ... from exc`), so the `__cause__`
+    is the fact that decides: an `OperationalError` cause is the
+    database being momentarily away (RETRYABLE); anything else --
+    including the `ProgrammingError` cause that means the queue tables do
+    not exist yet, and a bare `QueueUnavailable` with no cause at all
+    (no backend configured) -- stays TERMINAL. Teaching the guard itself
+    to make that distinction would be the better fix, but it is a queue-
+    contract change across fifteen `except QueueUnavailable` sites in
+    three columns, so it is not made here.
     """
-    principal = principal_for_request(request)
-    turn = visible_turn(principal, turn_id)
-    if turn is None:
-        raise Http404(f"Turn {turn_id} does not exist.")
     try:
+        principal = principal_for_request(request)
+        turn = visible_turn(principal, turn_id)
+        if turn is None:
+            # Http404 is neither of the two exceptions below, so it
+            # passes through this guard untouched -- the 404 behaviour
+            # is byte-identical to before the guard existed, pinned by
+            # `TestTheTwoNon200s::test_an_unknown_turn_is_404`.
+            raise Http404(f"Turn {turn_id} does not exist.")
         body = _BODY_BUILDERS[turn.state](turn, request)
-    except QueueUnavailable:
+    except QueueUnavailable as exc:
+        if isinstance(exc.__cause__, OperationalError):
+            # RETRYABLE, wearing the terminal exception's clothes -- see
+            # the docstring's `_guarded` paragraph. The cause is read, not
+            # the message, so a wording change in the guard cannot
+            # silently turn a recovering database back into a dead end.
+            return _retryable_503()
+        # TERMINAL: the queue is not configured, or its tables do not
+        # exist yet. Keeps its setup link, and the loop stops -- retrying
+        # would spin for ever on a box that needs an operator, not
+        # another request.
         return JsonResponse(
             {"error": QUEUE_UNAVAILABLE, "setup_url": reverse("inference-console")},
             status=503,
         )
+    except OperationalError:
+        # RETRYABLE: the database was momentarily unavailable (a restart,
+        # a recovery), raised by one of this view's OWN reads rather than
+        # through the queue guard. The loop counts this answer against
+        # the same bounded transport ceiling a dropped connection uses,
+        # so a database that never comes back cannot make the page tick
+        # for ever either.
+        return _retryable_503()
     return JsonResponse(body)
+
+
+def _retryable_503() -> JsonResponse:
+    """The RETRYABLE half of `turn_status`'s two 503s, in one place
+    because two clauses answer with it -- a database blip raised by this
+    view's own reads, and the same blip arriving as a `QueueUnavailable`
+    the queue guard chained it into. Both are the same fact to the
+    poller, so they must be the same bytes."""
+    return JsonResponse(
+        {"error": "The queue is briefly unavailable; this will retry.",
+         "retryable": True},
+        status=503,
+    )
 
 
 @require_POST

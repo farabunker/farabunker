@@ -29,6 +29,7 @@ from models.registry.tests._helpers import make_job_ctx
 from models.contracts.bindings import ResolvedModel
 from models.contracts.jobkinds import get_job_kind
 from models.contracts.roles import RAG_ANSWER_ROLE, RAG_EMBED_ROLE
+from models.contracts.testing import hermetic_engine_endpoints  # noqa: F401 -- autouse fence
 
 GB = 1024**3
 

@@ -1099,6 +1099,111 @@ upper bound at all.
   own wait to whatever remains of the turn's budget. An operator who wants a longer in-turn
   generation raises THIS number, not vision's.
 
+## The execution queue's memory governance: what the logs say, and what to do
+
+Added 2026-09-21 (ADR 0013's queue memory-governance amendment). Before this, a successful
+eviction was silent and a refused one was the only thing the worker ever logged — so an
+operator watching a host fill up could not tell "nothing needed evicting" from "everything
+was skipped". The vocabulary below is stable, and **WARNING is reserved for what you can
+actually act on**.
+
+These lines come from the `worker` service (`docker compose logs -f worker`); the last one
+comes from whichever process wrote a footprint, which in practice is also the worker.
+
+### INFO — normal operation, nothing to do
+
+| Line | What it means |
+|---|---|
+| `worker: unload <model> at <endpoint> (<engine>), scope model\|endpoint, <reason> -- accepted` | One unload attempt succeeded. `<reason>` is `not needed at an exclusive endpoint`, `over budget`, or `precautionary barrier`. `scope` is what that ONE call frees: `model` releases that model alone, `endpoint` releases everything there. |
+| `... -- refused` | The engine declined. **Not itself a problem**: from a `precautionary barrier` call it usually means there was nothing to free. It only matters if the WARNING below follows it. |
+| `worker: eviction pass (<triggers>): swept N endpoints, R resident, M admitted marginal, budget <bytes\|unset>` | One line per tick that evicts. `<triggers>` is `exclusive admission`, `over budget`, or both. **`N` jumps on exclusive-admitting ticks** — those are the only ticks that sweep every registered endpoint — so `R` is not comparable tick to tick, by design. `budget unset` is a posture, not a missing value. |
+| `worker: eviction could not list installed models at <endpoint> (<engine>) -- that endpoint is skipped this tick` | One engine was briefly unreachable. Nothing to do; the next admitting tick retries. If it repeats for an engine you expect to be up, check that engine, not the queue. |
+| `worker: no precautionary barrier call at <endpoint> (<engine>) -- nothing registered there supplies a model id ... ` | A configured endpoint with no connection row. The unload seam needs a model id and that endpoint supplies none. **Fix by registering a connection for that endpoint** on the Models console; it is a named residual, never papered over with a made-up id. |
+| `worker: engine <name> has no <method>() -- eviction degrades to today's idle-timeout behavior for it` | Said once per engine+method. That adapter offers no `list_installed`/`unload`, so its memory is reclaimed only by its own idle timeout. Informational. |
+
+### WARNING — read these
+
+| Line | What to do |
+|---|---|
+| `worker: eviction skipped the whole endpoint <endpoint> (<engine>) -- one unload there frees everything, and <model> is protected by live work (<reason>)` | **Correct behaviour**, not an error: at this engine one unload call frees every model, and something is genuinely running there. Nothing to do while work is actually running. If it repeats with **nothing** on the Queue page, a job row is stuck — see `manage.py reconcile_turns` below and the Queue page's own cancel action. |
+| `worker: not launching exclusive job N this tick -- <models> at <endpoint> (engine '<name>') is protected by live work; the job is queued again for 45s` | The job is waiting for another job's live work to finish. It retries after the hold-off, and the Queue page's waiting row says `waiting for engine memory — retries at HH:MM`. **This is never counted toward the failure bound**, because the wait ends when the other job does. |
+| `worker: not launching exclusive job N this tick -- engine '<name>' at <endpoint> refused to release <models>; the job is queued again for 45s` | The engine was asked to release memory it says it is holding, and declined. One of these is ordinary (the engine was busy). **Three of them, spanning at least five minutes, fail the job** — see the next row. If you see these repeatedly, the engine is wedged: restart that engine. |
+| `worker: job N failed -- engine '<name>' at <endpoint> did not release memory for this exclusive job after 3 attempts over N minutes; it was not retried again` | The honest failure. The **same sentence is on the job row**, readable on the Queue page. Restart the engine named in the line, then resubmit the work. Both bounds had to be met — three refusals AND the elapsed minutes — so this is not a fast-failing job. |
+| `registry: refused to lower <column> on connection N (<name>): standing <S> bytes, refused reading <R> bytes ... ` | A footprint measurement came in **below** the stored high-water mark and was discarded, bytes and timestamp alike. A footprint is kept at its maximum on purpose (a tolerance band ratchets the value down over repeated warm runs, which is the incident this rule exists to refuse). **If the model genuinely got smaller, set `footprint_override_bytes` on that connection** — the line names that remedy itself. A dip under three quarters of the standing value is a WARNING; a smaller one is logged at INFO. |
+
+### Worker lifecycle — the other new lines
+
+The two tables above are the eviction and barrier vocabulary. The worker's own lifecycle
+gained these as well, and three of them are WARNINGs — which this section's own promise
+makes a contract.
+
+| Level | Line | What to do |
+|---|---|---|
+| WARNING | `worker <id>: the host appears to have slept for about N seconds (wall clock moved that much further than the monotonic clock); skipping the orphan sweep for 30s so live rows can re-stamp themselves ... ` | The box was suspended — a closed laptop lid is the ordinary cause. On wake every running row looks stale at once, so the orphan sweep is **deliberately** skipped for one grace period rather than mass-orphaning healthy work; the very next tick sweeps normally. Nothing to do. Seeing this on a machine that never sleeps means the clock is wrong — check NTP, not the queue. |
+| WARNING | `worker <id>: heartbeat write failed; retrying next iteration` | One failed database write from the heartbeat thread, logged with its traceback. The thread survives it by design and retries. **Repeating is the signal**: the heartbeat is the one fact the orphan sweep trusts, so a database that stays unhealthy will have running jobs reclaimed as orphans underneath you. Check the database. |
+| WARNING | `worker <id>: refusing to submit job N twice -- an attempt is still in flight here; restoring the row to it and discarding this claim` | Correct behaviour and the safe outcome, not an error. The job was reclaimed as orphaned while its own cold load starved the heartbeat, then re-admitted — so the row is handed back to the attempt that is genuinely still running it, and the duplicate claim is discarded. A second handler for one job is exactly what this prevents. If it repeats for one job kind, that kind is cold-loading for longer than the staleness allowance and should declare its own `stale_after_seconds` (see [`docs/EXTENDING.md`](EXTENDING.md)). |
+| INFO | `worker: budget-driven eviction hit its cap of N unload calls this tick; whatever is left is picked up on a later admitting tick` | The capped, budget-driven pass stopped short **on purpose** — the cap exists so a slow or wedged engine call cannot eat this worker's own heartbeat margin. The remainder is picked up on a later tick that itself admits something. Nothing to do; an eviction that stopped short would otherwise look identical to one that had nothing left to do. |
+| INFO | ``worker: waiting for the database schema (the queue's tables are not there yet -- `migrate` is probably still running)`` | A cold boot that got ahead of `migrate`. Said once, at startup; the worker then sizes its pool from the documented default rather than blocking the compose boot. Expected, and quiet by design — if you see a traceback here instead, that is the bug. |
+| INFO | `worker <id>: database schema not ready yet; skipping this tick` | The same cold-boot race, seen by the tick loop instead of the constructor. The tick returns quietly and the loop survives to try again, rather than being read as a crash. Expected once per boot; persisting past a finished `migrate` means the worker is pointed at the wrong database. |
+| INFO | `worker <id>: heartbeat thread started` / `worker <id>: heartbeat thread exiting -- every running row this worker holds now depends on the tick thread alone` | The heartbeat's own thread, new in this track so a blocking tick can no longer starve the signal that says this worker is alive. The pair brackets a normal run. **Seeing "exiting" while the worker is still running** is the one to act on: from that moment the heartbeat depends on the tick thread alone, which is the pre-2026-09-21 failure mode — restart the worker. |
+| ERROR | `worker: job N could not read the response timeout or the per-kind wait ceiling; both fall back to None ... ` | The settings row could not be read while building this job's context, logged with a traceback. **The job still runs**: both limits degrade honestly — the response timeout to the turn deadline constant, the wait ceiling to no ceiling — rather than stranding the job RUNNING for ever, which is what letting the error escape would do. Check that the `jobs_jobsettings` row is readable and holds a sane `kind_wait_seconds` map. |
+
+With this subsection the list above is **every log line this track added or changed**, not a
+selection: the eviction and barrier vocabulary, the registry's refused-lowering pair, and
+the eight lifecycle lines here.
+
+### What the Queue page shows an operator
+
+Two readings on a waiting job's meta line, both display-only and both read straight off the
+already-loaded row:
+
+- **`waiting for engine memory — retries at HH:MM`** — this job was refused a launch and is
+  holding off until that time. Shown only while the hold-off is still in the FUTURE; a past
+  hold-off has expired and rendering it would read as a delay still in force.
+- **`passed over once` / `twice` / `N times`** — model-affinity batching put a later-arriving
+  peer ahead of this job that many admission ROUNDS (one per round, however many peers went
+  ahead). At three, the job is pinned and sorts ahead of every unpinned peer at its priority
+  from then on. This is the honest answer to "why is this older job still below a newer one".
+
+And on the settings and Queue pages, when `memory_budget_bytes` is unset: **"Memory budget —
+not set. Jobs run one at a time, and nothing is offloaded for budget reasons."** An
+administrator additionally gets a link to the Job execution page. The Job execution page
+prefills a **detected memory** figure labelled with the process that measured it and the
+date — *detected by the worker process on `<date>`*. It is a prefill and a label, **never
+applied to the budget on your behalf**: the console renders in the `web` container and the
+budget governs the `worker` container, and a container sees the VM's allocation rather than
+the host's, so a silently derived budget would be authoritative and wrong.
+
+### `manage.py reconcile_turns` — a chat turn whose job row vanished
+
+A chat turn is backed by a queued job row. If that row disappears under it — a database
+crash rolled it back, most realistically — nothing is left to close the turn, and the card
+reads "Queued — waiting…" for ever. Recovery used to be "delete the conversation and
+resend".
+
+The chat page's own poll now repairs the one turn somebody is actually watching, on every
+poll, so the common case needs no operator at all. This command exists for the turn
+**nobody is polling** — a conversation nobody has reopened since:
+
+```bash
+# Count what would be closed, and write nothing:
+docker compose exec web python manage.py reconcile_turns --dry-run
+
+# Actually close them:
+docker compose exec web python manage.py reconcile_turns
+```
+
+`--dry-run` reports the **exact** count a real run would close, not an approximation: it
+runs the same condition, including the live "does this job row still exist" check, and
+simply does not write. A turn is only touched when it is an ASSISTANT turn, still queued or
+running, older than a 60-second grace period (so a turn whose job row simply has not been
+committed yet is never raced), and its job row genuinely does not exist. The write is one
+conditional, idempotent `UPDATE`, so running this twice is harmless and running it while
+the worker is busy cannot clobber a turn the worker is legitimately finishing.
+
+**There is no background sweeper**, deliberately: the condition is rare, and the page
+already visits exactly the row that matters.
+
 ## Document limits: an archive's uncompressed size, and a CSV's row count
 
 **Not gated on the `"media"` feature flag** — `.docx`, `.xlsx` and `.csv` are all in the

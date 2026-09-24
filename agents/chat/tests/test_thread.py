@@ -408,6 +408,76 @@ class TestThePoller:
         assert "if (data.html && data.html !== lastHtml) {" in body
 
 
+def _rendered_conversation_script(client, conversation) -> str:
+    """The conversation page's rendered inline script, as text. The poll
+    loop is asserted at the RENDERED level (not by reading the template
+    file) because the numbers it depends on -- POLL_INTERVAL_MS,
+    MAX_TRANSPORT_RETRIES, MAX_POLL_DURATION_MS -- are interpolated by
+    the view, the same reason `TestThePoller` above reads a real GET
+    rather than the template source."""
+    body = client.get(
+        reverse("chat-conversation", args=[conversation.id])
+    ).content.decode()
+    return body[body.index("<script"):body.rindex("</script>")]
+
+
+class TestTheLoopCountsWhatItCannotActOn:
+    """The uncounted branch: a PARSEABLE body carrying no recognized state
+    fell into the forward-compatible final `else` and re-ticked silently
+    until the duration ceiling, hours later. A 5xx with an unparseable
+    body was already counted -- it rejects in response.json() and lands in
+    .catch()."""
+
+    def _final_else(self, script: str) -> str:
+        """The forward-compatible `else` alone -- from the branch that
+        follows the last recognized state to the `.catch()` that closes
+        the chain -- so an assertion about it cannot be satisfied by
+        `.catch()`'s own counting further down."""
+        tail = script[script.index('data.state === "cancelled"'):]
+        return tail[tail.index("} else {"):tail.index(".catch(function ()")]
+
+    def test_an_unrecognized_state_increments_the_bounded_counter(self, client):
+        branch = self._final_else(_rendered_conversation_script(client, make_conversation()))
+
+        assert "transportFailures += 1;" in branch
+        assert "MAX_TRANSPORT_RETRIES" in branch
+        assert "setTimeout(tick, POLL_INTERVAL_MS)" in branch
+
+    def test_a_parseable_5xx_is_counted_too(self, client):
+        """Its unparseable twin already rejects in `response.json()` and
+        is counted in `.catch()`; this one used to fall through to the
+        state branches with no state to match."""
+        script = _rendered_conversation_script(client, make_conversation())
+
+        assert "result.status >= 500" in script
+
+    def test_exhausting_the_counter_shows_the_same_honest_note(self, client):
+        """One sentence for every exhausted counter, not a new one per
+        branch -- the page composes no prose of its own."""
+        script = _rendered_conversation_script(client, make_conversation())
+
+        assert script.count("Lost contact with the server") >= 1
+
+    def test_the_retryable_503_is_retried_rather_than_given_up_on(self, client):
+        script = _rendered_conversation_script(client, make_conversation())
+
+        assert "data.retryable" in script
+
+    def test_the_transport_counter_is_still_only_reset_by_an_actionable_answer(
+        self, client
+    ):
+        """`transportFailures = 0` must not sit before the branches that
+        count -- resetting on every parseable response would make the
+        ceiling unreachable. It lives inside the recognized-state
+        branches instead, which is the only place a reset is honest."""
+        script = _rendered_conversation_script(client, make_conversation())
+        chain = script[script.index(".then(function (result) {"):]
+        before_the_counting = chain[:chain.index("result.status >= 500")]
+
+        assert "transportFailures = 0" not in before_the_counting
+        assert "transportFailures = 0" in chain[chain.index('data.state === "queued"'):]
+
+
 class TestEnterSubmits:
     """Owner-requested UX fix: in the composer, Enter submits and
     Shift+Enter inserts a newline. Template-presence pins, the same

@@ -202,9 +202,9 @@ error message is content too (it can quote payload back).
       </p>
     {% else %}
       <p class="settings-current">
-        <strong>Memory budget</strong> — not set. Jobs run one at a time.
+        <strong>Memory budget — not set.</strong> Jobs run one at a time, and nothing is offloaded for budget reasons.
+        {% if identity_is_admin %}Set a budget on <a href="{% url 'jobs-settings' %}">Job execution</a> to let jobs whose footprints fit run together.{% endif %}
       </p>
-      <p class="settings-current">With a budget set, jobs whose footprints fit within it run together.</p>
     {% endif %}
     {% comment %}
     F1 (Coherence Wave C): READ-ONLY here. The forms that edit these
@@ -283,6 +283,12 @@ error message is content too (it can quote payload back).
               · {% for name in row.model_names %}{{ name }}{% if not forloop.last %}, {% endif %}{% endfor %}
               · {{ row.footprint_human|default:"size not measured" }}
               · submitted {{ row.created_at }}
+              {% if row.hold_off_until %}
+              · waiting for engine memory — retries at {{ row.hold_off_until|time:"H:i" }}
+              {% endif %}
+              {% if row.passed_over %}
+              · passed over {% if row.passed_over == 1 %}once{% elif row.passed_over == 2 %}twice{% else %}{{ row.passed_over }} times{% endif %}
+              {% endif %}
             </div>
             <div class="job-actions">
               <form method="post" action="{% url 'jobs-queue-cancel' row.id %}">

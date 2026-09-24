@@ -465,23 +465,23 @@ class TestFootprintPrecedence:
         assert connection.effective_footprint_bytes is None
         assert connection.footprint_source is None
 
-    def test_measured_only_is_engine_sourced(self):
+    def test_measured_only_is_measured_sourced(self):
         connection = ModelConnection.objects.create(
             name="measured", engine="ollama", endpoint="http://e:1", model_id="m",
             measured_footprint_bytes=123,
         )
 
         assert connection.effective_footprint_bytes == 123
-        assert connection.footprint_source == "engine"
+        assert connection.footprint_source == "measured"
 
-    def test_override_only_is_connection_sourced(self):
+    def test_override_only_is_override_sourced(self):
         connection = ModelConnection.objects.create(
             name="overridden", engine="ollama", endpoint="http://e:1", model_id="m",
             footprint_override_bytes=456,
         )
 
         assert connection.effective_footprint_bytes == 456
-        assert connection.footprint_source == "connection"
+        assert connection.footprint_source == "override"
 
     def test_override_wins_over_measured_when_both_set(self):
         """Owner ruling: the operator's declared value always wins,
@@ -493,16 +493,19 @@ class TestFootprintPrecedence:
         )
 
         assert connection.effective_footprint_bytes == 456
-        assert connection.footprint_source == "connection"
+        assert connection.footprint_source == "override"
 
-    def test_footprint_source_keys_match_source_labels_exactly(self):
-        """`footprint_source`'s two non-None values must be exactly the
-        keys `_SOURCE_LABELS` (views.py) maps to "manual" / "detected from
-        the model server" -- no third, undocumented vocabulary."""
-        from models.registry.views import _SOURCE_LABELS
+    def test_footprint_source_keys_match_the_footprint_label_vocabulary(self):
+        """`footprint_source`'s three non-None values are exactly the keys
+        of `_FOOTPRINT_SOURCE_LABELS` -- the footprint vocabulary, NOT
+        `_SOURCE_LABELS`, which stays the capability/embed-dim disclosure's
+        own map and is untouched by this track (spec §3.1).
 
-        assert "connection" in _SOURCE_LABELS
-        assert "engine" in _SOURCE_LABELS
+        RE-PINNED by the queue memory-governance track: this used to
+        assert `"connection"`/`"engine"` against `_SOURCE_LABELS`."""
+        from models.registry.views import _FOOTPRINT_SOURCE_LABELS
+
+        assert set(_FOOTPRINT_SOURCE_LABELS) >= {"override", "measured", "engine_reported"}
 
     def test_footprint_override_gb_round_trips(self):
         """8.5 GB stored as bytes reads back as exactly "8.5" -- the same

@@ -385,7 +385,7 @@ class TestRegisteredTableLayout:
         disclosure_start = body.index(f'id="conn-{connection.pk}"')
         disclosure_end = body.index("</details>", disclosure_start)
         disclosure_html = body[disclosure_start:disclosure_end]
-        assert "<dt>Memory footprint</dt><dd>8.5 GB — manual</dd>" in disclosure_html
+        assert "<dt>Memory footprint</dt><dd>8.5 GB — set by the operator</dd>" in disclosure_html
         assert "<dt>Last measured</dt>" not in disclosure_html
 
     def test_footprint_measured_only_renders_one_detected_row(self, client):
@@ -404,7 +404,7 @@ class TestRegisteredTableLayout:
         disclosure_end = body.index("</details>", disclosure_start)
         disclosure_html = body[disclosure_start:disclosure_end]
         assert (
-            "<dt>Memory footprint</dt><dd>4.7 GB — detected from the model server "
+            "<dt>Memory footprint</dt><dd>4.7 GB — measured after a run "
             "on March 4, 2026</dd>" in disclosure_html
         )
         assert "<dt>Last measured</dt>" not in disclosure_html
@@ -428,9 +428,9 @@ class TestRegisteredTableLayout:
         disclosure_start = body.index(f'id="conn-{connection.pk}"')
         disclosure_end = body.index("</details>", disclosure_start)
         disclosure_html = body[disclosure_start:disclosure_end]
-        assert "<dt>Memory footprint</dt><dd>8.5 GB — manual</dd>" in disclosure_html
+        assert "<dt>Memory footprint</dt><dd>8.5 GB — set by the operator</dd>" in disclosure_html
         assert (
-            "<dt>Last measured</dt><dd>4.7 GB — detected from the model server "
+            "<dt>Last measured</dt><dd>4.7 GB — measured after a run "
             "on March 4, 2026</dd>" in disclosure_html
         )
 

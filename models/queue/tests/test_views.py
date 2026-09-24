@@ -20,7 +20,8 @@ ordering/position assertions unambiguous.
 from __future__ import annotations
 
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta
+from datetime import timezone as dt_timezone
 
 import pytest
 from django.db import OperationalError
@@ -378,7 +379,15 @@ class TestBudgetConcurrencySettings:
 
         assert JobSettings.get_solo().memory_budget_bytes is None
         response = client.get(reverse("jobs-queue"))
-        assert "not set. Jobs run one at a time." in response.content.decode()
+        # Task 15: the unset-budget block became a callout naming what an
+        # unset budget costs (`TestTheUnsetBudgetIsLoud` covers its
+        # wording); the old "not set. Jobs run one at a time." phrase no
+        # longer sits contiguous in the HTML ("not set." now closes its
+        # own `<strong>` before "Jobs run..."), so the assertion here
+        # moved to the callout's own new copy.
+        assert "Memory budget — not set." in response.content.decode()
+        assert "Jobs run one at a time, and nothing is offloaded for budget reasons." \
+            in response.content.decode()
 
     def test_a_valid_write_is_audited_exactly_once(self, client):
         """S3 (Coherence Wave B): `JobSettings` was one of the four
@@ -600,21 +609,26 @@ class TestResponseTimeoutSettings:
 
 @pytest.mark.django_db
 class TestTheJobExecutionPage:
-    """`jobs-settings` -- the registered settings page all six
+    """`jobs-settings` -- the registered settings page all seven
     `JobSettings` controls now live on (originally four; `max_queued_
     per_principal` joined at C-7 round-3 hardening, `response_timeout_
-    seconds` at the one-timeout task, fix round 1 MINOR 2 -- this class
-    docstring drifted behind both additions until now). What the
-    settings-area guards (`foundation/tests/test_settings_help.py`,
-    `test_page_names.py`, `test_settings_area.py`) already pin is not
-    repeated here; this is the page's own behaviour."""
+    seconds` at the one-timeout task, fix round 1 MINOR 2, `kind_wait_
+    seconds` at Task 16 of the queue memory-governance track,
+    2026-09-21 -- this class docstring drifted behind all three
+    additions until now). What the settings-area guards
+    (`foundation/tests/test_settings_help.py`, `test_page_names.py`,
+    `test_settings_area.py`) already pin is not repeated here; this is
+    the page's own behaviour."""
 
-    def test_it_renders_the_six_controls_each_under_its_own_anchor(self, client):
-        """One id per CONTROL, not one per form. The help card cites six
+    def test_it_renders_the_seven_controls_each_under_its_own_anchor(self, client):
+        """One id per CONTROL, not one per form. The help card cites seven
         separate anchors and two fields sharing one is exactly the defect
         `TestTheModelFieldCoverage` exists to catch -- this is the same
         claim asserted against the rendered page from the page's own
-        side."""
+        side. `kind-waits` (Task 16) is the seventh, added here rather
+        than as a new test -- `registered_test_kind` (autouse) already
+        registers `"test.marker"`, so the wrapper it lives on renders
+        unconditionally regardless."""
         JobSettings.objects.create(
             pk=1, memory_budget_bytes=round(8.5 * 1024**3), max_concurrent_jobs=3,
             retention_limit=20, default_priority=77, max_queued_per_principal=9,
@@ -625,7 +639,8 @@ class TestTheJobExecutionPage:
 
         for anchor in ("memory-budget", "max-concurrent-jobs",
                        "retention-limit", "default-priority",
-                       "max-queued-per-principal", "response-timeout-seconds"):
+                       "max-queued-per-principal", "response-timeout-seconds",
+                       "kind-waits"):
             assert f'id="{anchor}"' in body, anchor
         assert 'value="8.5"' in body
         assert 'value="3"' in body
@@ -637,15 +652,16 @@ class TestTheJobExecutionPage:
     def test_both_forms_post_to_the_one_dispatched_endpoint(self, client):
         """S2's sanctioned topology, from the template's side: ONE POST
         URL for the page, with a hidden `form` field saying which of the
-        three submitted -- never a URL per field. Three forms now
-        (one-timeout task, 2026-09-17 added "timeout"), the test name
-        kept as-is since it names the TOPOLOGY, not a count."""
+        four submitted -- never a URL per field. Four forms now (Task 16
+        of the queue memory-governance track added "waits"), the test
+        name kept as-is since it names the TOPOLOGY, not a count."""
         body = client.get(reverse("jobs-settings")).content.decode()
 
-        assert body.count(f'action="{reverse("jobs-settings-update")}"') == 3
+        assert body.count(f'action="{reverse("jobs-settings-update")}"') == 4
         assert 'name="form" value="budget"' in body
         assert 'name="form" value="retention"' in body
         assert 'name="form" value="timeout"' in body
+        assert 'name="form" value="waits"' in body
 
     def test_it_marks_its_own_sidebar_entry_current(self, client):
         """The one step of the settings-page recipe with no guard of its
@@ -727,6 +743,183 @@ class TestTheJobExecutionPage:
         assert settings_row.retention_limit == 20
         assert settings_row.default_priority == 77
         assert not AuditEvent.objects.filter(action=actions.QUEUE_SETTINGS_UPDATED).exists()
+
+
+# --- Task 16: per-kind wait ceilings (spec §3.5a) ----------------------------
+
+
+@pytest.mark.django_db
+class TestTheWaitCeilingForm:
+    """`JobSettings.kind_wait_seconds` -- the fourth settings form
+    (`form="waits"`, `models.queue.views._update_kind_waits`), one row
+    per REGISTERED job kind (`_job_settings_context`'s `kind_wait_rows`),
+    never a fixed template field list -- `registered_test_kind` (autouse,
+    this module's own top-of-file fixture) already registers
+    `"test.marker"` for every test here, so it is always one of the rows
+    a POST to this form iterates.
+
+    DEVIATIONS FROM THE BRIEF'S LITERAL FIXTURE LIST, both named here:
+    `admin_signed_in` does not exist anywhere in this codebase --
+    `TestTheUnsetBudgetIsLoud`'s own class docstring (below) names the
+    same absence and the same reason (the open posture this suite runs
+    under renders `identity_is_admin` True for every viewer, so no
+    sign-in is needed to reach an admin-gated form) -- plain `client` is
+    used throughout instead, matching that precedent. `reset_registry`
+    is not a fixture this module defines either (unlike `test_worker.py`/
+    `test_backend.py`, which build one via `registry_reset_fixture`);
+    `registered_test_kind`'s own snapshot/clear/restore already covers
+    every test in this file, so a test that registers an extra kind of
+    its own simply does so directly, with no second fixture to name."""
+
+    def _post(self, client, **fields):
+        data = {"form": "waits"}
+        data.update(fields)
+        return client.post(reverse("jobs-settings-update"), data, follow=True)
+
+    def test_one_row_per_registered_kind_renders_from_the_registry(self, client):
+        register_job_kind(
+            JobKind(
+                key="test.echo", label="Echo", planner=f"{MODULE}.plan_noop",
+                handler=f"{MODULE}.handle_noop", summarizer=f"{MODULE}.summarize_marker",
+            )
+        )
+
+        body = client.get(reverse("jobs-settings")).content.decode()
+
+        assert "Echo" in body
+        assert 'name="wait_test.echo"' in body
+
+    def test_saving_one_leaves_the_others_untouched(self, client):
+        register_job_kind(
+            JobKind(
+                key="test.a", label="A", planner=f"{MODULE}.plan_noop",
+                handler=f"{MODULE}.handle_noop", summarizer=f"{MODULE}.summarize_marker",
+            )
+        )
+        register_job_kind(
+            JobKind(
+                key="test.b", label="B", planner=f"{MODULE}.plan_noop",
+                handler=f"{MODULE}.handle_noop", summarizer=f"{MODULE}.summarize_marker",
+            )
+        )
+        # `get_solo()` FIRST -- same fix `TestTheUnsetBudgetIsLoud.test_a_
+        # set_budget_renders_no_callout` names for the identical
+        # `.filter(pk=1).update(...)`-on-an-empty-table shape.
+        JobSettings.get_solo()
+        JobSettings.objects.filter(pk=1).update(kind_wait_seconds={"test.a": 10, "test.b": 20})
+
+        self._post(client, **{"wait_test.a": "900", "wait_test.b": "20"})
+
+        assert JobSettings.get_solo().kind_wait_seconds == {"test.a": 900, "test.b": 20}
+
+    def test_a_blank_value_clears_that_kinds_ceiling(self, client):
+        JobSettings.get_solo()
+        JobSettings.objects.filter(pk=1).update(kind_wait_seconds={"test.marker": 300})
+
+        self._post(client, **{"wait_test.marker": ""})
+
+        assert JobSettings.get_solo().kind_wait_seconds == {}
+
+    def test_a_non_numeric_value_saves_nothing_and_says_so(self, client):
+        response = self._post(client, **{"wait_test.marker": "abc"})
+
+        assert "must be a whole number of seconds" in response.content.decode()
+        assert JobSettings.get_solo().kind_wait_seconds == {}
+
+    def test_a_mixed_post_over_a_seeded_map_proves_all_or_nothing_not_partial(self, client):
+        """F2 (review): the single-field post above cannot tell 'nothing
+        was saved' apart from 'the good field was saved and the bad one
+        was skipped', because it starts from an empty map -- this pins
+        the actual never-500 promise `_update_kind_waits`'s own docstring
+        makes ('a bad field for ANY one kind leaves the WHOLE map --
+        every kind's entry, not just the bad one's -- exactly as it
+        was'), the same mixed-post shape `TestBudgetConcurrencySettings`/
+        `TestRetentionPrioritySettings`/`TestResponseTimeoutSettings`
+        each already use to pin their own form's all-or-nothing save."""
+        register_job_kind(
+            JobKind(
+                key="test.a", label="A", planner=f"{MODULE}.plan_noop",
+                handler=f"{MODULE}.handle_noop", summarizer=f"{MODULE}.summarize_marker",
+            )
+        )
+        register_job_kind(
+            JobKind(
+                key="test.b", label="B", planner=f"{MODULE}.plan_noop",
+                handler=f"{MODULE}.handle_noop", summarizer=f"{MODULE}.summarize_marker",
+            )
+        )
+        JobSettings.get_solo()
+        JobSettings.objects.filter(pk=1).update(kind_wait_seconds={"test.a": 10, "test.b": 20})
+
+        response = self._post(client, **{"wait_test.a": "900", "wait_test.b": "abc"})
+
+        assert "must be a whole number of seconds" in response.content.decode()
+        assert JobSettings.get_solo().kind_wait_seconds == {"test.a": 10, "test.b": 20}
+        assert not AuditEvent.objects.filter(action=actions.QUEUE_SETTINGS_UPDATED).exists()
+
+    def test_an_unknown_kind_key_is_ignored_rather_than_stored(self, client):
+        """The form renders from the registry, so a posted key that names
+        no registered kind is tampering, not data."""
+        self._post(client, **{"wait_test.marker": "100", "wait_bogus.kind": "999"})
+
+        assert JobSettings.get_solo().kind_wait_seconds == {"test.marker": 100}
+
+
+# --- Task 15: the unset budget is loud, and the prefill names the worker ----
+
+
+@pytest.mark.django_db
+class TestTheUnsetBudgetIsLoud:
+    """With the budget gate moved (Task 14), an unset budget no longer
+    switches the apparatus off -- but the operator still had no way to
+    know the capped pass runs with no number to work against. The Queue
+    page's read-only budget block becomes a real callout naming both
+    consequences and the control that changes them; the settings page's
+    prefill note names the process and the date that measured it.
+
+    `client` alone, no sign-in: both pages read `identity_is_admin`,
+    which is True for every viewer on the open-posture default this
+    suite runs under (see `queue.html`'s own comment on the "Change the
+    budget..." link), so there is no `admin_signed_in` fixture in this
+    module -- an admin session is only ever minted explicitly, with
+    `sign_in(client, make_admin())` inside `posture(...)`, by the tests
+    above that actually need a non-open posture."""
+
+    def test_the_queue_page_says_what_an_unset_budget_costs(self, client):
+        body = client.get(reverse("jobs-queue")).content.decode()
+
+        assert "Jobs run one at a time" in body
+        assert "nothing is offloaded for budget reasons" in body
+        assert reverse("jobs-settings") in body
+
+    def test_a_set_budget_renders_no_callout(self, client):
+        # `get_solo()` FIRST: `.filter(pk=1).update(...)` alone updates
+        # zero rows against an empty table (no data migration seeds
+        # `pk=1`), which would leave the budget unset and make this
+        # assertion pass for the wrong reason. Deviation from the brief's
+        # literal `.filter(pk=1).update(...)`-only snippet, named here.
+        JobSettings.get_solo()
+        JobSettings.objects.filter(pk=1).update(memory_budget_bytes=32 * 1024**3)
+
+        assert "nothing is offloaded for budget reasons" not in client.get(
+            reverse("jobs-queue")).content.decode()
+
+    def test_the_prefill_names_the_process_that_measured_it(self, client):
+        # Same fix as `test_a_set_budget_renders_no_callout` above: the
+        # row must exist before `.update()` can touch it.
+        JobSettings.get_solo()
+        JobSettings.objects.filter(pk=1).update(
+            detected_memory_bytes=64 * 1024**3,
+            detected_memory_at=datetime(2026, 3, 4, tzinfo=dt_timezone.utc),
+        )
+
+        body = client.get(reverse("jobs-settings")).content.decode()
+
+        assert "detected by the worker process on March 4, 2026" in body
+        assert "64" in body
+
+    def test_with_nothing_detected_the_settings_page_still_renders(self, client):
+        assert client.get(reverse("jobs-settings")).status_code == 200
 
 
 # --- Worker-down hint --------------------------------------------------------
@@ -1164,7 +1357,10 @@ class TestDegradation:
         assert response.status_code == 200
         assert "run database migrations" not in body
         assert "Nothing has been queued yet." in body
-        assert "not set. Jobs run one at a time." in body
+        # Task 15: same wording move as `TestBudgetConcurrencySettings::
+        # test_blank_budget_clears_to_none_and_shows_not_set_copy` above.
+        assert "Memory budget — not set." in body
+        assert "Jobs run one at a time, and nothing is offloaded for budget reasons." in body
 
 
 # --- Escaping ------------------------------------------------------------------
@@ -1273,7 +1469,15 @@ class TestTheQueueSettingsFormsAreAdminOnlyOnThePage:
             sign_in(client, make_admin())
             body = client.get(reverse("jobs-queue")).content
         assert reverse("jobs-settings-update").encode() not in body
-        assert body.count(reverse("jobs-settings").encode()) == 2
+        # Task 15: THREE now, not two -- the unset-budget callout itself
+        # (default JobSettings row here has no budget) gained its own
+        # admin-only "Set a budget on Job execution" link, on top of the
+        # two pre-existing "Change the budget..."/"Change the
+        # retention..." links below. Still admin-only, still class S, so
+        # the invariant this test's docstring states ("a way to reach
+        # them did not [leave]") holds -- there are just three doors to
+        # it now instead of two.
+        assert body.count(reverse("jobs-settings").encode()) == 3
 
     def test_a_member_is_offered_neither(self, client):
         """I4 (Wave C review): the earlier version of this test signed in
@@ -1317,3 +1521,97 @@ class TestTheQueueSettingsFormsAreAdminOnlyOnThePage:
         `is_admin`, which an open box answers True for everybody."""
         assert reverse("jobs-settings-update").encode() in \
             client.get(reverse("jobs-settings")).content
+
+
+# --- T13: a held-off row says why it is waiting -----------------------------
+
+
+@pytest.mark.django_db
+class TestHoldOffReading:
+    """A job the queue is deliberately declining to consider for the next
+    forty-five seconds is a stronger case of an unexplained delay than a
+    reordering, and it would otherwise surface only as a log line -- which
+    fails this track's own observability thesis."""
+
+    def test_a_future_hold_off_renders_on_the_waiting_row(self, client):
+        make_queue_job(kind="test.k", not_before=timezone.now() + timedelta(minutes=2))
+
+        body = client.get(reverse("jobs-queue")).content.decode()
+
+        assert "waiting for engine memory" in body
+        assert "retries at" in body
+
+    def test_a_past_hold_off_renders_nothing(self, client):
+        make_queue_job(kind="test.k", not_before=timezone.now() - timedelta(minutes=2))
+
+        body = client.get(reverse("jobs-queue")).content.decode()
+
+        assert "waiting for engine memory" not in body
+
+    def test_an_unheld_job_renders_nothing(self, client):
+        make_queue_job(kind="test.k")
+
+        assert "waiting for engine memory" not in client.get(
+            reverse("jobs-queue")).content.decode()
+
+    def test_the_reading_costs_no_extra_query(self, client, django_assert_num_queries):
+        """It comes off the row `queue_snapshot` already loaded.
+
+        A LITERAL, never a computed baseline: an earlier draft called a
+        `_queue_page_query_count(client)` helper (which does not exist)
+        and asserted against its own answer -- a test that passes whatever
+        the page does, which the plan's own Global Constraints forbid.
+        Fill the number from the first red run and write it in."""
+        for index in range(3):
+            make_queue_job(kind="test.k%d" % index,
+                           not_before=timezone.now() + timedelta(minutes=2))
+
+        with django_assert_num_queries(10):
+            client.get(reverse("jobs-queue"))
+
+    def test_the_reading_does_not_grow_with_the_number_of_held_off_rows(
+            self, client, django_assert_num_queries):
+        """The non-vacuous half: three held-off rows cost the same as
+        one. Without this, the literal above would pass a reading that
+        secretly queried per row."""
+        make_queue_job(kind="test.only", not_before=timezone.now() + timedelta(minutes=2))
+
+        with django_assert_num_queries(10):
+            client.get(reverse("jobs-queue"))
+
+    def test_the_page_never_500s_on_a_row_with_a_hold_off(self, client):
+        make_queue_job(kind="test.unregistered", not_before=timezone.now() + timedelta(minutes=2))
+
+        assert client.get(reverse("jobs-queue")).status_code == 200
+
+
+# --- T14: a passed-over row says so -----------------------------------------
+
+
+@pytest.mark.django_db
+class TestPassedOverReading:
+    """The other half of "why is this job still waiting": affinity
+    batching can put a later peer ahead of an older job, and a count
+    nobody can see is exactly the unexplained delay this track exists to
+    remove. Read off the row `queue_snapshot` already loaded -- no query,
+    no script."""
+
+    def test_a_passed_over_job_says_so_on_the_waiting_row(self, client):
+        make_queue_job(kind="test.k", passed_over=2)
+
+        assert "passed over twice" in client.get(reverse("jobs-queue")).content.decode()
+
+    def test_one_pass_over_reads_once(self, client):
+        make_queue_job(kind="test.k", passed_over=1)
+
+        assert "passed over once" in client.get(reverse("jobs-queue")).content.decode()
+
+    def test_above_two_it_is_a_number(self, client):
+        make_queue_job(kind="test.k", passed_over=5)
+
+        assert "passed over 5 times" in client.get(reverse("jobs-queue")).content.decode()
+
+    def test_a_job_never_passed_over_renders_nothing(self, client):
+        make_queue_job(kind="test.k")
+
+        assert "passed over" not in client.get(reverse("jobs-queue")).content.decode()
