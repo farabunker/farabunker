@@ -53,7 +53,10 @@ from django.apps import apps
 from django.utils.module_loading import import_string
 
 from identity.access import owner_fields
-from identity.contracts.cascades import retention_handlers
+from identity.contracts import cascades as cascades_module
+from identity.contracts.cascades import (
+    RetentionHandler, register_retention_handler, retention_handlers,
+)
 from identity.contracts.principals import OPEN_PRINCIPAL
 from identity.contracts.retention import KIND_CONVERSATION, KIND_LABELS, RETENTION_KINDS
 
@@ -232,3 +235,29 @@ def test_labels_that_meet_in_one_purge_map_are_distinct():
                 f"the handler {spec.key!r} answers for {kind!r} but is "
                 f"labelled {spec.label!r}, which is what a {worn} ticket is "
                 f"called on the Deleted page")
+
+
+def test_the_label_gate_would_actually_catch_a_collision():
+    """Anti-vacuous, matching `test_the_gate_would_actually_catch_a_
+    missing_handler` above: this module's every other gate proves
+    itself this way, and the label check above had not. If two
+    real-world handlers on one kind ever DID collide, the loop above
+    is what would catch it -- proven here with a registry this test
+    fully controls (save/clear/restore, like every registry isolation
+    in this codebase), rather than leaving that loop's own reasoning
+    unverified against the box's real registrations, which happen not
+    to collide today for reasons this test does not depend on."""
+    saved = dict(cascades_module._RETENTION)
+    cascades_module._RETENTION.clear()
+    try:
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION, key="t.one", label="Same label",
+            handler="identity.retention.sweep"))
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION, key="t.two", label="Same label",
+            handler="identity.retention.sweep"))
+        labels = [spec.label for spec in retention_handlers(KIND_CONVERSATION)]
+        assert sorted(labels) != sorted(set(labels))
+    finally:
+        cascades_module._RETENTION.clear()
+        cascades_module._RETENTION.update(saved)

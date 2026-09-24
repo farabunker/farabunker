@@ -183,8 +183,12 @@ def delete_content(actor, *, kind: str, key, owner, label: str = "",
     row = IdentitySettings.get_solo()
     purge_on = timezone.localdate() + datetime.timedelta(days=row.retention_days)
     with transaction.atomic():
+        # `key` IS max_length=200 (`DeletionTicket.key`), clamped here
+        # exactly as `label` is clamped two lines below -- so a caller
+        # passing something unexpectedly long raises nothing worse than
+        # a truncated key, never a `DataError` mid-delete.
         ticket, created = DeletionTicket.objects.get_or_create(
-            kind=kind, key=str(key),
+            kind=kind, key=str(key)[:200],
             defaults=dict(
                 label=label[:255],
                 purge_on=purge_on,
@@ -214,6 +218,11 @@ def delete_content(actor, *, kind: str, key, owner, label: str = "",
             # the parent is, so the unconditional prune-on-write sweep
             # below purges them in the same call.
             for child_kind, child_key in run_children(kind, str(key)):
+                # Clamped the same way the parent's own `key` is, two
+                # blocks up -- a resolver is a column's own code, but a
+                # key a column computes is not exempt from the field's
+                # own limit.
+                child_key = child_key[:200]
                 _child, child_created = DeletionTicket.objects.get_or_create(
                     kind=child_kind, key=child_key,
                     defaults=dict(
@@ -247,9 +256,20 @@ def restore_content(actor, ticket, *, source: str = SOURCE_WEB,
     deferred enterprise slice can set a hold.
 
     A TICKET ALREADY GONE (a raced sweep, a double-click) MUST NOT LOG A
-    RESTORE THAT DID NOT HAPPEN: deleting by QUERYSET rather than by
-    instance reports how many rows it actually removed, and an event is
-    written only when that count is nonzero.
+    RESTORE THAT DID NOT HAPPEN. THE PARENT IS RE-READ UNDER A LOCK
+    FIRST -- a miss there is the already-gone case, and returns before
+    touching a child. Each CHILD is then removed by QUERYSET rather than
+    by instance, so a child a competing purge already reached reports
+    zero rows removed and gets no event of its own; the parent, once its
+    lock is held, cannot be raced by anything else, so it is safe to
+    delete by instance instead.
+
+    THE PARENT IS LOCKED FIRST, THEN THE CHILDREN -- the same order
+    `purge_ticket` below takes. The opposite order (children first,
+    parent last) is what this function used before children existed;
+    keeping it would let a restore and a purge of the same family lock
+    rows in opposite orders and deadlock under real concurrency, so both
+    functions now agree on which row is locked first.
 
     `settings_row`, OPTIONAL, THE SAME SHAPE `visible_tickets`/`may_purge`
     ABOVE TAKE: a caller that already holds the request's one
@@ -259,14 +279,16 @@ def restore_content(actor, ticket, *, source: str = SOURCE_WEB,
 
     A CHILD RESTORED ON ITS OWN EARLIER IS SIMPLY ABSENT by the time this
     runs -- not an error, and it writes no event of its own here: each
-    child is removed and reported on its own, for the reason the parent
-    already is. A parent whose own delete reports nothing (already gone)
-    had no children left to put back either -- a ticket cannot outlive
-    its parent's row.
+    child is removed and reported on its own, for the reason above. A
+    parent already gone (the lock read finds nothing) had no children
+    left to put back either -- a ticket cannot outlive its parent's row.
     """
     row = settings_row if settings_row is not None else IdentitySettings.get_solo()
     with transaction.atomic():
-        kind, key, label = ticket.kind, ticket.key, ticket.label
+        current = DeletionTicket.objects.select_for_update().filter(pk=ticket.pk).first()
+        if current is None:
+            return
+        kind, key, label = current.kind, current.key, current.label
         # THE CHILDREN COME BACK WITH THE PARENT, and they go first and
         # one at a time. The foreign key would cascade them away with
         # the parent row, but a cascade reports nothing per row, and
@@ -275,20 +297,18 @@ def restore_content(actor, ticket, *, source: str = SOURCE_WEB,
         # the meantime must not get a `content.restored` event for an
         # item that was in fact destroyed. Deleting by queryset per
         # child answers that question the same way the parent's own
-        # delete below answers it.
+        # lock read above answers it for the whole ticket.
         # NO RESOLVER HERE -- the link is what this restore follows, so
         # an item somebody deleted on its own, or one that went with a
         # different parent, is not this restore's business and is left
         # deleted with the date it was shown.
         restored_children = []
-        for child in ticket.children.all().order_by("pk"):
+        for child in current.children.all().order_by("pk"):
             removed_child, _ = DeletionTicket.objects.filter(
                 pk=child.pk).delete()
             if removed_child:
                 restored_children.append(child)
-        removed, _ = DeletionTicket.objects.filter(pk=ticket.pk).delete()
-        if not removed:
-            return
+        current.delete()
         audit.record(actor, CONTENT_RESTORED, target_type=kind, target_key=key,
                      target_label=label if row.audit_detail else "",
                      source=source, kind=kind)
@@ -362,33 +382,73 @@ def purge_ticket(actor, ticket, *, source: str = SOURCE_WEB,
     this ticket and is therefore not purged with it: somebody put that
     image back, or was shown a different date for it, and this click is
     not that date.
+
+    A HELD CHILD (`hold_by_kind != ""`) IS SKIPPED AND LEFT STANDING with
+    its own ticket, exactly as the sweep's own due condition already
+    excludes a held ticket reached directly -- this item's own purge
+    still runs, and the other, un-held children still go with it. It is
+    also DETACHED (`parent=None`) before this item's own ticket is
+    deleted, because `parent` is `on_delete=CASCADE`: skipping it in the
+    handler loop is not enough on its own, since the row delete below
+    would otherwise destroy it anyway at the database level. Nothing in
+    this delivery writes a hold, so this is latent until the deferred
+    enterprise slice (spec section 10.10) can set one.
+
+    A CHILD'S OWN `RetentionRefused` IS NOT CAUGHT HERE, unlike the
+    sweep's: it propagates out of `_purge_child` exactly like any other
+    exception a handler raises, taking the whole click down with it --
+    every ticket in the family stays, including this item's own, and
+    the person sees the child's refusal sentence for an item they did
+    not directly address. `sweep`'s own `RetentionRefused` handling
+    (below) is what turns that into a quiet retry when nobody is
+    watching; a direct click surfaces it.
     """
     row = settings_row if settings_row is not None else IdentitySettings.get_solo()
     with transaction.atomic():
         current = DeletionTicket.objects.select_for_update().filter(pk=ticket.pk).first()
         if current is None:
             return {}
-        # THIS ITEM'S ROWS FIRST, THEN THE CHILDREN, AND THE ORDER IS
-        # LOAD-BEARING. It is the filesystem-last rule
-        # `identity/contracts/cascades.py` states: a filesystem delete
-        # has no rollback, so a row handler that raised AFTER files were
-        # removed would leave a resurrected row pointing at bytes that
-        # are gone. A child here is a generated image, whose handler is
-        # in the FILES band, so every row this click touches is gone
-        # before the first byte is.
+        # THIS ITEM'S OWN HANDLERS RUN FIRST, IN THEIR OWN REGISTERED
+        # ORDER, BEFORE ANY CHILD'S HANDLER RUNS -- AND THE ORDER IS
+        # LOAD-BEARING, THOUGH NOT THE STRONGER CLAIM IT CAN LOOK LIKE.
+        # This is NOT "every row this click touches is gone before the
+        # first byte is": this item's OWN registered handlers can
+        # themselves be ORDER_FILES and destroy bytes (a conversation's
+        # do, today), so a child's rows can be deleted after this item's
+        # own bytes are already gone. The filesystem-last rule
+        # `identity/contracts/cascades.py` states (ORDER_ROWS before
+        # ORDER_FILES) holds WITHIN each `run_retention` call -- this
+        # item's own call, and independently each child's own call --
+        # not ACROSS the cascade. What running this item's handlers
+        # first DOES guarantee: a child's bytes are never destroyed
+        # before this item's own handlers have finished running.
         # READ UNDER THE SAME LOCK, and read before anything is
         # destroyed: the parent row's delete would cascade these away
         # without ever running their handlers. `order_by("pk")` because
         # the table's own ordering is newest-first, and the order this
         # destroys things in is worth being the order they were written
         # in rather than whichever way a timestamp fell.
-        children = list(current.children.select_for_update().order_by("pk"))
+        # `hold_by_kind=""` EXCLUDES A HELD CHILD, matching `sweep`'s own
+        # due condition below: this item's purge reaches every ordinary
+        # child that arrived with it, never one somebody has since put a
+        # hold on.
+        children = list(
+            current.children.filter(hold_by_kind="")
+            .select_for_update().order_by("pk"))
         removed = run_retention(current.kind, current.key)
         for child in children:
             child_removed = _purge_child(actor, child, source=source, row=row)
             for child_label, count in child_removed.items():
                 removed[child_label] = removed.get(child_label, 0) + count
         kind, key, label = current.kind, current.key, current.label
+        # A HELD CHILD IS DETACHED, NOT MERELY SKIPPED ABOVE: `parent`
+        # is `on_delete=CASCADE`, so the row delete two lines down would
+        # otherwise destroy it anyway, at the database level, without
+        # ever reaching the skip above. `parent=None` is exactly what an
+        # item deleted on its own already looks like -- a held child
+        # left this way keeps its own ticket, still restorable and still
+        # purgeable on its own, the same as any other un-linked ticket.
+        current.children.exclude(hold_by_kind="").update(parent=None)
         current.delete()
         audit.record(actor, CONTENT_PURGED, target_type=kind, target_key=key,
                      target_label=label if row.audit_detail else "",

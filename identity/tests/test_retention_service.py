@@ -50,6 +50,18 @@ def document_handler(key: str) -> int:
     return 1
 
 
+def document_handler_second_child_raises(key: str) -> int:
+    """`doc-1` is `children`'s first pair, so its purge runs before
+    `doc-2`'s -- this fails on the SECOND child on purpose, so the test
+    that registers it can prove the first child's own row deletion and
+    `content.purged` event are undone with everything else when the
+    second one raises."""
+    if key == "doc-2":
+        raise RuntimeError("this child cannot finish")
+    REMOVED.append(f"document:{key}")
+    return 1
+
+
 def fake_children(key: str) -> list[tuple[str, str]]:
     """Recomputed from the parent's own rows in production; a constant
     here, because what this module tests is what the SERVICE does with
@@ -549,12 +561,19 @@ class TestChildTickets:
         assert DeletionTicket.objects.filter(kind=KIND_DOCUMENT,
                                              key="doc-2").count() == 0
 
-    def test_permanent_delete_runs_this_items_rows_before_any_childs_bytes(self):
-        """ORDER IS THE POINT, and it is the filesystem-last rule this
-        registry already states: a child's handler is the one that
-        removes bytes, and a row handler that raised after files were
-        gone would leave a resurrected row pointing at nothing. So every
-        row this click touches goes first, and the children follow."""
+    def test_permanent_delete_runs_this_items_own_handlers_before_any_childs(self):
+        """ORDER IS THE POINT, but not the stronger claim it can look
+        like. This item's own registered handlers run first, in their
+        own band order, and only then does each child's handler run --
+        never the other way round. That is NOT "every row this click
+        touches is gone before the first byte is": `conversation_handler`
+        here fakes the real `conversation` kind's registered handlers,
+        which are themselves ORDER_FILES and destroy bytes, so this
+        item's own bytes are already gone by the time a child's rows are
+        even touched. The filesystem-last rule (ORDER_ROWS before
+        ORDER_FILES) holds WITHIN each item's own `run_retention` call,
+        not ACROSS the cascade -- what this test actually pins is the
+        cascade order: item first, children after, never interleaved."""
         user = make_user()
         item = _owner(user)
         parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
@@ -663,3 +682,75 @@ class TestChildTickets:
                            "document:doc-1", "document:doc-2"]
         assert DeletionTicket.objects.count() == 0
         assert AuditEvent.objects.filter(action=CONTENT_PURGED).count() == 3
+
+    def test_a_second_childs_raising_handler_rolls_back_the_whole_purge(self):
+        """A half-purged cascade -- one child's content and ticket gone,
+        the other child's handler never even reached, but the parent
+        still standing -- is precisely what the one transaction around
+        `purge_ticket` exists to prevent. `doc-1` (the first child
+        `_purge_child` reaches) succeeds and is deleted with its own
+        `content.purged` event BEFORE `doc-2`'s handler raises, so this
+        proves the transaction undoes work already done inside it, not
+        only work that never started."""
+        register_retention_handler(RetentionHandler(
+            kind=KIND_DOCUMENT, key="t.document", label="Document",
+            handler=f"{__name__}.document_handler_second_child_raises"))
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+
+        with pytest.raises(RuntimeError, match="this child cannot finish"):
+            service.purge_ticket(user_principal(user), parent)
+
+        assert DeletionTicket.objects.filter(pk=parent.pk).exists()
+        assert DeletionTicket.objects.filter(kind=KIND_DOCUMENT,
+                                             key="doc-1").exists()
+        assert DeletionTicket.objects.filter(kind=KIND_DOCUMENT,
+                                             key="doc-2").exists()
+        assert DeletionTicket.objects.count() == 3
+        assert not AuditEvent.objects.filter(action=CONTENT_PURGED).exists()
+
+    def test_a_childs_refusal_also_propagates_to_the_caller(self):
+        """`purge_ticket`'s docstring says a child's `RetentionRefused`
+        aborts the whole click and is never swallowed -- this is that
+        claim, pinned: the refusal is the child's, not the parent's, and
+        it still reaches the caller as a refusal, with every ticket in
+        the family left standing for the next attempt."""
+        register_retention_handler(RetentionHandler(
+            kind=KIND_DOCUMENT, key="t.document", label="Document",
+            handler=f"{__name__}.refused"))
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+
+        with pytest.raises(RetentionRefused):
+            service.purge_ticket(user_principal(user), parent)
+
+        assert DeletionTicket.objects.count() == 3
+        assert not AuditEvent.objects.filter(action=CONTENT_PURGED).exists()
+
+    def test_a_held_child_is_skipped_by_the_parents_permanent_delete(self):
+        """Nothing in this delivery WRITES a hold (identity/tests/
+        test_retention_service.py::TestTheSweep::test_it_skips_a_held_
+        ticket makes the same point for the sweep's own due query), so
+        the hold is set directly here -- the clause ships now so the
+        deferred enterprise slice is a control and a refusal, not a
+        change to this cascade."""
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        held = DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-2")
+        DeletionTicket.objects.filter(pk=held.pk).update(
+            hold_by_kind="user", hold_by_key="1")
+
+        service.purge_ticket(user_principal(user), parent)
+
+        assert DeletionTicket.objects.filter(pk=held.pk).exists()
+        assert not DeletionTicket.objects.filter(pk=parent.pk).exists()
+        assert not DeletionTicket.objects.filter(kind=KIND_DOCUMENT,
+                                                  key="doc-1").exists()
+        assert "document:doc-1" in REMOVED
+        assert "document:doc-2" not in REMOVED
