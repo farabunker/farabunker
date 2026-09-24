@@ -362,7 +362,7 @@ class OllamaEngine:
             return None
         return sizes.get(model_id)
 
-    def unload(self, endpoint: str, model_id: str) -> bool:
+    def unload(self, endpoint: str, model_id: str, *, wait: bool = True) -> bool:  # noqa: ARG002 - see docstring
         """Request that Ollama release `model_id`'s memory at `endpoint`
         right now, via Ollama's documented immediate-unload mechanism: POST
         `/api/generate` with `{"model": model_id, "keep_alive": 0}` and no
@@ -383,6 +383,11 @@ class OllamaEngine:
         `httpx.HTTPError` (refused connection, non-2xx response, or a
         response slower than `UNLOAD_TIMEOUT`) -> `False`, never an
         exception -- the caller degrades to "didn't unload".
+
+        `wait` is ACCEPTED AND IGNORED (the optional extension the base
+        seam's `unload` docstring describes): this call is already
+        immediate -- it verifies nothing and polls nothing -- so there is
+        no waiting here for a caller to skip.
         """
         try:
             response = httpx.post(
