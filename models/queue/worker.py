@@ -1567,6 +1567,20 @@ class Worker:
         `own_endpoints` is the admitted exclusive job's OWN endpoints,
         derived from THIS tick's batch and never recomputed later.
 
+        AND "OWN" MEANS `synchronous` (2026-09-24): only the refs whose
+        planner said this kind's HANDLER drives the model in-process
+        during the run (`models.contracts.jobkinds.ModelRef.synchronous`,
+        defaulted to `True` for a ref serialised before that field, so an
+        older row keeps today's behaviour). A ref a TOOL may use is still
+        declared, still protected, still counted and still swept -- none
+        of that reads this flag -- but it is not an endpoint this run is
+        about to load at, so the barrier has no load-on-top race to guard
+        there and must not spend a settle poll on it. A chat turn
+        declares the role of every granted tool, so without this filter
+        an agent granted the image tool put the image endpoint in every
+        turn's own-set and paid that poll on every admission (ADR 0013's
+        2026-09-24 amendment).
+
         AND IT IS THE WIDENING PREDICATE TOO, not "any exclusive
         descriptor" -- the two used to be different expressions and could
         disagree on one reachable case: an exclusive job declaring NO
@@ -1577,7 +1591,14 @@ class Worker:
         `_evict_to_match_plan` gates pass 1 and the barrier on
         `own_endpoints`. One expression now, so the sweep widens on
         exactly the condition the pass fires on, and such a job keeps
-        today's reach instead of buying a probe it cannot use.
+        today's reach instead of buying a probe it cannot use. The
+        `synchronous` filter joins that same expression, and the case it
+        adds is the same case: an exclusive job that declares only refs
+        its own handler never drives loads nothing in-process, so it has
+        nothing to barrier and keeps today's reach too. No CURRENT kind
+        is in it -- every planner in this repository declares at least one
+        synchronous ref -- and a chat turn, whose first ref is its chat
+        role, still widens exactly as before.
 
         `model_ids_by_endpoint` is what each endpoint can be ADDRESSED by,
         from the same `registered_endpoints()` call -- the unload seam
@@ -1601,6 +1622,7 @@ class Worker:
             for descriptor in claimed
             if descriptor.get("exclusive")
             for ref in descriptor["model_refs"]
+            if ref.get("synchronous", True)
         }
 
         model_ids_by_endpoint: dict[tuple[str, str], tuple[str, ...]] = {}

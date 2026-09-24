@@ -157,6 +157,7 @@ def _ref(
     role="test.role",
     connection_name="",
     footprint_bytes=None,
+    synchronous=True,
 ) -> dict:
     return {
         "role": role,
@@ -165,6 +166,7 @@ def _ref(
         "model_id": model_id,
         "connection_name": connection_name,
         "footprint_bytes": footprint_bytes,
+        "synchronous": synchronous,
     }
 
 
@@ -3501,6 +3503,67 @@ class TestThePrecautionaryCallTakesNoWait:
 
         assert foreign.unload_calls == [(self.FOREIGN, "foreign-model")]
         assert foreign.unload_waits == [True]
+
+    def _admitted_with_a_tool_ref(self):
+        """One admitted exclusive descriptor shaped like a chat turn on a
+        box where the agent is granted the image tool: its OWN chat ref
+        (`synchronous=True`) plus the tool's ref at the foreign endpoint
+        (`synchronous=False`) -- declared, protected, accounted for, but
+        never loaded in-process by this handler."""
+        refs = [
+            _ref(engine="e", endpoint=ENDPOINT, model_id="mine", role="chat.converse"),
+            _ref(engine="f", endpoint=self.FOREIGN, model_id="foreign-model",
+                 role="image.generate", synchronous=False),
+        ]
+        row = _job(state=RUNNING, model_refs=refs)
+        InferenceJob.objects.filter(pk=row.pk).update(exclusive=True)
+        return {
+            "id": row.pk, "kind": row.kind, "payload": {}, "model_refs": refs,
+            "claim_token": uuid.uuid4(), "exclusive": True,
+            "checkpoint": None, "attempts": 0,
+        }
+
+    def test_a_tool_declared_ref_is_not_an_own_endpoint_for_the_wait_decision(
+            self, worker, register_engine):
+        """THE CORRECTION (2026-09-24, after the preview still measured
+        ~22s): a chat turn declares the role of every granted tool, so the
+        image endpoint was landing in `own_endpoints` and keeping the
+        wait -- guarding a load this run never makes, since that tool
+        enqueues its own job and submits on its own path. Only refs the
+        handler drives in-process (`synchronous`) are own endpoints."""
+        self._foreign_connection()
+        own = register_engine(FakeWaitAwareEngine("e", installed=[]))
+        foreign = register_engine(FakeWaitAwareEngine("f", installed=[]))
+
+        refused = worker._evict_to_match_plan([self._admitted_with_a_tool_ref()])
+
+        assert refused == set()
+        # The endpoint the turn's own handler loads at: still waits.
+        assert own.unload_calls == [(ENDPOINT, "mine")]
+        assert own.unload_waits == [True]
+        # The tool's endpoint, declared by the same job: no wait.
+        assert foreign.unload_calls == [(self.FOREIGN, "foreign-model")]
+        assert foreign.unload_waits == [False]
+
+    def test_a_ref_with_no_synchronous_key_is_an_own_endpoint(self, worker, register_engine):
+        """Forward compatibility, pinned: a row enqueued before the field
+        existed carries no such key, and `.get("synchronous", True)` must
+        read it as the job's own -- today's behaviour, never a silent
+        narrowing of an older job's barrier."""
+        own = register_engine(FakeWaitAwareEngine("e", installed=[]))
+        legacy_ref = _ref(engine="e", endpoint=ENDPOINT, model_id="mine")
+        legacy_ref.pop("synchronous")
+        row = _job(state=RUNNING, model_refs=[legacy_ref])
+        InferenceJob.objects.filter(pk=row.pk).update(exclusive=True)
+
+        worker._evict_to_match_plan([{
+            "id": row.pk, "kind": row.kind, "payload": {}, "model_refs": [legacy_ref],
+            "claim_token": uuid.uuid4(), "exclusive": True,
+            "checkpoint": None, "attempts": 0,
+        }])
+
+        assert own.unload_calls == [(ENDPOINT, "mine")]
+        assert own.unload_waits == [True]
 
     def test_an_adapter_without_the_keyword_is_still_called_and_the_tick_proceeds(
             self, worker, register_engine):

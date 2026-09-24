@@ -1687,6 +1687,26 @@ caught this. It is corrected here: the timing capture must be taken on a box
 registering a **memo-authority** engine, since an all-authoritative box makes no
 precautionary calls at all and measures the one path that was never at risk.
 
+**Correction, same day, after the after-measurement.** On a two-engine preview one
+chat admission still waited ~22 s, and the cause was the word "own". A turn's planner
+declares the role of every tool the agent is granted — that is what the queue needs in
+order to protect and account for those models — and the worker built the admitted job's
+own-endpoint set from *all* of those refs. So on a box where the agent may call the
+image tool, the image endpoint was the turn's "own" endpoint and kept the wait, even
+though the turn never loads there in-process: that tool enqueues its own job and submits
+on its own path, so the load-on-top race the wait guards cannot occur there. The fix is
+in the snapshot, not the worker's policy: `ModelRef` gains `synchronous: bool = True` —
+`True` means this kind's handler drives the model itself during the run, `False` means a
+tool or a delegate may use it — the turn planner tags its chat ref `True` and every
+tool-derived ref (a delegate's own chat role included) `False`, and `_eviction_targets`
+builds `own_endpoints` from the synchronous refs alone. Everything else reads the
+declaration exactly as before: protection, the in-flight refs map, pass-1 eviction, the
+budget arithmetic and the swept endpoint set are untouched, so a tool's model is still
+reserved and still safe from budget eviction. The default is `True` and every reader
+defaults an absent key to `True`, so a planner that predates the field (the ingest
+planner genuinely drives both of its refs in-process) and a row enqueued before it keep
+today's behaviour. It is a dataclass field, not a model field: no migration.
+
 **What is deliberately NOT changed.** The log vocabulary: the precautionary
 line keeps its exact words, because the live-proof runbook pins those literals
 and the operator-visible fact (a call was made, accepted or refused) is the
