@@ -39,29 +39,36 @@ from tools.vision.models import GeneratedOutput, JobInput
 logger = logging.getLogger(__name__)
 
 
-def purge_artifacts(refs, generation_ids) -> int:
-    """Delete every generation job these references and ids name.
-    Returns the number of JOBS deleted, deduped.
+def resolve_artifact_jobs(refs, generation_ids) -> list[str]:
+    """The generation jobs these references and ids name, as primary
+    keys in string form, deduped.
 
-    THIS MODULE NEVER QUERIES `GenerationJob.objects` ITSELF: it only
-    maps references and generation ids to job ids, and hands them to
-    `tools.vision.services.delete_jobs` for the one unscoped read and
-    the actual deletion -- `foundation/ops/tests/
-    test_column_boundaries.py`'s IA-1 gate pins `visibility.py` and
-    `services.py` as the only two files in this column allowed to touch
-    that manager, and a third site here is exactly the drift it exists
-    to catch. Each job goes through `services.delete_job` (inside
-    `delete_jobs`), so its child rows cascade, its managed directory
-    goes, and its best-effort engine-side sweep runs.
+    RESOLVES; DESTROYS NOTHING. The conversation that owns these
+    references hands them over so each job can be given a DELETION OF
+    ITS OWN -- its own ticket, its own date on the Deleted page, its
+    own restore -- rather than being destroyed silently on somebody
+    else's date. `purge_job` below is what finally removes one, on the
+    date that job's own ticket printed.
 
-    With two empty lists this returns 0 having run no query at all
-    beyond what parsing an empty sequence costs (none) and without
-    calling `delete_jobs` -- every conversation purge on a vision box
-    reaches this function, most of them for a conversation with no
-    images, and that common case must cost nothing.
+    Strings, not UUIDs: a ticket key is text, and the caller is
+    building `(kind, key)` pairs for a registry, not a queryset.
 
-    Idempotent: a reference whose row is already gone contributes
-    nothing, and so does a job id that matches no row.
+    ONLY JOBS THAT STILL EXIST. A conversation's stored generation ids
+    outlive the jobs they name -- the turn keeps the id after the
+    picture was deleted from the gallery -- and every key this answers
+    becomes a TICKET. A ticket for a job nobody has would be a
+    "Generated image" row on the Deleted page with a date and a Restore
+    button, naming a picture nobody can restore and nothing will ever
+    destroy. So both channels' ids go through
+    `services.existing_job_ids` once, together.
+
+    With two empty lists this answers `[]` having run no query at all
+    -- every conversation delete on a box with this column installed
+    reaches this function, and most conversations have no images.
+
+    An unparseable reference or generation id is DROPPED and logged
+    WITHOUT its raw value: this runs inside a deletion, and a deletion
+    must not write what it is destroying somewhere new.
     """
     job_ids: set = set()
 
@@ -100,7 +107,34 @@ def purge_artifacts(refs, generation_ids) -> int:
             logger.warning(
                 "tools.vision.retention: one generation id failed to parse; ignored.")
 
-    if not job_ids:
-        return 0
+    return sorted(services.existing_job_ids(job_ids))
 
-    return services.delete_jobs(job_ids)
+
+def purge_artifacts(refs, generation_ids) -> int:
+    """Today's conversation-purge slot: resolve, then delete. The next
+    change retires this in favour of the child tickets
+    `resolve_artifact_jobs` feeds."""
+    return services.delete_jobs(resolve_artifact_jobs(refs, generation_ids))
+
+
+def purge_job(key: str) -> int:
+    """Destroy ONE generation on its own ticket's date: the row, its
+    `JobInput`/`GeneratedOutput` children by CASCADE, its managed
+    directory, and its best-effort engine-side sweep. Returns 1 or 0.
+
+    THROUGH `services.delete_jobs`, never `GenerationJob.objects`: only
+    `visibility.py` and `services.py` may query that manager in this
+    column, and a purge must reach a job nobody may currently see,
+    which is not a visibility question at all.
+
+    Idempotent: a job already gone, or a key that is not a UUID at all,
+    answers 0 rather than raising -- the ticket may outlive a row an
+    older path removed.
+
+    FILES band: it removes bytes.
+    """
+    try:
+        job_id = uuid.UUID(str(key))
+    except (ValueError, AttributeError, TypeError):
+        return 0
+    return services.delete_jobs([job_id])

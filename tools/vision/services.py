@@ -1384,6 +1384,33 @@ def delete_job(job: GenerationJob) -> None:
     store.remove_engine_files(job_id)
 
 
+def existing_job_ids(candidates) -> list[str]:
+    """Which of these job ids still name a job, as strings.
+
+    ONE QUERY FOR THE WHOLE BATCH, never one per id, and NO QUERY AT
+    ALL for an empty input -- most conversations reach the retention
+    resolver with nothing to ask about.
+
+    THE SECOND UNSCOPED READ OF `GenerationJob.objects` A DELETION
+    NEEDS, and it lives here for the reason `delete_jobs` below does:
+    only `visibility.py` and this module may query that manager, and
+    "does this row exist" is not a visibility question -- a deletion
+    must see a job nobody may currently look at.
+
+    IT EXISTS BECAUSE A DELETED CHAT'S IMAGES ARE NOW GIVEN DELETIONS
+    OF THEIR OWN. A conversation's turns keep a generation id after the
+    job itself is gone; a key answered for one of those would become a
+    ticket, and a ticket is a row on the Deleted page with a date and a
+    Restore button. This box does not print promises about pictures it
+    does not have.
+    """
+    ids = list(candidates or ())
+    if not ids:
+        return []
+    return [str(job_id) for job_id in
+            GenerationJob.objects.filter(pk__in=ids).values_list("pk", flat=True)]
+
+
 def delete_jobs(job_ids) -> int:
     """Delete every `GenerationJob` named by `job_ids` (each through
     `delete_job`, so its files and its best-effort engine sweep go too)

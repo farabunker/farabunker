@@ -95,3 +95,15 @@ class VisionConfig(AppConfig):
         from agents.contracts.artifacts import register_artifact_purge
 
         register_artifact_purge("tools.vision.retention.purge_artifacts")
+
+        # THIS COLUMN'S ANSWER TO "A DELETED IMAGE'S DATE HAS ARRIVED".
+        # A dotted-path string, like every other registration in this
+        # method, because `identity/` may not import `tools/` at all.
+        from identity.contracts.cascades import (
+            ORDER_FILES, RetentionHandler, register_retention_handler,
+        )
+        from identity.contracts.retention import KIND_VISION_JOB
+
+        register_retention_handler(RetentionHandler(
+            kind=KIND_VISION_JOB, key="vision.job", label="Generated image",
+            handler="tools.vision.retention.purge_job", order=ORDER_FILES))

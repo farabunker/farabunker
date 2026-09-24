@@ -966,23 +966,36 @@ stored image or stored input answers the same 404 as one this principal
 could never read in the first place, so a deleted picture cannot be
 fetched by a link that was copied or bookmarked before it was deleted.
 
-`tools/vision/retention.py::purge_artifacts` is this column's registered
-answer to `agents.contracts.artifacts.register_artifact_purge`
-(`tools/vision/apps.py::VisionConfig.ready()`, inside the feature gate).
-A deleted conversation's own purge hands it two things it already
-collected before deleting a single row of its own: the `output:<id>`/
-`input:<id>` artifact references its turns carried, and the generation
-ids sitting in `Turn.data["id"]`. `purge_artifacts` maps both to the
-`GenerationJob`s behind them — an `output`/`input` reference is one FK
-hop from its job, and several outputs share one job, so the mapping
-dedupes by job — and hands the resulting job ids to `services.
-delete_jobs`, never querying `GenerationJob.objects` itself (see
-`delete_jobs` above). **That is also the only reach this platform has
-into `/engine/output` and `/engine/input`**: `delete_job`'s best-effort
-engine-side sweep (`store.remove_engine_files`, which never raises) is
-what it triggers, once per job, and those two directories are tracked by
-no row at all — the Engine files page (above) remains the operator's own
-manual door onto them, for whatever a sweep never reached.
+This column registers TWO things in `tools/vision/apps.py::VisionConfig.ready()`.
+The first is unchanged: `agents.contracts.artifacts.register_artifact_purge`
+still names `tools/vision/retention.py::purge_artifacts`, and a deleted
+conversation's own purge still hands it the same two things it already
+collected before deleting a single row of its own — the `output:<id>`/
+`input:<id>` artifact references its turns carried, and the generation ids
+sitting in `Turn.data["id"]`. `purge_artifacts` now does that in two steps:
+`resolve_artifact_jobs` maps both channels to the keys of `GenerationJob`s
+that still exist — an `output`/`input` reference is one FK hop from its job,
+and several outputs share one job, so the mapping dedupes by job — and
+DESTROYS NOTHING, and `purge_artifacts` then deletes everything it resolved.
+The resolver checks existence, once, for the whole batch, because a stored
+generation id can outlive the job it names — the turn keeps the id after the
+picture was deleted from the gallery — and every key it answers is about to
+become something that must be true: today a job id, tomorrow a ticket for a
+job nobody has, which would be a "Generated image" row on the Deleted page
+with a date and a Restore button, naming a picture nobody can restore and
+nothing will ever destroy.
+
+The second registration is new: `tools/vision/retention.py::purge_job` is
+the `vision_job` kind's handler (`identity.contracts.cascades.RetentionHandler`,
+registered in the same `ready()`), which destroys exactly one generation on
+its own ticket's date, through `services.delete_jobs`, never querying
+`GenerationJob.objects` itself (see `delete_jobs` above). **This is also the
+only reach this platform has into `/engine/output` and `/engine/input`**:
+`delete_job`'s best-effort engine-side sweep (`store.remove_engine_files`,
+which never raises) runs once for every job purged this way — those two
+directories are tracked by no row at all, and the Engine files page (above)
+remains the operator's own manual door onto them, for whatever a sweep never
+reached.
 
 **Accepted residue.** A generation whose tool turn was never written at
 all — the job row was created and the chat turn died before it (a

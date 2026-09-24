@@ -3,12 +3,16 @@ the generation jobs behind them."""
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 
 import pytest
+from django.utils.module_loading import import_string
 
-from tools.vision import services
+from identity.contracts.cascades import retention_handlers
+from identity.contracts.retention import KIND_VISION_JOB
+from tools.vision import services, store
 from tools.vision.models import GeneratedOutput, GenerationJob, JobInput
-from tools.vision.retention import purge_artifacts
+from tools.vision.retention import purge_artifacts, purge_job, resolve_artifact_jobs
 from tools.vision.tests._helpers import seed_sweep_posture
 
 pytestmark = pytest.mark.django_db
@@ -51,32 +55,34 @@ def _output(**overrides) -> GeneratedOutput:
 
 
 class TestMappingReferencesToJobs:
+    """`resolve_artifact_jobs` -- RESOLVES and deletes nothing. What used
+    to be `purge_artifacts`'s own mapping half, pinned here on its own
+    now that the map is split from the delete (see `retention.py`'s
+    `resolve_artifact_jobs` docstring for why)."""
+
     def test_an_output_reference_deletes_its_whole_job(self):
         job = _generation()
         output = _output(job=job)
-        assert purge_artifacts([f"output:{output.pk}"], []) == 1
-        assert not GenerationJob.objects.filter(pk=job.pk).exists()
+        assert resolve_artifact_jobs([f"output:{output.pk}"], []) == [str(job.pk)]
 
     def test_two_outputs_of_one_job_are_one_delete(self):
         """Each reference is one FK hop from its job and several outputs
         share one job, so the mapping dedupes BY JOB."""
         job = _generation()
         first, second = _output(job=job, index=0), _output(job=job, index=1)
-        assert purge_artifacts(
-            [f"output:{first.pk}", f"output:{second.pk}"], []) == 1
+        assert resolve_artifact_jobs(
+            [f"output:{first.pk}", f"output:{second.pk}"], []) == [str(job.pk)]
 
     def test_an_input_reference_resolves_through_its_own_table(self):
         job = _generation()
         job_input = JobInput.objects.create(job=job, param_key="image",
                                             path="/dev/null",
                                             media_type="image/png")
-        assert purge_artifacts([f"input:{job_input.pk}"], []) == 1
-        assert not GenerationJob.objects.filter(pk=job.pk).exists()
+        assert resolve_artifact_jobs([f"input:{job_input.pk}"], []) == [str(job.pk)]
 
     def test_a_bare_generation_id_is_accepted(self):
         job = _generation()
-        assert purge_artifacts([], [str(job.pk)]) == 1
-        assert not GenerationJob.objects.filter(pk=job.pk).exists()
+        assert resolve_artifact_jobs([], [str(job.pk)]) == [str(job.pk)]
 
     def test_a_failed_job_with_no_output_is_reached_only_through_its_generation_id(self):
         """The docstring's own claim: a job that reached the engine and
@@ -86,43 +92,51 @@ class TestMappingReferencesToJobs:
         job = _generation(status=GenerationJob.Status.FAILED,
                           error="the engine could not be reached")
         assert not GeneratedOutput.objects.filter(job=job).exists()
-        assert purge_artifacts([], [str(job.pk)]) == 1
-        assert not GenerationJob.objects.filter(pk=job.pk).exists()
+        assert resolve_artifact_jobs([], [str(job.pk)]) == [str(job.pk)]
 
     def test_a_reference_and_an_id_naming_one_job_are_one_delete(self):
         job = _generation()
         output = _output(job=job)
-        assert purge_artifacts([f"output:{output.pk}"], [str(job.pk)]) == 1
+        assert resolve_artifact_jobs(
+            [f"output:{output.pk}"], [str(job.pk)]) == [str(job.pk)]
 
     def test_a_uuid_that_matches_no_job_is_ignored(self):
-        assert purge_artifacts([], [str(uuid.uuid4())]) == 0
+        """The whole point of the existence check `resolve_artifact_jobs`
+        runs both channels through: a stored generation id can outlive
+        the job it names."""
+        assert resolve_artifact_jobs([], [str(uuid.uuid4())]) == []
 
     def test_a_reference_that_matches_no_row_is_ignored(self):
-        assert purge_artifacts(["output:999999"], []) == 0
+        assert resolve_artifact_jobs(["output:999999"], []) == []
 
     def test_an_unparseable_reference_is_dropped_not_raised(self):
-        assert purge_artifacts(["not-a-reference", ""], []) == 0
+        assert resolve_artifact_jobs(["not-a-reference", ""], []) == []
 
     def test_a_document_reference_is_skipped_silently(self):
         """`document:<id>` names a `Document` row, which the attachment
         seam already reaches -- `agents.retention._collect` never hands
         one to this column in the first place, and this pins that a
         caller who did anyway would not raise or count it."""
-        assert purge_artifacts(["document:451"], []) == 0
+        assert resolve_artifact_jobs(["document:451"], []) == []
 
     def test_it_is_idempotent(self):
+        """RESOLVING twice is not DESTROYING twice: a second call answers
+        the SAME list, not a second, smaller one."""
         job = _generation()
         output = _output(job=job)
-        purge_artifacts([f"output:{output.pk}"], [])
-        assert purge_artifacts([f"output:{output.pk}"], []) == 0
+        first = resolve_artifact_jobs([f"output:{output.pk}"], [])
+        assert first == resolve_artifact_jobs([f"output:{output.pk}"], []) == [str(job.pk)]
 
     def test_it_goes_through_delete_job_so_the_files_and_the_sweep_run(self, monkeypatch):
+        """Moved onto `purge_job`: the resolver above destroys nothing,
+        so the delete-job-and-sweep contract now belongs to the handler
+        that actually removes a job."""
         calls = []
         from tools.vision import retention as module
         monkeypatch.setattr(module.services, "delete_job",
                             lambda job: calls.append(job.pk))
         job = _generation()
-        purge_artifacts([], [str(job.pk)])
+        purge_job(str(job.pk))
         assert calls == [job.pk]
 
 
@@ -161,7 +175,7 @@ class TestEmptyInputCostsNothing:
         monkeypatch.setattr(module.services, "delete_jobs",
                             lambda job_ids: called.append(list(job_ids)) or 0)
         with django_assert_num_queries(0):
-            assert purge_artifacts([], []) == 0
+            assert resolve_artifact_jobs([], []) == []
         assert called == []
 
 
@@ -195,3 +209,84 @@ class TestDeleteJobs:
         job.delete()
 
         assert services.delete_jobs([job_id]) == 0
+
+
+class TestOnlyJobsThatExistComeBack:
+    """A STORED GENERATION ID CAN NAME A JOB THAT IS ALREADY GONE --
+    the turn keeps the id after the picture was deleted from the
+    gallery. That was harmless while these ids fed a delete; it is not
+    harmless now that each one becomes a ticket, because a ticket for a
+    job nobody has is a "Generated image" row on the Deleted page with
+    a date and a Restore button, naming a picture nobody can restore
+    and nothing will ever destroy."""
+
+    def test_a_generation_id_whose_job_is_gone_is_dropped(self):
+        job = _generation()
+        services.delete_jobs([job.pk])
+        assert resolve_artifact_jobs([], [str(job.pk)]) == []
+
+    def test_a_live_job_and_a_gone_one_answer_only_the_live_one(self):
+        live = _generation()
+        gone = _generation()
+        services.delete_jobs([gone.pk])
+        assert resolve_artifact_jobs([], [str(live.pk), str(gone.pk)]) == [
+            str(live.pk)]
+
+    def test_the_check_is_one_query_for_the_whole_batch(
+            self, django_assert_num_queries):
+        """Two ids, one existence query -- never one per id. The
+        reference channel pays its own FK hop on top; this pins the
+        check itself."""
+        first = _generation()
+        second = _generation()
+        with django_assert_num_queries(1):
+            assert resolve_artifact_jobs(
+                [], [str(first.pk), str(second.pk)]) == sorted(
+                    [str(first.pk), str(second.pk)])
+
+    def test_a_reference_costs_its_hop_and_the_check(
+            self, django_assert_num_queries):
+        job = _generation()
+        output = _output(job=job)
+        with django_assert_num_queries(2):
+            assert resolve_artifact_jobs([f"output:{output.pk}"], []) == [
+                str(job.pk)]
+
+
+class TestPurgeJob:
+    """The `vision_job` kind's registered handler: ONE generation,
+    addressed by its own ticket."""
+
+    def test_it_removes_the_row_its_children_and_its_file(self, tmp_path, settings):
+        settings.GENERATED_DIR = tmp_path
+        job = _generation()
+        path = store.store_output(job.pk, 0, "lighthouse.png", b"bytes on disk")
+        GeneratedOutput.objects.create(job=job, index=0, path=path,
+                                       media_type="image/png")
+        assert purge_job(str(job.pk)) == 1
+        assert not GenerationJob.objects.filter(pk=job.pk).exists()
+        assert not GeneratedOutput.objects.filter(job_id=job.pk).exists()
+        assert not Path(path).exists()
+
+    def test_it_is_idempotent(self):
+        job = _generation()
+        purge_job(str(job.pk))
+        assert purge_job(str(job.pk)) == 0
+
+    def test_a_job_that_does_not_exist_is_zero_not_an_error(self):
+        assert purge_job(str(uuid.uuid4())) == 0
+
+    def test_a_non_uuid_key_removes_nothing(self):
+        assert purge_job("not-a-uuid") == 0
+
+
+class TestTheKindIsRegistered:
+    def test_the_registered_handler_resolves_and_removes_the_job(self):
+        """END TO END THROUGH THE REGISTRY, not through the function
+        name: this is what `identity.retention.purge_ticket` will
+        actually run for a `vision_job` ticket."""
+        specs = retention_handlers(KIND_VISION_JOB)
+        assert [spec.label for spec in specs] == ["Generated image"]
+        job = _generation()
+        assert import_string(specs[0].handler)(str(job.pk)) == 1
+        assert not GenerationJob.objects.filter(pk=job.pk).exists()

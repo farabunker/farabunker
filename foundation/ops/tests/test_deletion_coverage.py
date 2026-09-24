@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import pytest
 from django.apps import apps
+from django.conf import settings
 from django.utils.module_loading import import_string
 
 from identity.access import owner_fields
@@ -58,7 +59,9 @@ from identity.contracts.cascades import (
     RetentionHandler, register_retention_handler, retention_handlers,
 )
 from identity.contracts.principals import OPEN_PRINCIPAL
-from identity.contracts.retention import KIND_CONVERSATION, KIND_LABELS, RETENTION_KINDS
+from identity.contracts.retention import (
+    KIND_CONVERSATION, KIND_LABELS, KIND_VISION_JOB, RETENTION_KINDS,
+)
 
 # Every model carrying user content, mapped to the ticket kinds whose
 # registered handlers reach it. Written from the content inventory in
@@ -91,7 +94,6 @@ _EXEMPT: dict[str, str] = {
                                "columns name the ITEM's owner, and the ticket is "
                                "destroyed by the purge it records",
     "rag.AskRecord": "gains a registered handler in Slice 2",
-    "vision.GenerationJob": "gains a registered handler in Slice 2",
     # Not owner-marked (see the module docstring above) -- recorded here
     # anyway so the residue is a decision a reviewer has read, not one a
     # future reader has to rediscover.
@@ -103,6 +105,20 @@ _EXEMPT: dict[str, str] = {
                              "through -- crash-orphaned rows are a known, "
                              "accepted residue with no reaper",
 }
+
+# A generated image is its own deletion kind, reached from the gallery
+# and as a deleted chat's child -- but the handler that answers for it
+# is registered by a column that only starts when that feature is on,
+# while the model itself is installed either way. BOTH BRANCHES MATTER:
+# with the feature off nothing registers the handler, and an owned
+# table still has to be accounted for in one dict or the other.
+if "vision" in settings.FARABUNKER_FEATURES:
+    _COVERED["vision.GenerationJob"] = (KIND_VISION_JOB,)
+else:
+    _EXEMPT["vision.GenerationJob"] = (
+        "the image column is not installed in this flag state, so nothing "
+        "registers its handler; with the feature on it is covered by the "
+        "vision_job kind")
 
 
 def _label(model) -> str:
