@@ -42,6 +42,7 @@ never the tick loop's.
 from __future__ import annotations
 
 import concurrent.futures
+import inspect
 import logging
 import os
 import signal
@@ -413,6 +414,13 @@ class Worker:
         # durable half of the mechanism is `InferenceJob.not_before`,
         # which survives the restart this map does not.
         self._barrier_refusals: dict[int, tuple[int, float]] = {}
+
+        # {engine name: whether its `unload` accepts the OPTIONAL `wait`
+        # keyword} -- answered once per engine by `_unload_accepts_wait`
+        # (which see for why this is inspected rather than tried). Bounded
+        # by the number of registered engines, written and read on the
+        # tick thread alone.
+        self._unload_wait_support: dict[str, bool] = {}
 
         self._last_heartbeat_monotonic: float | None = None
 
@@ -1412,6 +1420,45 @@ class Worker:
         declared = getattr(engine_obj, "unload_scope", None)
         return declared if declared in _UNLOAD_SCOPES else "endpoint"
 
+    def _unload_accepts_wait(self, engine_name: str, unload) -> bool:
+        """Whether this engine's `unload` accepts the OPTIONAL keyword-only
+        `wait` (base seam, 2026-09-24). Answered ONCE per engine name and
+        remembered in `self._unload_wait_support`.
+
+        INSPECTED, NEVER TRIED. The alternative shape --
+        `try: unload(..., wait=False) except TypeError: unload(...)` --
+        cannot tell "this adapter has no `wait` parameter" from "a
+        `TypeError` was raised INSIDE the adapter", and would answer the
+        second by silently calling it again, hiding a broken adapter
+        behind a retry. The same reason the rest of this pass reads
+        optional seam members with `getattr` rather than catching
+        `AttributeError` off a call.
+
+        Anything `inspect.signature` cannot describe (a C-implemented or
+        aggressively wrapped callable) reads as `False`, the degraded
+        answer: a needless wait costs latency, while assuming a keyword
+        an adapter does not take would raise inside the eviction pass.
+        """
+        cached = self._unload_wait_support.get(engine_name)
+        if cached is not None:
+            return cached
+        try:
+            parameters = inspect.signature(unload).parameters
+        except (TypeError, ValueError):
+            accepts = False
+        else:
+            wait_param = parameters.get("wait")
+            accepts = (
+                wait_param is not None
+                and wait_param.kind in (
+                    inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
+            ) or any(
+                param.kind is inspect.Parameter.VAR_KEYWORD for param in parameters.values()
+            )
+        self._unload_wait_support[engine_name] = accepts
+        return accepts
+
     @staticmethod
     def _residency_authority(engine_obj) -> str:
         """`"endpoint"` or `"memo"` -- how much this engine's residency
@@ -2015,6 +2062,7 @@ class Worker:
         model_ids_by_endpoint: dict[tuple[str, str], tuple[str, ...]],
         protected_keys: set[tuple[str, str, str]],
         own_keys_by_job: dict[int, set[tuple[str, str, str]]],
+        own_endpoints: set[tuple[str, str]],
     ) -> set[int]:
         """PARTS 3 AND 4 of the barrier: the PRECAUTIONARY calls, and then
         reading what the unload calls actually said. Returns the job ids
@@ -2040,6 +2088,29 @@ class Worker:
         and a cold, empty endpoint is the common case after a restart --
         a rule that refused there would make an exclusive job
         unlaunchable not for one tick but for ever.
+
+        AND BECAUSE THAT ANSWER IS DISCARDED, A PRECAUTIONARY CALL AT A
+        FOREIGN ENDPOINT ASKS THE ADAPTER NOT TO WAIT FOR IT
+        (`wait=False`, the base seam's optional extension; ADR 0013's
+        2026-09-24 amendment). An adapter that VERIFIES its unload polls
+        for a free-memory rise that a cold endpoint never shows, so it
+        pays its whole settle budget and then answers `False` -- an
+        answer this method throws away, in front of every exclusive
+        admission. Measured live on 2026-09-24: up to ~30s before a chat
+        turn's first token, because an agent turn is planned exclusive.
+
+        THE ADMITTED JOB'S OWN ENDPOINTS KEEP THE WAIT. That is where the
+        job is about to load, and the settle poll is the only thing
+        standing between this `/free` and the new checkpoint loading ON
+        TOP of the one being freed -- the load-on-top race the barrier
+        exists for. So does a believed-RESIDENT endpoint, which is not
+        barriered here at all: `_evict_exclusive_endpoints` made that
+        call, its `False` is informative, and a real eviction must be
+        seen to settle.
+
+        An adapter that does not accept the keyword is called the plain
+        two-argument way (`_unload_accepts_wait`), which is what keeps
+        `wait` an optional extension rather than a seam requirement.
         """
         for endpoint_key in sorted(endpoints):
             engine_name, endpoint = endpoint_key
@@ -2070,8 +2141,16 @@ class Worker:
             # the one place a BELIEVED-RESIDENT model is unloaded; this
             # is the one place a call is made precisely because the
             # belief is worth nothing. Its `False` is INFO and does not
-            # refuse (§3.3d(4)).
-            accepted = unload(endpoint, addressed)
+            # refuse (§3.3d(4)) -- which is exactly why a FOREIGN
+            # endpoint's call asks the adapter not to wait for an answer
+            # this method is about to discard. The job's own endpoints
+            # keep the wait (see this method's docstring).
+            if endpoint_key in own_endpoints or not self._unload_accepts_wait(
+                engine_name, unload,
+            ):
+                accepted = unload(endpoint, addressed)
+            else:
+                accepted = unload(endpoint, addressed, wait=False)
             self._maybe_heartbeat()
             self._log_unload(
                 engine_name, endpoint, addressed, self._unload_scope(engine_obj),
@@ -2359,7 +2438,7 @@ class Worker:
             )
             refused = self._barrier(
                 claimed, endpoints, installed_by_endpoint, model_ids_by_endpoint,
-                protected_keys, own_keys_by_job,
+                protected_keys, own_keys_by_job, own_endpoints,
             )
 
         if over_budget:
