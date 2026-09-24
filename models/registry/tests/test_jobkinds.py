@@ -89,11 +89,17 @@ class TestJobKind:
         assert kind.handler == "tools.rag.jobs.handle_ask"
         assert kind.summarizer == "tools.rag.jobs.summarize_ask"
         assert kind.default_priority is None
+        assert kind.stale_after_seconds is None
 
     def test_construction_with_explicit_priority(self):
         kind = _kind(default_priority=10)
 
         assert kind.default_priority == 10
+
+    def test_construction_with_explicit_stale_after_seconds(self):
+        kind = _kind(stale_after_seconds=3600)
+
+        assert kind.stale_after_seconds == 3600
 
     def test_frozen(self):
         kind = _kind()

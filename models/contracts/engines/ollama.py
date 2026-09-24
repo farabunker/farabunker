@@ -132,6 +132,28 @@ class OllamaEngine:
     # scan's own code by name.
     well_known_ports = (11434,)
 
+    # WHAT ONE `unload()` CALL FREES HERE. "model": this adapter's unload
+    # is `POST /api/generate {"model": <name>, "keep_alive": 0}` (see
+    # `unload`'s own docstring), which names ONE model and releases that
+    # model alone -- every other model resident at the endpoint stays
+    # loaded. The execution queue reads this to decide whether it may
+    # skip a protected key one by one or must leave the whole endpoint
+    # alone; without the declaration it assumes "endpoint", the safe
+    # guess, and would then believe a single call had freed everything
+    # here when it had freed one model.
+    unload_scope = "model"
+
+    # HOW MUCH THIS ENGINE'S RESIDENCY REPORT IS WORTH. "endpoint": the
+    # `loaded` flags `list_installed` carries come from a LIVE `GET
+    # /api/ps` against the engine itself (`_ps_sizes`), not from any
+    # process-local memory this adapter keeps -- so "nothing resident"
+    # here is a FACT about the engine, and a restart of THIS process
+    # cannot produce it. The queue reads this to decide whether an empty
+    # residency answer is worth trusting before it launches an exclusive
+    # job; the declaration is what spares an idle engine a precautionary
+    # unload on every such tick.
+    residency_authority = "endpoint"
+
     # Which platform capabilities this engine can answer at all -- the setup
     # page's "Served by" column reads this; nothing else branches on it.
     serves_capabilities = ("chat", "embeddings", "vision")

@@ -30,6 +30,7 @@ from models.contracts.engines.base import (
     TranscriptResult,
     TranscriptSegment,
 )
+from models.contracts.engines.comfyui import ComfyUIEngine
 from models.contracts.engines.ollama import OllamaEngine
 
 
@@ -233,3 +234,34 @@ class TestBuildTranscriberIsOptional:
 
     def test_inference_engine_declares_build_transcriber(self):
         assert hasattr(InferenceEngine, "build_transcriber")
+
+
+class TestTheImageAdapterDeclaresItsEvictionSemantics:
+    """Two one-line declarations, pre-cleared by the engine steward
+    (spec §13 steward amendment, S-1). Both match what the queue would
+    have ASSUMED, so this changes no behaviour -- it replaces a guess
+    with a fact, which is what lets the queue tell this engine apart from
+    one that really does free a single named model."""
+
+    def test_its_unload_frees_the_whole_endpoint(self):
+        assert ComfyUIEngine.unload_scope == "endpoint"
+
+    def test_its_residency_report_is_a_process_local_memo(self):
+        assert ComfyUIEngine.residency_authority == "memo"
+
+
+class TestTheTextAdapterDeclaresItsEvictionSemantics:
+    """The other half of the seam, and the half that actually changes
+    behaviour. Undeclared, this engine read as endpoint-scope + memo --
+    the safe guess for an UNKNOWN adapter, and the wrong fact for this
+    one: the queue would make a single `keep_alive: 0` call, free ONE
+    model, and then believe every model at the endpoint had been
+    released, so an exclusive job could launch on top of memory nobody
+    unloaded. Declaring both replaces that guess with what the adapter's
+    own `unload`/`list_installed` actually do."""
+
+    def test_its_unload_frees_the_named_model_only(self):
+        assert OllamaEngine.unload_scope == "model"
+
+    def test_its_residency_report_is_a_live_endpoint_answer(self):
+        assert OllamaEngine.residency_authority == "endpoint"

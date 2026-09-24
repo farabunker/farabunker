@@ -137,6 +137,8 @@ from django.db import IntegrityError, OperationalError, ProgrammingError, transa
 from django.http import HttpResponse, HttpResponseBadRequest
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
+from django.utils.formats import date_format
 from django.views.decorators.http import require_POST
 from django.views.generic import TemplateView
 
@@ -145,7 +147,7 @@ from identity.access import is_admin, labelling_entitlements
 from identity.contracts import actions
 from identity.contracts.principals import payload_fields
 from identity.request import principal_for_request, settings_row_for, user_for_request
-from models.registry.bindings import resolved_from_connection
+from models.registry.bindings import registered_endpoints, resolved_from_connection
 from models.registry.discovery import discover, norm_endpoint, norm_tag, scan_for_servers
 from models.registry.labels import (
     SetRefused, attach, create_set, delete_set, detach, rename_set, set_delete_counts,
@@ -212,11 +214,10 @@ def _engine_endpoints(connections: list[ModelConnection], endpoint: str) -> dict
     at the one viewed address) as a superset, so an override still scans
     for every engine.
 
-    The defaults pass reads the settings map itself rather than
-    `ENGINES`, so an engine whose default address is configured but whose
-    adapter is not registered yet still gets a bucket; `discover()` only
-    ever polls engines that ARE registered (it iterates `ENGINES` and
-    looks the name up here), so an unused key costs nothing.
+    The defaults-union-connections half is `models.registry.bindings.
+    registered_endpoints` -- ONE implementation, shared with the execution
+    queue's cross-engine sweep (spec §3.3e). This page's own connections
+    are handed straight in, so delegating costs no extra query.
 
     De-anchored by construction: no engine name, port, or path is written
     here -- keys come off the settings map, the connections, and each
@@ -231,10 +232,16 @@ def _engine_endpoints(connections: list[ModelConnection], endpoint: str) -> dict
         if all(norm_endpoint(candidate) != norm_endpoint(seen) for seen in bucket):
             bucket.append(candidate)
 
-    for engine_name, default in settings.INFERENCE_DEFAULT_ENDPOINTS.items():
-        _add(engine_name, default)
-    for connection in connections:
-        _add(connection.engine, connection.endpoint)
+    # The defaults-union-connections half is `models.registry.bindings.
+    # registered_endpoints` -- ONE implementation, shared with the
+    # execution queue's cross-engine sweep (spec §3.3e). The rows this
+    # page already holds are handed straight in, so this costs no query.
+    for engine_name, endpoint_value, _model_ids in registered_endpoints(connections=connections):
+        _add(engine_name, endpoint_value)
+    # Still this page's own behaviour, and not the queue's: the address
+    # currently being VIEWED is polled for every REGISTERED engine, which
+    # preserves the pre-D11 superset an operator's `?endpoint=` override
+    # depends on.
     for engine in ENGINES.values():
         _add(engine.name, endpoint)
 
@@ -707,6 +714,78 @@ _SOURCE_LABELS = {
 }
 
 
+# Operator-facing labels for `ModelConnection.footprint_source` -- a
+# SEPARATE vocabulary from `_SOURCE_LABELS` above, deliberately (spec
+# §3.1). `_SOURCE_LABELS`'s first job is labelling
+# `DiscoveryRow.capability_source`, where "detected from the model
+# server" is TRUE: a capability really was read off the engine. A
+# footprint's rung-2 value is OUR OWN post-run delta observation, not the
+# engine's declaration, so reusing that phrase for it was the one place
+# this console said something untrue -- and retiring the phrase where it
+# IS true would relabel a shipped, unrelated disclosure.
+#
+# Rung 3 reads "from the engine's residency snapshot", NOT "reported by
+# the model server" (engine steward's amendment, 2026-09-21): one of the
+# two live engines reports no per-model residency or size at all -- its
+# loaded size is the adapter's own post-run delta out of a TTL'd memo --
+# so the stronger phrasing would be untrue there. This one is honest on
+# both.
+#
+# The empty-string key is the "no rung answered" case, kept in the map
+# rather than as a template `{% if %}` so every state this vocabulary can
+# be in is declared in one place.
+_FOOTPRINT_SOURCE_LABELS = {
+    "override": "set by the operator",
+    "measured": "measured after a run",
+    "engine_reported": "from the engine's residency snapshot",
+    "": "not measured yet — this model runs alone",
+}
+
+
+def _footprint_source_label(source: str | None, at) -> str:
+    """One resolved label for a footprint rung: the vocabulary string
+    above, plus " on <date>" for the two rungs that carry a timestamp.
+
+    Resolved HERE, in the view, rather than in the template, so the label
+    and the fact can no longer disagree: the template used to render
+    `footprint_source_labels.connection`/`.engine` directly off a raw map,
+    keyed by hand, beside a value it had chosen with its own `{% if %}` --
+    two independent decisions about the same row (spec §3.1's named
+    template edit).
+
+    Returns plain text -- autoescaping stays ON. The rung-3 wording's
+    apostrophe ("engine's residency snapshot") therefore renders as
+    `&#x27;` on the page; that is the correct, repo-wide behaviour for an
+    apostrophe in rendered copy (see
+    `tools/rag/tests/test_views_upload_and_settings.py`'s write-then-render
+    gate), not a defect to route around with `mark_safe`/`|safe`.
+    """
+    label = _FOOTPRINT_SOURCE_LABELS.get(source or "", _FOOTPRINT_SOURCE_LABELS[""])
+    if at is None:
+        return label
+    # `timezone.localtime` FIRST, and it is not optional: the template's
+    # `{{ value|date:"N j, Y" }}` localizes to `settings.TIME_ZONE` before
+    # formatting and `date_format` does not. `config/settings.py` reads
+    # `TIME_ZONE` from the environment with `USE_TZ = True`, so formatting
+    # the raw UTC value would silently move the rendered DATE by a day on
+    # any non-UTC box -- while the shipped assertions, and the operator,
+    # expect the date the template has always rendered.
+    local_at = timezone.localtime(at) if timezone.is_aware(at) else at
+    return f"{label} on {date_format(local_at, 'N j, Y')}"
+
+
+def _footprint_source_at(connection: ModelConnection):
+    """The timestamp belonging to whichever rung `footprint_source` named
+    -- `None` for the operator's override (a declaration, not an
+    observation, and it carries no date) and for the unknown case."""
+    source = connection.footprint_source
+    if source == "measured":
+        return connection.measured_footprint_at
+    if source == "engine_reported":
+        return connection.engine_reported_footprint_at
+    return None
+
+
 def _installed_views(
     discovered: list,
     in_use_keys: set[tuple[str, str]],
@@ -859,13 +938,18 @@ def _connection_views(
             "bound_has_embeddings": bound_has_embeddings.get(connection.pk, False),
             "removal_note": _removal_note_short(bound_outcomes.get(connection.pk, [])),
             "removal_note_title": _removal_note_title(bound_outcomes.get(connection.pk, [])),
-            # T2b facts <dl>: human-readable sizes computed here (the
-            # template has no way to format bytes itself) -- `None` when
-            # the underlying field is unset, so the template's `{% if
-            # item.connection.footprint_override_bytes %}` gate already
-            # decides whether either is ever rendered.
-            "footprint_override_display": _human_size(connection.footprint_override_bytes),
+            # The facts <dl>, rebuilt by the queue memory-governance track
+            # (spec §3.1): ONE resolved label per row, from the footprint
+            # vocabulary, so the template no longer picks a fact and a
+            # label independently of each other.
+            "footprint_display": _human_size(connection.effective_footprint_bytes),
+            "footprint_source_label": _footprint_source_label(
+                connection.footprint_source, _footprint_source_at(connection),
+            ),
             "measured_footprint_display": _human_size(connection.measured_footprint_bytes),
+            "measured_source_label": _footprint_source_label(
+                "measured", connection.measured_footprint_at,
+            ),
             "member_set_ids": member_set_ids.get(connection.pk, []),
         }
         for connection in connections
@@ -1444,10 +1528,6 @@ def _build_context(endpoint: str, override: str = "") -> dict:
         # selected "(not registered)" option instead of silently falling
         # through to whichever option happens to be first.
         "supported_engine_names": {entry["name"] for entry in supported_engines},
-        # T2b's facts <dl> (`_registered_connection.html`) reads its
-        # provenance strings straight from `_SOURCE_LABELS` -- no new
-        # vocabulary alongside "manual" / "detected from the model server".
-        "footprint_source_labels": _SOURCE_LABELS,
     }
 
     # The multi-file registration fields (ADR 0012 D-EDIT-2/3): the engine

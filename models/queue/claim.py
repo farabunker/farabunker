@@ -57,13 +57,14 @@ import zlib
 from datetime import timedelta
 
 from django.db import connection, transaction
+from django.db.models import F, Q
 from django.utils import timezone
 
 from models.registry.bindings import footprint_for
 from models.registry.discovery import norm_endpoint, norm_tag
 from models.queue.models import FAILED, QUEUED, RUNNING, InferenceJob, JobSettings
 from models.queue.scheduler import SchedCandidate, SchedModel, plan_admissions
-from models.contracts.jobkinds import invoke_on_terminal
+from models.contracts.jobkinds import all_job_kinds, invoke_on_terminal
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,8 @@ CANDIDATE_WINDOW = 200
 
 
 def claim_and_admit(
-    worker_id: str, *, stale_after_seconds: int, settings_row: JobSettings | None = None,
+    worker_id: str, *, stale_after_seconds: int, sweep_orphans: bool = True,
+    settings_row: JobSettings | None = None, resident_keys: frozenset = frozenset(),
 ) -> list[dict]:
     """Claim and admit newly-runnable jobs for `worker_id`, one round.
 
@@ -112,6 +114,25 @@ def claim_and_admit(
     `claim_and_admit` -- importing back would be circular). Passing it in
     keeps the orphan sweep itself testable in isolation too, with an
     arbitrarily short threshold, no monkeypatching required.
+
+    `sweep_orphans` (spec §3.4c) lets the caller skip step 2 for ONE round.
+    The worker passes `False` for a grace period after it detects that the
+    HOST SLEPT -- on wake every running row looks stale at once, because
+    wall-clock hours passed while the process's monotonic clock barely
+    advanced, and a sweep at that instant mass-orphans healthy work. It is
+    a deliberate one-round skip, never a mode: the very next tick sweeps
+    normally.
+
+    `resident_keys` (spec 3.6) is the CALLER'S believed-resident model-key
+    set -- `models.queue.worker.Worker._resident_keys`, the snapshot its
+    last eviction pass took with that pass's own unloads subtracted. It is
+    handed straight to `plan_admissions` as rule 10's ordering preference
+    and is used for nothing else: deliberately stale (minutes old in
+    sequential mode, since snapshots are only taken on ticks that admit),
+    so a wrong guess costs one suboptimal ordering decision and never a
+    wrong admission or a wrong eviction. The default empty set is the
+    fresh-worker fallback and what keeps this function callable on its own
+    -- with no snapshot, `affinity_order` is plain `(priority, id)` order.
 
     Returns a list of claimed job descriptors, each `{"id", "kind",
     "payload", "model_refs", "claim_token", "exclusive", "checkpoint",
@@ -148,10 +169,26 @@ def claim_and_admit(
        sets, resolve `footprint_for(engine, endpoint, model_id)` FRESH,
        right now -- never the row's stored/stamped snapshot, which is
        display/history data only (`scheduler.py`'s provenance contract).
+
+       `not_before` (spec §3.3d) is the ONE new admission-side filter this
+       track adds -- an extra `WHERE` on this same SELECT, not a second
+       statement. A job the worker refused to launch this tick is excluded
+       until its hold-off expires, so it cannot be re-claimed on every 0.5s
+       tick against an engine that is still holding memory. The no-backfill
+       deadlock proof survives because the exclusion is time-bounded and
+       SELF-CLEARING -- the job returns to its own head position the moment
+       the hold-off passes, and an effectively-exclusive head is still
+       admitted alone the instant the machine is idle -- so nothing can
+       wait behind it for ever.
     4. `plan_admissions(candidates, running, budget_bytes=<row>.
-       memory_budget_bytes, max_concurrent=<row>.max_concurrent_jobs)`,
-       `<row>` being the threaded `settings_row` or this function's own
-       fallback fetch (see above).
+       memory_budget_bytes, max_concurrent=<row>.max_concurrent_jobs,
+       resident_keys=resident_keys)`, `<row>` being the threaded
+       `settings_row` or this function's own fallback fetch (see above).
+       Then PASS-OVER ACCOUNTING: one bulk `UPDATE` incrementing
+       `passed_over` on every candidate a later-by-`(priority, id)` peer
+       was admitted ahead of (spec 3.6) -- see the inline note at that
+       statement for why it is derived from the same helper
+       `plan_admissions` itself walked.
     5. For each admitted id: one conditional `UPDATE` -- state=running,
        claimed_by=worker_id, a FRESH `claim_token` (uuid4, one per job),
        started_at=now, heartbeat_at=now, attempts unchanged, and
@@ -190,12 +227,15 @@ def claim_and_admit(
         if not acquired:
             return []
 
-        _sweep_orphans(stale_after_seconds)
+        if sweep_orphans:
+            _sweep_orphans(stale_after_seconds)
 
         running_rows = list(InferenceJob.objects.filter(state=RUNNING))
+        now = timezone.now()
         candidate_rows = list(
             InferenceJob.objects.select_for_update(skip_locked=True)
             .filter(state=QUEUED)
+            .filter(Q(not_before__isnull=True) | Q(not_before__lte=now))
             .order_by("priority", "id")[:CANDIDATE_WINDOW]
         )
 
@@ -215,9 +255,42 @@ def claim_and_admit(
             running,
             budget_bytes=job_settings.memory_budget_bytes,
             max_concurrent=job_settings.max_concurrent_jobs,
+            resident_keys=resident_keys,
         )
 
         rows_by_id = {row.pk: row for row in candidate_rows}
+
+        # PASS-OVER ACCOUNTING (spec 3.6). A candidate is "passed over"
+        # when a peer that is LATER by strict `(priority, id)` was admitted
+        # ahead of it. Derived from the admitted set ITSELF, not from a
+        # second ordering: `plan_admissions` already walked
+        # `affinity_order`, so the highest strict `(priority, id)` key it
+        # admitted is a high-water mark, and any non-admitted candidate
+        # below it is one a later peer was admitted ahead of. Nothing here
+        # can disagree with the order that was actually walked, because
+        # nothing here re-derives it.
+        #
+        # ONE per ROUND, not per peer: this is a single increment on a
+        # candidate the round went past, however many peers went past it.
+        # The aging bound counts occasions a job lost its turn.
+        #
+        # ONE BULK UPDATE inside the transaction already open. The count is
+        # what the aging bound reads, and it is durable precisely so a
+        # worker restart cannot reset a job's age.
+        admitted_set = set(admitted_ids)
+        latest_admitted = max(
+            ((rows_by_id[job_id].priority, job_id) for job_id in admitted_set), default=None,
+        )
+        if latest_admitted is not None:
+            passed_over_ids = [
+                row.pk for row in candidate_rows
+                if row.pk not in admitted_set and (row.priority, row.pk) < latest_admitted
+            ]
+            if passed_over_ids:
+                InferenceJob.objects.filter(pk__in=passed_over_ids).update(
+                    passed_over=F("passed_over") + 1,
+                )
+
         now = timezone.now()
         descriptors: list[dict] = []
         for job_id in admitted_ids:
@@ -273,7 +346,10 @@ def _sched_candidate(row: InferenceJob, resolved: list[tuple[dict, int | None]])
     `(ref, footprint)` pairs. `key` is normalized per `scheduler.py`'s
     provenance contract: `norm_endpoint()` for the endpoint segment,
     `norm_tag()` for the model_id segment -- built here, the one place
-    a `SchedModel.key` is ever constructed for live rows."""
+    a `SchedModel.key` is ever constructed for live rows.
+
+    `passed_over` is carried straight off the row: the aging bound reads
+    a DURABLE count, so a worker restart cannot reset a job's age."""
     models = tuple(
         SchedModel(
             key=(ref["engine"], norm_endpoint(ref["endpoint"]), norm_tag(ref["model_id"])),
@@ -281,35 +357,67 @@ def _sched_candidate(row: InferenceJob, resolved: list[tuple[dict, int | None]])
         )
         for ref, footprint in resolved
     )
-    return SchedCandidate(job_id=row.pk, priority=row.priority, exclusive=row.exclusive, models=models)
+    return SchedCandidate(
+        job_id=row.pk, priority=row.priority, exclusive=row.exclusive, models=models,
+        passed_over=row.passed_over,
+    )
 
 
-def _sweep_orphans(stale_after_seconds: int) -> None:
-    """Requeue-or-fail every `running` job whose heartbeat has gone stale
-    (`heartbeat_at < now - stale_after_seconds`) -- runs INSIDE
-    `claim_and_admit`'s advisory-lock transaction, before the running set
-    is read for planning (see that function's docstring, step 2).
+def _kind_stale_thresholds(default_stale_seconds: int) -> dict[str, int]:
+    """`{job kind key: staleness threshold}` for every REGISTERED kind,
+    with `default_stale_seconds` standing in for any kind that declares
+    none.
 
-    First orphaning (`attempts == 0`): requeue (state=queued, claimed_by=
-    "", claim_token=NULL, attempts=1, started_at=NULL, heartbeat_at=NULL)
-    -- the job gets exactly one more try, on whichever worker claims it
-    next. Second orphaning (`attempts >= 1`): permanently `failed`, with an
-    operator-readable error naming exactly why, no third attempt, and (T9.5
-    audit §5) `kind`'s registered `on_terminal` hook scheduled via
-    `transaction.on_commit` -- see that branch's own comment below for why
-    on_commit specifically.
-
-    Each row's actual UPDATE re-checks `state=running AND heartbeat_at <
-    cutoff` atomically (not a blind write keyed off the earlier read) --
-    if that worker's heartbeat writer lands a fresh `heartbeat_at` in the
-    narrow window between this function's read and its own write, the
-    conditional UPDATE simply matches zero rows and the job is correctly
-    left alone, never double-orphaned.
+    Resolved HERE, in the claim module, rather than threaded in from the
+    worker: this module already imports the job-kind registry, the sweep
+    runs inside this module's own advisory-lock transaction, and the
+    worker owns only the global cadence constant it passes in (it may not
+    be imported from here -- it imports this module).
     """
-    cutoff = timezone.now() - timedelta(seconds=stale_after_seconds)
-    stale = list(InferenceJob.objects.filter(state=RUNNING, heartbeat_at__lt=cutoff))
+    thresholds: dict[str, int] = {}
+    for kind in all_job_kinds():
+        declared = getattr(kind, "stale_after_seconds", None)
+        thresholds[kind.key] = declared if declared else default_stale_seconds
+    return thresholds
+
+
+def _sweep_orphans(default_stale_seconds: int) -> None:
+    """Requeue-or-fail every `running` job whose heartbeat has gone stale
+    -- now against THAT KIND's own threshold (spec §3.4b) rather than one
+    global cutoff, which could never be right for both a sub-second embed
+    and a job that cold-loads a large model for minutes.
+
+    ONE QUERY, grouped by DISTINCT threshold (a handful of kinds, bounded
+    and pinned by a query-count test) -- never one query per kind. A kind
+    the registry does not know (deregistered since the row was enqueued)
+    falls to `default_stale_seconds`, so no row is ever left running for
+    ever merely because nothing declares a number for it.
+
+    Everything below this point is unchanged: first orphaning requeues
+    with `attempts=1`, a second fails permanently and schedules the kind's
+    `on_terminal` hook via `transaction.on_commit`, and each row's own
+    UPDATE re-checks `state=running AND heartbeat_at < <that row's own
+    cutoff>` atomically so a heartbeat landing in the window between read
+    and write leaves the job correctly alone.
+    """
+    now = timezone.now()
+    thresholds = _kind_stale_thresholds(default_stale_seconds)
+
+    by_threshold: dict[int, list[str]] = {}
+    for kind_key, seconds in thresholds.items():
+        by_threshold.setdefault(seconds, []).append(kind_key)
+
+    condition = Q(
+        ~Q(kind__in=list(thresholds)),
+        heartbeat_at__lt=now - timedelta(seconds=default_stale_seconds),
+    )
+    for seconds, kind_keys in by_threshold.items():
+        condition |= Q(kind__in=kind_keys, heartbeat_at__lt=now - timedelta(seconds=seconds))
+
+    stale = list(InferenceJob.objects.filter(Q(state=RUNNING) & condition))
 
     for job in stale:
+        cutoff = now - timedelta(seconds=thresholds.get(job.kind, default_stale_seconds))
         if job.attempts == 0:
             # `progress`/`checkpoint` are deliberately NOT in this field
             # list (T3) -- their preservation across a requeue IS the

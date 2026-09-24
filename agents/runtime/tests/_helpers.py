@@ -15,13 +15,17 @@ offered them would let a loop start using them without a test noticing.
 from __future__ import annotations
 
 import contextlib
+from datetime import timedelta
 from unittest.mock import patch
 
+from django.utils import timezone
 from llama_index.core.base.llms.types import ChatResponse, TextBlock, ToolCallBlock
 from llama_index.core.llms import ChatMessage, MessageRole
 from llama_index.core.llms.llm import ToolSelection
 
 from agents.contracts.tools import ToolRefused, ToolResult
+from agents.models import Turn
+from agents.reconcile import STRANDED_TURN_GRACE_SECONDS
 # Captured at import time -- before any test can have monkeypatched it -- so
 # `patch_llm` can tell "still the real function" from "a test already
 # overrode this for the capability-gate itself" purely by identity.
@@ -153,6 +157,33 @@ from agents.tests._helpers import (  # noqa: F401
     make_agent, make_budget, make_conversation, make_entitlement, make_flow, make_job_ctx,
     make_principal, make_tool_ctx, make_turn, make_user, posture, user_principal,
 )
+
+
+def _assistant_turn(*, role=Turn.Role.ASSISTANT, state, queue_job_id, age_seconds: int):
+    """One turn (ASSISTANT by default) in `state`, pointing at
+    `queue_job_id` (which may name no row at all), whose row has been in
+    that state for `age_seconds` -- the facts the stranded condition
+    reads. `role` is overridable so a test can build the one shape the
+    stranded sweep must never touch: a USER turn."""
+    turn = make_turn(
+        conversation=make_conversation(agent=make_agent()),
+        role=Turn.Role.ASSISTANT, state=Turn.State.QUEUED,
+    )
+    Turn.objects.filter(pk=turn.pk).update(
+        role=role, state=state, queue_job_id=queue_job_id,
+        created_at=timezone.now() - timedelta(seconds=age_seconds),
+    )
+    turn.refresh_from_db()
+    return turn
+
+
+def _stranded_assistant_turn():
+    """The shape the poll path reconciles: past the grace, pointing at a
+    job row that does not exist."""
+    return _assistant_turn(
+        state=Turn.State.RUNNING, queue_job_id=4242,
+        age_seconds=STRANDED_TURN_GRACE_SECONDS + 10,
+    )
 
 
 # The six stub runners `agents/runtime/tests/test_invoke.py` names by

@@ -146,14 +146,27 @@ def _forget_identity_dependents(recorder):
     future task adds) the same way `name__gte="0003"` sweeps
     `agents.0004` and onward.
 
-    `inference` keeps its single named entry: it has exactly one such
-    migration (`0008_modelset`) and nothing has been added after it.
+    THE `inference` CLAUSE IS A RANGE TOO, FOR THE SAME REASON, since
+    queue memory governance (2026-09-21) added
+    `models/registry/migrations/
+    0009_modelconnection_engine_reported_footprint.py` and made it
+    depend on `0008_modelset` in the ordinary Django
+    migration-dependency sense (`dependencies = [("inference",
+    "0008_modelset")]`) -- so forgetting `0008` by single name while
+    `0009` stayed recorded left `0009` applied before a dependency
+    Django's own loader now considers forgotten, the exact
+    `InconsistentMigrationHistory` the `agents` range above already
+    exists to prevent, just tripped from the `inference` side instead.
+    `name__gte="0008"` sweeps `0009` (and any later `inference`
+    migration a future task adds) the same way `name__gte="0003"`
+    sweeps `agents.0004` and onward. Forgetting one migration too many
+    costs nothing here either, for the reason the `agents` note gives:
+    the repair command's own last line of advice is a plain
+    `manage.py migrate` that re-applies everything in dependency order.
     """
     recorder.migration_qs.filter(app="agents", name__gte="0003").delete()
     recorder.migration_qs.filter(app="rag", name__gte="0015").delete()
-    recorder.migration_qs.filter(
-        app="inference", name="0008_modelset"
-    ).delete()
+    recorder.migration_qs.filter(app="inference", name__gte="0008").delete()
 
 
 def _admin_log_row_count() -> int:

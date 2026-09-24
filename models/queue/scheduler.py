@@ -135,7 +135,9 @@ elsewhere in this module cites one of these numbers):
    checked before every single admission (`max_concurrent <= 0` admits
    nothing, defensively).
 
-9. Candidates are walked in strict `(priority, job_id)` order and the walk
+9. Candidates are walked in the order rule 10 produces -- `(priority,
+   not pinned, not affine, job_id)`, which IS strict `(priority, job_id)`
+   whenever no affinity snapshot is supplied -- and the walk
    STOPS at the first one that cannot be admitted this round -- no
    candidate is ever skipped in favor of a later one that would fit
    ("backfill"). This is a deliberate v1 policy choice (see the plan this
@@ -158,6 +160,30 @@ elsewhere in this module cites one of these numbers):
    deadlock guarantee and the simplicity of never backfilling; giving
    either property back later needs a new ADR, not a quiet tweak here.
 
+10. MODEL-AFFINITY BATCHING, with an aging bound (`affinity_order`, spec
+   3.6). Among candidates AT THE SAME PRIORITY NUMBER, one whose model
+   keys are ALL already resident sorts ahead of one that would have to
+   load something -- the owner's own requirement that like requests for a
+   given model run together even when they were submitted at different
+   times. PRIORITY IS NEVER CROSSED, and rule 9's walk still stops at the
+   first candidate it cannot admit, so the no-backfill deadlock proof is
+   untouched: whichever candidate heads a round is still admitted alone
+   the instant the machine is idle. THE AGING BOUND: a candidate whose
+   `passed_over` count has reached `max_passovers` is PINNED -- it sorts
+   by id ahead of every UNPINNED peer at its priority and is never
+   reordered behind one again. It is NOT never reordered behind ANY
+   peer: pinning sets the SECOND element of the sort key, so the `not
+   affine` term still discriminates among pinned candidates. Within one
+   priority number a job can therefore be passed over at most that many
+   ROUNDS BY UNPINNED PEERS, which is the bound that matters -- the
+   count is of OCCASIONS a job lost its turn, one per round however
+   many peers went ahead, not of peers. Across priority numbers nothing
+   changed, so rule 9's honestly-scoped starvation caveat is neither
+   improved nor worsened. The believed-
+   resident set is a plain frozen set the CALLER hands in (the worker's
+   last residency snapshot -- see `affinity_order`'s own docstring); this
+   module never asks an engine anything and never touches a row.
+
 Preconditions this module assumes but does not defend against everywhere
 (caller responsibility -- the claim code, T4):
 
@@ -173,7 +199,7 @@ Preconditions this module assumes but does not defend against everywhere
   a negative footprint would manufacture free budget headroom for every
   key it touches (rule 7's `max(0, size - already_resident)` folds a
   negative `size` toward 0 headroom-side, but a negative value stored in
-  `resident_keys` would still understate `used` for every later
+  `resident_sizes` would still understate `used` for every later
   candidate) -- refusing it at the one place `SchedModel` values are
   created removes the bug at its source instead of merely tolerating it
   downstream.
@@ -184,6 +210,19 @@ from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 _Key = tuple[str, str, str]
+
+# How many admission ROUNDS a candidate may lose to model-affinity
+# reordering before it is PINNED -- ordered by id ahead of every UNPINNED
+# peer at its priority from then on, and never reordered behind one again
+# (owner decision 4). Not ahead of every peer: pinning sets the second
+# element of the sort key, so `not affine` still discriminates among
+# pinned candidates, and the bound is therefore rounds lost to UNPINNED
+# peers. ONE per round, however many
+# later-by-(priority, id) peers were admitted ahead of it in that round:
+# the bound counts occasions a job lost its turn, not peers. Supplied by
+# the claim code as a keyword argument so table tests can vary it; this
+# is the default the queue actually runs with.
+MAX_PASSOVERS = 3
 
 
 @dataclass(frozen=True)
@@ -240,6 +279,15 @@ class SchedCandidate:
     priority: int
     exclusive: bool
     models: tuple[SchedModel, ...]
+    # How many admission ROUNDS this candidate has lost to model-affinity
+    # reordering -- rounds in which at least one later-by-(priority, id)
+    # peer was admitted ahead of it (`InferenceJob.passed_over`). ONE per
+    # round, however many peers went ahead: the aging bound counts
+    # occasions a job lost its turn, not peers (spec 3.6). Durable, not
+    # in-memory: a worker restart must not reset a job's age. Trailing and
+    # defaulted, so every existing construction of this dataclass is
+    # unchanged.
+    passed_over: int = 0
 
 
 def _dedup_bytes(models: Iterable[SchedModel]) -> tuple[dict[_Key, int | None], bool]:
@@ -334,12 +382,82 @@ def effectively_exclusive(candidate: SchedCandidate, budget_bytes: int | None) -
     return None
 
 
+def affinity_order(
+    candidates: Sequence[SchedCandidate], *, resident_keys: frozenset, max_passovers: int,
+) -> list[SchedCandidate]:
+    """Order `candidates` for admission: `(priority, not pinned, not
+    affine, job_id)` (rule 10, spec 3.6).
+
+    THE OWNER'S OWN REQUIREMENT: "we should bundle like requests for a
+    given model even if they were submitted at different times... This
+    should be a feature of the queue." Among candidates AT THE SAME
+    PRIORITY NUMBER, one whose model keys are ALL already resident sorts
+    ahead of one that would have to load something.
+
+    PRIORITY IS NEVER CROSSED, and `plan_admissions` still stops at the
+    first candidate it cannot admit, so the no-backfill deadlock proof is
+    untouched: whichever candidate heads a round is still admitted alone
+    the instant the machine is idle.
+
+    THE AGING BOUND: a candidate whose `passed_over` has reached
+    `max_passovers` is PINNED -- it sorts by id ahead of every UNPINNED
+    peer at its priority and is never reordered behind one again. It is
+    NOT never reordered behind ANY peer: pinning sets the SECOND element
+    of this key, so the `not affine` term still discriminates among
+    pinned candidates and a pinned non-affine job can still sort behind
+    a pinned affine one. Within one priority number a job can therefore
+    be passed over at most that many ROUNDS BY UNPINNED PEERS, which is
+    the bound that matters, while the affinity preference survives among
+    the aged; `passed_over` counts OCCASIONS a job lost its turn, not peers,
+    so a round admitting four later peers ahead of it still costs it one.
+    Across priority numbers nothing changed, so the ADR's existing,
+    honestly-scoped starvation caveat is neither improved nor worsened.
+
+    "AFFINE" MEANS "WOULD LOAD NOTHING", not "would load less": every one
+    of the candidate's keys must be in `resident_keys`. A candidate
+    declaring NO models is never affine -- the set-subset test would
+    otherwise be vacuously true, and such a job is already effectively
+    exclusive (rule 2c) rather than a free rider entitled to jump a queue.
+
+    WHERE `resident_keys` COMES FROM, and the two rejected alternatives:
+    the WORKER'S most recent residency snapshot (`models.queue.worker.
+    Worker._resident_keys`), cached on the worker and handed down through
+    `claim_and_admit` as a plain frozen set. NOT this module's own
+    resident fold over `running` -- that is derived from running jobs and
+    would make affinity a no-op in sequential mode, exactly the posture
+    where batching matters most. NOT a live `list_installed` -- that would
+    put engine HTTP inside the claim's advisory-lock transaction and stall
+    every other admitter.
+
+    It is therefore deliberately STALE: snapshots are only taken on ticks
+    that admit, so in sequential mode the cached set can be minutes old;
+    it is the pre-eviction belief with that pass's own unloads subtracted;
+    and a fresh worker has none at all, which simply falls back to plain
+    `(priority, job_id)` order. That is exactly why it drives an ordering
+    PREFERENCE and nothing else -- a wrong guess costs one suboptimal
+    ordering decision, never a wrong admission or a wrong eviction.
+
+    PURE. `resident_keys` is a plain frozen set the CALLER believes is
+    resident; this module never asks an engine anything and never touches
+    a row (see the module docstring).
+    """
+    def _key(candidate: SchedCandidate) -> tuple:
+        pinned = candidate.passed_over >= max_passovers
+        keys = {model.key for model in candidate.models}
+        affine = bool(keys) and keys <= resident_keys
+        return (candidate.priority, not pinned, not affine, candidate.job_id)
+
+    return sorted(candidates, key=_key)
+
+
 def plan_admissions(
     candidates: Sequence[SchedCandidate],
     running: Sequence[SchedCandidate],
     *,
     budget_bytes: int | None,
     max_concurrent: int,
+    resident_keys: frozenset = frozenset(),
+    max_passovers: int = MAX_PASSOVERS,
 ) -> list[int]:
     """Decide which of `candidates` (queued jobs) to admit this round,
     given `running` (currently running jobs), a memory `budget_bytes`
@@ -347,13 +465,21 @@ def plan_admissions(
     cap. Returns the admitted job ids, in the order they were admitted
     (== priority order, since admission never skips ahead -- rule 9).
 
-    `candidates` is sorted defensively by `(priority, job_id)` inside this
-    function rather than trusted as a caller contract: the cost is one
-    cheap sort, and it removes an entire class of "caller forgot to order
-    the queryset" bug from every call site forever. `running` needs no
-    such sort -- nothing about this function's rules depends on the order
-    running jobs are visited in (rules 3/4 only ever fold over the whole
-    set), only on the order candidates are admitted in.
+    `candidates` is ordered defensively inside this function rather than
+    trusted as a caller contract: the cost is one cheap sort, and it
+    removes an entire class of "caller forgot to order the queryset" bug
+    from every call site forever. `running` needs no such sort -- nothing
+    about this function's rules depends on the order running jobs are
+    visited in (rules 3/4 only ever fold over the whole set), only on the
+    order candidates are admitted in.
+
+    `resident_keys`/`max_passovers` are rule 10's two knobs, handed
+    straight to `affinity_order` -- the SAME helper the claim code uses to
+    derive who was passed over, so the order walked here and the order
+    reasoned about there can never drift. Both are defaulted (an empty
+    snapshot, `MAX_PASSOVERS`), and an empty snapshot makes `affinity_order`
+    plain `(priority, job_id)` order: every existing call site, this
+    module's table tests included, behaves exactly as before.
     """
     candidate_ids = {c.job_id for c in candidates}
     running_ids = {r.job_id for r in running}
@@ -369,7 +495,9 @@ def plan_admissions(
         # theoretically possible.
         return []
 
-    ordered = sorted(candidates, key=lambda c: (c.priority, c.job_id))
+    ordered = affinity_order(
+        candidates, resident_keys=resident_keys, max_passovers=max_passovers,
+    )
 
     if budget_bytes is None:
         # Rule 1: sequential mode. At most one job on the whole machine,
@@ -386,7 +514,7 @@ def plan_admissions(
         # no matter how much budget looks free on paper.
         return []
 
-    # Resident set, keyed by `SchedModel.key`, MAX-folded across every
+    # Resident SIZES, keyed by `SchedModel.key`, MAX-folded across every
     # running job (rule 4). After the rule-3 check above, no running job
     # is effectively exclusive, so every running model's footprint is
     # known -- this dict never holds a `None` value from here on. The
@@ -394,10 +522,10 @@ def plan_admissions(
     # rather than silently trusting it -- `assert` is a no-op under
     # `python -O`/`PYTHONOPTIMIZE`, so it is not a runtime guarantee in an
     # optimized deployment, only a check that fires in ordinary runs.
-    resident_keys: dict[_Key, int | None] = dict(
+    resident_sizes: dict[_Key, int | None] = dict(
         _dedup_bytes(model for job in running for model in job.models)[0]
     )
-    assert all(size is not None for size in resident_keys.values()), (
+    assert all(size is not None for size in resident_sizes.values()), (
         "rule 3 already ruled out any running job with an unmeasured "
         "model, so no resident key should be unknown here"
     )
@@ -430,7 +558,7 @@ def plan_admissions(
         # `job` is not effectively exclusive here (ruled out above), so
         # every value in `job_keys` is a known int, never `None`.
         marginal = sum(
-            max(0, size - resident_keys.get(key, 0))
+            max(0, size - resident_sizes.get(key, 0))
             for key, size in job_keys.items()
         )
 
@@ -444,7 +572,7 @@ def plan_admissions(
 
         admitted.append(job.job_id)
         for key, size in job_keys.items():
-            resident_keys[key] = max(resident_keys.get(key, 0), size)
+            resident_sizes[key] = max(resident_sizes.get(key, 0), size)
         used += marginal
 
     return admitted

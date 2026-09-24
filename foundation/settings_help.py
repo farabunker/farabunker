@@ -490,6 +490,53 @@ CARDS: tuple[HelpCard, ...] = (
                     "before it is caught."
                 ),
             ),
+            HelpField(
+                name="Detected memory (worker-measured)",
+                anchor="detected-memory",
+                meaning=(
+                    "What the worker process's own machine reported as total physical memory "
+                    "the last time the worker service started. A prefill for the memory "
+                    "budget above, never applied automatically -- the console renders in the "
+                    "web service and the budget governs the worker service, separate "
+                    "containers, so this is measured where it matters."
+                ),
+                effects=(
+                    "Informational only: nothing on this box acts on it, and the memory "
+                    "budget above stays whatever an operator set (or left unset) regardless "
+                    "of this figure. It changes only the next time the worker service "
+                    "restarts."
+                ),
+            ),
+            HelpField(
+                name="Detected memory, measured on",
+                anchor="detected-memory-at",
+                meaning=(
+                    "The date the worker process last measured its own machine's total "
+                    "memory, shown beside the detected figure so an operator can judge how "
+                    "stale it is."
+                ),
+                effects=(
+                    "Informational only, like the figure it dates. It does not change the "
+                    "memory budget by itself."
+                ),
+            ),
+            HelpField(
+                name="Per-kind wait ceilings",
+                anchor="kind-waits",
+                meaning=(
+                    "One row per registered job kind: how long that kind's own handler may "
+                    "wait on its engine before giving up, in seconds. Left BLANK for a kind, "
+                    "that kind falls back to its own code-declared default -- or no ceiling "
+                    "at all, for a kind that declares none."
+                ),
+                effects=(
+                    "Applies to the next job of that kind that runs; a job already running "
+                    "keeps whatever ceiling it started with. A kind whose ceiling expires "
+                    "must not report a finished job while its engine still reports the work "
+                    "running -- the ceiling bounds how long a handler waits, never how long "
+                    "the underlying work is allowed to take."
+                ),
+            ),
         ),
     ),
     HelpCard(

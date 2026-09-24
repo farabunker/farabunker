@@ -383,11 +383,12 @@ class TestTheOverviewFieldCoverage:
             )
             assert overlap == set(), (model_name, overlap)
 
-    def test_the_twenty_one_the_audit_counted_are_exactly_these_twenty_one(self):
+    def test_the_twenty_two_the_audit_counted_are_exactly_these_twenty_two(self):
         """Pinned against the backend audit's own Dimension 1 count plus
-        round-3 hardening's one addition, the one-timeout task's own, and
-        the deletion-semantics task's three retention columns
-        (7 + 5 + 4 + 1 + 1 + 3 = 21 OPERATOR-EDITABLE fields, as of
+        round-3 hardening's one addition, the one-timeout task's own, the
+        deletion-semantics task's three retention columns, and the queue
+        memory-governance track's one
+        (7 + 5 + 4 + 1 + 1 + 3 + 1 = 22 OPERATOR-EDITABLE fields, as of
         2026-09-21), so a future field silently changes this number
         rather than the accounting above. The two `updated_at`
         bookkeeping timestamps are excluded from this count on purpose --
@@ -405,22 +406,51 @@ class TestTheOverviewFieldCoverage:
         added `JobSettings.response_timeout_seconds`, for the identical
         reason -- import law, not a policy choice about this one field.
 
-        EIGHTEEN BECAME TWENTY-ONE
-        when deletion semantics' `IdentitySettings.
-        retention_days`/`queue_retention_days`/`audit_detail` joined the
-        REPORTED set instead -- unlike the Library/Job-execution fields,
-        these three are readable off the same `settings_row()` this tool
-        already fetches, so import law names no reason to exclude them."""
+        FROM EIGHTEEN, THE TREE FORKED, and both forks reached
+        twenty-one and nineteen independently before this merge put them
+        back together.
+
+        EIGHTEEN BECAME TWENTY-ONE, on this branch, when deletion
+        semantics' `IdentitySettings.retention_days`/`queue_retention_
+        days`/`audit_detail` joined the REPORTED set instead -- unlike
+        the Library/Job-execution fields, these three are readable off
+        the same `settings_row()` this tool already fetches, so import
+        law names no reason to exclude them.
+
+        EIGHTEEN ALSO BECAME NINETEEN, separately, when the queue
+        memory-governance track (`models/queue/migrations/0005`,
+        2026-09-21) added three `JobSettings` fields, but only ONE of
+        them is operator-editable: `kind_wait_seconds` (the per-kind
+        wait-ceiling map, edited on the Job execution page's fourth
+        form) joins the import-law unreported set with its siblings, for
+        the unchanged reason. `detected_memory_bytes`/`detected_memory_
+        at` are the OTHER shape -- worker-written measurements, never
+        operator-set (`_DETECTED_MEMORY_REASON` in the module under
+        test) -- so, exactly like the two `updated_at` timestamps above,
+        they are named in `UNREPORTED_SETTINGS_FIELDS` but excluded from
+        this operator-editable count by name below, not folded into
+        `import_law_unreported`.
+
+        TWENTY-ONE AND NINETEEN MERGE TO TWENTY-TWO: the queue track's
+        only operator-editable addition is `kind_wait_seconds` (one
+        field -- the other two are the worker-written pair this count
+        was never going to include), so it carries this branch's own
+        twenty-one one further rather than the two branches colliding.
+        """
         from agents.settings_tools import REPORTED_SETTINGS_FIELDS, UNREPORTED_SETTINGS_FIELDS
 
+        # Worker-written measurements, not operator-editable settings --
+        # named the same way `updated_at` is excluded from this count
+        # (see the docstring above and `_DETECTED_MEMORY_REASON`).
+        job_settings_not_operator_editable = {"detected_memory_bytes", "detected_memory_at"}
         reported_count = sum(len(fields) for fields in REPORTED_SETTINGS_FIELDS.values())
         import_law_unreported = sum(
             len(fields) for model, fields in UNREPORTED_SETTINGS_FIELDS.items()
             if model in ("RagSettings", "JobSettings")
-        )
+        ) - len(job_settings_not_operator_editable)
         assert reported_count == 8
-        assert import_law_unreported == 13
-        assert reported_count + import_law_unreported == 21
+        assert import_law_unreported == 14
+        assert reported_count + import_law_unreported == 22
 
     def test_bookkeeping_fields_are_named_separately_from_import_law_fields(self):
         from agents.settings_tools import UNREPORTED_SETTINGS_FIELDS

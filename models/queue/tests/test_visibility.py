@@ -42,7 +42,7 @@ def _row(**overrides) -> QueueRow:
         id=1, kind="rag.ask", payload={}, state=QUEUED, priority=100,
         exclusive=False, model_refs=[], footprint_bytes=None,
         created_at=timezone.now(), started_at=None, finished_at=None, error="",
-        progress=None,
+        progress=None, not_before=None, passed_over=0,
     )
     fields.update(overrides)
     return QueueRow(**fields)

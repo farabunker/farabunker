@@ -102,3 +102,22 @@ class TestWorksOverEitherRegistryDict:
         assert TestRegistersSomethingMidTest._fake_module._REGISTRY == _seed_content
         assert jobkinds._JOB_KINDS == {}
         assert roles._ROLES == {}
+
+
+class TestAutouseIsAChoice:
+    """`autouse=False` (Task 6's `models/queue/tests/test_claim.py` case,
+    where most tests want the real app-registered kinds and only a few
+    want a clean registry) -- a test that does not name the fixture must
+    not have it fire at all, and a test that does must still get the
+    ordinary clear/restore."""
+
+    _fake_module = _FakeRegistryModule(**_seed_content)
+    _opt_in_reset = staticmethod(
+        registry_reset_fixture(_fake_module, "_REGISTRY", autouse=False)
+    )
+
+    def test_a_test_that_does_not_request_it_sees_the_real_registry(self):
+        assert self._fake_module._REGISTRY == _seed_content
+
+    def test_a_test_that_requests_it_still_gets_cleared(self, _opt_in_reset):
+        assert self._fake_module._REGISTRY == {}

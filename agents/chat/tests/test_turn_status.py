@@ -7,14 +7,17 @@ from __future__ import annotations
 import json
 
 import pytest
+from django.db import OperationalError, ProgrammingError
 from django.urls import reverse
 from django.utils import timezone
 
+from agents.chat.views import turns as turns_module
 from agents.chat.tests._helpers import (   # noqa: F401 -- the import IS the registration
     fake_queued_job, fake_running_job, make_admin, make_agent, make_conversation, make_turn,
     make_user, posture, sign_in, user_principal,
 )
 from agents.models import ToolInvocation, Turn
+from agents.runtime.tests._helpers import _assistant_turn, _stranded_assistant_turn
 from agents.visibility import create_conversation
 from identity.contracts.postures import POSTURE_ENTERPRISE
 from models.contracts.queue import QueueUnavailable
@@ -370,3 +373,124 @@ class TestTheTwoNon200s:
                          queue_job_id=1)
         _code, body = _status(client, turn)
         assert body["state"] == "queued" and body["position"] is None
+
+
+class TestReconciliationOnThePollPath:
+    """Owner decision 7: a turn whose job row vanished recovers instead of
+    sitting at "working" forever. `_queued_body`/`_running_body` are the
+    one surface that was going to answer "Queued — waiting…" for ever, so
+    that is where the strand becomes visible and gets repaired, within
+    the same poll tick that noticed it -- no separate JS-only path, since
+    a plain reload takes the same view."""
+
+    def test_a_polled_turn_whose_job_row_is_gone_comes_back_failed(self, client):
+        """Turns a permanent "Queued — waiting…" into an honest failed
+        card within one poll tick -- with JS on or off, since a plain
+        reload takes the same path through the rendered card."""
+        turn = _stranded_assistant_turn()
+        _code, body = _status(client, turn)
+        assert body["state"] == "failed"
+        assert "lost this turn" in body["error"]
+
+    def test_a_turn_inside_the_grace_still_reports_queued(self, client):
+        """The enqueue-then-commit window: a turn mid-creation genuinely
+        has no job row yet, and the poll path must not race it."""
+        turn = _assistant_turn(state=Turn.State.QUEUED, queue_job_id=4242, age_seconds=1)
+        _code, body = _status(client, turn)
+        assert body["state"] == "queued"
+
+
+class TestTheRetryable503:
+    """TWO DIFFERENT 503s. One says "try again", the other says "go
+    configure the queue" -- and the poller acts on the difference."""
+
+    def test_a_momentarily_unavailable_database_answers_retryable(self, client,
+                                                                  monkeypatch):
+        """BEST-EFFORT, and the view's own docstring says so: the guard
+        wraps the whole view body because principal resolution and turn
+        visibility both touch the database before any body builder runs,
+        and session middleware touches it before the view is entered at
+        all. Patched at `visible_turn` because that is inside the guard
+        and a real recovering database would raise there first."""
+        monkeypatch.setattr(
+            turns_module, "visible_turn",
+            lambda *a, **k: (_ for _ in ()).throw(OperationalError("server closed")),
+        )
+
+        response = client.get(reverse("chat-turn-status", args=[1]))
+
+        assert response.status_code == 503
+        assert response.json()["retryable"] is True
+
+    def test_the_configuration_503_stays_terminal_and_keeps_its_setup_link(
+        self, client, monkeypatch
+    ):
+        """Two different 503s: one says "try again", the other says "go
+        configure the queue". Conflating them would either spin on a
+        misconfigured box or give up on a recovering one."""
+        monkeypatch.setattr(
+            "agents.chat.views.turns.get_job",
+            lambda job_id: (_ for _ in ()).throw(QueueUnavailable("no tables")),
+        )
+        turn = make_turn(role=Turn.Role.ASSISTANT, state=Turn.State.QUEUED,
+                         queue_job_id=1)
+
+        response = client.get(reverse("chat-turn-status", args=[turn.pk]))
+
+        assert response.status_code == 503
+        body = response.json()
+        assert body.get("retryable") is not True
+        assert "setup_url" in body
+
+    def test_a_database_blip_inside_the_queue_read_is_retryable_too(
+        self, client, monkeypatch
+    ):
+        """THE MOST LIKELY PATH, and the one that used to answer
+        terminally. `_queued_body` reads the queue through `get_job`,
+        whose backend wraps every ORM error in `QueueUnavailable`
+        (`models/queue/backend.py::_guarded`) -- so a recovering database
+        reaches the view as the exception that means "go configure the
+        queue" unless the view looks at what the guard CHAINED. It does,
+        and the answer is the retryable one, byte-identical to the blip
+        this view catches for itself."""
+        def _blip(job_id):
+            try:
+                raise OperationalError("server closed the connection unexpectedly")
+            except OperationalError as exc:
+                raise QueueUnavailable("get_job: queue tables unavailable") from exc
+
+        monkeypatch.setattr("agents.chat.views.turns.get_job", _blip)
+        turn = make_turn(role=Turn.Role.ASSISTANT, state=Turn.State.QUEUED,
+                         queue_job_id=1)
+
+        response = client.get(reverse("chat-turn-status", args=[turn.pk]))
+
+        assert response.status_code == 503
+        body = response.json()
+        assert body["retryable"] is True
+        assert "setup_url" not in body
+
+    def test_missing_queue_tables_inside_the_queue_read_stay_terminal(
+        self, client, monkeypatch
+    ):
+        """The other half of the same `__cause__` read, so the widening
+        above cannot be mistaken for "every `QueueUnavailable` is
+        retryable now". A `ProgrammingError` cause is the unmigrated box
+        the terminal 503 and its setup link exist for, and it keeps
+        both."""
+        def _no_tables(job_id):
+            try:
+                raise ProgrammingError('relation "jobs_inferencejob" does not exist')
+            except ProgrammingError as exc:
+                raise QueueUnavailable("get_job: queue tables unavailable") from exc
+
+        monkeypatch.setattr("agents.chat.views.turns.get_job", _no_tables)
+        turn = make_turn(role=Turn.Role.ASSISTANT, state=Turn.State.QUEUED,
+                         queue_job_id=1)
+
+        response = client.get(reverse("chat-turn-status", args=[turn.pk]))
+
+        assert response.status_code == 503
+        body = response.json()
+        assert body.get("retryable") is not True
+        assert "setup_url" in body

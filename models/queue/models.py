@@ -132,6 +132,36 @@ class InferenceJob(models.Model):
     # requeue is the resume mechanism itself, not an oversight.
     checkpoint = models.JSONField(null=True, blank=True)
 
+    # THE HOLD-OFF (spec §3.3d). A job the queue has DELIBERATELY declined
+    # to consider until this moment -- written by the worker when an
+    # exclusive launch is refused, either because a protected endpoint is
+    # still busy or because the barrier got an informative refusal. The
+    # claim's candidate query honours it (`not_before IS NULL OR
+    # not_before <= now`), which makes it the ONE new admission-side
+    # filter this track adds.
+    #
+    # DURABLE rather than in-process, deliberately: the restart that would
+    # clear an in-memory hold-off is the same restart that clears the
+    # barrier's refusal count, and the two together would drop a freshly
+    # restarted worker straight back into 0.5s-tick churn against an
+    # endpoint that is still holding memory.
+    #
+    # The deadlock proof survives because the exclusion is time-bounded and
+    # SELF-CLEARING: the job returns to its own head position the moment
+    # the hold-off expires, and an effectively-exclusive head is still
+    # admitted alone the instant the machine is idle.
+    not_before = models.DateTimeField(null=True, blank=True)
+
+    # HOW MANY TIMES MODEL-AFFINITY REORDERING HAS PUT A LATER PEER AHEAD
+    # OF THIS JOB (spec §3.6). Durable, not in-memory state: a worker
+    # restart must not reset a job's age and let it be passed over for
+    # ever. At `models.queue.scheduler.MAX_PASSOVERS` the job is PINNED --
+    # it sorts by id ahead of every UNPINNED peer at its priority from
+    # then on and is never reordered behind one again. Not ahead of every
+    # peer: pinning sets the second element of the sort key, so the
+    # affinity term still discriminates among pinned candidates.
+    passed_over = models.PositiveSmallIntegerField(default=0)
+
     class Meta:
         ordering = ["priority", "id"]
         indexes = [
@@ -142,6 +172,8 @@ class InferenceJob(models.Model):
             # running jobs whose heartbeat has gone stale, without scanning
             # every state.
             models.Index(fields=["state", "heartbeat_at"], name="jobs_orphan_sweep"),
+            models.Index(fields=["state", "not_before", "priority", "id"],
+                         name="jobs_claim_scan_holdoff"),
         ]
 
     @property
@@ -240,6 +272,26 @@ class JobSettings(models.Model):
         default=RESPONSE_TIMEOUT_SECONDS_DEFAULT,
     )
 
+    # PER-KIND WAIT CEILINGS (spec §3.5a), `{job kind key: seconds}`. The
+    # OPERATOR-editable half of a kind's wait ceiling; the code-declared
+    # default lives on `models.contracts.jobkinds.JobKind.
+    # default_wait_seconds`. Rides on THIS row, which
+    # `models.queue.worker.Worker._build_job_context` already fetches for
+    # `response_timeout_seconds` -- a second `get_solo()` would be a
+    # query-count regression and is explicitly not how this is read.
+    kind_wait_seconds = models.JSONField(default=dict, blank=True)
+
+    # WHAT THE WORKER PROCESS MEASURED, ONCE, AT BOOT (spec §3.7). The
+    # console renders in the WEB service and the budget governs the WORKER
+    # service -- separate containers -- so memory detected in the web
+    # process describes the wrong machine. Written by the worker, rendered
+    # on the settings page labelled with the process that measured it and
+    # the date. NOTHING IS EVER APPLIED ON THE OPERATOR'S BEHALF: the
+    # container sees the VM's allocation rather than the host's, and a
+    # silently derived budget would be authoritative and wrong.
+    detected_memory_bytes = models.BigIntegerField(null=True, blank=True)
+    detected_memory_at = models.DateTimeField(null=True, blank=True)
+
     @classmethod
     def get_solo(cls) -> "JobSettings":
         """The one `JobSettings` row (`pk=1`), creating it with defaults on
@@ -254,6 +306,9 @@ class JobSettings(models.Model):
                 "retention_limit": cls.RETENTION_LIMIT_DEFAULT,
                 "max_queued_per_principal": None,
                 "response_timeout_seconds": cls.RESPONSE_TIMEOUT_SECONDS_DEFAULT,
+                "kind_wait_seconds": {},
+                "detected_memory_bytes": None,
+                "detected_memory_at": None,
             },
         )
         return obj

@@ -123,33 +123,68 @@ class ModelConnection(models.Model):
     # better than the last measurement has the final word. Null means "no
     # override": the measured value, if any, applies.
     footprint_override_bytes = models.BigIntegerField(null=True, blank=True)
+    # THE THIRD RUNG (queue memory governance, 2026-09-21, ADR 0013's
+    # dated amendment §4). The size an engine reports for a model it
+    # says is LOADED, harvested from the residency snapshot the queue
+    # worker is taking anyway (`models.queue.worker.Worker.
+    # _residency_snapshot` reads `InstalledModel.loaded_size`) -- NEVER
+    # a new HTTP call. It exists because those numbers were previously
+    # read and thrown away, and because a model that has never completed
+    # a run under this queue has no `measured_footprint_bytes` at all and
+    # is therefore treated as unknown-footprint, i.e. exclusive, for ever.
+    #
+    # A SEPARATE COLUMN, not folded into `measured_footprint_bytes`: the
+    # two are facts of different quality (ours-after-a-run vs the
+    # engine's-while-loaded), the recorder rule compares a reading only
+    # against its OWN standing value, and the console's label would be
+    # untrue again the moment one column had to answer for both.
+    engine_reported_footprint_bytes = models.BigIntegerField(null=True, blank=True)
+    # When `engine_reported_footprint_bytes` was last written -- paired so
+    # the console can date the reading, exactly as `measured_footprint_at`
+    # dates its own.
+    engine_reported_footprint_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     @property
     def effective_footprint_bytes(self) -> int | None:
-        """The footprint the scheduler should reserve for this connection's
-        model: `footprint_override_bytes` first (an operator's word is
-        final), else `measured_footprint_bytes`, else `None` -- "unknown",
-        which `models.registry.bindings.footprint_for` documents as
-        meaning the job that claims this model runs alone.
+        """The footprint the scheduler should reserve for this
+        connection's model, on a FOUR-rung ladder (spec §3.1):
+        `footprint_override_bytes` (the operator's word, always wins),
+        else `measured_footprint_bytes` (what we observed after a run
+        this queue executed), else `engine_reported_footprint_bytes`
+        (what the engine said a loaded copy occupied, harvested from a
+        residency snapshot), else `None` -- "unknown", which
+        `models.registry.bindings.footprint_for` documents as "this job
+        runs alone".
+
+        Walks on `is not None`, never on truthiness: a genuine zero is a
+        value, and reading it as "unknown" would silently make a
+        zero-cost model exclusive.
         """
         if self.footprint_override_bytes is not None:
             return self.footprint_override_bytes
-        return self.measured_footprint_bytes
+        if self.measured_footprint_bytes is not None:
+            return self.measured_footprint_bytes
+        return self.engine_reported_footprint_bytes
 
     @property
     def footprint_source(self) -> str | None:
-        """Which fact backs `effective_footprint_bytes`, keyed EXACTLY to
-        `models.registry.views._SOURCE_LABELS` -- "connection" (renders
-        "manual") when an override is set, "engine" (renders "detected from
-        the model server") when only a measurement exists, `None` when
-        neither is set. No new vocabulary: the facts <dl>
-        (`_registered_connection.html`) renders straight off this.
+        """Which rung backs `effective_footprint_bytes` -- one of
+        `"override"` / `"measured"` / `"engine_reported"` / `None`, keyed
+        EXACTLY to `models.registry.views._FOOTPRINT_SOURCE_LABELS`.
+
+        NOT keyed to `_SOURCE_LABELS`, which is and stays the label map
+        for `DiscoveryRow.capability_source` (where "detected from the
+        model server" is true of a capability probe and would be a lie
+        about a post-run delta measurement). The two vocabularies are
+        deliberately separate -- see that module and spec §3.1.
         """
         if self.footprint_override_bytes is not None:
-            return "connection"
+            return "override"
         if self.measured_footprint_bytes is not None:
-            return "engine"
+            return "measured"
+        if self.engine_reported_footprint_bytes is not None:
+            return "engine_reported"
         return None
 
     @property
