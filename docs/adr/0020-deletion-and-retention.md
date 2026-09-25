@@ -174,7 +174,7 @@ records this in full under "Deleted content and your backups".
 
 ### 7. The named residue
 
-Four things a deletion on this box does not reach today, each accepted rather than hidden:
+Five things a deletion on this box does not reach today, each accepted rather than hidden:
 
 - **`rag.ask` queue rows keyed to no Ask record.** The queue payload carries the question text
   and the actor, never the id of the record `record_ask` writes on success — there is nothing
@@ -201,6 +201,17 @@ Four things a deletion on this box does not reach today, each accepted rather th
   `test_the_generations_queue_row_survives_until_the_queue_half_lands`, assert this state
   against real rows rather than leaving it ambiguous, and are the two tests the queue half
   flips.
+- **A purge interrupted after its byte removal, but before its transaction commits.** A
+  handler's own registered order can put a byte-destroying step ahead of a later step in the
+  *same* purge (its band rule only orders handlers within one `run_retention` call, not across
+  a failure that comes after); if that later step then fails for any reason, `purge_ticket`'s
+  transaction rolls the rows back while the files a `shutil.rmtree` already removed stay
+  removed. The tree does not detect this: the ticket carries no failure state, so the item sits
+  on the Deleted page still offering Restore, and Restore hands back an item whose content is
+  gone. Closing it needs a failure mark on `DeletionTicket` and a refused Restore — a new
+  column, and a product trade the owner has not made. Pinned as a strict `xfail`,
+  `agents/tests/test_retention.py::TestThePromiseAPurgeCannotYetKeep::
+  test_restore_after_a_purge_that_fails_once_its_files_are_gone_still_opens_the_document`.
 
 ### 8. The owner's cost/benefit principle, what it cut, and the one thing it added
 

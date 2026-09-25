@@ -630,3 +630,101 @@ class TestOrderingAgainstRag:
         assert DocumentAttachment.objects.filter(
             document=document, conversation_id=conversation.id).exists()
         assert doc_dir.exists()
+
+
+class TestThePromiseAPurgeCannotYetKeep:
+    """`TestOrderingAgainstRag` above closes the most likely way a purge
+    breaks its promise to the person who deleted something: a handler
+    that raises BEFORE any byte moves. It cannot close every way, because
+    the band rule it relies on only orders handlers WITHIN one
+    `run_retention` call (`identity/retention.py:433-443` says so in its
+    own words) -- and this item's OWN handler can itself destroy bytes
+    and then a LATER step of the SAME purge can still fail.
+
+    Here, that later step is `agents.retention.scrub_tool_records`: it
+    runs after `delete_attachments_for` has already removed a chat-scoped
+    document's files (`agents/retention.py:220,225`), so a failure there
+    rolls `identity.retention.purge_ticket`'s transaction back -- the
+    conversation and the document ROW both reappear -- while the file a
+    `shutil.rmtree` already removed does not. What that leaves behind: a
+    Deleted page that still offers Restore for the conversation, and a
+    Restore that hands back a conversation whose attached document will
+    not open. Nothing on the ticket says a purge was ever attempted."""
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "DeletionTicket carries no failure state, so a purge that "
+            "destroys a document's files and then fails on a later step "
+            "in the same run still leaves the ticket offering Restore, "
+            "and Restore hands back a conversation whose document is "
+            "gone -- closing this needs a new column on the ticket and a "
+            "refused Restore, which is a product trade for the owner, "
+            "not this test (see docs/adr/0020-deletion-and-retention.md, "
+            "decision 7)"
+        ),
+    )
+    def test_restore_after_a_purge_that_fails_once_its_files_are_gone_still_opens_the_document(
+        self, real_registration, monkeypatch, tmp_path, settings,
+    ):
+        import agents.retention as agents_retention_module
+        from tools.rag import store
+
+        from agents.tests._helpers import make_document
+        from identity.contracts.retention import KIND_CONVERSATION
+        from identity.retention import delete_content, restore_content
+        from tools.rag.models import DocumentAttachment
+
+        settings.DOCUMENTS_DIR = tmp_path
+
+        user = make_user()
+        actor = user_principal(user)
+
+        def _raise(invocation_ids):
+            raise RuntimeError("scrub failed after the bytes were already gone")
+
+        monkeypatch.setattr(agents_retention_module, "scrub_tool_records", _raise)
+
+        with posture("personal") as row:
+            # `retention_days = 0` makes the ticket due at once, so
+            # `delete_content`'s own bounded sweep -- the SAME sweep an
+            # ordinary delete always triggers, not a synthetic call --
+            # purges it before this call returns. The raise above lands
+            # AFTER `delete_attachments_for` has removed the document's
+            # files and BEFORE the ticket itself is deleted, so
+            # `identity.retention._purge_due`'s own swallow (identical to
+            # a production sweep) logs it, rolls the row changes back,
+            # and leaves the ticket standing due -- exactly as it would
+            # on a real box.
+            row.retention_days = 0
+            row.save()
+
+            conversation = make_conversation(
+                owner_kind="user", owner_key=str(user.pk))
+            make_turn(conversation=conversation)
+
+            document = make_document(title="Notes.pdf", scope="conversation")
+            DocumentAttachment.objects.create(
+                document=document, conversation_id=conversation.id)
+            doc_dir = store.document_dir(document.pk)
+            doc_dir.mkdir(parents=True)
+            (doc_dir / "Notes.pdf").write_text("content", encoding="utf-8")
+
+            ticket = delete_content(
+                actor, kind=KIND_CONVERSATION, key=str(conversation.pk),
+                owner=conversation)
+
+        # The files are really gone -- not a fixture mistake, the premise
+        # of the whole scenario.
+        assert not doc_dir.exists()
+
+        still_offers_restore = DeletionTicket.objects.filter(pk=ticket.pk).exists()
+        if not still_offers_restore:
+            return  # the promise holds trivially: nothing left to restore
+
+        restore_content(actor, ticket)
+        assert doc_dir.exists(), (
+            "the ticket offered Restore and Restore put the conversation "
+            "back, but the document it was attached to has no file left "
+            "on disk"
+        )
