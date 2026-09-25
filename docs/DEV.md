@@ -525,6 +525,12 @@ column changed. A failure here is a test that assumed the open posture
 without pinning it — fix the test by pinning, never by weakening the
 assertion.
 
+**Running the whole ladder as one command:** `scripts/ladder.py <worktree> <db_url> <outdir>
+full [touched-modules...]` runs every run above (module order, the feature-flag matrix, and
+the posture sweep) plus `makemigrations --check --dry-run` and `check`, logging each to
+`<outdir>/<run>.log` and `<outdir>/SUMMARY`. See `.claude/skills/test-ladder/SKILL.md` for the
+full run table and the hotfix-mode shortcut.
+
 ### Rung 2 — the branch's own preview stack
 
 A feature branch is smoke-tested on its own isolated stack, with its own

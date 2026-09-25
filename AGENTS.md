@@ -79,17 +79,14 @@ docker compose up -d --build                           # run it locally, or afte
   "passing", "complete" are claims about the deployed box, not a green terminal. Mid-ladder
   reports use progress phrasing; an edit needing a second step is "edited, not yet live"; a
   status answer names its subject and that state — planned, built, tested, merged, deployed.
-- **Deploying.** Merge current `dev` INTO the feature branch, in that branch's own worktree,
-  and resolve there first. The flow is one-directional: pull request → review → the owner's
-  merge word → `dev` → root checkout fast-forwarded to `origin/dev` → restart (or recreate, if
-  environment variables changed) → verify in a browser → announce "landed". Announce the
-  deploy window first and confirm it went out — one window at a time. Permission for a merge,
-  a deploy, or anything destructive arrives in the acting session's own conversation; a
-  relayed "the owner said" is not authorization.
-- **Never touch, without that authorization:** the root checkout — see above — outside an
-  announced window (never push to `dev` directly or merge into it outside the PR flow; never
-  push to `main` at all — it takes only batched release PRs from `dev`); another branch's
-  bind-mounted preview containers; another session's worktree or ledger.
+- **Deploying** goes through `.claude/skills/deploy-window`: `dev` merged into the branch and
+  resolved there, PR → review → the owner's merge word → `dev` → an announced, ancestry-guarded
+  fast-forward of the root checkout → migrate/restart → fresh pixels → window closed. A merge,
+  deploy, or anything destructive needs permission in the acting session's own conversation —
+  a relayed "the owner said" is not authorization.
+- **Never touch, without that authorization:** the root checkout outside an announced window
+  (never push to `dev` directly, or to `main` at all — `main` takes only batched release PRs);
+  another branch's bind-mounted preview containers; another session's worktree or ledger.
 
 ## Subagent-driven development
 
@@ -106,6 +103,8 @@ so when it does.
   the most capable tier for architectural judgment and whole-branch reviews.
 - One plan, one ledger: per-plan briefs, reports, rulings with their cost-if-wrong, and
   deferred-minor triage live in that worktree's `.superpowers/sdd/<plan>/`.
+- A brief carries the task section, file anchors, and ledger rulings, never a plan path alone
+  (`.claude/skills/subagent-brief`).
 
 ## Merge readiness
 
@@ -135,9 +134,8 @@ covering everything added since its last one. The merge decision is the owner's.
 - **Announce before you touch a shared surface** — the live containers, the shared page shell,
   a settings registration, anything another session flagged as theirs — and announce additive
   out-of-zone touches before they merge.
-- **The stash stack is shared across worktrees.** Never a bare `git stash` or `git stash pop`;
-  prefer a work-in-progress commit, or tag a stash and apply it by commit hash. Run one git
-  command per shell invocation.
+- **The stash stack is shared across worktrees.** Never a bare `git stash`/`git stash pop`;
+  prefer a WIP commit, or tag a stash and apply it by hash. One git command per shell invocation.
 - **Before removing any worktree**, check `git -C <worktree> log --branches --not --remotes`
   for unpushed commits and whether it holds a `.superpowers/` ledger: a clean-looking checkout
   can be another session's live desk.
@@ -178,6 +176,8 @@ through the registry's one sanctioned door). `foundation/ops/tests/test_import_l
   one contract; this is how to add one, so do not reverse-engineer an existing one.
 - **[docs/superpowers/](docs/superpowers/)** — the plan and spec archive: history, not docs.
 - **`.superpowers/`** (untracked) — per-session ledgers; never another session's to delete.
+- **[.claude/skills/](.claude/skills/)** — recurring procedures (deploy window, test ladder,
+  steward review, PR body, briefs), invoked rather than re-derived from memory each session.
 - **[CONTRIBUTING.md](CONTRIBUTING.md)**, **[SECURITY.md](SECURITY.md)**,
   **[LICENSING.md](LICENSING.md)**, **[CLA.md](CLA.md)** — contribution, disclosure, licensing.
 
