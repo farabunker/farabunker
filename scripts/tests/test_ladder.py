@@ -1,9 +1,15 @@
-"""Test for scripts/ladder.py's run-plan builder.
+"""Test for scripts/ladder.py's run-plan builder and its other-pytest matcher.
 
 build_run_plan never shells out (its only I/O is one stderr line when the
 scoped pair is dropped), so this imports the module directly rather than
 shelling out -- contrast scripts/tests/test_preview.py, which must shell
 out because scripts/preview is a bash script.
+
+count_other_pytest is likewise pinned as a pure function over a list of
+already-collected `ps` lines (no subprocess run here either): it is the
+matcher scripts/ladder.py's wait loop used to run by shelling out to
+`pgrep -f pytest`, which put the pattern it searched for on the command
+line it then searched -- a watcher counting its own reflection.
 """
 from __future__ import annotations
 
@@ -12,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ladder import FULL_MODULES, build_run_plan  # noqa: E402
+from ladder import FULL_MODULES, build_run_plan, count_other_pytest  # noqa: E402
 
 REVERSED = tuple(reversed(FULL_MODULES))
 
@@ -71,3 +77,38 @@ def test_build_run_plan_hotfix_is_only_the_r1_pair():
     assert all(run["features"] == "vision,media" and run["posture"] is None for run in hotfix)
     assert hotfix[0]["modules"] == FULL_MODULES
     assert hotfix[1]["modules"] == REVERSED
+
+
+def test_count_other_pytest_ignores_a_shell_whose_arguments_merely_mention_pytest():
+    # This is the self-referential case: a wait loop's own polling command
+    # (or the old `pgrep -f pytest` call itself) has "pytest" sitting right
+    # there in its arguments. A predicate that matched on arguments alone
+    # would count it -- a sharper pattern doesn't fix that, since any
+    # pattern is still just text the match would also see. This line is
+    # rejected because its EXECUTABLE (ucomm) is a shell, not because the
+    # pattern was tuned to miss it.
+    lines = [
+        "100 1 zsh /bin/zsh -c eval 'pgrep -f pytest' < /dev/null",
+    ]
+    assert count_other_pytest(lines, exclude_pids=set()) == 0
+
+
+def test_count_other_pytest_counts_a_real_python_process_running_pytest():
+    # The positive case that must still fire: a real interpreter whose
+    # arguments name the runner is another session's test run and belongs
+    # in the count.
+    lines = [
+        "200 150 Python /venv/bin/python .venv/bin/pytest -q tools models",
+    ]
+    assert count_other_pytest(lines, exclude_pids=set()) == 1
+
+
+def test_count_other_pytest_excludes_its_own_pid():
+    # A run this script launched itself has a real interpreter and real
+    # runner arguments, so the predicate correctly matches it -- it must be
+    # excluded by pid (this script's own process tree), not by the
+    # predicate misclassifying it.
+    lines = [
+        "300 1 Python .venv/bin/pytest -q scripts",
+    ]
+    assert count_other_pytest(lines, exclude_pids={300}) == 0

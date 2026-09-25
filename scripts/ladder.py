@@ -18,9 +18,16 @@ name, which has produced a false red before.
 
 Before every pytest run (not before the trailing makemigrations/check pair)
 this waits until at most --max-others other pytest processes are running
-machine-wide, polled with `pgrep -f pytest`.
-# ponytail: name-substring match, not a lock -- a false positive just costs
-# a few extra seconds of waiting, never a wrong result.
+machine-wide. It lists processes with one `ps` call whose own command line
+never names "pytest" (so it can never match itself or be matched by a peer
+running the same check), then matches in Python: a line counts only when
+its executable is a Python interpreter AND its arguments mention the
+runner, so a shell or grep that merely has "pytest" in its arguments (its
+own polling command, another session's wait loop) is never counted. This
+process's own pid and its whole process tree (an in-flight pytest run it
+launched itself) are excluded from the count.
+# ponytail: executable+argument match, not a lock -- a false positive just
+# costs a few extra seconds of waiting, never a wrong result.
 Default --max-others is 1 (AGENTS.md: at most two full suites across the
 machine, this run plus one other); pass --max-others 0 when peers have
 agreed a stricter cap for a period. A line is printed to stderr every 60s
@@ -80,11 +87,77 @@ def build_run_plan(mode: str, touched_modules: list[str]) -> list[dict]:
     return runs
 
 
+def _process_lines() -> list[str]:
+    """One `ps` call, pid + ppid + short executable name + full arguments
+    per line. None of that argv (["ps", "-eo", "pid=,ppid=,ucomm=,args="])
+    names "pytest" anywhere, so this call can never match itself, and
+    nothing else watching for "pytest" in a command line can match it
+    either -- the pattern never travels on a command line at all."""
+    result = subprocess.run(
+        ["ps", "-eo", "pid=,ppid=,ucomm=,args="], capture_output=True, text=True,
+    )
+    return result.stdout.splitlines()
+
+
+def _parse_process_line(line: str) -> tuple[int, int, str, str] | None:
+    parts = line.split(None, 3)
+    if len(parts) < 4:
+        return None
+    try:
+        pid, ppid = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    return pid, ppid, parts[2], parts[3]
+
+
+def _own_process_tree(lines: list[str], root_pid: int) -> set[int]:
+    """root_pid plus every descendant, walked from `ps`'s pid/ppid links --
+    a run this script launched itself is not "another" process, however
+    the matching predicate below classifies it."""
+    children: dict[int, list[int]] = {}
+    for line in lines:
+        parsed = _parse_process_line(line)
+        if parsed is None:
+            continue
+        pid, ppid, _ucomm, _args = parsed
+        children.setdefault(ppid, []).append(pid)
+    tree = {root_pid}
+    frontier = [root_pid]
+    while frontier:
+        pid = frontier.pop()
+        for child in children.get(pid, ()):
+            if child not in tree:
+                tree.add(child)
+                frontier.append(child)
+    return tree
+
+
+def count_other_pytest(lines: list[str], exclude_pids: set[int]) -> int:
+    """Pure matcher over already-collected `ps` output -- no subprocess call
+    here, so a test can hand it a self-referential line with no process run
+    at all. A line counts only when its EXECUTABLE is a Python interpreter
+    AND its arguments mention "pytest": an executable check, not a sharper
+    pattern, because any pattern is just more text a text-only match would
+    also see in a shell or grep that merely mentions it in its own
+    arguments (a wait loop's own polling command, for instance) -- those
+    have ucomm "zsh"/"bash"/etc, never a python interpreter, so they are
+    structurally excluded regardless of what their arguments say."""
+    count = 0
+    for line in lines:
+        parsed = _parse_process_line(line)
+        if parsed is None:
+            continue
+        pid, _ppid, ucomm, args = parsed
+        if pid in exclude_pids:
+            continue
+        if "python" in ucomm.lower() and "pytest" in args:
+            count += 1
+    return count
+
+
 def _other_pytest_count() -> int:
-    result = subprocess.run(["pgrep", "-f", "pytest"], capture_output=True, text=True)
-    if result.returncode != 0:
-        return 0
-    return len([line for line in result.stdout.splitlines() if line.strip()])
+    lines = _process_lines()
+    return count_other_pytest(lines, _own_process_tree(lines, os.getpid()))
 
 
 def _wait_for_the_machine(max_others: int, poll_seconds: float = 5.0) -> None:

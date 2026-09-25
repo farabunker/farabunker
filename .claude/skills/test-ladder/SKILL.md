@@ -57,10 +57,14 @@ scripts/ladder.py <worktree> <db_url> <outdir> hotfix
   script touches `<outdir>/LADDER_DONE` once every run (the trailing pair
   included) has finished. The process exits non-zero if any run's
   returncode was non-zero.
-- Before every pytest run (not the trailing `makemigrations`/`check` pair) the script waits,
-  polling `pgrep -f pytest`, for at most `--max-others` other pytest processes machine-wide,
-  printing `waiting: N other pytest processes` to stderr every 60s. Default `1` -- AGENTS.md's
-  "at most two full suites" (this run plus one other); pass `0` for a peer-agreed stricter cap.
+- Before every pytest run (not the trailing `makemigrations`/`check` pair) the script waits for
+  at most `--max-others` other pytest processes machine-wide, printing
+  `waiting: N other pytest processes` to stderr every 60s. It counts by listing processes with
+  one `ps` call and matching in Python -- a line counts only when its executable is a Python
+  interpreter and its arguments mention the runner, and its own pid and process tree are
+  excluded -- never by shelling out with the pattern on the command line it then searches,
+  which used to make the watcher count its own reflection. Default `1` -- AGENTS.md's "at most
+  two full suites" (this run plus one other); pass `0` for a peer-agreed stricter cap.
 - **Pausing** is `kill -STOP <ladder.py's own pid>` (not its process group).
   Its in-flight pytest subprocess is a separate process and keeps running to
   completion regardless -- the result still lands in that run's `.log` and
@@ -68,6 +72,21 @@ scripts/ladder.py <worktree> <db_url> <outdir> hotfix
   move to the next run.
 - Runs sequentially, in the table's order; do not parallelize runs against
   the same `<db_url>`.
+
+## Sharing the machine
+
+The wait is advisory, not mutual exclusion -- checking the count and starting the run are two
+separate steps with a gap between them, so two sessions can both see a clear machine in the
+same instant and start together. Explicit handover -- saying out loud what you're about to run
+and when, and correcting it when that changes -- is therefore the protocol, not a politeness:
+it is what stopped and restarted a chain here when the count alone would not have, and it is
+the part that survives whoever eventually lands a lock, since a lock only says the machine is
+taken, never for how long or what to do instead. Next step, not yet built: a lock file created
+exclusively (so the loser of a race fails to create it rather than reading stale state),
+carrying the holder's pid and a timestamp, with a waiter treating a missing holder or an
+implausibly old timestamp as stale and taking it -- it would turn "I looked and nobody was
+running" into "I hold the only token", giving every session one place to see who holds the
+machine and since when.
 
 ## Failure modes
 
@@ -79,6 +98,11 @@ scripts/ladder.py <worktree> <db_url> <outdir> hotfix
   "pause" means here.
 - Citing `LADDER_DONE`'s existence as "green" -- it means the ladder
   *finished*, not that every run passed. Read `SUMMARY`.
+- Matching on arguments alone (a sharper pattern instead of an executable check) once reported
+  the machine busy on an idle machine, all day, in both directions -- phantoms counted as busy
+  is the direction that starves a peer, and explicit handover carried the real coordination
+  while it stood undetected. The remedy is not a sharper eye, it is running the check and
+  reading its output.
 
 ## See also
 
