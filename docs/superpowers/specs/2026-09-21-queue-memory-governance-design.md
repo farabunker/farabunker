@@ -370,6 +370,13 @@ So the barrier is defined by what the queue actually knows:
    admission, i.e. on every chat turn. §11 prices it, and done-when proof 2(ii)
    carries a timing expectation so a 30 s-per-turn regression is caught on the preview
    rather than in use.
+
+   *(2026-09-24, amended — the regression reached live, on a box registering a
+   memo-authority image engine.)* A precautionary call at an endpoint that is **not**
+   the admitted job's own is now made with `unload(..., wait=False)`: its answer is
+   discarded by §3.3d(4), so the settle poll buys nothing. The job's own endpoints keep
+   the poll (the load-on-top race), and so does every believed-resident call. See ADR
+   0013's 2026-09-24 amendment, which also corrects proof 2(iii)'s premise.
 4. **Reading the answer.** `False` is honoured **only for a call made against a
    believed-resident model** — the one case where it carries information ("memory
    might still be held"). A `False` from a *precautionary* call is logged at INFO
