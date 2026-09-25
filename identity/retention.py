@@ -171,6 +171,18 @@ def delete_content(actor, *, kind: str, key, owner, label: str = "",
     principal -- never the principal that triggered this call -- exactly
     as `sweep` below documents.
 
+    THE SWEEP RUNS AFTER THE `with transaction.atomic()` BLOCK ABOVE HAS
+    ALREADY CLOSED, deliberately -- each purge wants its own transaction,
+    not one shared with the ticket write it follows. That is only an
+    OUTER transaction's boundary, not the request's, because this
+    codebase sets no `ATOMIC_REQUESTS`
+    (`config/settings.py` has no such key): a future `ATOMIC_REQUESTS =
+    True` would fold this call and its sweep into one ambient
+    request-level transaction, and a purge failing partway through would
+    then roll back the very delete that triggered it -- silently making
+    the zero-day promise above false. Left unguarded because nothing in
+    this codebase sets it, not because the risk does not exist.
+
     `retention_days = 0` IS SYNCHRONOUS ONLY WHILE THE DUE BACKLOG STAYS
     UNDER `SWEEP_LIMIT`: this call's own bounded sweep orders every due
     ticket by `purge_on, pk` and takes the oldest `SWEEP_LIMIT`, so on a

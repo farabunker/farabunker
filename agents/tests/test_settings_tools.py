@@ -316,6 +316,30 @@ class TestTheOverview:
             result = run_overview({}, make_tool_ctx(principal=user_principal(make_admin())))
         assert "no age limit (recorded; the queue does not apply it yet)" in result.text
 
+    def test_the_retention_line_discloses_its_scope(self):
+        """The assistant answers in chat, with no help card beside it to
+        correct an over-claim -- unlike the Deleted page and the two
+        settings help cards, which all carry this same clause. Both
+        branches -- a number and "deleted permanently at once" -- carry
+        it, since a person asking "how long do you keep things I
+        delete" would otherwise read either one as covering everything,
+        including a library document, which is already gone."""
+        from identity.models import IdentitySettings
+
+        with posture(POSTURE_ENTERPRISE):
+            row = IdentitySettings.get_solo()
+            row.retention_days = 45
+            row.save()
+            result = run_overview({}, make_tool_ctx(principal=user_principal(make_admin())))
+        assert "45 days (conversations and the images that were part of them)" in result.text
+
+        with posture(POSTURE_ENTERPRISE):
+            row.retention_days = 0
+            row.save()
+            result = run_overview({}, make_tool_ctx(principal=user_principal(make_admin())))
+        assert ("deleted permanently at once; conversations and the images "
+                "that were part of them") in result.text
+
     def test_the_zero_and_blank_retention_edges_get_plain_words(self):
         """`0` and `None` are both LEGAL values with specific meanings
         (`identity/models.py`'s own field comments) -- "no grace period"

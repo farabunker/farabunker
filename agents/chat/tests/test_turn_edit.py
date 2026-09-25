@@ -876,6 +876,17 @@ class TestThePost:
 # off the row `IdentityGateMiddleware` already stashed; the second
 # assertion below guards that regression directly, independent of this
 # literal, and is unaffected by the deletion-semantics reads above.
+#
+# 14 IS THE ZERO-TICKET FLOOR, not a fixed cost. Items 1 and 2 above --
+# the two `ticketed_keys()` reads -- always run, ticketed or not; what
+# this fixture's shape (nothing deleted anywhere on the box) leaves
+# UNPAID is the pair of `Document.objects.filter(...__in=...)` queries
+# `_deleted_document_ids` also names (the chat-scoped and notes legs),
+# each compiled away to a known-empty `__in` at zero database round
+# trips when the conversation-ticket id list is empty. With one open
+# conversation ticket in play those two queries actually reach Postgres,
+# and the same tick costs 16 (`tools/rag/access.py`'s own docstring:
+# "TWO QUERIES WHEN NOTHING IS TICKETED, FOUR WHEN A CONVERSATION IS").
 _DONE_TICK_READS = 14
 
 

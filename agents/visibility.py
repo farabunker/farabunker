@@ -757,7 +757,7 @@ def duplicate_conversation(principal, conversation, *, title: str):
 
 # THE THREE FACTS, ONCE. `is_editable_turn_row` asks them of a row in
 # hand; a queryset caller (`agents.chat.service.branch_point_ordinal`)
-# asks them of the database. ADR 0020 decision 10 says "spelled once",
+# asks them of the database. ADR 0019 decision 10 says "spelled once",
 # and this is what makes that true rather than aspirational.
 EDITABLE_TURN_ROW_FIELDS = {"role": Turn.Role.USER, "depth": 0,
                             "state": Turn.State.DONE}

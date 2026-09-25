@@ -444,10 +444,21 @@ def run_overview(args: dict, ctx: ToolContext) -> ToolResult:
     # this module names no new sentence for "keep deleted items for" or
     # "keep finished queue jobs for", it reads the same words the
     # Retention settings form's own labels already carry.
+    # THE SCOPE CLAUSE IS PART OF THE LINE, NOT A SEPARATE SENTENCE, for
+    # the same reason `queue_retention_line` below carries its own
+    # disclosure: the assistant answers in chat, with no help card
+    # beside it to correct an over-claim. A bare number here would tell
+    # a person who asks "how long do you keep things I delete" that
+    # EVERYTHING they delete follows this period -- a deleted library
+    # document is already gone. Same words the Deleted help card
+    # already carries (`foundation/settings_help.py`), not a new
+    # sentence.
     retention_line = (
-        f"  {LABEL_RETENTION_DAYS} 0 days (deleted permanently at once)"
+        f"  {LABEL_RETENTION_DAYS} 0 days (deleted permanently at once; "
+        "conversations and the images that were part of them)"
         if data["retention_days"] == 0
-        else f"  {LABEL_RETENTION_DAYS} {data['retention_days']} days"
+        else f"  {LABEL_RETENTION_DAYS} {data['retention_days']} days "
+             "(conversations and the images that were part of them)"
     )
     # THE DISCLOSURE IS PART OF THE LINE, NOT A SEPARATE SENTENCE:
     # `models/` is untouched by this branch and nothing reads

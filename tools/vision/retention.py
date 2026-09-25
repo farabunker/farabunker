@@ -45,6 +45,23 @@ generation whose tool turn was never written at all -- the job row was
 created and the turn died before it (a crash, a kill, a cancelled
 turn). It stays visible to its own owner in the gallery, where the
 `vision_job` kind deletes it.
+
+A SECOND, RELATED RESIDUE: a `vision_job` CHILD TICKET written while
+the feature is on can outlive its own handler if the feature is turned
+off before the ticket's purge date. `tools/vision/apps.py::ready()`
+registers nothing at all -- not `resolve_artifact_jobs`, not this
+module's own retention handler -- when the flag is off, so
+`identity.cascades.run_retention("vision_job", key)` resolves an empty
+handler list for a ticket that already exists. The sweep still writes
+its `content.purged` event and deletes the ticket, with `removed={}`,
+because no handler answered; the `GenerationJob` row survives, and it
+becomes visible again in the gallery, because the exclusion in
+`tools.vision.visibility` is gone with the handler that would have run.
+Turning the feature back on re-registers the handler and the exclusion,
+but does not retroactively purge what the flag-off window already
+un-ticketed. A rare box-configuration window, not a code path any
+handler here can close on its own -- named so a future reader does not
+mistake a silently un-ticketed image for the box's promise kept.
 """
 from __future__ import annotations
 
@@ -97,11 +114,6 @@ def resolve_artifact_jobs(refs, generation_ids) -> list[str]:
         try:
             kind, pk = parse_artifact(reference)
         except ValueError:
-            # THE RAW REFERENCE NEVER REACHES THE LOG: this path runs
-            # inside a deletion, and a deletion must not write what it
-            # is destroying somewhere new. The fact that one reference
-            # failed to parse and was dropped is the whole of what a
-            # reader needs.
             logger.warning(
                 "tools.vision.retention: one artifact reference failed to parse; ignored.")
             continue
@@ -120,9 +132,6 @@ def resolve_artifact_jobs(refs, generation_ids) -> list[str]:
         try:
             job_ids.add(uuid.UUID(str(raw)))
         except (ValueError, AttributeError, TypeError):
-            # SAME RULE AS THE REFERENCE BRANCH ABOVE: no raw value in
-            # the log, only the fact that one generation id could not
-            # be parsed and was dropped.
             logger.warning(
                 "tools.vision.retention: one generation id failed to parse; ignored.")
 

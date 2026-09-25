@@ -612,9 +612,9 @@ IDENTITY_PERMITTED = (
     # column asks it a PRINCIPAL-shaped question -- "which keys of my
     # kind are deleted" -- and turns the answer into an exclusion on its
     # own queryset; identity could not answer "which conversations" even
-    # if it wanted to (rule 4). Three visibility functions in three
-    # columns call `ticketed_keys`, and three delete surfaces call
-    # `delete_content`. Nothing else under `identity/` is opened.
+    # if it wanted to (rule 4). Four visibility functions in three
+    # columns call `ticketed_keys`, and one delete surface calls
+    # `delete_content` today. Nothing else under `identity/` is opened.
     "identity.retention",
 )
 
