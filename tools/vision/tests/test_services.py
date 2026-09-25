@@ -2169,3 +2169,73 @@ class TestDescribeOutput:
         output.job.save(update_fields=["description"])
 
         assert services.job_json(output.job)["description"] == output.job.description
+
+
+class TestDescribeIfReady:
+    """`services.describe_if_ready` -- the ONE gate both `describe_output`
+    callers share (vision-describes-its-own-output task, ruling 3):
+    `tools.vision.jobs.run_generate` (the queued job kind) and `tools.
+    vision.tools.run_generate` (the chat tool). Patches `describe_output`
+    itself -- `TestDescribeOutput` above already covers what THAT
+    function does; this class only proves the GATE."""
+
+    def _bind_extract(self):
+        connection = ModelConnection.objects.create(
+            name="describer", engine="stubengine", endpoint="http://stub:9999",
+            model_id="describer.gguf", capabilities=["vision"],
+        )
+        RoleBinding.objects.create(role_key=RAG_EXTRACT_ROLE, connection=connection)
+
+    def test_unbound_role_never_calls_describe_output(self, tmp_path):
+        output = stored_output(tmp_path)
+
+        with patch("tools.vision.services.describe_output") as describe_mock:
+            services.describe_if_ready(output.job)
+
+        describe_mock.assert_not_called()
+
+    def test_bound_role_describes_a_done_job_with_outputs(self, tmp_path):
+        output = stored_output(tmp_path)
+        self._bind_extract()
+
+        with patch("tools.vision.services.describe_output") as describe_mock:
+            services.describe_if_ready(output.job)
+
+        describe_mock.assert_called_once_with(output.job)
+
+    def test_a_failed_job_is_never_described_even_when_bound(self, tmp_path):
+        output = stored_output(tmp_path)
+        output.job.status = GenerationJob.Status.FAILED
+        output.job.save(update_fields=["status"])
+        self._bind_extract()
+
+        with patch("tools.vision.services.describe_output") as describe_mock:
+            services.describe_if_ready(output.job)
+
+        describe_mock.assert_not_called()
+
+    def test_no_outputs_is_never_described_even_when_bound(self):
+        job = GenerationJob.objects.create(
+            operation="txt2img", params={}, engine="stubengine",
+            model_id="stub.safetensors", endpoint="http://stub:9999",
+            model_fingerprint="x", status=GenerationJob.Status.DONE,
+        )
+        self._bind_extract()
+
+        with patch("tools.vision.services.describe_output") as describe_mock:
+            services.describe_if_ready(job)
+
+        describe_mock.assert_not_called()
+
+    def test_a_still_running_job_is_never_described_even_when_bound(self, tmp_path):
+        output = stored_output(tmp_path, job=GenerationJob.objects.create(
+            operation="txt2img", params={}, engine="stubengine",
+            model_id="stub.safetensors", endpoint="http://stub:9999",
+            model_fingerprint="x", status=GenerationJob.Status.QUEUED,
+        ))
+        self._bind_extract()
+
+        with patch("tools.vision.services.describe_output") as describe_mock:
+            services.describe_if_ready(output.job)
+
+        describe_mock.assert_not_called()

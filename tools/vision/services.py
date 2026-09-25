@@ -1420,6 +1420,33 @@ def describe_output(job: GenerationJob) -> None:
     job.save(update_fields=["description"])
 
 
+def describe_if_ready(job: GenerationJob) -> None:
+    """The ONE gate both `describe_output` callers share -- `tools.vision.
+    jobs.run_generate` (the queued job kind's own handler) and `tools.
+    vision.tools.run_generate` (the chat tool's own synchronous submit/
+    wait), one implementation, two callers (vision-describes-its-own-
+    output task, ruling 3).
+
+    Requirement 4, enforced ONCE here rather than duplicated at each call
+    site: only a `DONE` job with at least one output is ever described --
+    never a failed, refused, still-running, or output-less one.
+
+    `rag.extract` is re-resolved FRESH here, tolerantly (`ValueError` ->
+    simply return, no describe call, no extra latency) -- the same
+    "never trust an earlier snapshot" discipline `services.submit_job`
+    already applies to `vision.generate` itself. This is what keeps the
+    whole step a true no-op on any box that has not bound the role,
+    whichever caller reached this function.
+    """
+    if not (job.is_terminal and job.status == GenerationJob.Status.DONE and job.outputs.exists()):
+        return
+    try:
+        bindings.resolve(RAG_EXTRACT_ROLE)
+    except ValueError:
+        return
+    describe_output(job)
+
+
 def wait_for(
     job: GenerationJob,
     timeout: float,

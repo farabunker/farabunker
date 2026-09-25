@@ -780,6 +780,21 @@ def run_generate(args: dict, ctx: ToolContext) -> ToolResult:
 
     job = services.wait_for(job, timeout=timeout, on_poll=on_poll)
 
+    # Describe the job's OWN output, STRICTLY AFTER generation has fully
+    # finished (vision-describes-its-own-output task, ruling 3): the
+    # SAME `services.describe_if_ready` gate `tools.vision.jobs.
+    # run_generate` (the queued job kind's own handler) already calls --
+    # one implementation, two callers, both non-fatal by construction. An
+    # unbound `rag.extract` role, or a job that is not a terminal `DONE`
+    # with at least one output, means this is a true no-op: no call, no
+    # extra latency, and the turn's own admission is what makes this
+    # safe to attempt at all -- `agents.runtime.jobs.plan_turn` now
+    # declares `rag.extract` alongside `vision.generate` whenever this
+    # tool is granted (tolerantly, and `synchronous=False`, exactly like
+    # the image role itself), so this call is never reaching for a model
+    # the turn's own admission snapshot did not know about.
+    services.describe_if_ready(job)
+
     payload = services.job_json(job)
     artifacts = tuple(f"output:{output['id']}" for output in payload.get("outputs", ()))
 
@@ -818,22 +833,13 @@ def run_generate(args: dict, ctx: ToolContext) -> ToolResult:
         pronoun = "this" if len(artifacts) == 1 else "these"
         lines.append(f"Outputs: {', '.join(artifacts)} — reference {pronoun} to edit.")
 
-    # READS, never produces (RULED CORRECTION, superseding this module's
-    # earlier "no describer" note): `payload["description"]` is written
-    # by `tools.vision.jobs.run_generate` -- the QUEUED `vision.generate`
-    # job kind's own handler, admitted with `rag.extract` alongside the
-    # image model (`jobs.plan_generate`) -- STRICTLY AFTER a generation
-    # finishes, never by this runner. A generation THIS runner submits
-    # (`services.submit_job`/`wait_for`, directly, synchronously, inside
-    # the turn already running this tool call) never passes through that
-    # job kind at all, so `payload["description"]` is `""` for every
-    # generation reached this way today -- this line costs nothing now
-    # and asks nothing new of the turn's own model admission, and it
-    # starts reading a value the moment anything ever writes one for a
-    # generation reached through THIS path. Appended verbatim, no
-    # further templating: `services.describe_output` already writes a
+    # `describe_if_ready` (above) already wrote `job.description` (or
+    # left it "" -- unbound role, or nothing to describe yet); `payload`
+    # (freshly built from the SAME `job` via `job_json`, right after)
+    # simply carries whatever that call left there. Appended verbatim,
+    # no further templating: `services.describe_output` already writes a
     # complete, clearly-labelled sentence (or the honest failure
-    # sentence) onto the stored field.
+    # sentence, never "") onto the field whenever it actually ran.
     if payload.get("description"):
         lines.append(payload["description"])
     text = " ".join(lines)

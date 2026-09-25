@@ -567,14 +567,46 @@ class TestVisionGenerateRunner:
 
         assert "output:" not in result.text
 
+    def test_it_calls_describe_if_ready_after_waiting_before_reading_the_result(self):
+        """WIRING (vision-describes-its-own-output task, ruling 3): this
+        runner now calls the SAME `services.describe_if_ready` gate
+        `tools.vision.jobs.run_generate` (the queued job kind) calls --
+        one implementation, two callers -- with the job `wait_for` gave
+        back, and STRICTLY AFTER `wait_for` returns, BEFORE `job_json` is
+        read (so a description it just wrote is what `job_json` sees)."""
+        from tools.vision.tools import run_generate
+
+        order = []
+        job = MagicMock()
+        payload = {
+            "id": "abc", "status": "succeeded",
+            "outputs": [{"id": 36, "url": "/vision/outputs/36/file/"}],
+        }
+        with patch("tools.vision.services.preflight", return_value=_ready_preflight()), \
+             patch("tools.vision.services.submit_job", return_value=job), \
+             patch(
+                 "tools.vision.services.wait_for",
+                 side_effect=lambda *a, **k: order.append("wait_for") or job,
+             ), \
+             patch(
+                 "tools.vision.services.describe_if_ready",
+                 side_effect=lambda j: order.append("describe_if_ready"),
+             ) as describe_mock, \
+             patch(
+                 "tools.vision.services.job_json",
+                 side_effect=lambda j: order.append("job_json") or payload,
+             ):
+            run_generate({"operation": "txt2img", "prompt": "x"}, make_tool_ctx())
+
+        describe_mock.assert_called_once_with(job)
+        assert order == ["wait_for", "describe_if_ready", "job_json"]
+
     def test_a_stored_description_is_appended_verbatim(self):
-        """READS, never produces (vision-describes-its-own-output task,
-        RULED CORRECTION): `payload["description"]` is written by
-        `tools.vision.jobs.run_generate`, the QUEUED job kind's own
-        handler -- never by this runner, which submits and waits
-        directly, synchronously, inside the turn. This test proves only
-        the READ half: whatever `job_json` hands back under that key
-        lands in `.text`, unchanged, alongside the untouched output-id
+        """READS the field, never templates it: whatever `describe_if_
+        ready` (patched away here, real behaviour covered in `test_
+        services.py::TestDescribeIfReady`/`TestDescribeOutput`) leaves on
+        the job, `job_json` hands back under `"description"`, and this
+        runner appends verbatim, alongside the untouched output-id
         sentence."""
         from tools.vision.tools import run_generate
 
@@ -591,6 +623,7 @@ class TestVisionGenerateRunner:
         with patch("tools.vision.services.preflight", return_value=_ready_preflight()), \
              patch("tools.vision.services.submit_job", return_value=job), \
              patch("tools.vision.services.wait_for", return_value=job), \
+             patch("tools.vision.services.describe_if_ready"), \
              patch("tools.vision.services.job_json", return_value=payload):
             result = run_generate({"operation": "txt2img", "prompt": "x"}, make_tool_ctx())
 
@@ -602,9 +635,9 @@ class TestVisionGenerateRunner:
         assert "— reference this to edit." in result.text
 
     def test_no_description_key_appends_nothing(self):
-        """A generation reached through THIS runner (the chat tool's own
-        synchronous submit/wait, never the queued job kind) carries no
-        `description` key at all today -- `payload.get("description")`
+        """A `describe_if_ready` call that left nothing (an unbound
+        `rag.extract` role, or nothing yet to describe) means `payload`
+        carries no `description` key -- `payload.get("description")`
         must degrade to nothing added, never a raise on a missing key."""
         from tools.vision.tools import run_generate
 
@@ -616,6 +649,7 @@ class TestVisionGenerateRunner:
         with patch("tools.vision.services.preflight", return_value=_ready_preflight()), \
              patch("tools.vision.services.submit_job", return_value=job), \
              patch("tools.vision.services.wait_for", return_value=job), \
+             patch("tools.vision.services.describe_if_ready"), \
              patch("tools.vision.services.job_json", return_value=payload):
             result = run_generate({"operation": "txt2img", "prompt": "x"}, make_tool_ctx())
 

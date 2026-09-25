@@ -450,50 +450,34 @@ def run_generate(payload: dict, models: list[ModelRef], ctx: JobContext) -> dict
 
     # Describe the job's own output, STRICTLY AFTER generation has fully
     # finished -- OWNER RULING: the two model calls are a SEQUENTIAL
-    # CHAIN, never overlapped or started eagerly for speed. Only for a
-    # DONE job with at least one output (requirement 4) -- never a
-    # failed, refused, still-running, or output-less one; `describe_
-    # output` itself re-checks the output count, but the status/terminal
-    # check belongs here, once, rather than inside a service function
-    # every OTHER caller of `describe_output` would also have to satisfy.
+    # CHAIN, never overlapped or started eagerly for speed.
+    # `services.describe_if_ready` is the ONE gate BOTH callers of
+    # `describe_output` share (vision-describes-its-own-output task,
+    # ruling 3) -- requirement 4 (only a `DONE` job with an output, never
+    # failed/refused/still-running), the tolerant `rag.extract` resolve
+    # (an unbound role means nothing runs, no extra latency, on a box
+    # that never bound it -- which is every box before an operator opts
+    # in, and every test in this module that does not bind it), and the
+    # call to `describe_output` itself all live there now, not duplicated
+    # per call site.
     #
-    # `rag.extract` is re-resolved HERE, fresh, BEFORE describing -- the
-    # same "never trust an enqueue-time snapshot" discipline
-    # `_resolve_model` above already applies to `vision.generate` itself.
-    # An unbound role means NOTHING below this point runs: no describe
-    # call, no extra latency, on a box that never bound the role at all
-    # -- which is every box before an operator opts in, and every test in
-    # this module that does not bind it.
-    #
-    # NO RELEASE OF THE IMAGE MODEL HERE, AND DELIBERATELY SO -- an
+    # NO RELEASE OF THE IMAGE MODEL, AND DELIBERATELY SO -- an
     # unconditional release was built, measured by tracing (not running),
-    # and REMOVED (vision-describes-its-own-output task, ruling 1).
-    # `ComfyUIEngine.unload`'s own docstring is explicit that ComfyUI's
-    # `/free` has no per-model form: `POST /free` with `unload_models` set
-    # calls `unload_all_models()`, which frees EVERY model at that
-    # endpoint, not just the one this job ran. Releasing it would therefore
-    # make the NEXT generation at that endpoint pay a full cold load --
-    # this file's own `GENERATE_WAIT_TIMEOUT_SECONDS` comment records that
-    # as "up to ~25 minutes" on the reference hardware -- to avoid a few
-    # seconds of two models resident at once. Orders of magnitude worse
-    # than the problem it would have solved, and it would fire on any box
-    # where `rag.extract` is actually bound, which is exactly the box this
-    # feature is FOR. Do not add it back without a per-model free (a
-    # different engine, or a future ComfyUI capability) to release
-    # against -- see this task's own report for the full finding.
-    try:
-        resolve(RAG_EXTRACT_ROLE)
-    except ValueError:
-        extract_bound = False
-    else:
-        extract_bound = True
-    if (
-        extract_bound
-        and job.is_terminal
-        and job.status == GenerationJob.Status.DONE
-        and job.outputs.exists()
-    ):
-        services.describe_output(job)
+    # and REMOVED (ruling 1). `ComfyUIEngine.unload`'s own docstring is
+    # explicit that ComfyUI's `/free` has no per-model form: `POST /free`
+    # with `unload_models` set calls `unload_all_models()`, which frees
+    # EVERY model at that endpoint, not just the one this job ran.
+    # Releasing it would therefore make the NEXT generation at that
+    # endpoint pay a full cold load -- this file's own `GENERATE_WAIT_
+    # TIMEOUT_SECONDS` comment records that as "up to ~25 minutes" on the
+    # reference hardware -- to avoid a few seconds of two models resident
+    # at once. Orders of magnitude worse than the problem it would have
+    # solved, and it would fire on any box where `rag.extract` is
+    # actually bound, which is exactly the box this feature is FOR. Do
+    # not add it back without a per-model free (a different engine, or a
+    # future ComfyUI capability) to release against -- see this task's
+    # own report for the full finding.
+    services.describe_if_ready(job)
 
     # One owner for what a job looks like as data: the outputs' serving
     # URLs are `services.job_json`'s, not a second copy of `reverse()`

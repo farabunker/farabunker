@@ -1258,18 +1258,31 @@ visible without a caller having to parse `data`.
 
 **A successful generation describes its own output** (vision-describes-
 its-own-output task) so a caller that just made an image can judge or
-retry it without a second turn. The description is produced INSIDE the
-queued `vision.generate` job kind's own handler (`jobs.run_generate`),
-never by `run_generate` above — that runner only reads whatever
-`GenerationJob.description` already holds. It costs one extra call
-through the extraction role's own model, made only after the image
-generation has fully finished (never overlapped with it), and an
-unbound extraction role simply means no description — the generation
-itself is unaffected either way. A generation submitted directly through
-`vision.generate` the TOOL (this section, the chat path) rather than
-through the queued job kind does not run this step today, so its result
-carries no description; see "Queued generation" above for the step
-itself.
+retry it without a second turn. Both callers of `services.submit_job`/
+`wait_for` — the queued `vision.generate` job kind's own handler
+(`jobs.run_generate`) and `run_generate` above, the chat tool's own
+synchronous submit/wait — call the SAME shared gate,
+`services.describe_if_ready`, right after `wait_for` returns: one
+implementation, two callers. It costs one extra call through the
+extraction role's own model, made only after the image generation has
+fully finished (never overlapped with it, and the image model is never
+released first — see "Queued generation" above for why), and an unbound
+extraction role simply means no description — the generation itself is
+unaffected either way, for either caller.
+
+For the CHAT path specifically (ruling 3): `agents.runtime.jobs.
+plan_turn` — the `agent.turn` job kind's own planner, which is what
+actually admits a chat turn to the execution queue — now declares
+`rag.extract` alongside `vision.generate` whenever this tool is granted,
+tolerantly (unbound → declares nothing) and `synchronous=False` (the
+same flag `vision.generate`'s own ref there already carries, for the
+same reason: neither model loads in-process inside the turn's own
+handler). `rag.extract` is deliberately NOT added to this tool's own
+`ToolSpec.roles` — `agents.runtime.loop._roles_resolve` drops a tool
+from the turn ENTIRELY when any of its declared roles fails to resolve,
+so doing that would make image generation itself vanish whenever
+`rag.extract` is unbound, a far worse regression than the one this task
+fixes.
 
 `vision.generate`'s params are **computed from `all_operations()` at
 registration time** (a ruling superseding this task's original literal

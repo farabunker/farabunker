@@ -112,6 +112,68 @@ class TestPlanTurn:
         refs, _ = plan_turn(_payload(turn))
         assert [r.role for r in refs] == [CHAT_CONVERSE_ROLE]
 
+    def test_the_image_tool_granted_with_extract_unbound_declares_no_extract_ref(
+        self, bound_chat_role
+    ):
+        """vision-describes-its-own-output task, ruling 3: the image tool
+        is granted, but `rag.extract` is not bound anywhere on this box
+        -- the fourth, narrower addition must be a true no-op, the same
+        tolerant drop every other role in this planner already gets."""
+        from models.contracts.roles import VISION_GENERATE_ROLE
+
+        register_tool(ToolSpec(key="vision.generate", label="S", description="d",
+                               runner="agents.runtime.tests._helpers.runner_ok",
+                               roles=(VISION_GENERATE_ROLE,)))
+        agent = make_agent(tool_keys=["vision.generate"])
+        turn = _turn_for(agent)
+
+        refs, _ = plan_turn(_payload(turn))
+
+        assert {r.role for r in refs} == {CHAT_CONVERSE_ROLE, VISION_GENERATE_ROLE}
+
+    def test_the_image_tool_granted_with_extract_bound_declares_it_non_synchronous(
+        self, bound_chat_role
+    ):
+        from models.contracts.roles import RAG_EXTRACT_ROLE, VISION_GENERATE_ROLE
+
+        register_tool(ToolSpec(key="vision.generate", label="S", description="d",
+                               runner="agents.runtime.tests._helpers.runner_ok",
+                               roles=(VISION_GENERATE_ROLE,)))
+        bind_chat_role(RAG_EXTRACT_ROLE, name="test-extract", capability="vision")
+        agent = make_agent(tool_keys=["vision.generate"])
+        turn = _turn_for(agent)
+
+        refs, exclusive = plan_turn(_payload(turn))
+
+        assert {r.role for r in refs} == {
+            CHAT_CONVERSE_ROLE, VISION_GENERATE_ROLE, RAG_EXTRACT_ROLE,
+        }
+        by_role = {r.role: r.synchronous for r in refs}
+        # SAME flag the image role itself carries, for the same reason:
+        # this handler drives neither model in-process, a TOOL does, on
+        # its own path -- and a granted-but-uncalled tool must not cost
+        # every turn a barrier settle poll.
+        assert by_role[RAG_EXTRACT_ROLE] is False
+        assert by_role[VISION_GENERATE_ROLE] is False
+        assert exclusive is True
+
+    def test_the_image_tool_NOT_granted_never_declares_extract_even_if_bound(
+        self, bound_chat_role
+    ):
+        """The declaration is conditional on the image tool actually
+        being granted -- not merely on whether `rag.extract` happens to
+        be bound on this box (an agent with no vision tool at all must
+        not pay for a model it can never use)."""
+        from models.contracts.roles import RAG_EXTRACT_ROLE
+
+        bind_chat_role(RAG_EXTRACT_ROLE, name="test-extract", capability="vision")
+        agent = make_agent()
+        turn = _turn_for(agent)
+
+        refs, _ = plan_turn(_payload(turn))
+
+        assert [r.role for r in refs] == [CHAT_CONVERSE_ROLE]
+
     def test_an_unresolvable_CHAT_role_is_a_hard_failure(self):
         """Not tolerant, deliberately: the enqueuing caller preflights
         this and refuses before the planner ever runs. Reaching here
