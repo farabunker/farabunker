@@ -60,7 +60,7 @@ from identity.contracts.cascades import (
 )
 from identity.contracts.principals import OPEN_PRINCIPAL
 from identity.contracts.retention import (
-    KIND_CONVERSATION, KIND_LABELS, KIND_VISION_JOB, RETENTION_KINDS,
+    KIND_CONVERSATION, KIND_DOCUMENT, KIND_LABELS, KIND_VISION_JOB, RETENTION_KINDS,
 )
 
 # Every model carrying user content, mapped to the ticket kinds whose
@@ -256,14 +256,27 @@ def test_labels_that_meet_in_one_purge_map_are_distinct():
 def test_the_label_gate_would_actually_catch_a_collision():
     """Anti-vacuous, matching `test_the_gate_would_actually_catch_a_
     missing_handler` above: this module's every other gate proves
-    itself this way, and the label check above had not. If two
-    real-world handlers on one kind ever DID collide, the loop above
-    is what would catch it -- proven here with a registry this test
-    fully controls (save/clear/restore, like every registry isolation
-    in this codebase), rather than leaving that loop's own reasoning
-    unverified against the box's real registrations, which happen not
-    to collide today for reasons this test does not depend on."""
+    itself this way, and the label check above had not. This INVOKES
+    the gate's own comparison --
+    `test_labels_that_meet_in_one_purge_map_are_distinct` itself,
+    called directly -- rather than re-implementing its logic, so a
+    future edit that weakened either of that test's two loops would be
+    caught here by this test failing to fail, not silently tolerated.
+    Two isolated registries, one per rule, because each rigged
+    collision must reach its own loop without the other loop firing
+    first on an unrelated mismatch.
+
+    RULE ONE: two handlers registered for the SAME kind sharing a
+    label. RULE TWO: a handler wearing another kind's plain
+    `KIND_LABELS` name, `KIND_DOCUMENT`'s here, chosen only because it
+    is not `KIND_CONVERSATION`'s own.
+
+    Both registries are saved/cleared/restored, like every registry
+    isolation in this codebase, rather than left to the box's real
+    registrations, which happen not to collide today for reasons this
+    test does not depend on."""
     saved = dict(cascades_module._RETENTION)
+
     cascades_module._RETENTION.clear()
     try:
         register_retention_handler(RetentionHandler(
@@ -272,8 +285,20 @@ def test_the_label_gate_would_actually_catch_a_collision():
         register_retention_handler(RetentionHandler(
             kind=KIND_CONVERSATION, key="t.two", label="Same label",
             handler="identity.retention.sweep"))
-        labels = [spec.label for spec in retention_handlers(KIND_CONVERSATION)]
-        assert sorted(labels) != sorted(set(labels))
+        with pytest.raises(AssertionError, match="share a label"):
+            test_labels_that_meet_in_one_purge_map_are_distinct()
+    finally:
+        cascades_module._RETENTION.clear()
+        cascades_module._RETENTION.update(saved)
+
+    cascades_module._RETENTION.clear()
+    try:
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION, key="t.wears-document",
+            label=KIND_LABELS[KIND_DOCUMENT],
+            handler="identity.retention.sweep"))
+        with pytest.raises(AssertionError, match="is what a"):
+            test_labels_that_meet_in_one_purge_map_are_distinct()
     finally:
         cascades_module._RETENTION.clear()
         cascades_module._RETENTION.update(saved)

@@ -183,12 +183,8 @@ def delete_content(actor, *, kind: str, key, owner, label: str = "",
     row = IdentitySettings.get_solo()
     purge_on = timezone.localdate() + datetime.timedelta(days=row.retention_days)
     with transaction.atomic():
-        # `key` IS max_length=200 (`DeletionTicket.key`), clamped here
-        # exactly as `label` is clamped two lines below -- so a caller
-        # passing something unexpectedly long raises nothing worse than
-        # a truncated key, never a `DataError` mid-delete.
         ticket, created = DeletionTicket.objects.get_or_create(
-            kind=kind, key=str(key)[:200],
+            kind=kind, key=str(key),
             defaults=dict(
                 label=label[:255],
                 purge_on=purge_on,
@@ -218,11 +214,6 @@ def delete_content(actor, *, kind: str, key, owner, label: str = "",
             # the parent is, so the unconditional prune-on-write sweep
             # below purges them in the same call.
             for child_kind, child_key in run_children(kind, str(key)):
-                # Clamped the same way the parent's own `key` is, two
-                # blocks up -- a resolver is a column's own code, but a
-                # key a column computes is not exempt from the field's
-                # own limit.
-                child_key = child_key[:200]
                 _child, child_created = DeletionTicket.objects.get_or_create(
                     kind=child_kind, key=child_key,
                     defaults=dict(
@@ -282,6 +273,17 @@ def restore_content(actor, ticket, *, source: str = SOURCE_WEB,
     child is removed and reported on its own, for the reason above. A
     parent already gone (the lock read finds nothing) had no children
     left to put back either -- a ticket cannot outlive its parent's row.
+
+    A HELD CHILD (`hold_by_kind != ""`) IS NOT RESTORED, mirroring
+    `purge_ticket` exactly and for the same reason: a hold is placed on
+    the CHILD'S ticket, and restoring the parent is not something that
+    should be able to lift it. It is also DETACHED (`parent=None`)
+    before the parent ticket is deleted, because `parent` is
+    `on_delete=CASCADE` -- skipping it in the loop below is not enough
+    on its own, since the parent row's delete would otherwise destroy
+    the held ticket anyway, with no event and no trace. Nothing in this
+    delivery writes a hold, so this is latent until the deferred
+    enterprise slice (spec section 10.10) can set one.
     """
     row = settings_row if settings_row is not None else IdentitySettings.get_solo()
     with transaction.atomic():
@@ -298,16 +300,28 @@ def restore_content(actor, ticket, *, source: str = SOURCE_WEB,
         # item that was in fact destroyed. Deleting by queryset per
         # child answers that question the same way the parent's own
         # lock read above answers it for the whole ticket.
+        # `hold_by_kind=""` EXCLUDES A HELD CHILD, matching
+        # `purge_ticket`'s own read below: this restore reaches every
+        # ordinary child that arrived with the parent, never one
+        # somebody has since put a hold on.
         # NO RESOLVER HERE -- the link is what this restore follows, so
         # an item somebody deleted on its own, or one that went with a
         # different parent, is not this restore's business and is left
         # deleted with the date it was shown.
         restored_children = []
-        for child in current.children.all().order_by("pk"):
+        for child in current.children.filter(hold_by_kind="").order_by("pk"):
             removed_child, _ = DeletionTicket.objects.filter(
                 pk=child.pk).delete()
             if removed_child:
                 restored_children.append(child)
+        # A HELD CHILD IS DETACHED, NOT MERELY SKIPPED ABOVE: `parent`
+        # is `on_delete=CASCADE`, so the row delete two lines down would
+        # otherwise destroy it anyway, at the database level, without
+        # ever reaching the skip above. `parent=None` is exactly what an
+        # item deleted on its own already looks like -- a held child
+        # left this way keeps its own ticket, still restorable and still
+        # purgeable on its own, the same as any other un-linked ticket.
+        current.children.exclude(hold_by_kind="").update(parent=None)
         current.delete()
         audit.record(actor, CONTENT_RESTORED, target_type=kind, target_key=key,
                      target_label=label if row.audit_detail else "",
@@ -537,8 +551,12 @@ def _purge_due(due, *, source: str = SOURCE_WEB) -> int:
             continue
         # COUNTED BEFORE THE PURGE, because afterwards these rows are
         # gone: one due ticket can destroy its children too, and each of
-        # those is an item somebody was shown a date for.
-        addressed = 1 + DeletionTicket.objects.filter(parent_id=ticket.pk).count()
+        # those is an item somebody was shown a date for. `hold_by_kind
+        # =""` EXCLUDES A HELD CHILD -- `purge_ticket` itself will not
+        # destroy one, so counting it here would report one more item
+        # destroyed than the purge actually reaches.
+        addressed = 1 + DeletionTicket.objects.filter(
+            parent_id=ticket.pk, hold_by_kind="").count()
         try:
             purge_ticket(SERVICE_PRINCIPAL, ticket, source=source)
         except RetentionRefused as exc:

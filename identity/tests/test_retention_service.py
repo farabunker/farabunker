@@ -754,3 +754,59 @@ class TestChildTickets:
                                                   key="doc-1").exists()
         assert "document:doc-1" in REMOVED
         assert "document:doc-2" not in REMOVED
+
+    def test_restoring_the_parent_skips_and_detaches_a_held_child(self):
+        """Mirrors `test_a_held_child_is_skipped_by_the_parents_permanent_
+        delete` above, on the restore side: a hold is placed on the
+        CHILD's ticket, and restoring some OTHER item (the parent) must
+        not be able to lift it. The unheld sibling still comes back with
+        its own event, exactly as before; the held one keeps its ticket,
+        loses its link to the parent (the CASCADE would otherwise destroy
+        it with the parent row), and gets no event -- nothing happened to
+        it."""
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        held = DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-2")
+        DeletionTicket.objects.filter(pk=held.pk).update(
+            hold_by_kind="user", hold_by_key="1")
+
+        service.restore_content(user_principal(user), parent)
+
+        assert not DeletionTicket.objects.filter(pk=parent.pk).exists()
+        assert not DeletionTicket.objects.filter(kind=KIND_DOCUMENT,
+                                                  key="doc-1").exists()
+        held.refresh_from_db()
+        assert held.parent_id is None
+        assert held.hold_by_kind == "user"
+        assert AuditEvent.objects.filter(
+            action=CONTENT_RESTORED, target_type=KIND_DOCUMENT,
+            target_key="doc-1").count() == 1
+        assert AuditEvent.objects.filter(
+            action=CONTENT_RESTORED, target_type=KIND_DOCUMENT,
+            target_key="doc-2").count() == 0
+
+    def test_the_sweep_excludes_a_held_child_from_its_own_count(self):
+        """The held-sibling variant of `test_the_sweep_counts_every_
+        ticket_it_addressed` above: a parent and TWO children are three
+        items due, but one child is held, so the sweep destroys and
+        counts only two -- itself and the unheld sibling -- and the held
+        child's own ticket is left standing, exactly as `purge_ticket`
+        itself would leave it."""
+        user = make_user()
+        item = _owner(user)
+        service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                               key=item.pk, owner=item)
+        held = DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-2")
+        DeletionTicket.objects.filter(pk=held.pk).update(
+            hold_by_kind="user", hold_by_key="1")
+        DeletionTicket.objects.exclude(pk=held.pk).update(
+            purge_on=timezone.localdate() - datetime.timedelta(days=1))
+
+        assert service.sweep() == 2
+
+        assert DeletionTicket.objects.count() == 1
+        assert DeletionTicket.objects.filter(pk=held.pk).exists()
+        assert "document:doc-1" in REMOVED
+        assert "document:doc-2" not in REMOVED
