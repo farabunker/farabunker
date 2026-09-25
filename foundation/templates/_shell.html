@@ -1107,6 +1107,176 @@ there to size both the content column and the top nav.
     margin-left: .6rem;
     flex: 0 0 auto;
   }
+  {% comment %}
+  THE TWO-PANE TRANSFER PANEL (`foundation/templates/_transfer_panel.html`),
+  PROMOTED ONE TIER (chat cluster, feature B). These rules lived in
+  `_settings.html` while EVERY consumer of the fragment extended it --
+  `identity/templates/identity/entitlement.html` in the entitlement-major
+  direction, `chat/tool_entitlements.html` and `chat/agent_entitlements.html` in
+  the resource-major one. `agents/chat/templates/chat/agent_edit.html` is the
+  fragment's first consumer OUTSIDE the settings area: it extends
+  `chat/base.html`, which extends THIS file directly and cannot reach
+  `_settings.html` through inheritance at all. The deepest common ancestor of
+  all four consumers is therefore here, which is the placement rule
+  `foundation/ops/tests/test_css_ownership.py` states.
+
+  MOVED, NOT COPIED, which `_settings.html`'s own comment named in advance as
+  the succession this block would take -- and which the gate enforces: a second
+  copy left behind in `_settings.html` would be a rule retyped below its own
+  ancestor. `.access-summary` stayed there, because it is the two access pages'
+  own `<summary>` class and not one the fragment ever writes.
+
+  THIS LIVES OUTSIDE `{% templatetag openblock %} block extra_style {%
+  templatetag closeblock %}`, not inside it, for the same reason the flash
+  recipe and the shared primitives above do: `chat/base.html` overrides
+  `extra_style` WITHOUT `{{ block.super }}`, so a rule placed inside the block
+  would reach the new consumer unstyled -- the exact failure the promotion
+  exists to prevent.
+
+  `.filter-input` CAME WITH THEM, and it has to. The fragment's own two pane
+  filters write that class, so leaving it behind would render them unstyled on
+  the chat page while the panes around them were styled. Its OTHER consumer,
+  `identity/templates/identity/entitlements.html`'s search box, is a descendant
+  of this file too, so nothing loses the rule by its moving up.
+
+  NO NEW PRIMITIVE, and no value changed: every rule below is the one
+  `_settings.html` shipped, with its own comment, moved verbatim.
+  {% endcomment %}
+  {% comment %}
+  THE PANEL'S OWN CARD (fix round 1, M1). It used to inherit background,
+  border and padding from whatever bare `section { ... }` rule the
+  including page happened to define in its own style block -- chromed on
+  the one page that had such a rule and bare anywhere else, and the
+  exact shape the CSS gate forbids for classes, escaping it only because
+  that check matched class names and not element selectors. Phase 2 then
+  added the two chat consumers, the element check stopped exempting this
+  fragment, and it went red on precisely that dependence: the fragment
+  opens a `<div>` now, and this rule is what chromes it.
+  {% endcomment %}
+  .transfer-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1.25rem;
+    scroll-margin-top: 1rem;
+  }
+  {% comment %}
+  THE INERT FORM the panel's two filter boxes are associated with by
+  `form=`, so Enter in one reaches a form that cannot write. It has no
+  content and must occupy no space -- a `<form>` carries a UA margin in
+  some browsers, which would otherwise open a gap under the heading.
+  Hiding the OWNER form does not disable the controls associated with
+  it: they live elsewhere in the markup and stay visible and submittable.
+  {% endcomment %}
+  {% comment %}
+  THE PANEL'S OWN HEADING (re-review nit NR2), for the reason its card
+  is its own: this was still sized by whichever consumer page happened
+  to write `section h2`, which is the M1 borrowing one selector deeper
+  -- and invisible to the element-selector check, which reads BARE
+  element selectors and says nothing about descendant ones.
+  {% endcomment %}
+  .transfer-panel h2 { font-size: 1rem; margin: 0 0 .75rem; }
+  {% comment %}
+  THE CHROME-LESS VARIANT (phase 2). On the two access pages the panel
+  sits inside a `<details>` inside a `section.row` card, so a second
+  card around it would be a border inside a border. The rule lives here,
+  beside the card it cancels, rather than in either consumer page --
+  same home, same reason.
+  {% endcomment %}
+  .transfer-panel-bare {
+    background: none;
+    border: 0;
+    border-radius: 0;
+    padding: .6rem 0 0;
+    margin-bottom: 0;
+  }
+  .transfer-inert { display: none; }
+  .transfer-hint { color: var(--muted); font-size: .85rem; margin: -.25rem 0 .75rem; }
+  .transfer-panes { display: flex; gap: 1rem; flex-wrap: wrap; }
+  {% comment %}
+  `flex: 1 1 15rem` with `min-width: 0` -- the two panes share the width
+  evenly on a desktop and STACK, rather than overflow, once neither can
+  hold 15rem. `min-width: 0` is what lets a long row name be clipped by
+  the pane instead of widening it: a flex item's default `min-width:
+  auto` is its content, which is exactly how a wide list pushes a page
+  sideways, and the body never scrolls sideways on this box.
+  {% endcomment %}
+  .transfer-pane { flex: 1 1 15rem; min-width: 0;
+                   display: flex; flex-direction: column; gap: .5rem; }
+  .transfer-pane h3 {
+    margin: 0;
+    font-size: .72rem;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  {% comment %}
+  ONE TYPE-TO-FILTER INPUT RULE for the whole settings area (fix round
+  1, N1), not one per consumer. The transfer panel's two pane filters
+  and the entitlements list's own search box were the same idiom written
+  twice, in two homes, with three values differing -- the CSS gate
+  passed only because one was a class and the other a bare
+  `input[type="search"]`. A page that needs a different WIDTH still says
+  so itself; what is shared is the control's look.
+  {% endcomment %}
+  .filter-input {
+    padding: .45rem .6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: .9rem;
+  }
+  {% comment %}
+  THE FIXED-HEIGHT SCROLL BOX, which is the whole point of the
+  component: fifty rows must not push the buttons below the fold, and
+  the pane must not resize as a filter hides rows.
+
+  `height`, NOT `max-height` (owner feedback, 2026-09-16, pre-merge on
+  PR #97). A max-height grows to fit and stops there, so a pane holding
+  one row rendered as a short box beside a full one -- "Available -- 10"
+  tall next to "Available -- 1" tiny, with the two Add/Remove buttons at
+  different heights. The owner's words: the boxes should be the same
+  size regardless, rather than truncating if there is not enough to fill
+  it. A fixed height gives both panes the same box whatever they hold; a
+  short list simply shows empty space below its rows, and a long one
+  scrolls exactly as it did.
+
+  THE BUTTON ALIGNMENT FALLS OUT OF IT rather than being arranged
+  separately: the two panes are structurally identical (heading, filter,
+  list, button), so once the only variable-height element is fixed, what
+  follows it lines up.
+
+  ONE RULE FOR EVERY CONSUMER AND EVERY AXIS -- the entitlement page's
+  panels and both access pages' expanded rows are the same fragment, so
+  this is the only place the size is stated. `box-sizing: border-box`
+  (`_shell.html`) makes 16rem the OUTER box, padding and border
+  included, so the two panes match to the pixel.
+  {% endcomment %}
+  .transfer-list {
+    height: 16rem;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: .3rem;
+  }
+  .transfer-row {
+    display: flex;
+    align-items: baseline;
+    gap: .45rem;
+    padding: .25rem .3rem;
+    border-radius: 4px;
+    font-size: .88rem;
+    cursor: pointer;
+  }
+  .transfer-row:hover { background: var(--bg); }
+  .transfer-name { overflow-wrap: anywhere; }
+  .transfer-note { color: var(--muted); font-size: .78rem; white-space: nowrap; }
+  .transfer-empty { color: var(--muted); font-size: .85rem; margin: .4rem .3rem; }
+  .transfer-pane button { align-self: flex-start; padding: .35rem .8rem; font-size: .85rem; }
   {% block extra_style %}{% endblock %}
 </style>
 </head>

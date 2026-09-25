@@ -97,6 +97,15 @@ all/` included -- so a page's own script count includes it.
   </details>
 
   {% comment %}
+  THE AGENT PAGES (chat cluster, feature B). A plain link beside
+  Workstreams rather than a `<details>` list: this rail lists ROWS a
+  reader picks between, and "the agents I work on" is a page, not a
+  picker. `.chat-nav-link` is this fragment's own class, and its rule
+  lives on `chat/base.html` with every other rule this fragment needs.
+  {% endcomment %}
+  <a class="chat-nav-link" href="{% url 'chat-agents' %}">Agents</a>
+
+  {% comment %}
   PINNED (round 20, owner verbatim: "can we add the ability t[o] pin
   chats so it's always shown in its own se[c]tion ibetween Workstreams
   and chats. It shoudl only appear if we have somethign that is pinned,

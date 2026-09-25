@@ -238,6 +238,29 @@ tag needs no truncation logic of its own.
     for free, the same way it does for `.chat-wrap`'s own `overflow-y`
     one level up.
     {% endcomment %}
+    {% comment %}
+    THE CONTEXT METER (feature A). Page-only selectors: its one
+    consumer is this page's own body. Colour tokens are the shell's
+    own; no new token is declared here.
+    {% endcomment %}
+    .context-meter { margin-top: .5rem; font-size: .85rem; }
+    .context-meter .context-line { margin: 0; color: var(--muted); }
+    .context-bar { height: 3px; border-radius: 2px; background: var(--border);
+                   margin: .3rem 0; overflow: hidden; }
+    .context-bar > span { display: block; height: 100%;
+                          width: var(--context-fill, 0%); background: var(--ok); }
+    .context-meter[data-band="high"] .context-bar > span { background: var(--accent); }
+    .context-meter[data-band="full"] .context-bar > span { background: var(--danger); }
+    .context-meter details { margin-top: .25rem; }
+    .context-meter details > summary { cursor: pointer; color: var(--muted); }
+    {% comment %}
+    CHAT CLUSTER, FEATURE C's provenance line. Page-scoped (Task 8's own
+    ruling: a page-prefixed class, not a bare `.provenance` or
+    `.branch-line`, since this fragment has exactly one consumer -- this
+    page's own body, never `chat/_turn_block.html`, which is the other
+    template `chat/all.html`'s preview pane shares).
+    {% endcomment %}
+    .branch-provenance { margin: 0 0 .75rem; }
 {% endblock %}
 {% comment %}
 UI-3b: the same sidebar the index renders, from the same context
@@ -265,6 +288,50 @@ model.
 {% for note in notes %}
 <p class="muted">{{ note }}</p>
 {% endfor %}
+
+{% if is_branch %}
+{% comment %}
+CHAT CLUSTER, FEATURE C's provenance line. The title links back only
+while the parent is still visible to THIS principal (resolved in the
+view through `visible_conversations`); with the parent deleted or
+invisible the line renders `branch_provenance_unnamed` instead, never a
+leaked title for a branch this reader was only handed, not the
+original.
+
+REVIEW FIX I1: the `{% else %}` is load-bearing, not decoration. A bare
+`{% if branched_from %}<a>...</a>{% endif %}` used to render NOTHING on
+both the deleted-parent and the unreadable-parent path, leaving the
+literal sentence "Branched from  at message 3" (HTML collapses the
+double space) -- exactly the "sentence assembled from fragments plus a
+hole" AGENTS.md's own rule forbids. `branch_provenance_unnamed` is a
+declared, whole, disclosure-free noun phrase (`agents.chat.service`), so
+both fallback paths render "Branched from an earlier conversation" --
+grammatical, and it still names nothing.
+
+WHOLE-BRANCH REVIEW I-2: the WHOLE `<p>` is gated on `is_branch`, not on
+the tail, because those same two fallback paths now carry NO NUMBER --
+an ordinal counted over a thread that is gone, or that this reader may
+not open to check, is a number nobody can verify. Gating on the tail (as
+this block used to) would have deleted the banner outright on exactly
+the two paths the fix above exists for. The tail has its own `{% if %}`
+so the sentence never ends in a dangling space.
+
+STATIC, so the poller does not need to know about it: it renders once,
+outside `.thread` and `.thread-scroll`, and no swap this page performs
+(`insertBlock`/`swapBlock` below, both scoped to `.thread`'s own
+children) ever touches it.
+{% endcomment %}
+{% comment %}
+ONE LINE, DELIBERATELY (review fix round): every piece is joined by an
+EXPLICIT single space rather than the template source's own newlines and
+indentation, which Django does not strip -- a multi-line version left
+literal `\n` characters between the pieces in the raw response, so a
+reader's browser collapsed them to spaces but a test asserting the whole
+declared sentence as one contiguous string could not. The rendered
+markup and the string a test (or a reader) sees are now the same text.
+{% endcomment %}
+<p class="muted branch-provenance">{{ branch_provenance_lead }} {% if branched_from %}<a href="{% url 'chat-conversation' branched_from.id %}">{{ branched_from.title|default:branched_from.agent.name }}</a>{% else %}{{ branch_provenance_unnamed }}{% endif %}{% if branch_provenance %} {{ branch_provenance }}{% endif %}</p>
+{% endif %}
 
 {% comment %}
 OWNER-REQUESTED CHAT LAYOUT FIX: `.thread-scroll` is the ONE region on
@@ -386,6 +453,49 @@ screen comment already documents for `.thread-scroll`.
   <p class="muted">This conversation was shared with you to read. Ask its owner for
     &ldquo;can view and post&rdquo; access to reply in it.</p>
   {% endif %}
+
+  {% comment %}
+  THE CONTEXT METER. Every sentence here is declared once in
+  `agents/usage.py` and handed in by `thread_context`; this template
+  concatenates the segments around two number spans and types no word
+  of its own. `data-window` is written by the SERVER and is the only
+  denominator the poller's script may read -- it never uses a number the
+  response supplied, and the window never travels to the poll endpoint
+  at all (spec decision 21).
+  {% endcomment %}
+  <div class="context-meter" id="context-meter" data-band="{{ context_usage.band }}"
+       {% if context_usage.window %}data-window="{{ context_usage.window }}"{% endif %}
+       style="--context-fill: {{ context_usage.percent|default_if_none:0 }}%;">
+    <p class="context-line">{{ context_meter.lead }}<span id="context-tokens">{{ context_usage.estimated_tokens }}</span>{{ context_meter.middle }}{% if context_meter.has_percent %}<span id="context-percent">{{ context_usage.percent }}</span>{% endif %}{{ context_meter.tail }}</p>
+    <div class="context-bar" aria-hidden="true"><span></span></div>
+    <p class="context-line" id="context-truncation"{% if not context_usage.truncated %} hidden{% endif %}>{{ context_truncation_clause }}</p>
+    {% comment %}
+    THE `full` BAND'S OWN SENTENCE (whole-branch review I-3). Spec 3.4's
+    table puts it in the `>= 90%` row unconditionally, but the band flips
+    on a poll tick and this sentence used to wait for F5: the bar turned
+    `var(--danger)` with nothing on the page saying why.
+
+    THE ELEMENT IS ALWAYS HERE, EMPTY AND `hidden` BELOW THE BAND, and
+    the TEXT arrives in the poll body (`_context_body`'s `full_clause`,
+    the same `agents.usage.FULL_CLAUSE` object this page renders). Not
+    pre-rendered-and-hidden the way `#context-truncation` is, and
+    deliberately so: a hidden copy of the sentence would put it in the
+    source of every page under 90%, where `test_below_ninety_percent_it_
+    does_not` says it must not be, and "hidden in the markup" is a weaker
+    promise than "not sent at all". The script writes it with
+    `textContent`, never `innerHTML`, and composes no word of its own --
+    decisions 21-22 untouched.
+    {% endcomment %}
+    <p class="context-line" id="context-full"{% if not context_full_clause %} hidden{% endif %}>{{ context_full_clause }}</p>
+    {% if context_engine_default_sentence %}
+    <p class="context-line">{{ context_engine_default_sentence }}
+      <a href="{{ setup_url }}">Models</a></p>
+    {% endif %}
+    <details>
+      <summary>{{ context_disclosure_summary }}</summary>
+      <p>{{ context_disclosure_body }}</p>
+    </details>
+  </div>
 
   {% include "chat/_thread_actions.html" %}
 </div>
@@ -543,6 +653,68 @@ screen comment already documents for `.thread-scroll`.
     }
   }
 
+  // THE CONTEXT METER'S LIVE HALF. No prose is composed here: the
+  // server rendered every sentence, and this writes `textContent` on
+  // two number spans, toggles `hidden` on one pre-rendered clause, and
+  // sets the band and the bar width. No `innerHTML` -- the same rule
+  // `showCardError` already keeps for text the page did not build. The
+  // denominator is `data-window`, WRITTEN BY THE SERVER, never a number
+  // the response supplied.
+  function applyContext(context) {
+    var meter = document.getElementById("context-meter");
+    if (!meter || !context) { return; }
+    var tokens = document.getElementById("context-tokens");
+    if (tokens) { tokens.textContent = context.estimated_tokens.toLocaleString(); }
+    var ceiling = parseInt(meter.getAttribute("data-window") || "", 10);
+    var percentSpan = document.getElementById("context-percent");
+    if (percentSpan && ceiling > 0) {
+      var percent = Math.round((100 * context.estimated_tokens) / ceiling);
+      percentSpan.textContent = String(percent);
+      var band = percent >= 90 ? "full" : (percent >= 70 ? "high" : "ok");
+      meter.setAttribute("data-band", band);
+      meter.style.setProperty("--context-fill", percent + "%");
+      // I-3: the band and its sentence move TOGETHER. The text is the
+      // server's -- `context.full_clause`, written by `textContent` --
+      // so nothing here composes prose, and the element is emptied
+      // again on the way back down rather than left holding a sentence
+      // a later tick contradicts.
+      var full = document.getElementById("context-full");
+      if (full) {
+        var isFull = band === "full" && !!context.full_clause;
+        full.textContent = isFull ? context.full_clause : "";
+        full.hidden = !isFull;
+      }
+    }
+    var truncation = document.getElementById("context-truncation");
+    if (truncation) { truncation.hidden = context.total_turns <= context.replayed_turns; }
+  }
+
+  // CHAT CLUSTER, FEATURE C: THE PICKER'S SELECTION, CARRIED ACROSS A
+  // SWAP. `chat-turn-status` is polled by turn pk and never sees this
+  // page's `?connection=`, so a swapped block's edit form renders that
+  // field empty. This copies the COMPOSER's own SERVER-RENDERED value
+  // into it -- one field on this page into another field on this page.
+  // Not a number the client invented, not prose, not `innerHTML`, and
+  // nothing sent to the server: decisions 21 and 22 are untouched. With
+  // scripts off there is no swap to fix, and the page-rendered form
+  // already carries the pick.
+  //
+  // THE SOURCE SELECTOR IS ATTRIBUTE-ONLY (`[name="connection"]`), NOT
+  // `input[name="connection"]`: `chat/_composer.html` renders its own
+  // hidden input only when there is NO picker to render, and otherwise
+  // `chat/_picker.html` renders a `<select name="connection">`. A
+  // selector naming `input` would therefore find nothing on exactly the
+  // pages where the pick can actually differ from the default. The
+  // TARGET stays `input[...]`, because the edit form's field is always
+  // the hidden input this script writes into.
+  function carryConnection(block) {
+    var pick = document.querySelector('#turn-form [name="connection"]');
+    if (!pick || !block) { return; }
+    block.querySelectorAll('input[name="connection"]').forEach(function (field) {
+      field.value = pick.value;
+    });
+  }
+
   // D1 (chat-polish P3.1). `html` is a server-rendered `chat/
   // _turn_block.html` fragment -- `rendering.turn_group_cards`'s own
   // group, the user's own message included -- parsed into real nodes
@@ -692,6 +864,14 @@ screen comment already documents for `.thread-scroll`.
             setTimeout(tick, POLL_INTERVAL_MS);
             return;
           }
+          // THE METER, ONLY ONCE THE ANSWER IS ONE THIS PAGE CAN READ.
+          // Every unusable answer -- the terminal 503, the retryable
+          // one, and the parseable 5xx just above -- has already
+          // returned, so `data` from here down is a real status body.
+          // `applyContext` guards a missing key anyway, but reading a
+          // context off an error body would be the meter believing a
+          // response that carries no corpus.
+          applyContext(data.context);
           // `transportFailures = 0` lives INSIDE the recognized-state
           // branches, never here: a reset at this point would run on the
           // same tick the final `else` below increments, so the ceiling
@@ -711,6 +891,7 @@ screen comment already documents for `.thread-scroll`.
               var wasNearBottom = isNearThreadBottom();
               var refreshed = swapBlock(card, data.html, turnId);
               if (refreshed) { card = refreshed; }
+              carryConnection(refreshed);
               if (wasNearBottom) { scrollThreadToBottom(); }
             }
             updateNote(
@@ -735,6 +916,7 @@ screen comment already documents for `.thread-scroll`.
             // above, for the same reason.
             var wasNearBottom = isNearThreadBottom();
             var refreshed = swapBlock(card, data.html, turnId);
+            carryConnection(refreshed);
             if (refreshed) {
               card = refreshed;
               setFormBusy(false);

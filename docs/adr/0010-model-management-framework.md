@@ -734,3 +734,19 @@ is putting the capability set on `ResolvedModel` itself (or resolving it at
 bind time from `models.registry.discovery`) so `native_media_types` can read a
 live per-connection fact instead of a static catalog lookup — deliberately
 not done by this task, which owns `agents/`, not `models/`.
+
+## Amendment (2026-09-22) — Amended by ADR 0019: the `context_window` column gains a READ direction
+
+The 2026-08-22 amendment above added `ModelConnection.context_window` so the adapter could be
+told what to ask for, and its own fix sentence forbids ever letting a client probe a model
+server for an architecture maximum on the platform's behalf. That column was written to be
+**sent**.
+
+The chat cluster's context meter now also **reads** it, for display, through
+`models/contracts/bindings.py::effective_context_window` — a pure read that writes nothing,
+sends nothing and never touches the network.
+
+**This amendment adds a direction, not a rule.** Nothing about how the value is set, resolved
+or spread into the engine call changes, and the prohibition the incident produced stands
+unweakened: a display probe would still be a probe, one per page render, against a machine
+that may be asleep. [ADR 0019](0019-chat-cluster.md), Decision 1, carries the rest.

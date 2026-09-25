@@ -33,8 +33,10 @@ retrieval keeps exactly ONE filter point, and a visibility scope is one
 more filter argument THERE rather than a second copy in each caller.
 This is that discipline applied to the agent column's own three tables.
 
-IA-1 fills in every body: ownership plus the `resident`/
-`service` carve-outs are now the real rule, not a promise. Every
+IA-1 fills in every body: ownership plus the `box_wide`/`resident`/
+`service` carve-outs are now the real rule, not a promise (`box_wide`,
+task 5 chat cluster feature B, is `Agent`'s own audience column;
+`resident` still covers `Flow`, which has none). Every
 function tests the OPEN BRANCH FIRST -- `sees_all_content`/`is_admin`
 test `accounts_on()` before touching another table -- so an open box
 still runs zero ownership queries and this module still changes no
@@ -53,13 +55,15 @@ from agents.models import (
     Agent, Conversation, ConversationTaint, Flow, Share, Turn, Workstream,
     WorkstreamScopeEntitlement, WorkstreamTaint,
 )
+from agents.limits import MAX_STEPS_CEILING, MAX_STEPS_DEFAULT
 from agents.shares import share_level, shared_keys, shares_for
 from identity import audit
 from identity.access import (
-    entitlement_ids_for_subject, entitlement_names, held_entitlement_ids, may_read_owned_row,
-    owned_rows_q, owner_fields, sees_all_content,
+    entitlement_ids_for_subject, entitlement_names, held_entitlement_ids, is_admin,
+    may_read_owned_row, owned_rows_q, owner_fields, sees_all_content,
 )
 from identity.contracts import actions
+from models.contracts.roles import CHAT_CONVERSE_ROLE, chat_capable_roles
 
 
 def visible_conversations(principal, *, settings_row=None):
@@ -154,12 +158,22 @@ def label_permitted_q(principal, *, settings_row=None) -> Q:
 def visible_agents(principal, *, settings_row=None):
     """Every ENABLED agent this principal may run.
 
-    `resident=True` rows are the shipped defaults and are visible to
-    everybody -- they are the platform's own offer, not somebody's
-    private work.
+    `box_wide=True` rows are visible to EVERYBODY on this box -- the
+    shipped defaults start that way (`agents.defaults.install_default`
+    stamps it, because a shipped default is the PLATFORM's offer, not
+    the installing operator's private row), and an administrator may set
+    or clear it on any agent from the agent form.
+
+    IT USED TO BE `resident=True` (chat cluster, feature B). `resident`
+    keeps its documented meaning -- an ORIGIN MARKER, `Agent`'s own
+    ruling 3 -- and its second reader, `resident_agent_tool_keys`'s
+    shell-path warning. Audience is now its own column, so making a
+    shipped default private is not a claim that it was never shipped.
+    Migration `0012_agent_box_wide` set `box_wide = resident` for every
+    existing row, so the day it landed nothing changed for anybody.
 
     THE LABEL CLAUSE IS AND-ED ONTO THE OWNERSHIP OR, NOT OR-ED INTO IT
-    (decision 35): a labelled row -- resident or owned -- is excluded
+    (decision 35): a labelled row -- box-wide or owned -- is excluded
     from a principal who holds none of its entitlements, which is what
     makes labelling the shipped defaults or one's own agent actually
     restrict it rather than being bypassable by the person it is aimed
@@ -185,7 +199,7 @@ def visible_agents(principal, *, settings_row=None):
     if sees_all_content(principal, settings_row=settings_row):
         return qs
     return qs.filter(
-        (owned_rows_q(principal, settings_row=settings_row) | Q(resident=True)
+        (owned_rows_q(principal, settings_row=settings_row) | Q(box_wide=True)
          | Q(pk__in=shared_keys(Share.Target.AGENT, principal)))
         & label_permitted_q(principal, settings_row=settings_row)
     ).distinct()
@@ -193,13 +207,17 @@ def visible_agents(principal, *, settings_row=None):
 
 def installed_agent_slugs(principal):
     """Every slug this principal has installed, ENABLED or not -- the
-    set the "Add the default X" offers are computed against. Same
-    visibility rule, minus the `enabled` filter, for the reason this
-    function's original docstring gives."""
+    set the "Add the default X" offers are computed against.
+
+    Same visibility rule as `visible_agents`, minus the `enabled`
+    filter, and it moved to `box_wide` with it -- the two must agree
+    about who can see a row or the "Add the default X" offers would be
+    computed against a different set from the one the index lists.
+    """
     qs = Agent.objects.all()
     if not sees_all_content(principal):
         qs = qs.filter(
-            (owned_rows_q(principal) | Q(resident=True)
+            (owned_rows_q(principal) | Q(box_wide=True)
              | Q(pk__in=shared_keys(Share.Target.AGENT, principal)))
             & label_permitted_q(principal)
         )
@@ -309,10 +327,25 @@ def visible_turn(principal, turn_id):
     where it closes. `None` for an unknown id as well as an invisible
     one -- the view answers 404 to both, and the caller cannot tell them
     apart, which is the point.
+
+    THE `select_related` CARRIES THE AGENT AND THE WORKSTREAM, not the
+    conversation alone (context meter, spec review R2).
+    `agents.chat.views.turns`' queued and done bodies call
+    `agents.usage.context_usage(turn.conversation, ...)`, which reads
+    `agent.system_prompt` and `conversation.workstream.instructions` --
+    neither of which is loaded on this path. Without these two JOINs the
+    poll path would pay TWO LAZY FK READS on every tick of every open
+    tab, for the price of two more JOINs on a query it already runs (a
+    nullable FK, which Django resolves with a LEFT JOIN). The thread
+    page is unaffected -- there both rows are genuinely already in hand.
+    `agents/chat/tests/test_thread_meter.py::TestTheContextMeterOnThePollPath
+    ::test_the_select_related_is_wide_enough_to_keep_the_budget_honest`
+    is what turns red if a later reader narrows it back.
     """
     return Turn.objects.filter(
         pk=turn_id, conversation__in=visible_conversations(principal)
-    ).select_related("conversation").first()
+    ).select_related("conversation", "conversation__agent",
+                     "conversation__workstream").first()
 
 
 def latest_completed_turn_index(conversation) -> int | None:
@@ -532,6 +565,87 @@ def set_conversation_pinned(principal, conversation, *, pinned: bool) -> bool:
 _TERMINAL_TURN_STATES = (Turn.State.DONE, Turn.State.FAILED, Turn.State.CANCELLED)
 
 
+def _copy_turns_into(target, source, *, before_index=None) -> None:
+    """Copy `source`'s terminal turns into `target`, renumbered from 0.
+
+    ONE COPY OF THE FIELD LIST, FOR THE TWO PUBLIC COPIERS BELOW, and
+    the reason is written in this module's own history rather than
+    borrowed from a style guide: `Turn.author_id` was added to the model
+    and `duplicate_conversation` silently stopped carrying it, which
+    inverted `agents.runtime.prompt._is_foreign_user_turn`'s fence on
+    every duplicate of a thread somebody else had posted into. The fix
+    had to be typed twice, five lines apart, the day
+    `branch_conversation` landed. A twelfth column on `Turn` faces the
+    identical coin-flip, and this helper is how it stops being a
+    coin-flip: the field list exists ONCE, so the two copiers cannot
+    disagree about it.
+
+    WHAT THIS IS NOT is a shared BODY for the two public functions. They
+    keep their own gate, their own `Conversation.objects.create(...)` --
+    which is where they genuinely differ, one stamping provenance and
+    one not -- their own docstring and their own tests. Sibling
+    functions, shared private copier.
+
+    `before_index`: copy only turns whose index is strictly below it.
+    `None` -- the default -- copies the whole thread, which is
+    `duplicate_conversation`'s rule; an integer is
+    `branch_conversation`'s bound.
+
+    `state__in=_TERMINAL_TURN_STATES` IS REACHABLE, and only through one
+    of the two callers. `duplicate_conversation`'s gate
+    (`may_manage_conversation`) says nothing about turns in flight, so a
+    duplicate really can be taken mid-answer and this filter really does
+    leave the placeholder behind -- `agents/chat/tests/
+    test_conversation_actions.py::TestDuplicate::
+    test_a_mid_run_turn_is_left_behind_and_the_indexes_close_up` is the
+    pin. It can never exclude anything for `branch_conversation`, whose
+    own gate refuses while ANY turn in the conversation is non-terminal;
+    there the gate is what keeps a running turn out, not this filter.
+
+    NOT COPIED, and each is `duplicate_conversation`'s own recorded
+    decision: `invocation` (an audit row belongs to exactly ONE
+    conversation, and is never re-pointed or re-invented) and
+    `queue_job_id` (a copy was produced by nothing).
+    """
+    rows = Turn.objects.filter(conversation=source, state__in=_TERMINAL_TURN_STATES)
+    if before_index is not None:
+        rows = rows.filter(index__lt=before_index)
+    Turn.objects.bulk_create([
+        Turn(
+            conversation=target, index=index, role=row.role, text=row.text,
+            tool_call=row.tool_call, data=row.data, artifacts=row.artifacts,
+            depth=row.depth, state=row.state, error=row.error,
+            author_id=row.author_id,
+        )
+        for index, row in enumerate(rows.order_by("index"))
+    ])
+
+
+def _copy_taint_into(target, source) -> None:
+    """Copy every `ConversationTaint` row of `source` onto `target`.
+
+    ALWAYS, and VERBATIM -- `first_turn` included, even when it names an
+    index the copy does not contain. Over-tainting is safe;
+    under-tainting is a leak, and the field is a plain integer precisely
+    so it can name the turn that really caused the tag, in the
+    conversation where it really happened.
+
+    Not only for a stream conversation: a loose thread's tags are
+    recorded too (author decision 9), and a copy that dropped them would
+    launder a loose conversation exactly as it would a stream one.
+
+    No `WorkstreamTaint` is written by either caller. Both keep the
+    parent's `workstream`, and the stream's materialised union already
+    holds every one of these tags -- each was unioned upward when it was
+    stamped. Nothing new enters the stream.
+    """
+    ConversationTaint.objects.bulk_create([
+        ConversationTaint(conversation=target, entitlement_id=tag.entitlement_id,
+                          first_turn=tag.first_turn)
+        for tag in source.taint_tags.all()
+    ])
+
+
 def duplicate_conversation(principal, conversation, *, title: str):
     """A new conversation with `conversation`'s finished history, owned
     by `principal` -- or `None` if they may not.
@@ -591,6 +705,14 @@ def duplicate_conversation(principal, conversation, *, title: str):
     `workstream` is stamped once at creation like every other row's. v1
     offers NO LOOSE COPY of a stream conversation -- there is no control
     for it and no parameter that would produce one.
+
+    `author_id` IS COPIED, AND THAT CHANGED (chat cluster, feature C).
+    It used to be dropped, silently -- a pre-existing gap rather than a
+    decision. `agents/runtime/prompt.py::_is_foreign_user_turn` reads
+    `author` to fence another person's words in a replay, so a copy that
+    dropped it changed how the model was shown a shared conversation's
+    history. `branch_conversation` below copies it too, and the two do
+    it the same way on purpose.
     """
     if not may_manage_conversation(principal, conversation):
         return None
@@ -600,27 +722,223 @@ def duplicate_conversation(principal, conversation, *, title: str):
             workstream=conversation.workstream,      # THE COPY STAYS IN THE STREAM
             **owner_fields(principal),
         )
-        Turn.objects.bulk_create([
-            Turn(
-                conversation=copy, index=index, role=turn.role, text=turn.text,
-                tool_call=turn.tool_call, data=turn.data, artifacts=turn.artifacts,
-                depth=turn.depth, state=turn.state, error=turn.error,
-            )
-            for index, turn in enumerate(
-                Turn.objects.filter(conversation=conversation,
-                                    state__in=_TERMINAL_TURN_STATES).order_by("index")
-            )
-        ])
-        # ALWAYS, not only for a stream conversation (ruling D): a loose
-        # thread's tags are recorded too (author decision 9), and a copy
-        # that dropped them would launder a loose conversation exactly as
-        # it would a stream one.
-        ConversationTaint.objects.bulk_create([
-            ConversationTaint(conversation=copy, entitlement_id=t.entitlement_id,
-                              first_turn=t.first_turn)
-            for t in conversation.taint_tags.all()
-        ])
+        _copy_turns_into(copy, conversation)
+        _copy_taint_into(copy, conversation)
     return copy
+
+
+# THE THREE FACTS, ONCE. `is_editable_turn_row` asks them of a row in
+# hand; a queryset caller (`agents.chat.service.branch_point_ordinal`)
+# asks them of the database. ADR 0019 decision 10 says "spelled once",
+# and this is what makes that true rather than aspirational.
+EDITABLE_TURN_ROW_FIELDS = {"role": Turn.Role.USER, "depth": 0,
+                            "state": Turn.State.DONE}
+
+
+def is_editable_turn_row(turn) -> bool:
+    """`may_edit_turn`'s PER-TURN half: a finished, root-depth USER row.
+
+    NO PRINCIPAL, NO QUERY, WHICH IS WHY THE CARD MAY ASK IT TOO. This is
+    three facts off a row already in hand, so `agents.chat.rendering.
+    turn_card` -- which holds the row and no principal at all -- calls
+    this rather than restating the condition in its own words.
+
+    THAT IT IS SHARED IS THE POINT, and the reason is this feature's own
+    review finding (I1) rather than a style rule. The condition used to
+    be spelled twice -- negatively here, positively on the card -- with
+    nothing pinning that the two agreed, and the two ways they could
+    drift are both bad. If the CARD's copy grew WIDER (a fourth state
+    admitted, the `depth` rule relaxed) the page would render a
+    disclosure whose own POST answers 404 -- exactly what the in-flight
+    clause is HIDDEN rather than merely refused to prevent. If it grew
+    NARROWER, an available control would silently disappear. One
+    definition makes both impossible; `agents/chat/tests/test_turn_edit.
+    py::TestTheRowPredicateIsSharedNotSpelledTwice` walks the whole
+    `(role, depth, state)` truth table through BOTH call sites and
+    asserts they agree row by row.
+
+    `agents/chat/rendering.py` importing this module is the sanctioned
+    direction -- `agents/chat/views/turns.py` and `views/thread.py`
+    already do it, and the import law's rule is about the reverse.
+    """
+    return all(getattr(turn, field) == value
+              for field, value in EDITABLE_TURN_ROW_FIELDS.items())
+
+
+def may_edit_any_turn(principal, conversation, *, settings_row=None) -> bool:
+    """`may_edit_turn`'s CONVERSATION-LEVEL half, asked ONCE per render.
+
+    The per-turn half is `is_editable_turn_row` above, and the card asks
+    THAT one directly for the row it is rendering -- so the thread page
+    asks THIS one once rather than once per message: a thread of two
+    hundred turns costs one principal-bearing predicate, not two hundred.
+
+    NEITHER HALF CAN DISAGREE WITH `may_edit_turn`, and each for its own
+    reason: `may_edit_turn` CALLS this function for the conversation
+    half, and it calls `is_editable_turn_row` for the row half, so there
+    is one definition of each and the page's answer and the POST's
+    answer are built from the same two.
+
+    BOTH CLAUSES ARE CONVERSATION-WIDE, and that is why they can be
+    hoisted at all. `may_manage_conversation` is a question about the
+    conversation, and the in-flight `.exists()` asks whether ANY turn
+    anywhere in the thread is still running -- not whether THIS one is.
+    That second clause is also why `agents.chat.views.thread` HIDES the
+    control rather than only refusing the POST: a page that rendered a
+    button its own POST would 404 is a page that lies.
+
+    `settings_row`: an already-fetched `IdentitySettings`, OPTIONAL and
+    keyword-only, threaded straight into `may_manage_conversation` and
+    on into `sees_all_content` -- the same single-read rule that
+    predicate's own docstring records for the sidebar.
+    """
+    if not may_manage_conversation(principal, conversation, settings_row=settings_row):
+        return False
+    return not Turn.objects.filter(conversation=conversation).exclude(
+        state__in=_TERMINAL_TURN_STATES).exists()
+
+
+def may_edit_turn(principal, conversation, turn, *, settings_row=None) -> bool:
+    """Whether `principal` may edit `turn` and carry on from there.
+
+    MANAGE, NOT POST, AND THE DIFFERENCE IS THE WHOLE OF IT (spec review
+    M2). `may_post_to` is strictly wider -- owner, `sees_all_content`, a
+    `use`-level conversation share, ANY workstream-share recipient (a
+    workstream share is `use`-by-construction), and the stream's owner.
+    Under that gate a share recipient could, with one click on somebody
+    else's message, mint a NEW CONVERSATION THEY OWN holding the
+    original's full terminal history: stamped with their own
+    `owner_fields`, surviving revocation of the share that permitted it,
+    and neither visible, manageable nor deletable by the original owner.
+    A BRANCH IS A COPY, so it answers to the copy predicate --
+    `duplicate_conversation` refuses exactly that today, on
+    `may_manage_conversation`, whose own docstring is explicit that
+    "shared to somebody is not manageable by them".
+
+    Since `may_manage_conversation` is a SUBSET of `may_post_to`, the
+    right to write the new turn comes along with it and needs no second
+    check.
+
+    THE COST IS REAL AND IS THE OWNER'S CALL (flag 7, ruled): a
+    `use`-share or workstream-share recipient cannot edit and branch in
+    a conversation shared with them, even on their own message. What
+    they are refused is a COPY, which costs them nothing they had.
+
+    NO TURN IN THIS CONVERSATION MAY BE IN FLIGHT -- one flat
+    `.exists()`. Editing while an answer is running would branch from a
+    conversation whose shape is still changing, and the job would write
+    its answer back to the ORIGINAL's row anyway.
+
+    EVERY CLAUSE BUT THE FIRST LIVES ELSEWHERE, ONCE EACH, and this
+    function is where they are composed. `is_editable_turn_row` is the
+    ROW half -- three facts, no principal -- which the card asks
+    directly for the row it renders; `may_edit_any_turn` is the
+    CONVERSATION half, which the thread page asks once per render rather
+    than once per message. Restating either here would be the second
+    spelling this feature's own review caught (I1), so neither is
+    restated: the page's answer and the POST's answer are built from the
+    same two definitions.
+
+    THE ONE CLAUSE THAT IS GENUINELY THIS FUNCTION'S OWN is the first:
+    that `turn` really belongs to `conversation`. Both ids arrive from
+    the URL separately, so a caller can name a turn of some OTHER
+    conversation they may also read -- and neither half above would
+    notice, because each is asked about only one of the two rows.
+    """
+    if turn.conversation_id != conversation.id:
+        return False
+    if not is_editable_turn_row(turn):
+        return False
+    return may_edit_any_turn(principal, conversation, settings_row=settings_row)
+
+
+def branch_conversation(principal, conversation, turn, *, title: str,
+                        settings_row=None):
+    """A new conversation holding everything BEFORE `turn`, owned by
+    `principal` -- or `None` if they may not.
+
+    `settings_row`: an already-fetched `IdentitySettings`, OPTIONAL and
+    keyword-only, threaded straight into `may_edit_turn` and on into
+    `sees_all_content`. THE CALLER THAT WILL HOLD ONE IS THE EDIT VIEW,
+    which asks the predicate first (to decide whether to render the
+    control at all) and then writes -- two singleton reads for one
+    request without it, which is the shape the middleware's single-row
+    rule exists to prevent. Without this keyword the row a caller
+    already has could not reach the predicate at all, and the keyword
+    `may_edit_turn` carries would have no reachable caller. Passing
+    nothing costs the one read it always did.
+
+    A SIBLING OF `duplicate_conversation`, NOT A PARAMETER ON IT (spec
+    decision 14). The two answer different questions -- copy the whole
+    thing / carry on from here -- and differ in the three places that
+    matter: the index bound, the provenance columns, and what their gate
+    has already established about turns in flight. Collapsing them into
+    `duplicate_conversation(..., before_index=None)` would put a mode
+    flag on a shipped function and make one docstring argue with itself.
+
+    TWO PUBLIC FUNCTIONS, ONE PRIVATE COPIER, and the distinction is the
+    whole of the answer. What is NOT justified is two copies of the copy
+    body: the field list and the taint block live once, in
+    `_copy_turns_into` / `_copy_taint_into` above, because this module
+    has already paid for the alternative -- `author_id` drifted out of
+    `duplicate_conversation` unnoticed, and the fix had to be typed
+    twice. What IS justified is two entry points, each with its own
+    gate, its own `Conversation.objects.create(...)`, its own docstring
+    and its own tests.
+
+    STEPS 1-2 ONLY. This function knows nothing about HTTP, the queue,
+    or where the reader goes next: the chat package imports THIS module,
+    ONE WAY, and a function that also redirected would be a view. The
+    chat column's `turn_edit` view starts the new turn and redirects --
+    steps 3-4 -- after this returns.
+
+    THE ADMINISTRATOR'S-COPY CONSEQUENCE `duplicate_conversation`
+    RECORDS APPLIES HERE FOR THE SAME REASON, now that the gate is the
+    same predicate: an administrator branching under
+    `admin_sees_content` makes a copy they own BY OWNERSHIP, and it
+    survives the content setting being switched back off.
+
+    WHAT IS CARRIED, and each is `duplicate_conversation`'s own rule:
+    `agent` and `workstream` (ruling D -- a branch stays in the stream,
+    or one click launders labelled material out of every gate),
+    `**owner_fields(principal)` (the brancher owns it), the same
+    `title`, and the two provenance columns.
+
+    WHAT IS COPIED PER TURN is `_copy_turns_into`'s own list, and
+    `author_id` is on it for the reason that helper records.
+
+    WHAT IS NOT, beyond that helper's `invocation` and `queue_job_id`:
+    any `DocumentAttachment` row (there is no copier seam, and the edit
+    form says so before the button), any share, and any pin or archive
+    state.
+
+    NO TURN IN FLIGHT COMES ACROSS, AND THE GATE IS WHY -- not the
+    copier's state filter, which can never exclude anything here.
+    `may_edit_turn` refuses while ANY turn in the conversation is
+    non-terminal, so by the time this runs there is none to leave
+    behind. (`duplicate_conversation` is the caller for which that
+    filter does real work; its gate says nothing about turns in flight.)
+
+    THE TAINT IS COPIED VERBATIM by `_copy_taint_into`, INCLUDING TAGS
+    WHOSE `first_turn` LIES AFTER THE BRANCH POINT, and no
+    `WorkstreamTaint` is written -- that helper records both reasons.
+
+    THE ORIGINAL IS NOT TOUCHED: this is a BRANCH, never a rewind. No
+    turn of `conversation` is edited, renumbered or deleted, and the
+    reader keeps both threads.
+    """
+    if not may_edit_turn(principal, conversation, turn, settings_row=settings_row):
+        return None
+    with transaction.atomic():
+        branch = Conversation.objects.create(
+            agent=conversation.agent, title=title,
+            workstream=conversation.workstream,      # THE BRANCH STAYS IN THE STREAM
+            branched_from=conversation, branched_at_index=turn.index,
+            **owner_fields(principal),
+        )
+        _copy_turns_into(branch, conversation, before_index=turn.index)
+        _copy_taint_into(branch, conversation)
+    return branch
 
 
 def may_post_to(principal, conversation) -> bool:
@@ -823,13 +1141,23 @@ def labellable_flows():
 
 
 def labellable_agent(pk):
-    """One `Agent` row by pk, for `/chat/access/`'s POST handler -- or
-    `None`. A ONE-QUERY reader, unconditional for the identical reason
-    `labellable_agents` is: CLASS S already means every caller here is
-    an administrator. Replaces a `next((r for r in labellable_agents()
-    if r.pk == pk), None)` full-table scan per POST, which is the same
-    N+1 shape `tool_entitlement_ids`'s own docstring warns against, just
-    on the write side rather than the render side.
+    """One `Agent` row by pk -- or `None`. A READER, never a gate.
+
+    TWO CALLERS, TWO DIFFERENT GATES, and the gate is always the
+    caller's. `/chat/access/`'s POST handler is CLASS S, so
+    `IdentityGateMiddleware` has already refused anybody but an
+    administrator before this is reached and there is no narrower
+    principal to ask about -- the reason this reader is unfiltered by
+    principal at all. `agents.chat.views.agents.agent_edit` (chat
+    cluster, feature B) is CLASS O: it applies
+    `may_manage_agent(principal, row)` to what this returns and turns a
+    refusal into the house 404. An unfiltered reader is safe for both
+    precisely because neither treats it as the permission check.
+
+    A ONE-QUERY reader, not a `next((r for r in labellable_agents()
+    if r.pk == pk), None)` full-table scan per POST -- the same N+1
+    shape `tool_entitlement_ids`'s own docstring warns against, on the
+    write side rather than the render side.
     """
     return Agent.objects.filter(pk=pk).first()
 
@@ -837,6 +1165,283 @@ def labellable_agent(pk):
 def labellable_flow(pk):
     """The same, for `Flow`."""
     return Flow.objects.filter(pk=pk).first()
+
+
+AGENT_NAME_REQUIRED = "Give this agent a name."
+AGENT_NAME_TOO_LONG = "That name is too long — the limit is 255 characters."
+AGENT_MAX_STEPS_OUT_OF_RANGE = (
+    f"Steps per turn must be between 1 and {MAX_STEPS_CEILING}."
+)
+AGENT_NOT_YOURS = "That agent is not yours to change."
+# THE WRITER'S OWN half of the role-vocabulary rule (fix round, review M1).
+# `agents.chat.agentform.ROLE_NOT_OFFERED` is the FORM's sentence for the same
+# refusal, worded for somebody looking at a select; this one is worded for a
+# caller who saw no form at all. Two layers of one rule, not two rules -- and
+# they cannot share a constant, because `agents/` may not import `agents.chat`
+# from here (import law), which is the same reason the vocabulary itself lives
+# in `models.contracts.roles.chat_capable_roles`.
+AGENT_ROLE_NOT_CHAT_CAPABLE = "That model role cannot back a chat agent."
+_SLUG_MAX = 64
+
+
+def may_manage_agent(principal, agent, *, settings_row=None) -> bool:
+    """Whether `principal` may edit `agent`.
+
+    ADMINISTRATORS MAY EDIT ANY AGENT -- the same call `labellable_agents`
+    records for the sibling page, and what "the main chat should be owned
+    by the admin" requires.
+
+    A USER-CREATED AGENT NEEDS NO ADMINISTRATOR: its owner edits it.
+
+    A BOX-WIDE AGENT IS ADMIN-ONLY, whoever originally created it, and
+    the `box_wide` test SHORT-CIRCUITS AHEAD OF THE OWNERSHIP BRANCH,
+    which is what makes that true for a member who installed a shipped
+    default themselves (`chat-default-install` is class A; that row's
+    owner is the member). `/chat/agents/` renders those rows in a
+    read-only section with a sentence, so the refusal is never silent.
+
+    AN OPEN BOX DEGRADES CORRECTLY WITH NO BRANCH: `is_admin` answers
+    True for everybody on a box with no accounts, so whoever is at the
+    keyboard edits everything. That is the true statement about a
+    household box, not a fallback.
+
+    `may_read_owned_row` is identity's own row-predicate mirror of
+    `owned_rows_q`; nothing here restates the shape of the two owner
+    columns.
+    """
+    if is_admin(principal, settings_row=settings_row):
+        return True
+    if agent.box_wide:
+        return False
+    return may_read_owned_row(principal, agent)
+
+
+def editable_agents(principal, *, settings_row=None):
+    """The agents this principal may edit, for `/chat/agents/`.
+
+    THE COLUMN'S STANDARD SHAPE, open branch first -- not a bare
+    `owned_rows_q` filter (spec review M6). `identity.access.
+    owned_rows_q` has NO open-posture widening (it is
+    `Q(owner_kind=..., owner_key=...) | Q(owner_kind="service")`) and it
+    calls `is_admin`, which reads the `IdentitySettings` singleton.
+    Without the short-circuit three things go wrong at once on an open
+    box: a row stamped with a `user` principal (installed during an
+    accounts-on period, or after an owner reassignment) is ABSENT from
+    this list while `may_manage_agent` answers True for it, so the list
+    and the predicate disagree; the "zero permission queries on an open
+    box" rule is false; and "this is every non-box-wide agent" is false.
+
+    ON AN ACCOUNTS-ON BOX AN ADMINISTRATOR SEES THEIR OWN ROWS ONLY,
+    because `sees_all_content` is `is_admin AND admin_sees_content` and
+    the content setting is usually off. That is deliberate:
+    `/chat/agents/` is "the agents I work on"; `/settings/agents/` is
+    the box-wide view, one click away.
+
+    BOX-WIDE ROWS ARE EXCLUDED because `may_manage_agent` refuses them
+    for a non-admin -- a list offering an edit the editor will 404 is
+    worse than no list. `box_wide_agents_owned_by` below is how the page
+    still says they exist.
+    """
+    qs = Agent.objects.exclude(box_wide=True).order_by("name")
+    if sees_all_content(principal, settings_row=settings_row):
+        return qs
+    return qs.filter(owned_rows_q(principal, settings_row=settings_row))
+
+
+def box_wide_agents_owned_by(principal, *, settings_row=None):
+    """The box-wide rows THIS principal owns -- `/chat/agents/`'s
+    read-only second section.
+
+    `chat-default-install` is class A and `install_default` stamps
+    `**owner_fields(principal)`, so a MEMBER installing an ordinary
+    catalogue slug owns a row everybody on this box can use and that
+    `may_manage_agent` refuses them. Without this section they would own
+    a row that is absent from their list and refused by the editor, with
+    nothing anywhere explaining why. The audience consequence itself is
+    pre-existing -- a member's install reaches exactly the same people
+    today as it did before `box_wide` existed -- and the spec's flag 8
+    is the owner's ruling to leave the route open and make it legible.
+
+    An administrator takes the same short-circuit every sibling here
+    does, for the same reason.
+    """
+    qs = Agent.objects.filter(box_wide=True).order_by("name")
+    if sees_all_content(principal, settings_row=settings_row):
+        return qs
+    return qs.filter(owned_rows_q(principal, settings_row=settings_row))
+
+
+def _derive_agent_slug(name: str) -> str:
+    """A unique, stable key for a new agent -- the user never types one.
+
+    CHECKED AGAINST THE SHIPPED CATALOGUE AS WELL AS THE TABLE: a row
+    whose slug collides with a catalogue entry would be silently
+    overwritten by `install_defaults --reset <slug>`. Case-insensitively
+    against the table, matching `Agent`'s own `uniq_agent_slug_ci`
+    constraint rather than a stricter or looser comparison.
+
+    A name that slugifies to nothing (punctuation only) falls back to
+    `agent-<n>`: a key is required and a blank one is not a key.
+    """
+    from django.utils.text import slugify
+
+    from agents.defaults import catalogue
+
+    base = slugify(name or "")[:_SLUG_MAX]
+    fell_back = not base
+    if fell_back:
+        base = "agent"
+    taken = {slug.lower() for slug in Agent.objects.values_list("slug", flat=True)}
+    taken |= {spec.slug.lower() for spec in catalogue("agent")}
+    # THE GUARD IS THE FALLBACK, NOT THE STRING. An agent somebody
+    # really named "Agent" takes `agent` when `agent` is free; only the
+    # punctuation-only fallback -- where `base` is a placeholder rather
+    # than anybody's chosen name -- always takes a suffix, so two such
+    # rows never read as one row named twice.
+    if base.lower() not in taken and not fell_back:
+        return base
+    suffix = 2
+    while True:
+        candidate = f"{base[:_SLUG_MAX - len(str(suffix)) - 1]}-{suffix}"
+        if candidate.lower() not in taken:
+            return candidate
+        suffix += 1
+
+
+def _validated_agent_fields(principal, fields, *, settings_row=None, existing=None):
+    """`(clean, errors)` -- the shape both writers share.
+
+    ADMIN-ONLY FIELDS ARE RE-CHECKED HERE, not merely omitted by the
+    form: a POST that forges `llm_role` or `box_wide` is either a stale
+    form or a hand-made request, and both get the same answer -- the
+    field is DROPPED, silently, because it was never offered and there
+    is nothing honest to say about a control the sender never saw.
+    `slug` is dropped the same way: `Agent.save()` refuses a change, and
+    a form that offered one would be offering a refusal.
+
+    `fields` IS A WHOLE FORM, NOT A PATCH: an absent key is a CLEARED
+    value, not an unchanged one (review note 5, for tasks 7 and 9-11).
+    `bool(fields.get("enabled"))` and `fields.get("description") or ""`
+    make a caller passing a partial dict silently disable the agent and
+    blank its description and prompt -- correct for an HTML form POST,
+    where an unchecked box is simply absent, and wrong for anything
+    else. The one exception is `box_wide`, written only when the KEY IS
+    PRESENT, so an administrator flipping the box-wide reach control back
+    must send the key explicitly or reach is one-way through the UI.
+    """
+    errors: dict = {}
+    name = (fields.get("name") or "").strip()
+    if not name:
+        errors["name"] = AGENT_NAME_REQUIRED
+    elif len(name) > 255:
+        errors["name"] = AGENT_NAME_TOO_LONG
+    try:
+        max_steps = int(fields.get("max_steps", MAX_STEPS_DEFAULT))
+    except (TypeError, ValueError):
+        max_steps = -1
+    if not 1 <= max_steps <= MAX_STEPS_CEILING:
+        errors["max_steps"] = AGENT_MAX_STEPS_OUT_OF_RANGE
+    if errors:
+        return {}, errors
+    clean = {
+        "name": name,
+        "description": fields.get("description") or "",
+        "system_prompt": fields.get("system_prompt") or "",
+        "max_steps": max_steps,
+        "enabled": bool(fields.get("enabled")),
+    }
+    if is_admin(principal, settings_row=settings_row):
+        if fields.get("llm_role"):
+            # THE VOCABULARY IS CHECKED HERE, NOT ONLY AT THE VIEW (fix
+            # round, review M1). Admin-ness is the only thing this branch
+            # used to ask, so any string an administrator sent was written
+            # -- including a role whose capability is `embeddings`, which no
+            # chat turn can resolve. `models.contracts.roles.
+            # chat_capable_roles` is the one filter the FORM offers from, so
+            # a second writer path (a management command, a future MCP edge)
+            # is now refused by the same vocabulary the select renders.
+            if fields["llm_role"] not in {key for key, _label in chat_capable_roles()}:
+                errors["llm_role"] = AGENT_ROLE_NOT_CHAT_CAPABLE
+                return {}, errors
+            clean["llm_role"] = fields["llm_role"]
+        if "box_wide" in fields:
+            clean["box_wide"] = bool(fields["box_wide"])
+    elif existing is not None:
+        clean["llm_role"] = existing.llm_role
+    return clean, {}
+
+
+def create_agent(principal, fields, *, settings_row=None):
+    """A new agent owned by `principal` -- `(row, {})`, or `(None, errors)`.
+
+    THE CREATE LIVES HERE for the reason `create_conversation`'s own
+    docstring gives: a view that could create a row could create one
+    without `owner_fields`, and that row would be invisible to every
+    filter identity added.
+
+    `box_wide=False` AND `resident=False` ARE HARD-CODED. A new agent is
+    nobody's shipped default and reaches nobody but its owner until its
+    owner says otherwise -- which closes the creation route as an
+    audience escape hatch by construction rather than by a check.
+    `tool_keys=[]`: granting tools is a privilege question, not a form
+    field (spec decision 8), and an agent with a prompt and a model is
+    already useful.
+    """
+    clean, errors = _validated_agent_fields(principal, fields, settings_row=settings_row)
+    if errors:
+        return None, errors
+    clean.setdefault("llm_role", CHAT_CONVERSE_ROLE)
+    clean.pop("box_wide", None)
+    with transaction.atomic():
+        row = Agent.objects.create(
+            slug=_derive_agent_slug(clean["name"]),
+            tool_keys=[], resident=False, box_wide=False,
+            **owner_fields(principal), **clean,
+        )
+        audit.record(principal, actions.AGENT_CREATED, target_type="agent",
+                     target_key=str(row.pk), target_label=row.slug)
+    return row, {}
+
+
+def update_agent(principal, agent, fields, *, settings_row=None) -> dict:
+    """Apply `fields` to `agent` if `principal` may. `{}` when written,
+    `{field: sentence}` when refused.
+
+    THE AUDIT ROW NAMES WHICH FIELDS CHANGED, NEVER THEIR CONTENTS. A
+    system prompt is the operator's text, and an audit trail is not the
+    place to copy it. The detail key is `fields=` and NOT `was=` (review
+    finding 1, superseding the brief): `rename_workstream` eighty lines
+    below already writes `was=` to mean THE PREVIOUS VALUE, and one
+    audit trail holding `{"was": "Old stream name"}` on one row and
+    `{"was": "name, system_prompt"}` on another is the same key carrying
+    two incompatible meanings -- which any page rendering `detail`
+    generically would print under one label. `identity.audit.record`
+    takes `**detail` verbatim and has no vocabulary to catch it, so the
+    distinction is recorded here, where the next reader is.
+
+    A NO-OP EDIT WRITES NO AUDIT ROW, the same reason `agents/labels.py::
+    _set_labels` writes the DIFFERENCE: a trail that recorded a change
+    for a save that changed nothing is a trail whose interesting lines
+    are invisible.
+    """
+    if not may_manage_agent(principal, agent, settings_row=settings_row):
+        return {"name": AGENT_NOT_YOURS}
+    clean, errors = _validated_agent_fields(principal, fields,
+                                            settings_row=settings_row, existing=agent)
+    if errors:
+        return errors
+    changed = sorted(key for key, value in clean.items()
+                     if getattr(agent, key) != value)
+    if not changed:
+        return {}
+    with transaction.atomic():
+        for key, value in clean.items():
+            setattr(agent, key, value)
+        agent.save(update_fields=[*clean, "updated_at"])
+        audit.record(principal, actions.AGENT_EDITED, target_type="agent",
+                     target_key=str(agent.pk), target_label=agent.slug,
+                     fields=", ".join(changed))
+    return {}
 
 
 def create_conversation(principal, agent, *, workstream=None):

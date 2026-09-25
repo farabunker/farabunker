@@ -192,7 +192,7 @@ def preflight_turn(agent, connection, *, actor, conversation=None, wall=None,
     `label_permitted_q(actor)` ALONE, not `visible_agents(actor)`. This
     function is reached for a turn on a conversation the actor is
     ALREADY POSTING TO -- a `use`-level `Share` recipient among them --
-    and `visible_agents` also encodes the ownership/resident/share OR
+    and `visible_agents` also encodes the ownership/box-wide/share OR
     that governs whether a principal may START a conversation with an
     agent from scratch, which is a different question from "did a LABEL
     just restrict this one". Asking the fuller function here would 403 a
@@ -201,7 +201,7 @@ def preflight_turn(agent, connection, *, actor, conversation=None, wall=None,
     sharing for every unlabelled agent. `label_permitted_q` alone is
     exactly the label half: UNLABELLED always passes regardless of
     ownership, and a LABELLED row passes only for a holder of one of its
-    entitlements -- which is what makes a `resident=True` row compose
+    entitlements -- which is what makes a `box_wide=True` row compose
     with the carve-out rather than bypass it, and what makes an OWNER's
     own labelled agent hide from them too (decision 35): ownership plays
     no part in this test either way.

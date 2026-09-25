@@ -82,7 +82,13 @@ class TestTheCatalogue:
         `ModelConnection` (incl. `footprint_override_bytes`) and
         `RoleBinding` writes were the four unaudited settings surfaces
         the backend audit named with no recorded rationale, and the
-        recorded ruling closing that gap is "audit all four"."""
+        recorded ruling closing that gap is "audit all four".
+        `agent.created`/`agent.edited` are a TENTH amendment, the chat
+        cluster's agent form (feature B, task 6) -- the first rows this
+        box writes for an agent that nobody shipped. Both reuse the
+        existing `agent.` prefix the labelling pair already opened, so
+        the prefix count above stays at sixteen while the vocabulary
+        grows by two."""
         assert "entitlement.created" in AUDIT_ACTIONS
         assert "share.revoked" in AUDIT_ACTIONS
         assert "modelset.created" in AUDIT_ACTIONS
@@ -118,7 +124,9 @@ class TestTheCatalogue:
         assert "connection.deleted" in AUDIT_ACTIONS
         assert "role.assigned" in AUDIT_ACTIONS
         assert "role.unassigned" in AUDIT_ACTIONS
-        assert len(AUDIT_ACTIONS) == 68
+        assert "agent.created" in AUDIT_ACTIONS
+        assert "agent.edited" in AUDIT_ACTIONS
+        assert len(AUDIT_ACTIONS) == 70
 
     def test_no_name_is_longer_than_the_column(self):
         """`AuditEvent.action` is CharField(max_length=64)."""

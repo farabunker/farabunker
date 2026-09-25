@@ -6754,3 +6754,95 @@ Run by the author against the spec, before handing this over.
 **2. Placeholders.** No "TBD", no "similar to Task N", no "add appropriate error handling", no "write tests for the above". **Every template step now ships real markup** — the first draft of this plan asserted that while leaving `agent_edit.html`, `agents.html` and `agents_admin.html` as one-sentence descriptions, which review M5 caught and which is fixed in Tasks 8 and 10. Three steps still carry a *read-this-first* instruction — the flash-fragment include name, the `settings_content` block name, and the picker's real query parameter — each naming the exact file to read and forbidding invention; those are verification instructions against the tree, not deferred decisions. The fourth such instruction, on `identity/audit.py::record`'s keyword, was **removed**: that function takes `**detail`, so there is no keyword to match and the instruction was asking for a check that could not fail.
 
 **3. Type consistency.** `ContextUsage`/`MeterSegments` field names match between Task 2, Task 3's template and Task 4's helper. `turn_card`'s four feature-C keys (`may_edit`, `may_attach_files`, `attach_workstream`, `attach_id`) are produced in Task 13 Step 3 and read in Task 13 Step 5 under those same names, and the two builders that set them — `thread_cards` and `turn_group_cards` — take the same three keyword-only parameters. `entitlement_panel`'s nine keys are produced in Task 7 and consumed by Task 9's include under the `tp_*` names `foundation/templates/_transfer_panel.html` documents. `window_source` takes exactly the four declared constants, and `WINDOW_SOURCE_UNBOUND` is the view's own value, never returned by `effective_context_window`. `create_agent` returns `(row, errors)` and `update_agent` returns `errors` — different shapes, deliberately, because only one of them can fail to produce a row; both are used that way at every call site. `agent_form_context`'s keys are produced in Task 7 and consumed in Tasks 8, 9 and 10 under the same names. `may_edit_turn` and `may_edit_any_turn` share one body for the conversation-level half, so the card and the POST gate cannot disagree. `thread_cards`' two new keyword-only parameters have the same names as the two card keys they set.
+
+---
+
+## Amendment (2026-09-22) — what actually landed, task by task
+
+Appended after Tasks 1–14 landed and were reviewed, in the shape this archive's other plans
+use: the plan text above is left as written, because it is the record of what was planned and
+reviewed, and **where it and this section disagree, this section is what landed on the
+branch.** Nothing here is a claim about a merge or a deploy; neither has happened.
+
+**The headline.** Task 6's audit detail keyword is **`fields=`, not the `was=`** the task body
+above prints. `was=` already means "the previous value" on the workstream rename action, so
+one keyword would have carried two meanings in one closed vocabulary; the review ordered the
+rename and verified no reader of a `was` detail key exists. Every occurrence of `was=` in
+Task 6's body is superseded by `fields=`.
+
+**Two execution rulings, recorded because the plan's own text is stale.** Global Constraints
+name a worktree directory and branch that predate the merge of the specs branch; execution
+happened on branch `chat-cluster`, each task in its own isolated checkout. And the executor
+database name in every printed command is the *queue* track's, not this one's: the chat
+implementer substituted its own name throughout, because two concurrent pytest runs must
+never share a database name.
+
+**The ADR is 0019** (`docs/adr/0019-chat-cluster.md`), the next free number at the time, and it
+carries a fourth thing Task 15's body does not ask for: a dated pointer amendment on
+**ADR 0010**, recording that its `context_window` column gained a read direction. The
+owner-ordered consolidation-audit rule landed in `AGENTS.md` under Merge readiness, cited once
+from `CONTRIBUTING.md`. The browser items a green suite cannot prove are collected in
+[`2026-09-21-chat-cluster-smoke.md`](2026-09-21-chat-cluster-smoke.md), beside this file; the
+`## Smoke Checklist` above stays the feature-level walk, and that file is the per-item detail
+the task reports asked for.
+
+### Every reviewed deviation
+
+One line each, in task order. All were reviewed; none is an open question. Task 1 and Task 11
+have none.
+
+| Task | Deviation | Why |
+|---|---|---|
+| 2 | The agent-slug fixture collision was worked around in the test, not the writer | Accepted: the collision is the slug rule working. |
+| 2 | The tool-call schema key asserted is `args` | Accepted: that is the key the schema really carries. |
+| 2 | A `repr()`-length size proxy was **rejected** and replaced by an equality pin against the estimator | A counting estimator would have scored green on the proxy; equality cannot. |
+| 3 | The `safe` filter on the two clause renders was **rejected**; four assertions re-pinned through the escaping helper | The repo's autoescape gate forbids opting out on a rendered path — and the two *negative* assertions were re-pinned too, or they would have passed vacuously. |
+| 3 | The engine-default-sentence test sets the administrator-content keyword | A brief omission: without it the administrator 404s before the sentence exists. |
+| 3 | The stream-read query pin excludes one precisely-identified pre-existing authorization read | That read predates the task and is not reachable from either file it touches. |
+| 3 | An existing composer query pin moved from one standalone workstream read to zero | The widened `select_related` folds that read into the conversation's own join — a strict improvement, named in the commit body. |
+| 4 | The "no rendered sentence on the wire" assertion became a count, not a substring | The mandated key name *contains* the forbidden substring, so the assertion was unsatisfiable as written. |
+| 4 | The `select_related` pin became shape-based (no lazy agent or workstream read on either side), not a fixed delta | A fixed delta could not see a partial narrowing that moved both sides equally. |
+| 4 | The thread page's test module joined the split-threshold exemption list | It had already crossed the gate one task earlier, unnoticed, because that task's targeted runs did not include the ops gate. See G10 in the ADR. |
+| 5 | Three brief assertions wrapped in a non-open posture | On an open box everyone is owner-equivalent, so two of them were vacuous and one was unsatisfiable. |
+| 5 | Fifteen pre-existing tests gained the audience flag beside the origin marker | Direct row builds bypass the data migration; no expected value changed, only fixture inputs. Four of the fifteen were found in the re-check, already vacuous. |
+| 5 | Four stale passages naming the origin marker as the visibility leg were corrected | The leg moved; prose that still named the old one would have been read as the rule. |
+| 6 | **`fields=` supersedes `was=`** | See the headline above. |
+| 6 | The closed audit vocabulary's count pin moved by two, with a dated paragraph in its docstring | The drift guard doing its job; both new names reuse an existing family prefix. |
+| 6 | The administrator-writes-a-role test now writes a *different* role | As drafted it set the value the row already held, so it proved no write. |
+| 6 | Two guard tests added (an over-long name; the create path's audience field) | Both paths were unpinned. |
+| 6 | The writer-side role vocabulary was parked to Task 8 rather than added here | The spec puts the check on the form side, and Task 8 is where the form lives. |
+| 7 | The foreign-label sentence is computed whenever there is a row, not only when the panel has something to offer | A member who owns no entitlement has no panel and is exactly the reader who needs telling. Brief bug, fixed as ordered. |
+| 8 | The role vocabulary became one shared function rather than a second filter in the view | A refusal keyed on a second spelling of what the select offers is the render-versus-gate bug in its other direction. |
+| 8 | A named override set in the route matrix, for the one class-O cell an administrator always reaches | The manage predicate short-circuits on administrator-ness by design; bending it to fit the base mapping would have been the wrong fix. |
+| 8 | List rows are dicts folded through one closure, not a lookup mapping | The template language has no item-lookup filter; the fold also makes the two batch reads once for the whole page. |
+| 8 | Page-prefixed CSS class names, not the bare ones the brief printed | The bare names already mean something else under the settings shell. |
+| 8 | The create route's route-matrix driver probes with a GET | A POST driver would create a row as a side effect of proving a class boundary; the existing precedent probes with a GET too. |
+| 8 | An apostrophe-bearing row name asserted through the escaping helper; the reset warning pinned whole | Autoescape again; and the warning constant had never been proven to reach a page. |
+| 8 (fix) | The read-only box-wide section's sentence is chosen **per row**, and an administrator gets a link | As first written it told an administrator on an open box that "an administrator can change it" and offered no way in — the owner's headline ask, with no door. |
+| 9 | The foreign-label sentence renders outside the panel's own condition | Nested under the panel, its one intended reader would never see it. |
+| 9 | The shared type-to-filter script include is gated on the panel | Keeps the zero-script pin on this page passing unchanged rather than weakening it. |
+| 9 | Two brief tests strengthened | Both were vacuous as drafted — one asked "in neither pane" of a panel that did not render. |
+| 9 | The filter-input rule was promoted with the transfer-panel block | The fragment's own pane filters write that class; leaving it behind would have rendered them unstyled on the new consumer. |
+| 9 | The access pages' summary rule deliberately did **not** move | Not one of the fragment's classes, and both its consumers still share the settings shell. See G8 in the ADR. |
+| 9 | Two CSS-ownership tests re-pinned to the new home, plus a "nothing left behind" assertion | The rules **moved**; a promotion that copied instead of moving now fails. |
+| 9 | `docs/EXTENDING.md` was touched although the brief's add list did not name it | Two of its sentences were made stale by this commit. |
+| 10 | **Six** settings-registration places, not four | The drift tests named two more — the help-card table (symmetric, with a rendered-anchor requirement) and the page-name table — and both are real build failures. |
+| 10 | The page carries its own style block, with the parent block first | A five-column table with no rules is not legible beside the two settings pages doing the same job. |
+| 10 (fix) | The entitlement read on **both** agent pages is gated on accounts being on; the column is hidden, never zeroed | Ungated, the count's meaning inverts on an open box. A zero would say "none" where the truth is "not asked". Both routes joined the zero-query mount sweep as a result. |
+| 10 (fix) | A source-inspection test replaced by a direct call that must raise | The old assertion matched the module's own docstring and could not fail. |
+| 10 | The Owner column still prints a principal key | Backlog by ruling: no display-name reader exists to call. See G1 in the ADR. |
+| 12 | The import-law test walks the module's syntax tree instead of grepping its text | The grep was red on a module obeying the rule perfectly — the column's own docstrings name the chat package in prose. The walk also catches function-local imports, which a header grep cannot. |
+| 12 | No audit row and no new action in the closed vocabulary | Ruled correct: a branch is a copy the principal could already make, and the sibling copier writes none either. |
+| 12 | `duplicate_conversation` re-pinned to copy the turn author | A real fence bug, not a refactor: a duplicate used to replay another person's words to the model unfenced. Named in the commit body; recorded in the ADR as a behaviour change. |
+| 12 (fix) | One private copier extracted under both public writers | The eleven-field copy had been typed twice, and had already drifted once — which is how the author fence was lost. |
+| 13 | The disclosure's declared sentence lives in the chat service module, not the poll view | The read view may not import the poll view; the shared leaf both already import is where the column's other declared sentences live. |
+| 13 | The polled body carries that sentence too | Without it the swapped disclosure would render with an empty lead — the reload/poll divergence four docstrings forbid. |
+| 13 | The poller's source selector is attribute-only, not input-qualified | On a page with a picker the field is a `select`, which is exactly the page where the pick can differ from the default. |
+| 13 | The edit view threads the already-fetched settings row into both the predicate and the writer | That keyword exists for this caller, and has its own pin. |
+| 13 | Three brief tests rewritten | Two asserted strings that occur nowhere in the repository, so they were green before a line was written; the third could not pass, because the first branch's own queued placeholder correctly blocks a second edit. |
+| 13 | The done-tick budget test compares threads of *different* lengths | Equality between two identical threads stays green on a per-turn predicate. |
+| 13 | The poller carry has no mutation proof | There is no JavaScript engine in this suite; it is a browser smoke item instead. |
+| 13 (fix) | The per-turn row rule extracted into one predicate both the card and the gate call | It had been spelled twice, with no test that could notice them disagreeing. |
+| 13 (fix) | Each edit box gained a real label and a per-turn id | A fixed id would point every label at the first box in document order. |
+| 14 | The tool-card test asserts the tool's registered label, not its dotted key | The renderer renders the label for any key the registry still knows; the raw key never appears. |
+| 3, 13, 14 | The thread page's flat-cost equality pin was **extended** three times, never copied | Each feature that added a per-render read had to be inside the pin's own measurement, or the pin would have been measuring a page that never asks. |

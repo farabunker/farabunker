@@ -635,6 +635,26 @@ def install_default(kind: str, slug: str, principal, *, reset: bool = False):
                 name=spec.name, description=spec.description,
                 system_prompt=spec.system_prompt, llm_role=spec.llm_role,
                 tool_keys=list(spec.tool_keys), max_steps=spec.max_steps,
+                # THE SHIPPED CATALOGUE IS THE PLATFORM'S OFFER TO
+                # EVERYBODY, so an installed default is box-wide --
+                # UNCONDITIONALLY, never `is_admin(principal)` (spec
+                # decision 23). `manage.py install_defaults` runs as
+                # `OPEN_PRINCIPAL`, which it imports and never
+                # constructs, AST-guarded; `identity.access.is_admin`
+                # answers True for it on an OPEN box and False on an
+                # accounts-on one, because `_user_row` returns None for
+                # any `principal.kind != "user"`. Stamping by the
+                # installer's authority would therefore leave the
+                # canonical shell install working on an open box and
+                # SILENTLY BREAK IT on an accounts-on one -- the posture
+                # where a shipped default most needs to reach everybody.
+                #
+                # IN `_fields()` RATHER THAN BESIDE `resident=True`
+                # BELOW, so the `--reset` path re-stamps it with every
+                # other field (that function's own "a reset is a fresh
+                # adoption" rule), and so the FLOW branch never learns
+                # about a column `Flow` does not have.
+                box_wide=True,
             )
     else:  # "flow" -- `catalogue()` (via `default_for`) already refused any other kind
         from agents.models import Flow as Model

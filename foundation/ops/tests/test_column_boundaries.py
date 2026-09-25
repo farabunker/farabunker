@@ -1108,6 +1108,17 @@ _KNOWN_OVER_SPLIT_THRESHOLD = {
     # so it is not itself a violation this merge introduced. Not this
     # merge's to split.
     "agents/chat/tests/test_assistant_panel.py",
+    # `agents/chat/tests/test_thread.py` WAS HERE, added by chat-cluster
+    # task 4 after task 3's context meter carried that module over the
+    # threshold unnoticed. The whole-branch review (I-5) ruled the entry
+    # out: AGENTS.md non-negotiable 2 ends "A dated exemption list gets
+    # its exempted code removed, not grown", it carves out no exception
+    # for a well-argued growth, and the branch that grew it is the branch
+    # that re-wrapped that rule's own file. The module was split instead
+    # -- `agents/chat/tests/test_thread_meter.py`, the meter's own edge --
+    # and BOTH meter classes moved together, so task 4's plan decision
+    # ("splitting the two halves across two modules is how they come to
+    # disagree") is honoured rather than overruled.
 }
 
 

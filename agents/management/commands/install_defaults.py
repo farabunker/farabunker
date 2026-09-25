@@ -17,10 +17,14 @@ Runs as `OPEN_PRINCIPAL`, which it IMPORTS, NEVER CONSTRUCTS
 AND UNCONDITIONALLY -- even once accounts are on and the shell operator
 is a real, identifiable administrator. This is plan Decision 9: a
 shipped default is the PLATFORM's offer, not the installing operator's
-private row, and `agents.visibility`'s `resident=True` rows are visible
-to every principal regardless of who owns them (`Q(resident=True)` in
-`visible_agents`/`visible_flows`, unconditional in the OR) -- so which
-principal owns a resident row never decides who can see it. What owning
+private row, and `agents.defaults.install_default` stamps `box_wide=
+True` on every installed agent UNCONDITIONALLY (task 5, chat cluster
+feature B -- `Agent`'s own audience column, distinct from `resident`
+the origin marker), which `agents.visibility.visible_agents` reads as
+visible to every principal regardless of who owns it (`Q(box_wide=
+True)`, unconditional in the OR; `visible_flows` still reads `Q(
+resident=True)`, `Flow` having no such column) -- so which principal
+owns a shipped default never decides who can see it. What owning
 it as `OPEN_PRINCIPAL` DOES decide is whether it stays ADOPTABLE:
 `manage.py adopt_open_rows` only claims rows still owned by the open
 box, and a shipped default that this command stamped with a specific
