@@ -9,7 +9,15 @@ count_other_pytest is likewise pinned as a pure function over a list of
 already-collected `ps` lines (no subprocess run here either): it is the
 matcher scripts/ladder.py's wait loop used to run by shelling out to
 `pgrep -f pytest`, which put the pattern it searched for on the command
-line it then searched -- a watcher counting its own reflection.
+line it then searched -- a watcher counting its own reflection. The
+predicate has since had to become structural rather than textual a second
+time: matching "pytest" anywhere in a process's arguments also counts a
+real Python process whose path, --outdir, or --db-name merely CONTAINS
+the word -- an editor's test-discovery adapter, or one unlucky peer
+argument, starves a strict run exactly like the reflection bug did. The
+fix asks whether the runner is what is being EXECUTED (some argument
+token's own basename is exactly "pytest", or the adjacent "-m pytest"
+pair), not whether the word appears somewhere in the text.
 """
 from __future__ import annotations
 
@@ -112,3 +120,43 @@ def test_count_other_pytest_excludes_its_own_pid():
         "300 1 Python .venv/bin/pytest -q scripts",
     ]
     assert count_other_pytest(lines, exclude_pids={300}) == 0
+
+
+def test_count_other_pytest_counts_the_module_invocation_form():
+    # `python -m pytest` is a real, common invocation, and a plain
+    # substring match "happened to" catch it before -- nothing pinned that
+    # the tokenised replacement keeps catching it. Here "pytest" is its
+    # own argument token (not a path), so the basename check alone already
+    # covers it; the pinned behaviour is what matters, not which branch of
+    # the predicate fires.
+    lines = [
+        "400 1 Python /usr/bin/python3 -m pytest -q tools models",
+    ]
+    assert count_other_pytest(lines, exclude_pids=set()) == 1
+
+
+def test_count_other_pytest_ignores_a_waiting_peer_runner_with_no_runner_in_its_arguments():
+    # The two-watchers case this whole predicate exists for: a real Python
+    # process (another session's own wait loop, or any other real
+    # interpreter) whose arguments never name the runner at all. Must
+    # count zero -- until now this was only proven indirectly, through a
+    # shell line rejected by the executable check, not through a genuine
+    # Python process rejected by _runs_pytest.
+    lines = [
+        "410 1 Python /usr/bin/python3 manage.py check",
+    ]
+    assert count_other_pytest(lines, exclude_pids=set()) == 0
+
+
+def test_count_other_pytest_ignores_a_real_python_process_whose_path_merely_contains_pytest():
+    # The phantom this round is about: a real interpreter running a real
+    # *other* command, where some argument -- an --outdir, a --db-name, a
+    # coincidental path -- happens to CONTAIN the substring "pytest". A
+    # plain "pytest" in args match would count this forever; the
+    # tokenised basename check rejects it because no token's basename is
+    # exactly "pytest", however the substring is spelled inside a larger
+    # one.
+    lines = [
+        "420 1 Python /usr/bin/python3 manage.py test --outdir=/tmp/mypytest_results/run1",
+    ]
+    assert count_other_pytest(lines, exclude_pids=set()) == 0

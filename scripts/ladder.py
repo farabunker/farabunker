@@ -21,17 +21,22 @@ this waits until at most --max-others other pytest processes are running
 machine-wide. It lists processes with one `ps` call whose own command line
 never names "pytest" (so it can never match itself or be matched by a peer
 running the same check), then matches in Python: a line counts only when
-its executable is a Python interpreter AND its arguments mention the
-runner, so a shell or grep that merely has "pytest" in its arguments (its
-own polling command, another session's wait loop) is never counted. This
-process's own pid and its whole process tree (an in-flight pytest run it
-launched itself) are excluded from the count.
-# ponytail: executable+argument match, not a lock -- a false positive just
+its executable is a Python interpreter AND some argument TOKEN is the
+runner outright -- its own basename is exactly "pytest", or it forms the
+"-m pytest" pair -- so neither a shell/grep that merely has "pytest" in
+its arguments (its own polling command, another session's wait loop) nor
+a real Python process whose path/outdir/db-name merely contains the word
+is ever counted. This process's own pid and its whole process tree (an
+in-flight pytest run it launched itself) are excluded from the count.
+# ponytail: executable+token match, not a lock -- a false positive just
 # costs a few extra seconds of waiting, never a wrong result.
 Default --max-others is 1 (AGENTS.md: at most two full suites across the
 machine, this run plus one other); pass --max-others 0 when peers have
 agreed a stricter cap for a period. A line is printed to stderr every 60s
-while waiting: "waiting: N other pytest processes".
+while waiting, naming each match by pid and a trimmed invocation rather
+than just a count -- "waiting: N other pytest processes -- <pid>:<label>,
+...": a count can't say whose run it is holding the machine or how far
+along it is, and that's what a waiting session actually needs to know.
 
 Pausing: SIGSTOP this script's own pid (not its process group). Its
 in-flight pytest subprocess is a separate process and keeps running to
@@ -100,6 +105,14 @@ def _process_lines() -> list[str]:
 
 
 def _parse_process_line(line: str) -> tuple[int, int, str, str] | None:
+    # ucomm can itself contain a space under this platform's truncation
+    # (a helper process's name cut mid-word). split(None, 3) then puts only
+    # the first word in the ucomm slot and folds the rest into args, or the
+    # reverse. Harmless for this predicate on purpose: it only needs
+    # whatever lands in the ucomm slot to correctly fail "is this a Python
+    # interpreter" for a non-Python process, which the first word always
+    # does -- it does not need to reproduce ps's own field boundary
+    # exactly. Do not "fix" this split without re-examining that contract.
     parts = line.split(None, 3)
     if len(parts) < 4:
         return None
@@ -108,6 +121,26 @@ def _parse_process_line(line: str) -> tuple[int, int, str, str] | None:
     except ValueError:
         return None
     return pid, ppid, parts[2], parts[3]
+
+
+def _runs_pytest(args: str) -> bool:
+    """True only when the runner is what is actually being executed, not
+    when its name merely appears somewhere in the text -- structural,
+    not a sharper string match. Tokenise the arguments and require either
+    some token whose own BASENAME is exactly "pytest" (direct invocation:
+    ".venv/bin/pytest", a bare "pytest") or the adjacent pair "-m pytest"
+    (module-invocation form). A path, output directory, or database name
+    that merely CONTAINS "pytest" as a substring -- a peer's --outdir, an
+    editor's unrelated tooling, a coincidental name -- has no token whose
+    basename equals it outright, so it can never match however the
+    substring is spelled inside a larger token."""
+    tokens = args.split()
+    for i, tok in enumerate(tokens):
+        if os.path.basename(tok) == "pytest":
+            return True
+        if tok == "-m" and i + 1 < len(tokens) and tokens[i + 1] == "pytest":
+            return True
+    return False
 
 
 def _own_process_tree(lines: list[str], root_pid: int) -> set[int]:
@@ -132,17 +165,24 @@ def _own_process_tree(lines: list[str], root_pid: int) -> set[int]:
     return tree
 
 
-def count_other_pytest(lines: list[str], exclude_pids: set[int]) -> int:
+def other_pytest_matches(lines: list[str], exclude_pids: set[int]) -> list[tuple[int, str]]:
     """Pure matcher over already-collected `ps` output -- no subprocess call
     here, so a test can hand it a self-referential line with no process run
-    at all. A line counts only when its EXECUTABLE is a Python interpreter
-    AND its arguments mention "pytest": an executable check, not a sharper
-    pattern, because any pattern is just more text a text-only match would
-    also see in a shell or grep that merely mentions it in its own
-    arguments (a wait loop's own polling command, for instance) -- those
-    have ucomm "zsh"/"bash"/etc, never a python interpreter, so they are
-    structurally excluded regardless of what their arguments say."""
-    count = 0
+    at all. A line matches only when its EXECUTABLE is a Python interpreter
+    AND _runs_pytest says the runner is actually what's being executed:
+    two structural checks, not a sharper pattern, because any pattern is
+    just more text a text-only match would also see -- in a shell or grep
+    that merely mentions it in its own arguments (a wait loop's own
+    polling command), or in a path/directory/database name that merely
+    contains the word (an --outdir, a peer's --db-name). The executable
+    check rejects the former (ucomm "zsh"/"bash"/etc is never a python
+    interpreter); the tokenised basename check in _runs_pytest rejects the
+    latter (a substring has no token whose basename equals the runner).
+
+    Returns (pid, args) per match rather than just a count -- a count
+    can't say whose run it is, and whose run it is is what a waiting
+    session actually needs to know."""
+    matches = []
     for line in lines:
         parsed = _parse_process_line(line)
         if parsed is None:
@@ -150,25 +190,54 @@ def count_other_pytest(lines: list[str], exclude_pids: set[int]) -> int:
         pid, _ppid, ucomm, args = parsed
         if pid in exclude_pids:
             continue
-        if "python" in ucomm.lower() and "pytest" in args:
-            count += 1
-    return count
+        if "python" in ucomm.lower() and _runs_pytest(args):
+            matches.append((pid, args))
+    return matches
 
 
-def _other_pytest_count() -> int:
+def count_other_pytest(lines: list[str], exclude_pids: set[int]) -> int:
+    """How many other pytest processes -- see other_pytest_matches for the
+    predicate. Kept as its own pure entry point since some callers (and
+    the existing tests) only need the number."""
+    return len(other_pytest_matches(lines, exclude_pids))
+
+
+def _invocation_label(args: str, max_len: int = 60) -> str:
+    """A short, recognisable slice of `args` for the progress line: start
+    at the runner token (direct or "-m pytest" form) and run to the end,
+    trimmed to `max_len` chars. Recognisability, not completeness -- this
+    names which suite is running, it does not dump the full command
+    line."""
+    tokens = args.split()
+    start = 0
+    for i, tok in enumerate(tokens):
+        if os.path.basename(tok) == "pytest":
+            start = i
+            break
+        if tok == "-m" and i + 1 < len(tokens) and tokens[i + 1] == "pytest":
+            start = i + 1
+            break
+    label = " ".join(tokens[start:])
+    if len(label) > max_len:
+        label = label[: max_len - 3] + "..."
+    return label
+
+
+def _other_pytest_matches() -> list[tuple[int, str]]:
     lines = _process_lines()
-    return count_other_pytest(lines, _own_process_tree(lines, os.getpid()))
+    return other_pytest_matches(lines, _own_process_tree(lines, os.getpid()))
 
 
 def _wait_for_the_machine(max_others: int, poll_seconds: float = 5.0) -> None:
     last_print = 0.0
     while True:
-        count = _other_pytest_count()
-        if count <= max_others:
+        matches = _other_pytest_matches()
+        if len(matches) <= max_others:
             return
         now = time.monotonic()
         if now - last_print >= 60:
-            print(f"waiting: {count} other pytest processes", file=sys.stderr)
+            named = ", ".join(f"{pid}:{_invocation_label(args)}" for pid, args in matches)
+            print(f"waiting: {len(matches)} other pytest processes -- {named}", file=sys.stderr)
             last_print = now
         time.sleep(poll_seconds)
 

@@ -58,13 +58,17 @@ scripts/ladder.py <worktree> <db_url> <outdir> hotfix
   included) has finished. The process exits non-zero if any run's
   returncode was non-zero.
 - Before every pytest run (not the trailing `makemigrations`/`check` pair) the script waits for
-  at most `--max-others` other pytest processes machine-wide, printing
-  `waiting: N other pytest processes` to stderr every 60s. It counts by listing processes with
-  one `ps` call and matching in Python -- a line counts only when its executable is a Python
-  interpreter and its arguments mention the runner, and its own pid and process tree are
-  excluded -- never by shelling out with the pattern on the command line it then searches,
-  which used to make the watcher count its own reflection. Default `1` -- AGENTS.md's "at most
-  two full suites" (this run plus one other); pass `0` for a peer-agreed stricter cap.
+  at most `--max-others` other pytest processes machine-wide. It lists processes with one `ps`
+  call and matches in Python -- a line matches only when its executable is a Python interpreter
+  AND some argument token IS the runner outright (its own basename is exactly `pytest`, or it
+  forms the `-m pytest` pair), and its own pid and process tree are excluded -- never by
+  shelling out with the pattern on the command line it then searches (a watcher counting its
+  own reflection), and never by matching the word anywhere in the text (a real Python process
+  whose path, `--outdir`, or `--db-name` merely contains it). Every 60s it prints one line
+  naming each match by pid and a trimmed invocation, not just a count --
+  `waiting: N other pytest processes -- <pid>:<label>, ...` -- because a count can't say whose
+  run is holding the machine or how far along it is. Default `1` -- AGENTS.md's "at most two
+  full suites" (this run plus one other); pass `0` for a peer-agreed stricter cap.
 - **Pausing** is `kill -STOP <ladder.py's own pid>` (not its process group).
   Its in-flight pytest subprocess is a separate process and keeps running to
   completion regardless -- the result still lands in that run's `.log` and
@@ -96,7 +100,9 @@ exclusion than the last -- sharpness is exactly what didn't help. Only the two t
 actually run against a machine in a known state, once with a real pytest run present and once
 confirmed absent, ever gave a right answer. Whoever changes `count_other_pytest` owes it the
 same before trusting it: run it both directions against known ground truth -- the check's own
-output is the evidence, not the reasoning that produced it.
+output is the evidence, not the reasoning that produced it. Do not count matching processes;
+read their arguments and say which suite is running -- a count cannot tell you whose run it is,
+and whose run it is turns out to be the thing every session actually needs to know.
 
 ## Failure modes
 
