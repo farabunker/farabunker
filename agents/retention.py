@@ -10,19 +10,21 @@ that may not import each other.
 
 THE FILES BAND, not the rows band, and deliberately: this handler must
 READ the conversation's turns (their artifacts and their tool payloads)
-before it deletes them, AND it reaches bytes on disk through the
-registered artifact purge. A handler that must do both registers in the
-FILES band and orders its own reads before its own writes internally --
-which keeps the registry's ordering rule to one field with two values
-instead of a general dependency graph nothing else needs.
+before it deletes them, and a handler that must both read and write
+orders its own work internally -- which keeps the registry's ordering
+rule to one field with two values instead of a general dependency graph
+nothing else needs.
 """
 from __future__ import annotations
 
 import logging
 import uuid
 
-from agents.contracts.artifacts import artifact_purge, parse_artifact
+from django.utils.module_loading import import_string
+
+from agents.contracts.artifacts import artifact_children, parse_artifact
 from agents.models import Conversation, Share, ToolInvocation, Turn
+from identity.contracts.retention import KIND_VISION_JOB
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +149,7 @@ def purge_conversation(key: str) -> int:
     is not a UUID at all -- is not an error: the item may have been hard
     -deleted by an older path while its ticket stood.
 
-    ORDER, and every step's reason -- BYTES LAST:
+    ORDER, and every step's reason:
       1. collect (see `_collect`) -- nothing is deleted yet;
       2. the row deletes: this conversation's `Share` rows, then
          `agents.attachments.delete_attachments_for` (which reaches
@@ -156,24 +158,16 @@ def purge_conversation(key: str) -> int:
          stream-contained ones lose only their claim; a failure here now
          PROPAGATES rather than degrading to zero), then
          `conversation.delete()`, with `Turn` going by CASCADE;
-      3. the tool-record scrub, on the invocation ids from step 1;
-      4. LAST: hand the references and generation ids collected in step
-         1 to the registered artifact purge -- called whenever a
-         handler IS registered, even with two empty lists, so the
-         registered handler decides for itself whether there is
-         anything to do rather than this column silently deciding on
-         its behalf. It maps them to jobs, dedupes by job, and deletes
-         each job with its files and its queue row. Everything this
-         step needs was read in step 1, before any row existed to go
-         stale, so moving it last costs nothing -- and means every ROW
-         this function owns is already gone before a single FILE on
-         disk is touched: if step 2 or 3 raises, this step never runs
-         at all (see `TestBytesGoLast` in `agents/tests/
-         test_retention.py`), the whole purge rolls back (the attachment
-         cleanup's own propagation, above, makes that true for step 2),
-         and no file was ever
-         deleted for a conversation whose ticket just survived to be
-         retried.
+      3. the tool-record scrub, on the invocation ids from step 1.
+
+    **A conversation's generated images are NOT destroyed here.** Each
+    one carries a ticket of its own, written when this conversation was
+    deleted (`conversation_children` below), and is destroyed by the
+    image column's own handler on that ticket's date -- or, when
+    somebody clicks "Delete permanently" on this conversation, by the
+    same click, after this function has finished: the purge runs this
+    item's row handlers first and destroys its children's bytes
+    afterwards. This function therefore reaches no file on disk at all.
 
     A DELIBERATE, HONEST LEFTOVER: `agents.models.
     WorkstreamTaint.first_conversation` keeps this conversation's id BY
@@ -187,7 +181,7 @@ def purge_conversation(key: str) -> int:
     except (ValueError, AttributeError, TypeError):
         return 0
 
-    refs, generation_ids, invocation_ids = _collect(conversation_id)
+    _refs, _generation_ids, invocation_ids = _collect(conversation_id)
 
     removed = 0
 
@@ -204,9 +198,34 @@ def purge_conversation(key: str) -> int:
 
     removed += scrub_tool_records(invocation_ids)
 
-    purge = artifact_purge()
-    if purge is not None:
-        from django.utils.module_loading import import_string
-        removed += import_string(purge)(refs, generation_ids)
-
     return removed
+
+
+def conversation_children(key: str) -> list[tuple[str, str]]:
+    """The tickets that go with this conversation's own: one per
+    generation its turns reached.
+
+    THE SAME COLLECT STEP THE PURGE USES, not a second copy of it --
+    both channels, the `output:`/`input:` artifact references and the
+    `data["id"]` generation ids that catch a job which failed and minted
+    no output at all.
+
+    ASKED AT DELETE TIME, and the conversation's turns are the only
+    truth about what it reached. Nothing here writes anything; the
+    tickets the answer becomes are what restore and permanent delete
+    follow afterwards.
+
+    WITH NOTHING REGISTERED ON THE SLOT -- a box with the image column
+    uninstalled -- this answers `[]`, and a chat delete tickets only the
+    chat, which is the honest answer on that box.
+    """
+    try:
+        conversation_id = uuid.UUID(str(key))
+    except (ValueError, AttributeError, TypeError):
+        return []
+    dotted = artifact_children()
+    if dotted is None:
+        return []
+    refs, generation_ids, _invocation_ids = _collect(conversation_id)
+    return [(KIND_VISION_JOB, str(job_key))
+            for job_key in import_string(dotted)(refs, generation_ids)]

@@ -1,15 +1,19 @@
-"""What `tools/vision` destroys, for a deleted conversation and for one
-deleted generation on its own ticket.
+"""What `tools/vision` destroys, for a deleted conversation's images and
+for one deleted generation on its own ticket.
 
-TWO THINGS ARE REGISTERED HERE. `purge_artifacts` answers
-`agents.contracts.artifacts.register_artifact_purge`, a single slot,
+TWO THINGS ARE REGISTERED HERE. `resolve_artifact_jobs` answers
+`agents.contracts.artifacts.register_artifact_children`, a single slot,
 because the agents column COMPUTES the references and exactly one tool
 column knows what they mean -- the same shape
 `agents.contracts.attachments.register_attachment_cleanup` already has.
-`purge_job` answers the `vision_job` kind's own retention handler
-(`identity.contracts.cascades.register_retention_handler`,
+It RESOLVES and destroys nothing: the job keys it answers are what
+`agents.retention.conversation_children` turns into tickets of their
+own, one per generation, rather than a silent destruction on the
+conversation's own date. `purge_job` answers the `vision_job` kind's own
+retention handler (`identity.contracts.cascades.register_retention_handler`,
 `tools/vision/apps.py::VisionConfig.ready()`), for a generation deleted
-on its own, through the gallery, with a ticket of its own.
+on its own -- through the gallery, or through the child ticket a
+conversation's delete wrote for it.
 
 NEITHER FUNCTION IN THIS MODULE QUERIES `GenerationJob.objects` ITSELF:
 both resolve to job ids or keys and hand them to `tools.vision.services`
@@ -123,13 +127,6 @@ def resolve_artifact_jobs(refs, generation_ids) -> list[str]:
                 "tools.vision.retention: one generation id failed to parse; ignored.")
 
     return sorted(services.existing_job_ids(job_ids))
-
-
-def purge_artifacts(refs, generation_ids) -> int:
-    """Today's conversation-purge slot: resolve, then delete. The next
-    change retires this in favour of the child tickets
-    `resolve_artifact_jobs` feeds."""
-    return services.delete_jobs(resolve_artifact_jobs(refs, generation_ids))
 
 
 def purge_job(key: str) -> int:

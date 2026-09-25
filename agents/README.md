@@ -802,7 +802,8 @@ deleted items for" control made possible.
 `agents/retention.py::purge_conversation` is where the HARD
 side lands, registered under `agents.apps.AgentsConfig.ready()` as a
 `RetentionHandler(kind=KIND_CONVERSATION, key="agents.conversation",
-handler="agents.retention.purge_conversation", order=ORDER_FILES)` —
+handler="agents.retention.purge_conversation", order=ORDER_FILES,
+children="agents.retention.conversation_children")` —
 the FILES band, deliberately: this handler must READ a conversation's
 turns before it deletes them, so it collects everything it needs first,
 then writes. `identity.cascades.run_retention` calls it, inside the one
@@ -810,20 +811,23 @@ then writes. `identity.cascades.run_retention` calls it, inside the one
 (a nested savepoint per handler), so a conversation's ticket and its
 content can never disagree about whether the item still exists.
 
-The collect step reads three things off every one of the conversation's
-turns before any row is touched: `output:<id>` / `input:<id>` artifact
-references (`document:<id>` is left alone — that is a `Document` row
-the attachment seam already reaches, never handed to the image column);
-`data["id"]` on any turn whose JSON `data` is a dict with a UUID-shaped
-`"id"` — the channel that catches a generation job that reached the
-engine and FAILED, minting no output at all, so the artifact channel
-alone would miss it entirely; and every non-null `invocation_id`,
-collected here because `Turn.invocation` is `SET_NULL` — once the turns
-are gone there is no path left from the conversation to its tool
-records at all. An artifact reference that fails to parse is dropped
-and logged by TURN ID AND CONVERSATION ID only — never the raw stored
-string, because a deletion path must not write the content it is
-destroying into a log.
+The collect step (`agents/retention.py::_collect`) reads three things off
+every one of the conversation's turns before any row is touched:
+`output:<id>` / `input:<id>` artifact references (`document:<id>` is left
+alone — that is a `Document` row the attachment seam already reaches,
+never handed to the image column); `data["id"]` on any turn whose JSON
+`data` is a dict with a UUID-shaped `"id"` — the channel that catches a
+generation job that reached the engine and FAILED, minting no output at
+all, so the artifact channel alone would miss it entirely; and every
+non-null `invocation_id`, collected here because `Turn.invocation` is
+`SET_NULL` — once the turns are gone there is no path left from the
+conversation to its tool records at all. An artifact reference that
+fails to parse is dropped and logged by TURN ID AND CONVERSATION ID
+only — never the raw stored string, because a deletion path must not
+write the content it is destroying into a log. THE SAME COLLECT STEP
+FEEDS `conversation_children` (below), which the delete calls, not the
+purge — one function, read from two callers at two different moments,
+rather than two copies of the same walk.
 
 The row deletes follow: the conversation's `Share` rows, then
 `agents.attachments.delete_attachments_for` (which reaches `tools.rag.
@@ -840,19 +844,27 @@ the shell (principal, tool key, outcome, timings) kept, because that
 shell IS the machine audit trail. **Scrubbed inline with the same
 purge, always, with no setting and no second date.**
 
-LAST — bytes last — the refs and
-generation ids from the collect step are handed to the ONE registered
-artifact-purge slot (`agents.contracts.artifacts.register_artifact_
-purge` / `artifact_purge`, resolved by dotted path, never imported —
-`agents/` may not import `tools/` at all) whenever a handler IS
-registered, even with two empty lists, so that handler decides for
-itself whether there is anything to do. With nothing registered
-(vision uninstalled) the slot is a no-op and the purge still completes.
-Running this step last, after every row delete and the scrub, means a
-failure anywhere upstream of it (the attachment cleanup, say) never
-reaches it at all — the files it would have deleted from disk, which
-no database rollback can restore, are only ever touched once every row
-this function owns is already gone.
+**A conversation's generated images are NOT destroyed by this
+function at all** — that is the whole point of `children`. At DELETE
+time (`identity.retention.delete_content`, before any row above is
+touched), `agents.retention.conversation_children` runs the same
+collect step, hands the refs and generation ids to the ONE registered
+artifact-children slot (`agents.contracts.artifacts.
+register_artifact_children` / `artifact_children`, resolved by dotted
+path, never imported — `agents/` may not import `tools/` at all), and
+turns every job key the resolver answers into a `("vision_job",
+<job key>)` pair. `identity.retention.delete_content` writes each pair
+as an ordinary `DeletionTicket`, linked back to the conversation's own
+ticket via `parent`, with the SAME `purge_on` date. With nothing
+registered on the slot (vision uninstalled) `conversation_children`
+answers `[]`, and a chat delete tickets only the chat — the honest
+answer on that box. Each image is then destroyed by the image column's
+own registered handler, on its own ticket, either on its own date or
+— when somebody clicks "Delete permanently" on the conversation — by
+that same click, AFTER this function's own row handlers have finished
+(`identity.retention.purge_ticket` runs an item's own handlers before
+any child's), so bytes still go after rows even though the row that
+decides which bytes was written well before either purge ran.
 
 Every step is IDEMPOTENT: a re-run on a conversation that is already
 gone, or on one only partly torn down by an earlier failed purge,

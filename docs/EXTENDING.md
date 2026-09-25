@@ -587,6 +587,52 @@ authored rather than content, say, or a container whose contents each carry thei
 exemption is a sentence somebody writes and a reviewer reads; that is the point of a list rather
 than a default.
 
+### When your item's delete should also ticket something else: `children`
+
+`RetentionHandler.children` is OPTIONAL — a second dotted-path string beside `handler`, with the
+signature `(key: str) -> list[tuple[str, str]]`, returning `(kind, key)` pairs for whatever else
+this item's delete should ticket. `agents/apps.py`'s conversation handler is the shipped example:
+a deleted chat's generated images are content of their own, on their own table, with their own
+visibility rule, and a delete that hid the chat while leaving them in the gallery would be a box
+whose "delete" and whose "destroy" disagreed.
+
+```python
+register_retention_handler(RetentionHandler(
+    kind=KIND_CONVERSATION,
+    key="agents.conversation",
+    label="Conversation and turns",
+    handler="agents.retention.purge_conversation",
+    order=ORDER_FILES,
+    children="agents.retention.conversation_children",
+))
+```
+
+**It is asked exactly ONCE, at `delete_content` time** — inside the same transaction that writes
+the parent's own `DeletionTicket` — never again later, and never at purge time. That is why it
+must be **side-effect-free**: it only reads, and it must not depend on anything the purge itself
+would otherwise delete first, because by the time a purge runs, the answer has already been
+turned into rows.
+
+**What its answer becomes.** Each `(kind, key)` pair the resolver returns is written as an
+ORDINARY `DeletionTicket` — its own row, its own date on the Deleted page (the SAME `purge_on` as
+the parent, stamped once, never recomputed), its own registered handler, its own restore — linked
+back to the ticket this delete just created through `DeletionTicket.parent`. A child ticket is not
+a different kind of row; it is an item that happens to have arrived with another item's delete.
+
+**The order guarantee at purge.** `identity.retention.purge_ticket` runs the parent's OWN
+registered handlers first, then purges each child in turn — so a child's bytes are never destroyed
+before the parent's own row handlers have finished. It is not the stronger claim it can look like:
+the parent's own handlers can themselves be `ORDER_FILES` and remove bytes of their own, so a
+child's rows can go after the parent's own bytes are already gone. What the order DOES promise is
+scoped to the parent/child boundary, not to every byte in the whole cascade.
+
+**A child restored, or deleted, on its own stays that way.** `restore_content` and `purge_ticket`
+both follow the `parent` link FORWARD ONLY: restoring the parent removes the children that arrived
+with it, but a child somebody already restored on its own — or one that already had its own ticket
+before this delete ran — has no link to follow and is left exactly as it is. The resolver is never
+asked again to decide whether a ticket somebody else's delete or restore created should move; the
+link recorded once at `delete_content` time is the only thing either operation reads.
+
 ## Adding a settings page
 
 Five steps get a control onto a page and into the sidebar; a further set,

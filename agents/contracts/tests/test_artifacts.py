@@ -30,9 +30,9 @@ import pytest
 from django.urls import reverse
 
 from agents.contracts.artifacts import (
-    ARTIFACT_KINDS, ArtifactFile, ArtifactLabels, artifact_purge, artifact_title,
+    ARTIFACT_KINDS, ArtifactFile, ArtifactLabels, artifact_children, artifact_title,
     artifact_url_name, file_resolver_for, labels_resolver_for, mint_artifact, parse_artifact,
-    register_artifact_file_resolver, register_artifact_labels, register_artifact_purge,
+    register_artifact_children, register_artifact_file_resolver, register_artifact_labels,
 )
 from agents.contracts import artifacts as artifacts_module
 from agents.contracts.tests._helpers import isolated_file_resolver_registry, isolated_labels_registry  # noqa: F401
@@ -266,23 +266,23 @@ class TestArtifactFileShape:
 
 @pytest.fixture(autouse=True)
 def _isolated_slot():
-    """This module writes the single artifact-purge global, so it saves
-    and restores it -- the same discipline every registry test in this
-    codebase follows (`identity/tests/test_cascades.py::
+    """This module writes the single artifact-children global, so it
+    saves and restores it -- the same discipline every registry test in
+    this codebase follows (`identity/tests/test_cascades.py::
     _isolated_registry`). Without it, `"pkg.other.fn"` below would be
-    resolved by the next conversation purge in the same process."""
-    saved = artifacts_module._ARTIFACT_PURGE
+    resolved by the next conversation delete in the same process."""
+    saved = artifacts_module._ARTIFACT_CHILDREN
     yield
-    artifacts_module._ARTIFACT_PURGE = saved
+    artifacts_module._ARTIFACT_CHILDREN = saved
 
 
-class TestTheArtifactPurgeSlot:
+class TestTheArtifactChildrenSlot:
     def test_it_is_one_slot_not_a_per_kind_dict(self):
-        register_artifact_purge("pkg.mod.fn")
-        assert artifact_purge() == "pkg.mod.fn"
-        register_artifact_purge("pkg.other.fn")
-        assert artifact_purge() == "pkg.other.fn"
+        register_artifact_children("pkg.mod.fn")
+        assert artifact_children() == "pkg.mod.fn"
+        register_artifact_children("pkg.other.fn")
+        assert artifact_children() == "pkg.other.fn"
 
     def test_it_refuses_a_path_that_is_not_dotted(self):
         with pytest.raises(ValueError, match="dotted path"):
-            register_artifact_purge("notdotted")
+            register_artifact_children("notdotted")

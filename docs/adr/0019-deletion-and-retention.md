@@ -87,6 +87,23 @@ nullable self-reference, indexed, added to the feature's single migration (`iden
 in place rather than followed by a second one, because that migration has never run anywhere but
 test and preview databases).
 
+**A deleted item's dependents get tickets of their own.** The `parent` column above records the
+link; `RetentionHandler.children` is the mechanism that decides who gets one. Before it, a
+conversation's generated images had no delete of their own at all: the chat's own purge reached
+into the gallery and destroyed them directly, silently, on the chat's own date — hidden the moment
+the chat was, but never disclosed as its own deleted item, never individually restorable, and
+never shown a date of its own. The fix is one OPTIONAL dotted-path resolver, `(key: str) ->
+list[tuple[str, str]]`, asked exactly ONCE, inside `delete_content`'s own transaction, before a
+single row is touched — it only reads, because by the time a purge runs, the answer has already
+become rows. Each pair it returns is written as an ordinary ticket, linked back to the parent via
+`parent`, with the same `purge_on` date. At purge, `purge_ticket` runs the parent's own registered
+handlers first and destroys each child afterward, so a child's bytes are never removed before the
+item that named it has finished its own row work — the filesystem-last rule, one level deeper.
+Two things follow that a person can observe: restoring the chat restores its pictures with it, and
+a picture restored on its own — or deleted on its own before the chat ever was — survives the
+chat's later permanent delete, because somebody already said to keep it, or was already shown a
+date of its own for it, and `parent` is followed forward only, never backward, to find that out.
+
 ### 3. The retention namespace lives on the existing cascade registry, not a second one
 
 `identity/contracts/cascades.py` already held `EntitlementCascade` — the registry an entitlement

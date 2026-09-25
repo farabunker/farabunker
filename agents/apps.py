@@ -155,9 +155,8 @@ class AgentsConfig(AppConfig):
         # ARRIVED", as a DOTTED-PATH STRING so `identity/` can run it
         # without importing `agents/` (import-law rule 4) -- the same
         # mechanism, and the same reason, as the entitlement cascades
-        # just above. FILES band: the handler reads the turns' artifacts
-        # before it deletes them and reaches bytes through the registered
-        # artifact purge.
+        # just above. FILES band: the handler must READ the turns'
+        # artifacts before it deletes them.
         from identity.contracts.cascades import (
             ORDER_FILES, RetentionHandler, register_retention_handler,
         )
@@ -169,6 +168,11 @@ class AgentsConfig(AppConfig):
             label="Conversation and turns",
             handler="agents.retention.purge_conversation",
             order=ORDER_FILES,
+            # A deleted chat's images are content of their own and get
+            # tickets of their own, not a silent destruction on the
+            # chat's own date. The answer is computed from the chat's
+            # turns at the moment of the delete, not recomputed later.
+            children="agents.retention.conversation_children",
         ))
 
         # THE OTHER DIRECTION ON THE SAME THREE TABLES. The cascades

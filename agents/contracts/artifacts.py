@@ -272,30 +272,38 @@ def file_resolver_for(kind: str) -> str | None:
 # exactly one tool column knows what they mean. `tools/rag` needs no
 # registration here, because a `document:<id>` artifact is a `Document`
 # row the attachment seam already reaches.
-_ARTIFACT_PURGE: str | None = None
+_ARTIFACT_CHILDREN: str | None = None
 
 
-def register_artifact_purge(dotted_path: str) -> None:
-    """Register the function that destroys the rows and bytes behind a
-    conversation's artifact references.
+def register_artifact_children(dotted_path: str) -> None:
+    """Register the function that says WHICH GENERATIONS a
+    conversation's artifact references and generation ids name.
 
     Signature `(refs: Sequence[str], generation_ids: Sequence[str]) ->
-    int` -- ONE MODE, like every retention handler, and for the reason
-    `identity.contracts.cascades.RetentionHandler` gives: a deletion's
-    confirmation is the Deleted page, not a number.
+    list[str]` -- job keys, destroying nothing.
 
-    A DOTTED PATH, resolved at purge time by the caller, never imported
+    **The name changed with the job:** this slot used to hand a tool
+    column a list and let it delete; it now asks a question, because
+    each of those generations is given a deletion of its own -- its own
+    ticket, its own date on the Deleted page, its own restore --
+    instead of being destroyed silently on another item's date.
+
+    ONE SLOT, NOT A PER-KIND DICT, for the reason it always was: the
+    agents column COMPUTES the values and exactly one tool column knows
+    what they mean.
+
+    A DOTTED PATH, resolved at delete time by the caller, never imported
     here -- `agents/` may not import `tools/` at all.
     """
     if "." not in dotted_path:
         raise ValueError(
-            f"register_artifact_purge needs a dotted path, got {dotted_path!r}")
-    global _ARTIFACT_PURGE
-    _ARTIFACT_PURGE = dotted_path
+            f"register_artifact_children needs a dotted path, got {dotted_path!r}")
+    global _ARTIFACT_CHILDREN
+    _ARTIFACT_CHILDREN = dotted_path
 
 
-def artifact_purge() -> str | None:
-    """The registered purge path, or `None` when nothing is -- which is
-    the common case on a box with the image column uninstalled, and is
-    not an error."""
-    return _ARTIFACT_PURGE
+def artifact_children() -> str | None:
+    """The registered resolver path, or `None` when nothing is -- which
+    is the common case on a box with the image column uninstalled, and
+    is not an error."""
+    return _ARTIFACT_CHILDREN

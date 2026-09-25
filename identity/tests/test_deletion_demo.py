@@ -224,6 +224,53 @@ class TestTheDemo:
                 assert Path(world.output_path).exists()
             assert world.chunk_count_for_document() == 1
 
+    def test_step_2c_the_image_is_hidden_listed_and_unfetchable(self, client, world):
+        """THE WHOLE POINT OF THE CHILD TICKET: the picture goes when
+        the chat goes, it is NAMED on the Deleted page with its own
+        date, and its direct URL stops answering -- rather than sitting
+        in the gallery until a date nobody was shown."""
+        if "vision" not in settings.FARABUNKER_FEATURES:
+            pytest.skip("the image column is not installed in this flag state")
+        with posture("personal"):
+            sign_in(client, world.user)
+            client.post(reverse("chat-conversation-delete",
+                                args=[world.conversation.id]))
+            principal = user_principal(world.user)
+
+            from tools.vision.visibility import visible_jobs
+            assert list(visible_jobs(principal)) == []
+            assert client.get(reverse("vision-output-file",
+                                      args=[world.output.pk])).status_code == 404
+
+            child = DeletionTicket.objects.get(kind=copy.KIND_VISION_JOB,
+                                               key=str(world.job.pk))
+            parent = DeletionTicket.objects.get(kind=copy.KIND_CONVERSATION)
+            assert child.parent_id == parent.pk
+            assert child.purge_on == parent.purge_on
+            body = client.get(reverse("identity-deleted")).content.decode()
+            assert copy.KIND_LABELS[copy.KIND_VISION_JOB] in body
+            # The row is still there and the bytes are still on disk --
+            # deleted is not destroyed.
+            assert Path(world.output_path).exists()
+
+    def test_step_2d_restoring_the_chat_restores_its_image(self, client, world):
+        if "vision" not in settings.FARABUNKER_FEATURES:
+            pytest.skip("the image column is not installed in this flag state")
+        with posture("personal"):
+            sign_in(client, world.user)
+            client.post(reverse("chat-conversation-delete",
+                                args=[world.conversation.id]))
+            ticket = DeletionTicket.objects.get(kind=copy.KIND_CONVERSATION)
+            client.post(reverse("identity-deleted-restore", args=[ticket.pk]))
+
+            from tools.vision.visibility import visible_jobs
+            principal = user_principal(world.user)
+            assert [job.pk for job in visible_jobs(principal)] == [world.job.pk]
+            assert not DeletionTicket.objects.filter(
+                kind=copy.KIND_VISION_JOB).exists()
+            assert client.get(reverse("vision-output-file",
+                                      args=[world.output.pk])).status_code == 200
+
     def test_step_2b_restore_brings_it_back_before_step_3_deletes_it_again(
             self, client, world):
         """THE RESTORE DOOR step 2's own notice promises: the same
@@ -246,8 +293,16 @@ class TestTheDemo:
             assert world.conversation in list(visible_conversations(principal))
             assert not DeletionTicket.objects.filter(pk=ticket.pk).exists()
             restored = audit.by_action([CONTENT_RESTORED])
-            assert len(restored) == 1
-            assert restored[0].target_key == str(world.conversation.pk)
+            own = [e for e in restored
+                   if e.target_type == copy.KIND_CONVERSATION
+                   and e.target_key == str(world.conversation.pk)]
+            assert len(own) == 1
+            if "vision" in settings.FARABUNKER_FEATURES:
+                # THE IMAGE CAME BACK TOO -- asserted, not filtered away:
+                # that is the whole point of the child ticket.
+                assert [e.target_key for e in restored
+                        if e.target_type == copy.KIND_VISION_JOB] == [
+                            str(world.job.pk)]
 
             # DELETE AGAIN -- a fresh ticket, so the rest of the demo
             # (step 3's permanent delete) starts from the same state it
@@ -269,13 +324,14 @@ class TestTheDemo:
             assert list(visible_conversations(principal)) == []
             assert not Conversation.objects.filter(pk=world.conversation.pk).exists()
             assert not Turn.objects.filter(conversation_id=world.conversation.pk).exists()
-            # The generated image, its files and its rows -- only reached
-            # by this purge while the artifact-purge slot is registered
-            # (`tools/vision/apps.py::ready()`, gated on the same flag
-            # this checks): with "vision" off nothing registers into
-            # that slot and the row is never destroyed by a conversation
-            # purge, so this assertion would pin a promise the box never
-            # made in that flag state.
+            # The generated image, its files and its rows -- reached
+            # through its OWN child ticket, written when the conversation
+            # was deleted, and purged as this parent's own click reaches
+            # it -- only while `tools/vision/apps.py::ready()` registers
+            # the resolver in the first place: with "vision" off nothing
+            # is registered, no child ticket is written, and the row is
+            # never destroyed by a conversation purge, so this assertion
+            # would pin a promise the box never made in that flag state.
             if "vision" in settings.FARABUNKER_FEATURES:
                 assert not apps.get_model("vision.GenerationJob").objects.filter(
                     pk=world.job.pk).exists()
@@ -296,6 +352,9 @@ class TestTheDemo:
             # And no ticket is left for that conversation.
             assert not DeletionTicket.objects.filter(
                 kind=copy.KIND_CONVERSATION).exists()
+            # NO TICKET OF ANY KIND SURVIVES THE CHAT'S PERMANENT
+            # DELETE: the image's own child ticket goes with it.
+            assert not DeletionTicket.objects.exists()
 
     def test_the_queue_row_survives_until_the_queue_half_lands(self, client, world):
         """QUEUE HALF NOT LANDED, and this test says so rather than
@@ -352,7 +411,11 @@ class TestTheDemo:
                                 args=[world.conversation.id]))
             ticket = DeletionTicket.objects.get(kind=copy.KIND_CONVERSATION)
             client.post(reverse("identity-deleted-purge", args=[ticket.pk]))
-            event = AuditEvent.objects.filter(action=CONTENT_PURGED).get()
+            # THE CONVERSATION'S OWN EVENT, narrowed: in the "vision"
+            # flag state the image writes a `content.purged` event of
+            # its own too, and this test's subject is the conversation's.
+            event = AuditEvent.objects.filter(
+                action=CONTENT_PURGED, target_type=copy.KIND_CONVERSATION).get()
             assert event.target_type == copy.KIND_CONVERSATION
             assert event.target_key == str(world.conversation.pk)
             assert event.target_label == ""

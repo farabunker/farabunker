@@ -1,6 +1,7 @@
 """The two ways `tools/vision` answers a deletion: the registered
-artifact-purge slot (a conversation's references and generation ids to
-the jobs still behind them), and the `vision_job` kind's own registered
+artifact-children resolver (a conversation's references and generation
+ids to the jobs still behind them, fed to `agents.retention.
+conversation_children`), and the `vision_job` kind's own registered
 handler for one generation deleted on its own ticket."""
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ from identity.contracts.cascades import retention_handlers
 from identity.contracts.retention import KIND_VISION_JOB
 from tools.vision import services, store
 from tools.vision.models import GeneratedOutput, GenerationJob, JobInput
-from tools.vision.retention import purge_artifacts, purge_job, resolve_artifact_jobs
+from tools.vision.retention import purge_job, resolve_artifact_jobs
 from tools.vision.tests._helpers import seed_sweep_posture
 
 pytestmark = pytest.mark.django_db
@@ -57,10 +58,10 @@ def _output(**overrides) -> GeneratedOutput:
 
 
 class TestMappingReferencesToJobs:
-    """`resolve_artifact_jobs` -- RESOLVES and deletes nothing. What used
-    to be `purge_artifacts`'s own mapping half, pinned here on its own
-    now that the map is split from the delete (see `retention.py`'s
-    `resolve_artifact_jobs` docstring for why)."""
+    """`resolve_artifact_jobs` -- RESOLVES and deletes nothing. Its
+    answer is what `agents.retention.conversation_children` turns into
+    tickets of their own, one per generation, rather than a destroy
+    (see `retention.py`'s `resolve_artifact_jobs` docstring for why)."""
 
     def test_an_output_reference_resolves_its_whole_job(self):
         job = _generation()
@@ -150,40 +151,14 @@ class TestAFailedParseIsLoggedWithoutWhatItFailedToParse:
     def test_an_unparseable_reference_names_no_raw_value(self, caplog):
         raw = "not-a-reference-xyz789"
         with caplog.at_level("WARNING"):
-            purge_artifacts([raw], [])
+            resolve_artifact_jobs([raw], [])
         assert not any(raw in record.getMessage() for record in caplog.records)
 
     def test_an_unusable_generation_id_names_no_raw_value(self, caplog):
         raw = "not-a-uuid-xyz789"
         with caplog.at_level("WARNING"):
-            purge_artifacts([], [raw])
+            resolve_artifact_jobs([], [raw])
         assert not any(raw in record.getMessage() for record in caplog.records)
-
-
-class TestEmptyInputCostsNothing:
-    """The resolver AND the artifact-purge slot that wraps it are both
-    called on EVERY conversation purge on a vision box, including the
-    common case -- a conversation with no images -- which hands each of
-    them two empty lists. Neither must touch a job, run no engine-side
-    sweep, and cost no more than the mapping itself needs, which is zero
-    queries for empty input."""
-
-    def test_two_empty_lists_return_zero_and_touch_nothing(
-        self, monkeypatch, django_assert_num_queries,
-    ):
-        from tools.vision import retention as module
-
-        called = []
-        monkeypatch.setattr(module.services, "delete_jobs",
-                            lambda job_ids: called.append(list(job_ids)) or 0)
-        with django_assert_num_queries(0):
-            assert resolve_artifact_jobs([], []) == []
-            assert purge_artifacts([], []) == 0
-        # The slot still calls `delete_jobs` on an empty resolve (it is
-        # `resolve_artifact_jobs` then `delete_jobs`, unconditionally) --
-        # what this pins is that the call it makes touches no job: one
-        # call, with an empty list.
-        assert called == [[]]
 
 
 class TestDeleteJobs:
@@ -192,9 +167,9 @@ class TestDeleteJobs:
     first is `existing_job_ids`, which `resolve_artifact_jobs` calls),
     and the one that actually destroys, rather than querying the table
     itself (IA-1's closed set of two, `foundation/ops/tests/
-    test_column_boundaries.py`). Lives beside `purge_artifacts`'s and
-    `purge_job`'s own tests, not `test_services.py`, which this module's
-    own size keeps under the split threshold."""
+    test_column_boundaries.py`). Lives beside `resolve_artifact_jobs`'s
+    and `purge_job`'s own tests, not `test_services.py`, which this
+    module's own size keeps under the split threshold."""
 
     def test_it_deletes_exactly_the_named_jobs_and_leaves_another_alone(self):
         gone = _generation()

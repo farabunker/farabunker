@@ -572,12 +572,14 @@ that path needs no handling.
 `register_artifact_file_resolver` / `file_resolver_for` pair:
 
 ```
-register_artifact_purge(dotted_path: str) -> None
-artifact_purge() -> str | None
+register_artifact_children(dotted_path: str) -> None
+artifact_children() -> str | None
 ```
 
-Handler signature `(refs: Sequence[str], generation_ids: Sequence[str]) -> int` — one mode,
-like every other retention handler and for the reason §3.5 gives.
+Handler signature `(refs: Sequence[str], generation_ids: Sequence[str]) -> list[str]` — job keys,
+which the delete turns into tickets of their own, rather than an `int` handed to a destroyer: each
+generation this resolves is given a deletion of its own, not destroyed silently on the
+conversation's own date.
 A single slot, not a per-kind dict, matching `agents/contracts/attachments.py::
 register_attachment_cleanup`'s own single-slot shape for the same situation: the agents column
 computes values and one tool column knows what they mean. `tools/vision/apps.py` registers it;

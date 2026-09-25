@@ -7,10 +7,10 @@ import uuid
 import pytest
 
 from agents.contracts import artifacts as artifacts_module
-from agents.contracts.artifacts import register_artifact_purge
+from agents.contracts.artifacts import register_artifact_children
 from agents.contracts.tests._helpers import isolated_attachment_registry  # noqa: F401
 from agents.models import Conversation, Share, ToolInvocation, Turn
-from agents.retention import purge_conversation, scrub_tool_records
+from agents.retention import conversation_children, purge_conversation, scrub_tool_records
 from agents.tests._helpers import (
     make_agent, make_conversation, make_turn, make_user, posture, user_principal,
 )
@@ -21,9 +21,9 @@ pytestmark = pytest.mark.django_db
 SEEN: list[tuple[tuple, tuple]] = []
 
 
-def fake_artifact_purge(refs, generation_ids) -> int:
+def fake_artifact_children(refs, generation_ids) -> list[str]:
     SEEN.append((tuple(refs), tuple(generation_ids)))
-    return len(set(refs)) + len(set(generation_ids))
+    return sorted(set(refs) | set(generation_ids))
 
 
 @pytest.fixture
@@ -40,11 +40,11 @@ def real_registration():
 
 @pytest.fixture(autouse=True)
 def _isolated_slot(request):
-    """SAVE, SET, RESTORE -- the single artifact-purge slot is a
+    """SAVE, SET, RESTORE -- the single artifact-children slot is a
     module-level global with no reset path, exactly like the cascade
     registries `identity/tests/test_cascades.py::_isolated_registry`
     protects, and for the same reason: a fake left in place here would
-    be resolved by every later conversation purge in the same pytest
+    be resolved by every later conversation delete in the same pytest
     process -- `identity/tests/test_deletion_demo.py`'s, the Deleted
     page's, the route matrix's owner column -- and the suite runs in
     BOTH collection orders, so ordering luck cannot cover it.
@@ -59,12 +59,12 @@ def _isolated_slot(request):
     if "real_registration" in request.fixturenames:
         yield
         return
-    saved = artifacts_module._ARTIFACT_PURGE
+    saved = artifacts_module._ARTIFACT_CHILDREN
     SEEN.clear()
-    register_artifact_purge(f"{__name__}.fake_artifact_purge")
+    register_artifact_children(f"{__name__}.fake_artifact_children")
     yield
     SEEN.clear()
-    artifacts_module._ARTIFACT_PURGE = saved
+    artifacts_module._ARTIFACT_CHILDREN = saved
 
 
 class TestTheRowsGo:
@@ -144,7 +144,7 @@ class TestFindingTheGeneratedImages:
                   artifacts=["output:1", "output:2"])
         make_turn(conversation=conversation, role="tool", index=1,
                   artifacts=["output:1", "input:9"])
-        purge_conversation(str(conversation.pk))
+        conversation_children(str(conversation.pk))
         refs, _ids = SEEN[0]
         assert sorted(set(refs)) == ["input:9", "output:1", "output:2"]
 
@@ -154,7 +154,7 @@ class TestFindingTheGeneratedImages:
         conversation = make_conversation()
         make_turn(conversation=conversation, role="tool",
                   artifacts=["document:451", "output:3"])
-        purge_conversation(str(conversation.pk))
+        conversation_children(str(conversation.pk))
         refs, _ids = SEEN[0]
         assert list(refs) == ["output:3"]
 
@@ -162,7 +162,7 @@ class TestFindingTheGeneratedImages:
         conversation = make_conversation()
         make_turn(conversation=conversation, role="tool",
                   artifacts=["output:12:extra", "", "output:4"])
-        assert purge_conversation(str(conversation.pk)) >= 0
+        conversation_children(str(conversation.pk))
         refs, _ids = SEEN[0]
         assert list(refs) == ["output:4"]
 
@@ -176,14 +176,14 @@ class TestFindingTheGeneratedImages:
         job_id = str(uuid.uuid4())
         make_turn(conversation=conversation, role="tool", artifacts=[],
                   data={"id": job_id, "status": "failed", "error": "out of memory"})
-        purge_conversation(str(conversation.pk))
+        conversation_children(str(conversation.pk))
         _refs, ids = SEEN[0]
         assert list(ids) == [job_id]
 
     def test_a_turn_with_no_data_contributes_nothing(self):
         conversation = make_conversation()
         make_turn(conversation=conversation, role="assistant", data=None)
-        purge_conversation(str(conversation.pk))
+        conversation_children(str(conversation.pk))
         _refs, ids = SEEN[0]
         assert list(ids) == []
 
@@ -192,17 +192,17 @@ class TestFindingTheGeneratedImages:
         make_turn(conversation=conversation, role="tool", index=0, data=["a", "list"])
         make_turn(conversation=conversation, role="tool", index=1,
                   data={"id": "not-a-uuid"})
-        purge_conversation(str(conversation.pk))
+        conversation_children(str(conversation.pk))
         _refs, ids = SEEN[0]
         assert list(ids) == []
 
-    def test_with_no_slot_registered_the_purge_still_completes(self):
+    def test_with_no_resolver_registered_there_are_no_children(self):
         """Safe to clear here: `_isolated_slot` restores whatever the
         real `tools/vision/apps.py::ready()` registered."""
-        artifacts_module._ARTIFACT_PURGE = None
+        artifacts_module._ARTIFACT_CHILDREN = None
         conversation = make_conversation()
         make_turn(conversation=conversation, role="tool", artifacts=["output:1"])
-        assert purge_conversation(str(conversation.pk)) >= 0
+        assert conversation_children(str(conversation.pk)) == []
 
 
 # `TestAttachmentRowsGoAtPurge`, `_raising_db_cleanup` / `TestTheCleanupSavepoint`
@@ -369,30 +369,30 @@ class TestTheCleanupSavepoint:
         )
 
 
-class TestBytesGoLast:
-    """BYTES LAST: the registered artifact-purge slot
-    deletes generated images' ROWS AND THEIR FILES ON DISK. It used to
-    run right after collect, before any row delete -- so a LATER step
-    raising (the attachment cleanup, say) rolled the row deletes back
-    while the files that slot had already removed from disk stayed
-    gone, unrecoverable. Moved to LAST: every row this function owns
-    goes first, and the artifact purge -- the one step with no
-    rollback -- runs only once nothing upstream of it can still fail."""
+class TestThePurgeTouchesNoImages:
+    """A generated image is no longer destroyed by the conversation's
+    own purge: it has a ticket, a date and a restore of its own, and it
+    is purged under that ticket -- after this handler has finished, so
+    rows still go before bytes. So this handler never reaches a file at
+    all."""
 
-    def test_when_the_attachment_cleanup_raises_the_artifact_purge_is_not_called(
-        self, isolated_attachment_registry,
-    ):
-        from agents.contracts.attachments import register_attachment_cleanup
-
+    def test_the_resolver_is_never_called_by_a_purge(self):
         conversation = make_conversation()
         make_turn(conversation=conversation, role="tool", artifacts=["output:1"])
-        register_attachment_cleanup(
-            "agents.tests.test_retention._raising_db_cleanup")
-
-        with pytest.raises(Exception):
-            purge_conversation(str(conversation.id))
-
+        purge_conversation(str(conversation.pk))
         assert SEEN == []
+
+
+class TestTheChildrenArePairs:
+    def test_each_job_key_becomes_a_vision_job_pair(self):
+        conversation = make_conversation()
+        job_id = str(uuid.uuid4())
+        make_turn(conversation=conversation, role="tool", artifacts=[],
+                  data={"id": job_id, "status": "succeeded"})
+        assert conversation_children(str(conversation.pk)) == [("vision_job", job_id)]
+
+    def test_a_key_that_is_not_a_uuid_answers_empty(self):
+        assert conversation_children("not-a-uuid") == []
 
 
 class TestConversationPurgeCascadesChatScopedDocuments:
@@ -472,7 +472,10 @@ class TestZeroDayEndToEnd:
         from agents.visibility import delete_conversation
         from identity.audit import by_action
         from identity.contracts.actions import CONTENT_PURGED
+        from identity.contracts.retention import KIND_VISION_JOB
+        from identity.tests._helpers import make_generation, make_output
         from tools.rag.models import DocumentAttachment
+        from tools.vision.models import GenerationJob
 
         user = make_user()
         principal = user_principal(user)
@@ -485,6 +488,16 @@ class TestZeroDayEndToEnd:
             doc = make_document(title="Notes.pdf")
             DocumentAttachment.objects.create(document=doc, conversation_id=conversation.id)
 
+            # A REAL GENERATED IMAGE, reached through the same two
+            # channels `TestFindingTheGeneratedImages` pins: the
+            # `output:<id>` artifact reference AND the `data["id"]`
+            # generation id.
+            job = make_generation()
+            output = make_output(job=job)
+            make_turn(conversation=conversation, role="tool", index=1,
+                      artifacts=[f"output:{output.pk}"],
+                      data={"id": str(job.pk), "status": "succeeded"})
+
             delete_conversation(principal, conversation)
 
             assert not Conversation.objects.filter(pk=conversation.pk).exists()
@@ -493,6 +506,12 @@ class TestZeroDayEndToEnd:
                 conversation_id=conversation.id).exists()
             assert not DeletionTicket.objects.filter(
                 kind="conversation", key=str(conversation.pk)).exists()
+            # THE IMAGE'S OWN TICKET AND ROW ARE BOTH GONE TOO: the
+            # zero-day sweep that purges the conversation's own ticket
+            # reaches its child in the same call.
+            assert not DeletionTicket.objects.filter(
+                kind=KIND_VISION_JOB, key=str(job.pk)).exists()
+            assert not GenerationJob.objects.filter(pk=job.pk).exists()
             purged = by_action([CONTENT_PURGED])
             assert any(
                 event.target_type == "conversation"

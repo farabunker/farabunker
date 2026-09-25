@@ -88,6 +88,10 @@ Deleted content therefore leaves your backups **as rotation ages them out**, on 
 schedule you keep. An operator with a retention obligation sets the backup rotation to match the
 deletion date; the two numbers are independent and this platform will not pretend otherwise.
 
+A deleted conversation's generated images are listed individually on the Deleted page, with the
+same date as the conversation itself, and can be restored individually — deleting the chat does
+not leave its pictures sitting in the gallery, unnamed, until a later date nobody was shown.
+
 **Preview stacks are not a backup layer** and are not covered either. A preview stack is a full
 parallel copy with its own database; deleting something on the live box does not touch it. Tear
 one down when you are done with it.
