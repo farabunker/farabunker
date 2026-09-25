@@ -47,21 +47,47 @@ spec's §12 put out of scope. No task here reuses that constant; the reuse is in
 adapter, which this branch touched only through Task 11's two pre-cleared declarations. It
 therefore needs its own track and is named in the spec's §12, not added as a task here.
 
+**But out of scope is not the same as harmless, and this part is present tense.** The
+diagnostic argued that correction should land *before* these tasks executed, because Task 12
+commit 2's refusal bookkeeping counts the results of that poll. These tasks are merged and
+running, so **that bookkeeping is being fed right now** by a poll the diagnosis calls
+meaningless wherever an endpoint's memo carries no footprint: the threshold falls back to the
+bare credibility floor, and a waited call is still made at the admitted job's own endpoints
+and at every believed-resident model — where a `False` is *informative* and increments the
+count. So `MAX_BARRIER_REFUSALS`, `MIN_BARRIER_REFUSAL_SPAN_SECONDS` and
+`BARRIER_HOLDOFF_SECONDS` are today acting on ambient machine drift at those endpoints, in
+both directions: a drift-driven `False` can walk a job toward an honest-looking failure, and a
+drift-driven early exit reads as a successful barrier and **resets** the count. The three
+constants are sound in form and are being fed a signal that is noise. The spec's 2026-09-25
+amendment §C carries the full statement; it is repeated here because a reader of this plan
+would otherwise file the correction as sequencing history.
+
 > **EXPERIMENT-BLOCKED — do not act on these until the confirming experiment has run.**
 > The experiment is mutating, needs the owner's word, an announced window, a restarted engine
 > and a quiet box, and is specified in the diagnostic report.
 >
 > - **The unload timeout's value.** It is at MEDIUM confidence and **cannot be determined
->   read-only**; no number may be invented for it. Two constants in Task 12 commit 2 are sized
->   *against* it — `BARRIER_HOLDOFF_SECONDS` ("comfortably longer than one unload timeout") and,
->   through it, `MIN_BARRIER_REFUSAL_SPAN_SECONDS` — so if that timeout moves, both must be
->   re-derived in the same change, together with the per-tick unload budget's arithmetic, which
->   prices one call at the same figure. Both sites carry this marker.
+>   read-only**; no number may be invented for it. **Four constants are sized against it**, and
+>   every one of them must be re-derived in the same change if it moves:
+>   `BARRIER_HOLDOFF_SECONDS` (Task 12 commit 2, whose comment requires it to be comfortably
+>   longer than one unload timeout) and, through it, `MIN_BARRIER_REFUSAL_SPAN_SECONDS`; plus
+>   the two in the shipped worker that this plan consumes without introducing —
+>   `MAX_UNLOADS_PER_TICK`, set to two precisely so that two calls at this timeout stay inside
+>   the staleness cutoff, and `STALE_AFTER_SECONDS`, whose own margin is reasoned from that
+>   same product. All four sites carry this marker.
 > - **Any budget rule sized against an eviction's transient peak.** Mechanism B predicts an
 >   unload transiently needs up to the model's size *again*; the magnitude is unmeasured and is
 >   the experiment's question.
+> - **Any admission headroom derived from a recorded image-engine footprint.** That number is
+>   biased **low**, by an unmeasured amount that grows with the size of the load, so it is a
+>   floor of unknown depth rather than a ceiling. Keep-the-maximum makes it monotonic, not an
+>   upper bound.
 >
-> Everything else in the diagnosis is read-only-verified and may be acted on.
+> **The durations quoted anywhere in this amendment — the settle observations, the idle drift
+> band, the spread between a quiet and a loaded box — are uncontrolled observations from the
+> proof captures, never measurements of the largest checkpoint at a known pressure level. None
+> of them may be used to derive a constant.** Everything else in the diagnosis is
+> read-only-verified and may be acted on.
 
 ---
 
@@ -608,12 +634,17 @@ FOOTPRINT_DIP_WARNING_RATIO = 0.75
 > **Correction, 2026-09-25 (engine diagnosis amendment).** The comment above — shipped as
 > written — says a smaller dip "is recorded at INFO, so the refusal is still visible". The
 > **ratio is confirmed correct**: it fired on both real incidents (0.57 and 0.62), and both
-> WARNING lines were verified visible at default logging. The "still visible" half is false:
-> **INFO is invisible at this platform's default logging configuration**, so a dip between the
-> ratio and 1.0 is silent, and on a large model that silent band is gigabytes. Raising the
-> level on the **absolute** dip as well as the ratio is the named improvement; it is not taken
-> here, because this track is merged and the change belongs to its own commit. See the spec's
-> 2026-09-25 amendment, §B.
+> WARNING lines were verified visible at default logging. The "still visible" half does not
+> hold **for this line**: the configuration raises exactly two namespaces to INFO — the
+> queue's and the engine adapters' — and everything else falls back to the root's WARNING.
+> This line is the **registry's**, which is not one of the two, so today the INFO dip is not
+> emitted at all and the band between the ratio and 1.0 is silent; on a large model that band
+> is gigabytes. *(A branch in flight adds the registry to those namespaces. The sentence is
+> still wrong afterwards: the line would then be emitted, but at INFO, in the same stream as
+> the eviction pass's per-unload INFO chatter — which is not what "still visible" was
+> claiming.)* Raising the level on the **absolute** dip as well as the ratio is the named
+> improvement; it is not taken here, because this track is merged and the change belongs to
+> its own commit. See the spec's 2026-09-25 amendment, §B.
 
 Replace `record_measured_footprint`'s body with a thin wrapper over one shared writer, and add its rung-3 twin:
 
@@ -1869,6 +1900,13 @@ SLEEP_DETECT_SECONDS = 60
 SLEEP_GRACE_SECONDS = 30
 ```
 
+> **EXPERIMENT-BLOCKED, 2026-09-25 (engine diagnosis amendment) — second-order.** This
+> constant is sized against `STALE_AFTER_SECONDS`, which is itself reasoned from the per-tick
+> unload cap multiplied by the image engine's unload timeout — a figure now at MEDIUM
+> confidence that cannot be determined read-only. Nothing here is wrong today; the marker
+> exists so that a future change to that timeout re-derives this constant too, rather than
+> leaving a grace period sized against a cutoff that has moved underneath it.
+
 In `__init__`: `self._last_tick_wall: float | None = None`, `self._last_tick_monotonic: float | None = None`, `self._sweep_skip_until: float | None = None`.
 
 At the top of `tick()`, before the claim:
@@ -3106,6 +3144,14 @@ class TestTheInFlightRefsMapNeverLeaks:
         `limit` caps the calls issued here, for the budget-driven pass's
         share of `MAX_UNLOADS_PER_TICK`; `None` is uncapped.
 
+        EXPERIMENT-BLOCKED (2026-09-25, engine diagnosis amendment):
+        `MAX_UNLOADS_PER_TICK` is two precisely so that two calls at the
+        image engine's unload timeout stay comfortably inside
+        `STALE_AFTER_SECONDS`. That timeout is at MEDIUM confidence and
+        cannot be determined read-only, so this cap may not be raised --
+        and must be re-derived if the timeout moves -- until the
+        confirming experiment has run.
+
         `self._maybe_heartbeat()` is called after EVERY unload call, not
         once around the loop -- that is what makes an uncapped exclusive
         pass safe, and hoisting it out reintroduces the stale-row window
@@ -3417,12 +3463,14 @@ MIN_BARRIER_REFUSAL_SPAN_SECONDS = 300
 > is now at **MEDIUM confidence**: the same eviction was observed settling in ~3.5 s on an
 > idle box and ~21.0 s on a loaded one, and the mechanism predicts settle time scales with
 > model size *and* with memory pressure, so a large checkpoint on a loaded box has little
-> headroom inside it. **The right value cannot be determined read-only** and no number may be
-> invented for it; determining it needs one timed eviction of the largest checkpoint at a
-> known pressure level, which is a mutating probe. **Do not change the timeout, and do not
-> re-derive either constant here, until that experiment has run** — and when it does, the
-> per-tick unload budget's arithmetic, which prices one call at the same figure, must be
-> revisited in the same change.
+> headroom inside it. **Those two durations are uncontrolled observations from the proof
+> captures, not a measurement**, and no constant may be derived from them. **The right value
+> cannot be determined read-only** and no number may be invented for it; determining it needs
+> one timed eviction of the largest checkpoint at a known pressure level, which is a mutating
+> probe. **Do not change the timeout, and do not re-derive either constant here, until that
+> experiment has run** — and when it does, the worker's `MAX_UNLOADS_PER_TICK` and
+> `STALE_AFTER_SECONDS` must be revisited in the same change, since both are reasoned from the
+> same figure.
 
 `_evict_to_match_plan`'s docstring gains the **fifth ordering rule** paragraph (the protection check runs before the residency snapshot, and why that ordering is about cost rather than taste), and the function now returns the refused set instead of `set()`.
 
