@@ -217,6 +217,41 @@ class TestTheRecorderKeepsTheMaximum:
         assert caplog.records
         assert all(record.levelname == "INFO" for record in caplog.records)
 
+    def test_both_branches_reach_a_capturing_handler_at_their_configured_level(
+            self, caplog):
+        """UNLIKE the two tests above, no `caplog.at_level(..., logger=...)`
+        override here -- that call forces the named logger's level for the
+        test and would pass whether or not `config/settings.py::LOGGING`
+        actually routes `models.registry` anywhere. This test instead
+        exercises the two branches under the REAL, already-applied
+        `settings.LOGGING` configuration (`models.registry` raised to INFO
+        alongside `models.queue` and `models.contracts.engines`), which is
+        the thing that was missing: before it was added, this logger's
+        effective level was inherited from `root`'s WARNING floor, so the
+        `logger.info(...)` call on the mild branch was never even built --
+        `logger.isEnabledFor(INFO)` was already `False` -- and silently
+        never reached a handler at all, gigabytes of refused footprint on
+        a large model included."""
+        # Not `self._conn()` twice -- it hardcodes `name="c"` and
+        # `model_id="m"`, and two distinct connections are needed here so
+        # each `record_measured_footprint` call has exactly one match.
+        ModelConnection.objects.create(
+            name="severe", engine="ollama", endpoint="http://e:1/",
+            model_id="severe", measured_footprint_bytes=1000,
+        )
+        ModelConnection.objects.create(
+            name="mild", engine="ollama", endpoint="http://e:1/",
+            model_id="mild", measured_footprint_bytes=1000,
+        )
+        just_above = int(1000 * FOOTPRINT_DIP_WARNING_RATIO) + 1
+
+        record_measured_footprint("ollama", "http://e:1", "severe", 100)
+        record_measured_footprint("ollama", "http://e:1", "mild", just_above)
+
+        levels = {record.levelname for record in caplog.records}
+        assert "WARNING" in levels
+        assert "INFO" in levels
+
     def test_the_engine_reported_column_obeys_the_same_rule(self):
         connection = self._conn(engine_reported_footprint_bytes=1000)
 

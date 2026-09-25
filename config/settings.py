@@ -408,22 +408,33 @@ VISION_STAGED_UPLOAD_TTL = timedelta(
 # console (Python's own last-resort handler on an unconfigured root
 # logger). The execution queue's eviction decisions, unload results and
 # precautionary-call outcomes (`models/queue/worker.py`,
-# `models/queue/backend.py`, `models/queue/claim.py`) and the engine
-# adapters (`models/contracts/engines/{ollama,comfyui,whisper}.py`) are
-# deliberately logged at INFO -- the owner's own evidence model
-# (docs/OPERATIONS.md "The execution queue's memory governance") assumes
-# every one of those lines reaches `docker compose logs worker`. Left
-# unconfigured, every one of them was silently dropped on every
-# deployment.
+# `models/queue/backend.py`, `models/queue/claim.py`), the engine
+# adapters (`models/contracts/engines/{ollama,comfyui,whisper}.py`), and
+# the registry's footprint-provenance refusals (`models/registry/
+# bindings.py::_record_footprint`) are deliberately logged at INFO -- the
+# owner's own evidence model (docs/OPERATIONS.md "The execution queue's
+# memory governance") assumes every one of those lines reaches
+# `docker compose logs worker`. Left unconfigured, every one of them was
+# silently dropped on every deployment.
+#
+# `models.registry` earns the same INFO floor as the other two for the
+# same reason and on the same evidence, not by default: grep finds
+# exactly one `logger.info(...)` call anywhere under `models/registry/`
+# outside its tests (the mild-dip branch of `_record_footprint`, the
+# other branch of the SAME refusal whose WARNING half was already
+# visible) -- rare (one refusal per shrunk reading), always
+# operator-actionable, never a per-request line. Raising the namespace
+# does not add console noise; it only stops discarding a line the
+# evidence model already promised.
 #
 # `disable_existing_loggers: False`: every logger in this codebase is the
 # module-level `logger = logging.getLogger(__name__)` pattern, constructed
 # at IMPORT time -- possibly before Django ever calls `dictConfig` -- and
 # disabling "existing" loggers would silence exactly those.
 #
-# ONE HANDLER IN THE WHOLE TREE, attached only at `root`. The two feature
+# ONE HANDLER IN THE WHOLE TREE, attached only at `root`. The three feature
 # loggers below carry no `handlers` entry of their own and are left on
-# `propagate`'s own default (`True`) -- a record from either climbs to
+# `propagate`'s own default (`True`) -- a record from any of them climbs to
 # `root` and is printed there, exactly once. An earlier version gave each
 # of them its own `console` handler plus `propagate: False` (mirroring
 # the shape this codebase's other per-app settings usually take); that
@@ -437,7 +448,7 @@ VISION_STAGED_UPLOAD_TTL = timedelta(
 # in `models/queue/tests/` assert on `models.queue.worker`'s own log
 # lines via `caplog`, and every one of them went dark. Routing everything
 # through the one handler at `root` reaches the identical outcome --
-# each INFO/WARNING line from these two namespaces printed once, in the
+# each INFO/WARNING line from these three namespaces printed once, in the
 # documented format -- without that regression.
 #
 # `django` loggers are DELIBERATELY ABSENT here -- Django's own
@@ -482,6 +493,9 @@ LOGGING = {
             "level": _QUEUE_LOG_LEVEL,
         },
         "models.contracts.engines": {
+            "level": _QUEUE_LOG_LEVEL,
+        },
+        "models.registry": {
             "level": _QUEUE_LOG_LEVEL,
         },
     },

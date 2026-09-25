@@ -7,23 +7,30 @@ last-resort handler on the root logger). Every INFO eviction/unload/
 precautionary-call line the worker and the engine adapters emit was
 therefore silently dropped on every deployment.
 
-`config/settings.py` now ships an explicit `LOGGING` dict so `models.queue`
-and `models.contracts.engines` -- the two logger namespaces the feature
-actually uses (`models/queue/worker.py`, `models/queue/backend.py`,
-`models/queue/claim.py`, `models/contracts/engines/{ollama,comfyui,
-whisper}.py` each open with `logger = logging.getLogger(__name__)`) --
-reach a stderr console handler at INFO. `FARABUNKER_QUEUE_LOG_LEVEL`
-overrides that one level; an unset or invalid value falls back to INFO
-rather than crashing boot, since a typo here governs verbosity, not
-correctness.
+`config/settings.py` now ships an explicit `LOGGING` dict so `models.queue`,
+`models.contracts.engines`, and `models.registry` -- the three logger
+namespaces the feature actually uses (`models/queue/worker.py`,
+`models/queue/backend.py`, `models/queue/claim.py`, `models/contracts/
+engines/{ollama,comfyui,whisper}.py`, `models/registry/bindings.py` each
+open with `logger = logging.getLogger(__name__)`) -- reach a stderr
+console handler at INFO. `FARABUNKER_QUEUE_LOG_LEVEL` overrides that one
+level; an unset or invalid value falls back to INFO rather than crashing
+boot, since a typo here governs verbosity, not correctness.
 
-ONE HANDLER IN THE WHOLE TREE, attached only at `root`. The two feature
+`models.registry` was added after the other two shipped: its own
+footprint-provenance refusal (`_record_footprint`) logs its mild branch
+at INFO and its severe branch at WARNING, and only the WARNING half
+reached the console before this namespace was added here -- the INFO
+half fell back to the root logger's WARNING floor and was silently
+dropped, on a large model a multi-gigabyte refusal nobody saw.
+
+ONE HANDLER IN THE WHOLE TREE, attached only at `root`. The three feature
 loggers carry no dedicated handler of their own and are left on
 `propagate`'s own default (`True`): a record climbs to `root` and prints
 there, exactly once. `config/settings.py`'s own comment above `LOGGING`
 records why -- giving each logger its OWN handler plus `propagate: False`
 needs a second handler at `root` (for every other namespace's WARNING+
-lines) and `propagate: False` to stop the two from both firing for the
+lines) and `propagate: False` to stop them from both firing for the
 same record, and that `propagate: False` is exactly what silently breaks
 `caplog`-based tests: pytest's own capturing handler is attached to
 `root` alone, so ~20 pre-existing tests under `models/queue/tests/`
@@ -88,6 +95,17 @@ class TestLoggingSettingShape:
         assert logger_cfg.get("handlers", []) == []
         assert logger_cfg.get("propagate", True) is True
 
+    def test_models_registry_is_routed_at_info(self):
+        # The registry's footprint-provenance refusal (`_record_footprint`)
+        # is the only `logger.info(...)` call anywhere under
+        # `models/registry/` outside its tests -- one rare,
+        # operator-actionable line, not a per-request one -- so raising
+        # this namespace surfaces exactly that and nothing chattier.
+        logger_cfg = django_settings.LOGGING["loggers"]["models.registry"]
+        assert logger_cfg["level"] == "INFO"
+        assert logger_cfg.get("handlers", []) == []
+        assert logger_cfg.get("propagate", True) is True
+
     def test_django_loggers_are_not_touched(self):
         """Non-negotiable per the brief: Django's own default logging
         behaviour (and DEBUG behaviour) is untouched. This settings module
@@ -126,6 +144,7 @@ class TestQueueLogLevelEnvVar:
         try:
             assert shipped.LOGGING["loggers"]["models.queue"]["level"] == "INFO"
             assert shipped.LOGGING["loggers"]["models.contracts.engines"]["level"] == "INFO"
+            assert shipped.LOGGING["loggers"]["models.registry"]["level"] == "INFO"
         finally:
             self._reload(monkeypatch, None)
 
@@ -134,6 +153,7 @@ class TestQueueLogLevelEnvVar:
         try:
             assert shipped.LOGGING["loggers"]["models.queue"]["level"] == "DEBUG"
             assert shipped.LOGGING["loggers"]["models.contracts.engines"]["level"] == "DEBUG"
+            assert shipped.LOGGING["loggers"]["models.registry"]["level"] == "DEBUG"
         finally:
             self._reload(monkeypatch, None)
 
@@ -142,6 +162,7 @@ class TestQueueLogLevelEnvVar:
         try:
             assert shipped.LOGGING["loggers"]["models.queue"]["level"] == "INFO"
             assert shipped.LOGGING["loggers"]["models.contracts.engines"]["level"] == "INFO"
+            assert shipped.LOGGING["loggers"]["models.registry"]["level"] == "INFO"
         finally:
             self._reload(monkeypatch, None)
 
@@ -150,6 +171,7 @@ class TestQueueLogLevelEnvVar:
         try:
             assert shipped.LOGGING["loggers"]["models.queue"]["level"] == "INFO"
             assert shipped.LOGGING["loggers"]["models.contracts.engines"]["level"] == "INFO"
+            assert shipped.LOGGING["loggers"]["models.registry"]["level"] == "INFO"
         finally:
             self._reload(monkeypatch, None)
 
@@ -204,5 +226,19 @@ class TestRealEmission:
             engine_logger.info("engine probe")
             captured = capsys.readouterr()
             assert "INFO models.contracts.engines.ollama: engine probe" in captured.err
+        finally:
+            logging.config.dictConfig(django_settings.LOGGING)
+
+    def test_a_registry_logger_is_captured_at_info_too(self, capsys):
+        # The regression this whole namespace addition exists to fix:
+        # `models.registry.bindings`'s mild footprint-dip branch logs at
+        # INFO, and before `models.registry` was added here it inherited
+        # the root's WARNING floor and never reached this handler at all.
+        logging.config.dictConfig(django_settings.LOGGING)
+        try:
+            registry_logger = logging.getLogger("models.registry.bindings")
+            registry_logger.info("registry probe")
+            captured = capsys.readouterr()
+            assert "INFO models.registry.bindings: registry probe" in captured.err
         finally:
             logging.config.dictConfig(django_settings.LOGGING)
