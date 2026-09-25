@@ -1116,6 +1116,9 @@ either way, and waiting for it added up to ~30 s in front of every chat turn on 
 The lines themselves are unchanged; only the time they take is. ADR 0013's 2026-09-24
 amendment has the reasoning.
 
+The INFO lines below are on by default; set `FARABUNKER_QUEUE_LOG_LEVEL=WARNING` in `.env` to
+quiet them down to the WARNING table further down, without touching any other logger.
+
 ### INFO — normal operation, nothing to do
 
 | Line | What it means |
