@@ -126,7 +126,7 @@ not satisfy is an id the anchor assertion will not find").
         <td><a href="{% url 'chat-agent-edit' row.agent.pk %}?next={{ next_url|urlencode }}">{{ row.agent.name }}</a></td>
         <td><code>{{ row.agent.slug }}</code></td>
         <td>{{ row.reach }}</td>
-        <td>{{ row.agent.owner_kind }}:{{ row.agent.owner_key }}</td>
+        <td>{{ row.owner }}</td>
         {% if show_restrictions %}<td>{{ row.label_count }}</td>{% endif %}
       </tr>
     {% empty %}
