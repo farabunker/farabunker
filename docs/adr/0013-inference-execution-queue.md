@@ -1629,3 +1629,91 @@ columns, and is not made here.
 
 [ADR 0015](0015-agent-layer-and-tool-contract.md)'s own named gaps are
 unchanged, and none of them is addressed here.
+
+## Amendment (2026-09-24) — The precautionary barrier call does not wait for an answer it discards
+
+A hotfix, one day after the 2026-09-21 amendment above was deployed. The
+mechanism it added is unchanged; what changes is how long one of its calls is
+allowed to take.
+
+**The defect, as it reached the live box.** An admitted exclusive job sweeps
+every registered endpoint (§3.3e), and at any endpoint whose residency belief
+is worth nothing it makes one precautionary unload call (§3.3d(3)). The image
+engine's adapter declares `residency_authority = "memo"` — honestly: its
+residency report is a process-local memo, and a worker restart empties it — so
+after every restart that endpoint takes a precautionary call on **every**
+exclusive admission. That adapter's `unload` is a barrier: it polls the engine
+for a real free-memory rise for up to 30 s before answering. On a cold endpoint
+nothing ever rises, so it answers `False` at the deadline. And §3.3d(4) throws
+that `False` away by rule — a precautionary refusal is logged at INFO and never
+blocks a launch. An agent turn is planned exclusive by declaration, so the cost
+landed in front of **every chat turn**: up to ~30 s before the first token,
+nondeterministically (host-wide free-memory drift sometimes ended the poll
+early, with a `True` that had observed nothing).
+
+**The decision.** `unload` gains an OPTIONAL keyword-only `wait: bool = True`
+(an adapter extension, named as optional in the base seam's docstring, not a
+seam requirement). With `wait=False` the image adapter posts `/free` exactly as
+before and takes the ONE immediate queue-idle check its existing no-baseline
+path already degrades to — no baseline read, no settle poll — and leaves its run
+memo untouched, because nothing was observed. The text adapter accepts the
+keyword and ignores it; its unload is already immediate. The queue passes
+`wait=False` for precautionary calls at endpoints that are **not** the admitted
+job's own, and degrades to the plain two-argument call for an adapter that does
+not accept the keyword — by inspecting the signature once per engine, never by
+catching `TypeError` off the call, which cannot tell a missing parameter from a
+broken adapter.
+
+**Why a poll there bought nothing.** The barrier's promise is that the memory
+an exclusive job was promised is actually free before it launches. A
+precautionary call carries no such promise and never did: it is made *because*
+the belief is worth nothing, its `False` cannot be told from "nothing to free",
+and the launch proceeds either way. Waiting for an answer that cannot change the
+decision is pure latency.
+
+**The two exceptions, both kept.** The admitted job's OWN endpoints still wait:
+that is where it is about to load, and the settle poll is the only thing between
+this `/free` and the new checkpoint loading on top of the old one — the
+load-on-top race the barrier was built for (the 2026-08-25 job-28 incident).
+Believed-RESIDENT endpoints still wait too: that call is a real eviction, its
+`False` is informative and blocks the launch, so it must be seen to settle.
+
+**Correction to §8's proof 2(iii).** That proof expects the barrier to add "a
+second or two … on a box whose engines report residency authoritatively". The
+live box is not such a box — one of its three engines reports residency from a
+process-local memo, which is exactly the case the precautionary call exists for,
+and the case the proof's premise excludes. The proof as written could not have
+caught this. It is corrected here: the timing capture must be taken on a box
+registering a **memo-authority** engine, since an all-authoritative box makes no
+precautionary calls at all and measures the one path that was never at risk.
+
+**Correction, same day, after the after-measurement.** On a two-engine preview one
+chat admission still waited ~22 s, and the cause was the word "own". A turn's planner
+declares the role of every tool the agent is granted — that is what the queue needs in
+order to protect and account for those models — and the worker built the admitted job's
+own-endpoint set from *all* of those refs. So on a box where the agent may call the
+image tool, the image endpoint was the turn's "own" endpoint and kept the wait, even
+though the turn never loads there in-process: that tool enqueues its own job and submits
+on its own path, so the load-on-top race the wait guards cannot occur there. The fix is
+in the snapshot, not the worker's policy: `ModelRef` gains `synchronous: bool = True` —
+`True` means this kind's handler drives the model itself during the run, `False` means a
+tool or a delegate may use it — the turn planner tags its chat ref `True` and every
+tool-derived ref (a delegate's own chat role included) `False`, and `_eviction_targets`
+builds `own_endpoints` from the synchronous refs alone. Everything else reads the
+declaration exactly as before: protection, the in-flight refs map, pass-1 eviction, the
+budget arithmetic and the swept endpoint set are untouched, so a tool's model is still
+reserved and still safe from budget eviction. The default is `True` and every reader
+defaults an absent key to `True`, so a planner that predates the field (the ingest
+planner genuinely drives both of its refs in-process) and a row enqueued before it keep
+today's behaviour. It is a dataclass field, not a model field: no migration.
+
+**What is deliberately NOT changed.** The log vocabulary: the precautionary
+line keeps its exact words, because the live-proof runbook pins those literals
+and the operator-visible fact (a call was made, accepted or refused) is the
+same. The sweep's width, the residency declarations, the refusal bounds, and
+every believed-resident path are untouched. The second harm the live trace named
+— a precautionary `/free` evicting a genuinely warm checkpoint at a foreign
+endpoint, since `/free` frees everything there — is **not** addressed by this
+hotfix and stays open: the fix for it is a per-endpoint negative belief
+("precautionary call already made, nothing has run here since"), which is a
+design change, not a hotfix.

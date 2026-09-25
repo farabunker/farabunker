@@ -402,6 +402,91 @@ VISION_STAGED_UPLOAD_TTL = timedelta(
     hours=_optional_int("VISION_STAGED_UPLOAD_TTL_HOURS") or 24
 )
 
+# --- Logging (queue memory-governance evidence model) --------------------
+# Django ships NO `LOGGING` setting by default, so its own fallback applied
+# here: only WARNING and above from a non-`django` logger reaches the
+# console (Python's own last-resort handler on an unconfigured root
+# logger). The execution queue's eviction decisions, unload results and
+# precautionary-call outcomes (`models/queue/worker.py`,
+# `models/queue/backend.py`, `models/queue/claim.py`) and the engine
+# adapters (`models/contracts/engines/{ollama,comfyui,whisper}.py`) are
+# deliberately logged at INFO -- the owner's own evidence model
+# (docs/OPERATIONS.md "The execution queue's memory governance") assumes
+# every one of those lines reaches `docker compose logs worker`. Left
+# unconfigured, every one of them was silently dropped on every
+# deployment.
+#
+# `disable_existing_loggers: False`: every logger in this codebase is the
+# module-level `logger = logging.getLogger(__name__)` pattern, constructed
+# at IMPORT time -- possibly before Django ever calls `dictConfig` -- and
+# disabling "existing" loggers would silence exactly those.
+#
+# ONE HANDLER IN THE WHOLE TREE, attached only at `root`. The two feature
+# loggers below carry no `handlers` entry of their own and are left on
+# `propagate`'s own default (`True`) -- a record from either climbs to
+# `root` and is printed there, exactly once. An earlier version gave each
+# of them its own `console` handler plus `propagate: False` (mirroring
+# the shape this codebase's other per-app settings usually take); that
+# shape needs a SECOND handler tied to `root` for every other namespace's
+# WARNING+ lines, `propagate: False` to keep the two handlers from BOTH
+# firing for the same record -- and that same `propagate: False` is
+# exactly what silently breaks `caplog`-based tests, because pytest's own
+# capturing handler is attached to `root` alone (confirmed against this
+# pytest's own `_pytest.logging.catching_logs`, which has no fallback
+# for a non-propagating logger in this version): ~20 pre-existing tests
+# in `models/queue/tests/` assert on `models.queue.worker`'s own log
+# lines via `caplog`, and every one of them went dark. Routing everything
+# through the one handler at `root` reaches the identical outcome --
+# each INFO/WARNING line from these two namespaces printed once, in the
+# documented format -- without that regression.
+#
+# `django` loggers are DELIBERATELY ABSENT here -- Django's own
+# `DEFAULT_LOGGING` (applied first, before this dict) keeps configuring
+# them exactly as it always has; this dict is a pure addition, not a
+# replacement. DEBUG behaviour is untouched for the same reason.
+def _queue_log_level() -> str:
+    """`FARABUNKER_QUEUE_LOG_LEVEL`, validated against the standard level
+    names (`logging.getLevelNamesMapping()`). Unset, blank, or unrecognized
+    all fall back to `"INFO"` -- a typo in this variable governs verbosity,
+    not correctness, and must never crash boot.
+    """
+    import logging as _logging
+
+    raw = os.environ.get("FARABUNKER_QUEUE_LOG_LEVEL", "INFO").strip().upper()
+    return raw if raw in _logging.getLevelNamesMapping() else "INFO"
+
+
+_QUEUE_LOG_LEVEL = _queue_log_level()
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "plain": {
+            "format": "%(asctime)s %(levelname)s %(name)s: %(message)s",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "stream": "ext://sys.stderr",
+            "formatter": "plain",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "WARNING",
+    },
+    "loggers": {
+        "models.queue": {
+            "level": _QUEUE_LOG_LEVEL,
+        },
+        "models.contracts.engines": {
+            "level": _QUEUE_LOG_LEVEL,
+        },
+    },
+}
+
 # --- Applications --------------------------------------------------------
 
 INSTALLED_APPS = [

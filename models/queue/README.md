@@ -127,6 +127,12 @@ honestly only once **both** three refusals and five minutes of wall clock have e
 successful barrier resets the count. A **protection** refusal is never counted at all — that
 wait is bounded by the live attempt's own end.
 
+*(2026-09-24)* Because that precautionary `False` is discarded, a precautionary call at a
+**foreign** endpoint now asks the adapter not to wait for it (`unload(..., wait=False)`, an
+optional adapter extension); the admitted job's own endpoints and every believed-resident
+call still wait. See [ADR 0013](../../docs/adr/0013-inference-execution-queue.md)'s
+2026-09-24 amendment.
+
 ## The log vocabulary an operator will actually see
 
 Every line below is real and stable; [`docs/OPERATIONS.md`](../../docs/OPERATIONS.md#the-execution-queues-memory-governance-what-the-logs-say-and-what-to-do)

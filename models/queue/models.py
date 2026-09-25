@@ -61,7 +61,9 @@ class InferenceJob(models.Model):
 
     `model_refs` is the admission snapshot: one entry per model this job
     holds resident while running, as plain dicts -- `{"role", "engine",
-    "endpoint", "model_id", "connection_name", "footprint_bytes"}` --
+    "endpoint", "model_id", "connection_name", "footprint_bytes",
+    "synchronous"}` (a row written before `synchronous` existed simply
+    has no such key, and every reader defaults it to `True`) --
     copied at claim time from the enqueue-time `ModelRef`s (`core.
     inference.jobkinds.ModelRef`), never a FK to `models.registry.models.
     ModelConnection`. Same two reasons `tools.rag.models.AskRecord`
