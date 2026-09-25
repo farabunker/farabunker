@@ -18,6 +18,12 @@ into the steward's column, so the steward can see the call site, not just the
 seam). The steward reads it personally -- not by delegating the read to a
 subagent that reports back a verdict the steward never saw the diff for.
 
+The packet's summary always names a new model field, a new migration, and
+any new key added to a payload that crosses the column boundary, even when
+the author believes them incidental -- a summary can be true of the shape a
+function returns and still hide the field, migration, or payload key the
+steward is actually being asked to clear.
+
 ## What to check, every time
 
 1. **Row visibility vs. content visibility -- never let one stand in for the
@@ -63,6 +69,8 @@ One of:
   vice versa) because the two read as interchangeable at a glance.
 - Clearing on a promise ("we'll add the guard test after merge") -- the
   packet is reviewed as it stands, not as it is promised to become.
+- Reporting an intention as a fact -- summarizing what a change was meant to
+  do instead of what the diff shows it did.
 
 ## See also
 

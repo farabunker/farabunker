@@ -61,6 +61,10 @@ scripts/ladder.py <worktree> <db_url> <outdir> hotfix
   polling `pgrep -f pytest`, for at most `--max-others` other pytest processes machine-wide,
   printing `waiting: N other pytest processes` to stderr every 60s. Default `1` -- AGENTS.md's
   "at most two full suites" (this run plus one other); pass `0` for a peer-agreed stricter cap.
+- That wait is a courtesy, not the protocol. Sessions sharing one machine-wide slot hand it
+  over by message -- "slot free" when done, an explicit ask before taking it -- not by polling
+  alone: a poll-for-a-free-slot loop has starved a peer's implementer for hours, each guard
+  yielding to the other with neither ever sending the message that would have ended it.
 - **Pausing** is `kill -STOP <ladder.py's own pid>` (not its process group).
   Its in-flight pytest subprocess is a separate process and keeps running to
   completion regardless -- the result still lands in that run's `.log` and
