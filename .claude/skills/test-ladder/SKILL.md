@@ -88,6 +88,16 @@ implausibly old timestamp as stale and taking it -- it would turn "I looked and 
 running" into "I hold the only token", giving every session one place to see who holds the
 machine and since when.
 
+## Trusting the matcher
+
+A process check isn't proven by reading it. Five different versions of this predicate got
+written in one day across two sessions, each looking obviously correct, each a sharper
+exclusion than the last -- sharpness is exactly what didn't help. Only the two that were
+actually run against a machine in a known state, once with a real pytest run present and once
+confirmed absent, ever gave a right answer. Whoever changes `count_other_pytest` owes it the
+same before trusting it: run it both directions against known ground truth -- the check's own
+output is the evidence, not the reasoning that produced it.
+
 ## Failure modes
 
 - Pointing `<db_url>` at a shared/bare `test_farabunker` -- false reds.
@@ -103,6 +113,12 @@ machine and since when.
   is the direction that starves a peer, and explicit handover carried the real coordination
   while it stood undetected. The remedy is not a sharper eye, it is running the check and
   reading its output.
+- A peer session's own runner log made both exclusions concrete in two lines: it reported
+  waiting on three other test processes, then on one, the moment it killed its own watchers --
+  three counted, one real, two of them its own reflections. That's why the executable check and
+  the own-process-tree exclusion are each load-bearing alone, not belt and braces: the first
+  stops the reflections, the second stops a runner refusing to start because it can see itself
+  working.
 
 ## See also
 
