@@ -65,6 +65,16 @@ ROUTE_RULES: dict[str, str] = {
     "chat-all": "A",
     "chat-conversation": "O",
     "chat-turn": "O",
+    # CHAT CLUSTER, FEATURE C (edit a past prompt): row-addressed by
+    # conversation + turn, POST-only, 404 unless
+    # `agents.visibility.may_edit_turn` -- which is
+    # `may_manage_conversation` plus two row facts, NOT the wider
+    # `may_post_to` (spec review M2: a branch is a COPY, and a share
+    # recipient minting a conversation they own that survives revocation
+    # of the share is a different decision from letting them post). The
+    # same "O" class `chat-conversation-duplicate` carries for the same
+    # gate.
+    "chat-turn-edit": "O",
     # ROUND 13 (message-bound attachments): row-addressed (conversation
     # + doc id), POST-only, gated in the view by `may_post_to` THEN
     # `agents.attachments.detach_attachment`'s own uploader-only check
@@ -103,6 +113,27 @@ ROUTE_RULES: dict[str, str] = {
     # Labels agents and flows with entitlements (spec sections 6.11,
     # 9.6). ONE page for both -- see `agents/chat/views/access.py`.
     "chat-agent-entitlements": "S",
+
+    # --- /chat/agents/ (chat cluster, feature B) -----------------------
+    # A: a signed-in person's own list; the rows are narrowed in the
+    # view by `editable_agents`, so there is no row to be addressed by.
+    "chat-agents": "A",
+    # A: creation needs no row.
+    "chat-agent-new": "A",
+    # O, NOT S, and the difference is the whole feature: an S route
+    # would refuse a non-admin at the middleware, which is exactly the
+    # person this page exists for. Row-addressed, 404 in the view unless
+    # `agents.visibility.may_manage_agent` -- the same shape
+    # `chat-conversation-rename` and its siblings carry.
+    #
+    # THE ONE O ROUTE WHOSE ADMIN ANSWER DOES NOT MOVE WITH THE CONTENT
+    # TOGGLE. `may_manage_agent` short-circuits on `is_admin` alone --
+    # an agent is box INVENTORY, the same call `labellable_agents`
+    # records for `/chat/access/`, not a conversation or a document --
+    # so an administrator is admitted here whether `admin_sees_content`
+    # is on or off. `identity/tests/test_route_matrix.py`'s own
+    # `_ADMIN_ALWAYS_ADMITTED_O` names it for that reason.
+    "chat-agent-edit": "O",
 
     # --- /chat/w/ (new in Workstreams WS-1) ----------------------------
     # A, not O: the list is this principal's own streams plus the ones
@@ -281,6 +312,21 @@ ROUTE_RULES: dict[str, str] = {
     "settings-assistant-ask": "S",
     "settings-assistant-reset": "S",
     "settings-assistant-panel": "S",
+
+    # --- /settings/agents/ (the agent library, chat cluster feature B) --
+    # S, the same call `chat-settings` and `chat-tool-entitlements`
+    # already record: a page whose WHOLE body is an administrator-only
+    # listing has nothing to show anybody else, so it refuses at the gate
+    # rather than serving an empty shell. The view carries its own
+    # `is_admin` check as well, for the reason `settings-assistant-*`
+    # above does: the gate is not the only way a view function can be
+    # reached.
+    #
+    # NOT O, unlike `chat-agent-edit` above, and the two are not in
+    # tension: the EDIT route is class O precisely so a non-admin owner
+    # can open their own row, and this LISTING is the box-wide view of
+    # every row, which only an administrator has any standing over.
+    "settings-agents": "S",
 
     # --- /identity/ (new in IA-1) --------------------------------------
     "identity-login": "P",

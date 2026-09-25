@@ -17,6 +17,17 @@
 | `reconcile.py` + `manage.py reconcile_turns` | **Queue memory governance (2026-09-21) — shipped** | A chat turn whose JOB ROW vanished recovers instead of saying "working" for ever. `reconcile_stranded_turn(turn)` / `reconcile_stranded_turns(grace)` close an ASSISTANT turn that is still queued/running, older than `STRANDED_TURN_GRACE_SECONDS` (60), and whose `queue_job_id` is null or names a job row that no longer exists — one conditional, idempotent `UPDATE` in the same shape `runtime/jobs.py::on_turn_terminal` uses, plus that turn's open invocation rows. `count_stranded_turns()` is the read-only half `manage.py reconcile_turns --dry-run` reports from, so a dry run gives the exact count a real run would close. Called from the chat poll view (`agents/chat/views/turns.py`, for the turn somebody is watching) and from the command (for the turn nobody is polling); **there is no background sweeper**, deliberately. **It lives at the column root, NOT under `runtime/`**: its condition IS a `models.contracts.queue.get_job` call, and `foundation/ops/tests/test_column_boundaries.py::test_no_runtime_module_blocks_on_a_queue_job` forbids that call anywhere under `agents/runtime/` — because every module there executes INSIDE the `agent.turn` job, holding the one execution slot, where such a call can deadlock. A view and a management command never do. See [`chat/README.md`](chat/README.md)'s "A stranded turn, and a poll loop that cannot tick silently for ever". |
 | `entitlements.py` + `labels.py` + `shares.py` | **Identity & Auth IA-2 — shipped** | `entitlements.py::tool_access_for` builds the pure `ToolAccess` (`agents/contracts/tools.py`) a turn's `granted_tools` call needs; `labels.py` reads/writes `ToolEntitlement`/`AgentEntitlement`/`FlowEntitlement` and supplies this column's two entitlement-delete cascade handlers (registered from `agents/apps.py`); `shares.py` reads/writes `Share` and answers `may_post_to`. See "The acting rule" and "The four visibility bodies get real filters" below. |
 
+- **`agents/usage.py`** — what the next turn's prompt will carry, as an
+  estimate, and the declared sentences that say it. At the column root for the
+  same reason `visibility.py` and `labels.py` are: a future management command
+  or MCP edge needs the same answer without being a view. It holds the one
+  token arithmetic on this platform (`estimate_tokens`); chat compaction, when
+  it is built, consumes this rather than growing a second, drifting counter —
+  which is exactly what `agents/limits.py::HISTORY_TURNS`' own docstring warns
+  against. Its estimate is a deliberate **under-count**, with six named
+  exclusions in the module docstring and a disclosure on the page that names
+  the two a reader can act on.
+
 ## The data model
 
 | Model | What it is |
@@ -62,6 +73,25 @@ matches on, so renaming one in place would silently repoint every
 reference to it. `Conversation.agent`'s `PROTECT` still refuses to
 delete an agent with conversations; that guard was never part of the
 resident lock and needed no change.
+
+### `box_wide` and `resident` are two different facts
+
+`resident` records **where a row came from** — it started life as a shipped
+default. It is an origin marker, not a lock (`Agent`'s own ruling 3), and it has
+a second reader: the tool-label page's shell-path warning
+(`agents/visibility.py::resident_agent_tool_keys`) names the shipped agents that
+declare a tool an operator is about to label.
+
+`box_wide` records **who may use it** — everybody on this box, or only the people
+its ownership and its entitlement labels reach. `visible_agents` AND-s the label
+clause onto its ownership OR, so a box-wide row narrowed to an entitlement
+reaches everybody on this box *who holds it*; the two controls compose rather
+than excluding each other.
+
+Migration `0012_agent_box_wide` set `box_wide = resident` for every existing row,
+so the swap changed nobody's access on the day it landed. `install_defaults`
+stamps `box_wide=True` unconditionally, including on `--reset`: a shipped default
+is the platform's offer, not the installing operator's private row.
 
 ## Flows
 
@@ -243,9 +273,13 @@ IA-1 makes the rule real without changing that.
 **Ownership is the base rule; IA-2's `Share` extends it.** `visible_
 conversations`/`visible_agents`/`visible_flows`/`installed_agent_slugs`
 filter on `identity.access.owned_rows_q(principal)` (own rows OR a
-service-owned one when `principal` is an admin) OR a `resident=True` row
-(the shipped defaults, visible to everybody — they are the platform's
-own offer, not somebody's private work) OR `Q(pk__in=agents.shares.
+service-owned one when `principal` is an admin) OR a box-wide row —
+`box_wide=True` for `visible_agents`/`installed_agent_slugs` (task 5,
+chat cluster feature B; `Agent`'s own audience column, distinct from the
+`resident` origin marker) but still `resident=True` for `visible_flows`
+(`Flow` has no `box_wide` column and needed none), because either way
+the shipped defaults are visible to everybody — they are the platform's
+own offer, not somebody's private work — OR `Q(pk__in=agents.shares.
 shared_keys(target_type, principal))` — a row's owner extended it,
 directly or through a group, at either level; `agents.visibility.
 may_post_to` is what then tells a `view` share apart from a `use` one.
@@ -274,6 +308,27 @@ turn_status` and `agents/chat/views/conversations.py::
 conversation_delete` route through `visible_turn`/`delete_conversation`
 rather than a bare `get_object_or_404` for exactly this reason.
 
+**The agent writers live here too (chat cluster, feature B, task 6).**
+`may_manage_agent` / `editable_agents` / `box_wide_agents_owned_by` / `create_agent`
+/ `update_agent` live here for the same reason `create_conversation`,
+`rename_workstream` and `set_workstream_scope` do: this module is the column's one
+owned-row read-and-write point, and a view that could create an agent could create
+one without `owner_fields`. Audience is **two independent controls**, never one:
+reach (`box_wide`, administrators only, re-checked at the write) is a plain field
+on this row and touches no labels at all; entitlement labels go through
+`agents/chat/service.py::parse_entitlement_diff` → `agents/labels.py::set_agent_labels`
+and never through a whole-set write. There is deliberately **no single audience
+writer** — one control writing both would either clobber a label its actor may not
+touch or refuse an edit it should allow.
+
+The one field with a closed vocabulary is `llm_role`, and that vocabulary is **not**
+spelled here: `models.contracts.roles.chat_capable_roles()` is the single filter, and
+it lives below both columns because this module may not import `agents.chat` and the
+form must offer exactly what `_validated_agent_fields` accepts — two spellings would
+be a form that offers what the writer rejects. `max_steps`' ceiling is likewise
+`agents/limits.py::MAX_STEPS_CEILING`, declared beside the default it bounds rather
+than inline in the form.
+
 ## Agents and flows carry their own labels too (Identity & Auth, Task 15)
 
 **`AgentEntitlement`/`FlowEntitlement`** (`agents/models.py`, read and
@@ -292,10 +347,12 @@ alongside `tool_labels_cascade`.
 through — one clause to keep in agreement rather than three (unlabelled
 rows pass; a labelled row matches on holding ANY one of its
 entitlements, the same OR-within-AND documents and tools use).
-**It composes with the `resident=True` carve-out rather than being
-bypassed by it** (decision 35): the label clause is AND-ed onto the
-ownership-OR-resident clause, not OR-ed into it, so a shipped agent that
-has been labelled is restricted exactly like an operator-created one —
+**It composes with the box-wide carve-out rather than being bypassed by
+it** (decision 35): the label clause is AND-ed onto the
+ownership-OR-box-wide clause (`box_wide=True` for agents,
+`resident=True` for flows — see "`box_wide` and `resident` are two
+different facts" above), not OR-ed into it, so a shipped agent that has
+been labelled is restricted exactly like an operator-created one —
 labelling a default is not a case the rule quietly exempts.
 
 **`AGENT_NOT_PERMITTED`** (`agents/runtime/preflight.py`) is the second
@@ -765,6 +822,65 @@ tables and `Conversation.consolidated_through_index` /
 the same migration since both are WS-2 additions to `Conversation`, ahead
 of the consolidation job that reads and writes them). No data migration:
 every column is nullable and every existing row already means "never".
+
+## Branch provenance
+
+`branched_from` / `branched_at_index` record that this conversation was made by
+editing a message in another one, and which message. Two nullable columns rather
+than a title convention, because "where did this thread come from" should be a
+fact you can query rather than a string you can only read. `SET_NULL`: deleting
+the parent leaves the branch readable, with a provenance line that no longer
+links.
+
+Migration: `agents/migrations/0013_conversation_branch.py` — additive, no data
+migration: every existing conversation was started rather than branched, and
+null is the honest value for it.
+
+`branch_conversation` is `duplicate_conversation`'s sibling: same gate
+(`may_manage_conversation`, through `may_edit_turn`), same constants, same rules
+about what an audit row and an attachment belong to — but bounded by an index
+and stamped with provenance. Two operations, one gate, neither reaching into the
+other's body. The field list lives once, in `_copy_turns_into` / `_copy_taint_into`
+— two public functions, one private copier — because it had already drifted once:
+`author_id` fell out of `duplicate_conversation` unnoticed, and the fix had to be
+typed twice. Both copy `author_id`; neither copies `invocation`, `queue_job_id`,
+attachments or shares. The original is never edited, renumbered or truncated: a
+branch, never a rewind.
+
+**`duplicate_conversation` did not copy `author_id` until the chat cluster**, and
+that is an operator-visible change, not only an internal one: a duplicate carries
+no shares, and `agents/runtime/prompt.py::_is_foreign_user_turn` treats an
+author-less turn in an unshared thread as the reader's own, so a duplicate of a
+conversation somebody else had posted into used to replay that person's words to
+the model unfenced. It no longer does.
+
+The card control and the writer share `is_editable_turn_row` — the per-row half,
+asked with no principal and no query; the conversation-level half is
+`may_edit_any_turn`, asked once per render. `may_edit_turn` composes both for the
+POST, so the page's answer and the writer's cannot drift.
+A root-depth, finished `user` turn of this conversation, no turn anywhere in the
+conversation still in flight, and manage rights — so a share recipient may not
+branch somebody else's thread, not even on their own message: a branch is a copy,
+and a copy is the owner's to make.
+
+**It does steps 1–2 only.** It returns the new conversation and knows nothing
+about HTTP, the queue, or where the reader goes next — the chat package imports
+this module, one way, and a function that also redirected would be a view. The
+chat column's `turn_edit` view starts the branch's first turn and redirects.
+
+**The provenance line is rendered, not just stored.** `agents/chat/service.py`
+declares the banner's sentence — `BRANCH_PROVENANCE_LEAD`, `BRANCH_PROVENANCE_
+UNNAMED`, and `branch_provenance_tail`'s own tail ("at your message N", whose N
+is `branch_point_ordinal`'s reader-countable ordinal, never the raw
+`branched_at_index`) — not
+this module: it is a chat page's prose, not one of this module's own refusal
+sentences, so it lives beside `EDIT_LEAD` in the shared leaf both `thread.py` and
+`views/turns.py` already import. `agents/chat/views/thread.py::thread_context`
+resolves `branched_from` through `visible_conversations` — never a bare pk read,
+so a parent this reader may not see is neither named nor linked — and
+`chat/conversation.html` renders the banner. `agents/chat/README.md`'s own "The
+provenance line" section has the full account, including the deleted- and
+invisible-parent cases and the query-budget pin.
 
 Design: `docs/superpowers/specs/2026-09-03-workstreams-design.md`. The
 rest of this app's design: `docs/superpowers/specs/

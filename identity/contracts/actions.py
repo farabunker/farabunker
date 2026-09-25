@@ -143,6 +143,13 @@ AGENT_UNLABELLED = "agent.unlabelled"
 FLOW_LABELLED = "flow.labelled"
 FLOW_UNLABELLED = "flow.unlabelled"
 
+# The agent form (chat cluster, feature B): a row created or edited from
+# `/chat/agents/` or `/settings/agents/`. `agent.edited` names WHICH
+# FIELDS changed and never their contents -- a system prompt is the
+# operator's own text.
+AGENT_CREATED = "agent.created"
+AGENT_EDITED = "agent.edited"
+
 # Engine files (2026-09-02): an administrator bulk-deleting the image
 # engine's own phantom output/input files, straight off disk
 # (`tools/vision/maintenance.py::engine_files_delete`). ONE row per
@@ -216,7 +223,7 @@ AUDIT_ACTIONS = (
     MODELSET_CREATED, MODELSET_RENAMED, MODELSET_DELETED,
     MODELSET_MEMBER_ADDED, MODELSET_MEMBER_REMOVED,
     MODELSET_ATTACHED, MODELSET_DETACHED,
-    AGENT_LABELLED, AGENT_UNLABELLED, FLOW_LABELLED, FLOW_UNLABELLED,
+    AGENT_LABELLED, AGENT_UNLABELLED, FLOW_LABELLED, FLOW_UNLABELLED, AGENT_CREATED, AGENT_EDITED,
     ENGINE_FILE_DELETED,
     WORKSTREAM_CREATED, WORKSTREAM_RENAMED, WORKSTREAM_DELETED,
     WORKSTREAM_ARCHIVED, WORKSTREAM_UNARCHIVED, WORKSTREAM_INSTRUCTIONS_SET,

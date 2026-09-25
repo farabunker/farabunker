@@ -365,7 +365,7 @@ def conversation_start(request):
     # A BLANK MESSAGE WITH NO FILES EITHER still starts an empty thread
     # (unchanged, existing behaviour -- see this function's own docstring).
     # A blank message WITH files, though, must not go the "empty thread"
-    # route: `start_turn` requires `text` (`_BLANK`), so silently taking
+    # route: `start_turn` requires `text` (`BLANK_MESSAGE`), so silently taking
     # that branch would drop the files on the floor with no error at all
     # -- precisely the "I attached a file and nothing happened" complaint
     # this whole door exists to prevent. `text.strip() or files` routes a

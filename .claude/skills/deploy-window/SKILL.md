@@ -32,14 +32,19 @@ ordered procedure for moving it forward -- no step skipped, no step reordered.
    A merge that is not a fast-forward means someone pushed to `dev` outside a
    PR. Stop and report; do not force anything.
 5. **Migrate**, only if the delta carries migrations:
-   `docker compose -p farabunker exec -T web python manage.py migrate --no-input`.
-6. **Restart**, scoped to what changed:
-   - runtime/queue/ingest code: `docker compose -p farabunker restart web worker watcher`
-   - template/CSS only: `restart web`
+   `docker compose exec web python manage.py migrate` (the exec form; bare
+   `manage.py migrate` in a runbook is shorthand for this same command).
+6. **Restart, always including `web`.** `web` auto-reloads under the dev
+   override but not on a production-style stack (`docker compose -f
+   compose.yaml`, no auto-reloader) -- restarting it is a no-op either way, so
+   every restart set names it (`docs/OPERATIONS.md`, "Deploying the chat
+   cluster to a live box"):
+   - runtime/queue/ingest code, or anything web-visible: `docker compose restart web watcher worker`
+   - template/CSS only: `docker compose restart web`
    - docs-only: no restart.
-7. **Probe.** Inside the container: `manage.py check` (a known `W003` on an
-   open-posture box is acceptable, nothing else is). Then HTTP 200 on the
-   front pages.
+7. **Probe.** `docker compose exec web python manage.py check` (a known
+   `W003` on an open-posture box is acceptable, nothing else is). Then HTTP
+   200 on the front pages.
 8. **Fresh pixels.** Verify the shipped feature, live, on `:8000`, in a
    browser, before any success language (`docs/DEV.md` rung 4).
 9. **Close the window**: "WINDOW CLOSED" to peers, with the deployed SHA.
@@ -63,5 +68,5 @@ inside the announced window, and returns to its own worktree afterward.
 
 `AGENTS.md` "The working loop" and "Never touch, without that authorization";
 `docs/DEV.md` §8 rungs 3-4; `docs/OPERATIONS.md` for migration-specific deploy
-notes (e.g. the Identity & Auth migration sequence) when a change needs more
-than the ordinary `migrate --no-input`.
+notes (e.g. the Identity & Auth migration sequence, or the chat cluster's two
+dependent migrations) when a change needs more than a plain `migrate`.

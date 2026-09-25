@@ -64,6 +64,11 @@ CHAT_CONVERSE_ROLE = "chat.converse"
 # retiring them is not this plan's business.)
 IMAGE_GENERATION_CAPABILITY = "image-generation"
 
+# The capability a role must answer to back a CHAT agent, shared here for the
+# same reason the role keys above are -- see `chat_capable_roles` below, whose
+# two callers sit in two different columns that may not import each other.
+CHAT_CAPABILITY = "chat"
+
 
 @dataclass(frozen=True)
 class RoleSpec:
@@ -106,3 +111,26 @@ def all_roles() -> list[RoleSpec]:
 def get_role(key: str) -> RoleSpec | None:
     """Return the registered role for `key`, or None if not registered."""
     return _ROLES.get(key)
+
+
+def chat_capable_roles() -> tuple[tuple[str, str], ...]:
+    """`((key, label), ...)` -- every registered role that can back a CHAT
+    agent, in key order.
+
+    ONE VOCABULARY, TWO COLUMNS, HERE BECAUSE NEITHER MAY IMPORT THE OTHER.
+    An agent's `llm_role` is answered in two places: the FORM decides what to
+    offer (`agents.chat.agentform.chat_role_options`, spec 4.4) and the WRITER
+    decides what to accept (`agents.visibility._validated_agent_fields`).
+    `agents/visibility.py` may not import `agents.chat` (import law), so a
+    single filter reachable from both has to live below both -- and
+    `models/contracts/` is that place, exactly as it is for the role KEYS
+    above. Two spellings of "which roles are chat roles" would be a form that
+    offers what the writer rejects, which is the render-vs-gate bug in its
+    other direction.
+
+    A TUPLE OF PAIRS, not `RoleSpec` objects: the form renders `(value, label)`
+    straight into a `<select>`, and the writer only needs the keys. Returning
+    plain data keeps both callers free of this module's dataclass.
+    """
+    return tuple(sorted((role.key, role.label) for role in _ROLES.values()
+                        if role.capability == CHAT_CAPABILITY))

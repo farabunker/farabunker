@@ -302,6 +302,28 @@ architectural constraints this phase must honor, and
   installed) and **a row that came from a shipped default is the operator's to edit**
   (ruling 3 — the resident edit-lock is gone; `--reset <slug>` is the one deliberate way
   back to the shipped text).
+- [ ] **The chat cluster** — on branch `chat-cluster`, in review (2026-09-22); this box ticks
+  when a later documentation pass records the deploy. Three independently argued features on
+  one branch. **A context meter**: the thread page says how much of the model's context the next
+  turn will carry, measured against the window the engine will actually be asked to allocate
+  rather than a model's architecture maximum, and says so when a conversation is already
+  being shortened before it is sent. **An agent create/edit utility**: one form and one edit
+  route, mounted both at `/chat/agents/` for the people who own agents and at
+  `/settings/agents/` as an administrator's library, with audience as **two independent
+  controls** — reach (`Agent.box_wide`, administrators only) and entitlement labels through
+  the existing add/remove diff gate — rather than one exclusive choice. **Editing a past
+  prompt**, as a **branch**: a new conversation holding everything before the edited message,
+  the original untouched, with two provenance columns making "where did this thread come
+  from" a fact you can query rather than a string you can only read. Recorded by
+  [ADR 0019](adr/0019-chat-cluster.md), which also carries the phase's ten named gaps and the
+  read-direction amendment it adds to [ADR 0010](adr/0010-model-management-framework.md).
+- [ ] **Conversation compaction** — still future, and deliberately so. **The meter is its
+  foundation, not a substitute for it:** `agents/usage.py::estimate_tokens` is the one token
+  arithmetic on this platform, at the agents column root rather than inside the chat app so a
+  future management command or MCP edge can ask the same question, and the truncation clause
+  the meter renders is already the sentence that tells a reader their conversation is being
+  shortened. Compaction consumes that function rather than growing a second, drifting
+  counter. Also carried as a deferred item in [ADR 0017](adr/0017-workstreams.md)'s gaps.
 
 Three phases follow directly from what P2's agents plumbing already built (the tool
 registry, `Principal`, `granted_tools`, the one retrieval filter point) — in this order,

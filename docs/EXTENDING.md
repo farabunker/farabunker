@@ -475,8 +475,14 @@ entitlements label this row" — is your column's own page, because only your
 column knows what a row of yours looks like. What you can reuse there is the
 same component: `{% include "_transfer_panel.html" %}` with panes of
 entitlements instead of panes of resources, which is exactly what
-`/chat/tools/` and `/chat/access/` do (`agents/chat/views/tools.py` for the
-view side, `agents/chat/service.py::parse_entitlement_diff` for the POST).
+`/chat/tools/`, `/chat/access/` and the agent editor at `/chat/agents/<pk>/`
+do (`agents/chat/views/tools.py` for the view side,
+`agents/chat/service.py::parse_entitlement_diff` for the POST — which is the
+gate, while the `set_*_labels` writers below it are raw and enforce nothing).
+The fragment's own CSS lives in `foundation/templates/_shell.html`, so a
+consumer anywhere in the tree gets it styled; it was promoted there from
+`_settings.html` by the first consumer outside the settings area, and
+`foundation/ops/tests/test_css_ownership.py` is what keeps it in one place.
 Registering an axis and never writing that page is a legitimate choice —
 `tools/rag` does it in reverse, editing documents on its own page and
 registering counts only.
@@ -612,6 +618,25 @@ An entry in `identity/routes.py::ROUTE_RULES`, plus a `_DRIVERS` entry in
 
 *Skip it →* `test_every_route_has_a_driver` fails, and an unclassified
 name is treated as admin **and logged**.
+
+**If the view lives in another column, the route does not live in that
+column's own URLconf.** Two settings-area pages are in this position today —
+the settings assistant (`agents/chat/assistant_urls.py`, three routes) and the
+agent library (`agents/chat/agent_admin_urls.py`, one) — and both take the same
+shape: **its own URLconf module in the owning column**, mounted from
+`config/urls.py` beside `/settings/`, never an entry in that column's own
+`/chat/` URLconf. The URL an operator sees should match the area they are in,
+and `config/` is the composition root that already imports every column, so
+nothing crosses a boundary to put it in front.
+
+**That choice costs one test module.** A column's never-500 sweep derives
+itself from that column's own URLconf — `agents/chat/tests/test_never_500.py`
+reads `agents.chat.urls.urlpatterns` — and cannot see a route mounted from
+anywhere else, so a route mounted this way needs its own never-500 tests
+(`agents/chat/tests/test_settings_agents.py` is the worked instance: a normal
+read, an empty box, a row with unrepresentable data, and a POST that is a
+status rather than a traceback). Nothing fails if you forget; that is why it is
+written here.
 
 ### 3. The sidebar entry — in BOTH tables
 
@@ -986,8 +1011,12 @@ not "known only to whoever added the last field."
 
 ### Two more that are easy to get wrong and cheap to state
 
-- The page's `<h1>` and `<title>` must agree with the sidebar label
-  (`foundation/tests/test_page_names.py`).
+- The page's `<h1>` and `<title>` must agree with the sidebar label — and the route needs its
+  own row in `foundation/tests/test_page_names.py::_NAMES` before either half is checked at
+  all. That table's own sweep walks `SETTINGS_GROUPS` and fails on an entry it does not name,
+  so it is a registration place in its own right rather than a test detail. (Add it to that
+  module's `_ADMIN_ONLY` set only if the gate is the accounts-admin one: a plain `ADMIN` page
+  renders its real body on an open box, where everyone is an administrator.)
 - A leaf page overriding `{% block extra_style %}` writes
   `{{ block.super }}` **first**, or it silently drops `_settings.html`'s
   shared rules.

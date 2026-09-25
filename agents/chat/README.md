@@ -37,6 +37,7 @@ The full table this app grows into across Tasks 6–11.
 | `/chat/c/<uuid:conversation_id>/duplicate/` | `chat-conversation-duplicate` | `conversation_duplicate` | **UI-3b** |
 | `/chat/c/<uuid:conversation_id>/archive/` | `chat-conversation-archive` | `conversation_archive` | **UI-3b** |
 | `/chat/c/<uuid:conversation_id>/unarchive/` | `chat-conversation-unarchive` | `conversation_unarchive` | **UI-3b** |
+| `/chat/c/<uuid:conversation_id>/turns/<int:turn_id>/edit/` | `chat-turn-edit` | `turn_edit` | **chat cluster, feature C** — see "Editing a past prompt" below |
 
 **`chat-conversation` shipped as a route, not a page, in Task 6.**
 `agents.chat.service.conversation_url` and `conversation_start`'s
@@ -94,9 +95,12 @@ like every other surface — in open posture it still is; under accounts
 - **The visibility functions in `agents/visibility.py` are where a real
   filter went once auth landed** — an edit to those functions, never a
   new listing view and never a migration. `visible_conversations`'s own
-  filter (ownership, `resident=True`, `Share`) and the label clause
-  `visible_agents`/`installed_agent_slugs`/`visible_flows` now carry are
-  both covered below and in [`agents/README.md`](../README.md).
+  filter (ownership, `Share`) and the sibling functions' box-wide/
+  resident carve-out (`box_wide=True` for `visible_agents`/
+  `installed_agent_slugs` since task 5, chat cluster feature B;
+  `resident=True` still for `visible_flows`) plus the label clause those
+  three now carry are both covered below and in
+  [`agents/README.md`](../README.md).
 
 ## The three auth seams (ruling 4)
 
@@ -1995,8 +1999,10 @@ agents and flows, one page for both (`agents/chat/views/access.py`),
 also class `S`. Labelling an agent or flow here is enforced through
 `agents.visibility`'s label clause (see [`agents/README.md`](../README.md)
 "Agents and flows carry their own labels"), which composes with the
-`resident=True` carve-out rather than being bypassed by it — a shipped
-default is not exempt from being labelled.
+box-wide carve-out (`box_wide=True` for an agent, `resident=True` for a
+flow — see "`box_wide` and `resident` are two different facts" in
+[`agents/README.md`](../README.md)) rather than being bypassed by it —
+a shipped default is not exempt from being labelled.
 
 **The share panel** (`_share_panel.html`, rendered inside
 `conversation.html`) is `chat-conversation-share`'s UI, not a page of
@@ -2525,3 +2531,444 @@ No models, no migration, no `ready()`. `agents/chat/apps.py` explains
 why in full; the short version is that `agents/chat` holds no schema, so
 it needs none of the machinery that exists to keep a schema safe across
 a package move.
+
+## What the context line means
+
+Below the composer, the thread page renders one line: the estimated size of the
+prompt the **next** turn will carry, the ceiling that prompt will be given, and
+the percentage between them.
+
+It is an **estimate**, and the page says so every time it is shown. There is no
+tokenizer on this box and no per-render engine call; the number is characters
+over four, and the `<details>` beside the line discloses exactly that.
+
+It measures **what is sent, not what the conversation holds.** Only the last
+`agents/limits.py::HISTORY_TURNS` replayable turns reach the prompt, so a long
+conversation's meter plateaus — and the line then says how many of how many
+messages are no longer sent. That clause is the first place this platform tells
+a reader their conversation is already being shortened before it is sent.
+
+Six things it does not count, every one an under-count; `agents/usage.py`'s
+module docstring names them all. The two a reader can act on — files attached to
+a message, and what a tool was asked and answered — are named in the disclosure
+on the page.
+
+The ceiling is the **operative** window: what the engine will actually be asked
+to allocate. An operator's own per-connection value when there is one, the engine
+adapter's bounded default otherwise — with a sentence saying so that only an
+administrator's render builds. Nothing probes an engine for an architecture
+maximum.
+
+The line refreshes live through the page's existing poller, at the two moments
+the replayed corpus grows: when a turn is queued, and when it finishes. The poll
+body carries three integers and nothing else. The window, the bands and every
+sentence stay with the page, which is the only place that knows the picker's
+current selection.
+
+## The agent pages
+
+`/chat/agents/` lists the agents this principal may edit; `/settings/agents/` lists
+every agent on the box, for an administrator. **One edit route serves both** —
+`agents/chat/views/agents.py`, rendering `chat/_agent_form.html` from
+`agents/chat/agentform.py::agent_form_context`. Nothing about editing an agent is
+written twice; the two mounts differ only in which rows they list and who may open
+them.
+
+### Audience is two controls, not one radio
+
+**Reach** — "the people I give it to" / "everyone on this box" — writes
+`Agent.box_wide` and **touches no labels at all**. It is administrators-only, and
+the POST re-checks that rather than trusting the render.
+
+**Entitlement labels** — the same two-pane transfer panel `/chat/access/` renders,
+posting through the same `parse_entitlement_diff` → `set_agent_labels` path. It is
+an **add/remove operation over what is there now**, never a whole submitted set: a
+label the actor may not label with is never in `choices`, therefore never in either
+pane, therefore never in `submitted`, so it survives both directions untouched. An
+administrator's label stands whatever a member does with their own.
+
+The two **compose**. `visible_agents` is `(owned | box_wide | shared) AND
+label_permitted_q`, which is a truth table, not an exclusive choice — a box-wide
+agent narrowed to a department is the useful fourth row. Because both panes are
+built from what the actor may label with, a member cannot see a label an
+administrator set; the form says **how many** such restrictions the row carries and
+never which, except for ones the reader already holds. That silence is the
+entitlement non-disclosure gate, and the route matrix sweeps these routes for it.
+
+`agent_form_context` computes the how-many sentence whenever `agent` is not
+`None`, whatever this actor may label with — a member who owns no entitlements at
+all still needs to be told their row carries an administrator-set restriction; only
+the transfer panel itself is conditioned on there being something to offer
+(`choices` non-empty). **The page renders that sentence outside the panel's own
+condition** for the same reason: nested under the panel, the one reader it was
+written for would never see it.
+
+## The agent pages: the routes (chat cluster, feature B)
+
+The section above is the FORM — one builder, two mounts. These are the routes
+that mount it, and the two lists they sit on. No entry in the `## URL table` above:
+that table's own preamble scopes it to the tasks it was written for, and
+`/chat/w/`, `/chat/access/` and `/chat/tools/` are all documented in sections
+instead. This follows that shape.
+
+| route name | class | what it is |
+| --- | --- | --- |
+| `chat-agents` | A | `/chat/agents/` — the agents I work on |
+| `chat-agent-new` | A | `/chat/agents/new/` — creation; there is no row yet |
+| `chat-agent-edit` | O | `/chat/agents/<pk>/` — the ONE edit route both mounts share |
+| `settings-agents` | S | `/settings/agents/` — the agent library, the second mount's list |
+
+**`settings-agents` is not a `/chat/` route**, which is why it has its own
+URLconf (`agents/chat/agent_admin_urls.py`) mounted from `config/urls.py` beside
+`/settings/` rather than an entry in `agents/chat/urls.py` — the same call
+`agents/chat/assistant_urls.py` already records for the settings assistant's own
+three routes. Its view (`agents/chat/views/agents_admin.py`) reads through
+`agents.visibility.labellable_agents`, the existing unfiltered read, for that
+function's own stated reason: class S already means every caller is an
+administrator, so `visible_agents(principal)` would hide a member's own agent
+from the page that exists to administer the box's agents whenever
+`admin_sees_content` is off. It has **no POST path at all** — `require_safe`, so
+a POST is a declared 405 — and every row links to `chat-agent-edit` with this
+page as its `?next=`. `docs/EXTENDING.md` records why a route mounted this way
+needs its own never-500 proof, and `agents/chat/tests/test_settings_agents.py`
+is this route's.
+
+**`chat-agent-edit` is class O, not S**, and that is the whole feature: an S
+route refuses a non-admin at the middleware, which is exactly the person these
+pages exist for. It is row-addressed, and the view turns
+`agents.visibility.may_manage_agent` into the house 404 — the same shape
+`chat-conversation-rename` and its siblings carry. It is also the ONE class-O
+route whose administrator answer does not move with `admin_sees_content`:
+`may_manage_agent` short-circuits on `is_admin` because managing an agent is
+administering box inventory rather than reading somebody's content.
+`identity/tests/test_route_matrix.py` names that one cell in
+`_ADMIN_ALWAYS_ADMITTED_O`, and `identity.access.sees_all_content`'s docstring
+records the distinction.
+
+### Two sections on the list, and why the second exists
+
+**"The agents I work on"** is `editable_agents` — every non-`box_wide` row this
+principal may edit. On an accounts-on box an administrator sees their OWN rows
+here, because `sees_all_content` is `is_admin AND admin_sees_content` and the
+content setting is usually off; `/settings/agents/` is the box-wide view, one
+click away.
+
+**"Agents everyone on this box can use"** is `box_wide_agents_owned_by` — the
+`box_wide` rows this principal owns. It exists because of a route that predates
+this page: `chat-default-install` is class A and stamps the INSTALLING principal
+as the owner, so a member can own a row everybody on the box can use and that
+`may_manage_agent` refuses them. Without the section they would own a row that
+is absent from their list and refused by the editor, with nothing anywhere
+explaining why.
+
+**Which sentence a row in that section gets is `may_manage_agent`'s answer for
+THAT ROW**, never the section's. A member who owns one gets the read-only
+sentence and no link — a link would be a link to a 404, which is the defect the
+section exists to prevent, shipped in a different shape. An administrator gets
+the link and a different declared sentence, saying that they administer this box
+and an edit here changes the agent for everyone. That distinction is not
+cosmetic: `box_wide_agents_owned_by` short-circuits on `sees_all_content`, which
+answers True for **everybody on an open box** — the shipped default — so on a
+default box the administrator is the only reader the section ever has, and a
+single read-only sentence made it a false statement with the edit link withheld
+from the one person the predicate admits.
+
+**The restriction count is a bare number, never a name.** It is folded in the
+view from two batch reads — one `agent_entitlement_ids()` and one
+`labelling_entitlements` — shared by both sections through one closure, so
+twenty-five rows cost what one row costs and no per-row held-entitlement read
+happens here. A name would be the entitlement non-disclosure gate, which the
+route matrix sweeps these routes for.
+
+**And it is not asked at all on an open box.** Both list pages gate
+`agent_entitlement_ids()` on `accounts_on()` alone — ruling A's shape, the one
+`views/workstreams.py` already takes — because with accounts off a label
+restricts nobody: `visible_agents` returns at its `sees_all_content`
+short-circuit before the label clause is ever evaluated (spec §4.3.1). Without
+the gate the fold's own meaning inverts: `mine` is empty, so "how many labels
+this reader cannot manage" becomes "every label on the row", printed as
+"N restrictions" to the single operator who could change all of them. The
+number is **hidden, never zeroed** — a `0` would say "none" where the truth is
+"not asked" — so `/chat/agents/` drops the chip (its `{% if row.restrictions %}`
+already does) and `/settings/agents/` drops the column, the header cell and one
+from the empty row's `colspan`. That gate is also what puts both routes in
+`identity/tests/test_zero_queries.py::_MOUNTS`.
+
+### `?next=` is echoed, never redirected to, on a GET
+
+`agents.chat.service.validated_next_url` reads `request.POST` and nothing else,
+so a `?next=` arriving on a GET link is NOT validated by it and a naive
+`request.GET["next"]` redirect would be an open redirect off this box. So: the
+list's own links carry `?next=`, the GET **echoes it into a hidden field and
+does nothing else with it**, and the POST validates through
+`validated_next_url`, falling back to the list.
+
+**The one thing a reader can click goes through a second, stricter guard.**
+`agents.chat.service.validated_next_link` requires same origin, same scheme
+**and** a path on this box — `url_has_allowed_host_and_scheme` alone admits a
+fully-qualified URL to this host, which is a correct answer for a redirect and a
+needlessly wide one for an `href` — and `views/agents.py::_cancel_url` falls
+back to `/chat/agents/` for anything else. The Cancel link used to go there
+unconditionally, which was right while `/chat/agents/` was the only mount and
+wrong the moment `/settings/agents/` became the second: an administrator who
+cancelled landed on the member-facing list instead of the page they came from.
+The raw value still reaches the hidden fields and nothing else.
+
+**The entitlement panel carries its own copy of `next`.** It renders its own
+`<form>` (it must — nested forms are illegal HTML), so the field form's hidden
+`next` does not reach it; `agent_form_context` puts the mount's value in the
+panel's `tp_fields` when there is one, and omits the key entirely when there is
+not, so `/chat/agents/`'s own panel is byte-identical to what it was.
+
+**A refused label save carries it too.** `_save_labels` builds the URL it hands
+`parse_entitlement_diff` as that helper's `redirect_url` from the same
+`validated_next_url`, so an unknown `op` or a typed id lands back on an editor
+that still knows where it came from — otherwise the Cancel link on that
+re-rendered page drops to `/chat/agents/`, which is the strand above reached by
+mistyping rather than by cancelling. The success redirect falls back to the row
+itself, not to that URL: a label edit leaves you where you were.
+
+### One action per POST, named
+
+`chat-agent-edit` reads an `action` field and accepts exactly two values,
+`fields` and `labels` — one per control on the page. Anything else — an absent
+field, a stale form, a hand-made body — is refused with the page re-rendered, a
+declared sentence and a 400, never handled as a field save. That refusal is not
+defensive decoration: a labels-shaped body handled as a field save would run an
+empty `name` and `system_prompt` through `update_agent` and blank the row.
+
+Each control ships its own spelling of its own name, because a template cannot
+read a view constant and `agents/chat/agentform.py` is what the view imports, so
+it cannot import back: `chat/_agent_form.html` writes `value="fields"` and
+`agent_form_context` puts `"labels"` in the panel's own hidden `tp_fields`. The
+two spellings are pinned against the view's `FIELDS_ACTION`/`LABELS_ACTION` by
+test rather than trusted to agree.
+
+The role vocabulary is refused twice on purpose: the form owns
+which roles it offers (spec §4.4) and the writer refuses the same set at its own
+seam, so a caller that saw no form cannot stamp an agent with a role no chat
+turn can resolve. The one filter both ask lives in
+`models.contracts.roles.chat_capable_roles`, below both columns, because
+`agents/visibility.py` may not import `agents.chat`.
+
+### The label editor — the edit route's second POST path
+
+`action=labels` goes to `_save_labels`, which takes the **same four steps**
+`agents/chat/views/access.py::_save` takes: build the return URL, parse the
+submitted diff through `agents.chat.service.parse_entitlement_diff`, derive the
+new set from what is on the row right now, and hand that whole set to
+`agents.labels.set_agent_labels`.
+
+**`parse_entitlement_diff` is the gate; `set_agent_labels` is not.** That writer
+is raw — it takes an actor only to stamp the audit row, never consults
+`labelling_entitlements`, and its remove closure deletes any row the diff names.
+The check that a submitted id is one this principal may label with lives in the
+parser, over the same predicate the form rendered from, so a stale form and a
+hand-made request get the identical refusal. No caller on this surface reaches
+the writer with an ungated diff, and none should.
+
+**The new set is derived from what is there now**, never from what the form
+showed: `before | submitted` for add, `before - submitted` for remove. A label
+this actor may not label with is never in `submitted`, so neither expression can
+touch it — which is why an administrator's label stands whatever a member does
+with their own, by construction rather than by a check. A whole submitted set
+would clobber, which is the same reason the two access pages post a diff.
+
+**The refusal and the success both land back on this row**, and not through
+`agents.chat.service.entitlement_row_url`: that helper builds
+`reverse(route_name)` with no arguments plus an `?open=` anchor, for the two
+access pages whose rows all share one URL. `chat-agent-edit` is row-addressed —
+the helper cannot name it at all — and `reverse("chat-agent-edit", args=[pk])`
+already *is* the row. `validated_next_url` is still honoured first, exactly as
+the field save honours it, for a mount that carries one.
+
+`AgentEntitlement.labelled_by` needs the real `User`, so the view reads it
+through `identity.request.user_for_request` — never a bare `request.user`, which
+`foundation/ops/tests` scans this column for.
+
+### Where the CSS lives
+
+**All of it in `chat/base.html`**, from the day the fragment was created —
+`.chat-nav-link`, `.agent-row`, `.agent-row h2`, `.agent-group-head`,
+`.agent-reach` and its two descendants, `.form-error`. `chat/_agent_form.html`
+is a fragment with page consumers, and a fragment cannot own rules a page has to
+load; Django template blocks do not cascade sideways, so a rule parked in one
+leaf page's own style block is invisible in another's.
+`foundation/ops/tests/test_css_ownership.py` enforces exactly that. The
+selectors are prefixed (`.agent-row`, not `.row`) because the bare names already
+mean a settings page's card and section heading under
+`foundation/templates/_settings.html`.
+
+**The transfer panel's own rules were promoted one tier** when the edit page
+started rendering it. Every `.transfer-*` rule, `.filter-input` included, lived
+in `foundation/templates/_settings.html` while every consumer of
+`foundation/templates/_transfer_panel.html` extended it; `chat/agent_edit.html`
+extends `chat/base.html`, which extends `_shell.html` directly and cannot reach
+`_settings.html` at all, so `_shell.html` became the deepest common ancestor and
+the block moved there — **moved, not copied**, which is what the ownership gate
+fails the build on. They sit in the shell's unconditional `<style>` region, not
+inside `extra_style`, because `chat/base.html` overrides that block without
+`{{ block.super }}`. `.access-summary` stayed behind: it is the two access
+pages' own `<summary>` class, never one the fragment writes, and the chat page
+writes a plain `<summary>`.
+
+**No `<style>` in any of the three templates, and one `<script>` on one of
+them.** The pages are plain POST forms with CSRF tokens and lists of links. The
+one exception is `foundation/templates/_filter_rows_script.html`, included
+beside the panel and gated on the same condition its existing consumers gate it
+on — so a page with no panel ships no script at all. It is pure progressive
+enhancement: it hides already-rendered rows as the operator types, adds no row,
+removes no checkbox and changes no `name=`/`value=` a JavaScript-off submission
+relies on, and each filter input says so in its own `title=`. The only other
+script these pages carry is the rail's own `chat/_menu_exclusive.html`, which
+rides `chat/_sidebar.html`. `agents/chat/tests/test_agent_pages.py` pins both
+halves — no script at all where there is no panel, and exactly that one include
+where there is — slicing the content block away from the rail for the same
+reason `test_sidebar.py` slices the other way.
+
+## Editing a past prompt (chat cluster, feature C)
+
+Any of your own earlier messages carries an **Edit and carry on from here**
+disclosure. It opens a plain form — a textarea pre-filled with that message, an
+optional file input, one button — and submitting it creates a **new conversation**
+holding everything before that message, with your edited text as its newest turn.
+The original is untouched.
+
+It is a branch, not a rewind, and the reasons are recorded in the ADR: a rewind
+cannot honestly un-taint (taint rows are additive-only by design, and deleting
+one is precisely the laundering the platform forbids), it orphans audit rows and
+attachments, and in a shared conversation it would destroy somebody else's work.
+A branch you did not want is one delete away; a rewind you did not want is gone.
+
+**What a branch does not carry:** attachments on the copied turns (there is no
+copier seam; the form says so before the button), tool audit rows, pinned or
+archived state, and shares. Files attached to the *edited* message itself work
+normally — `start_turn` stages them exactly as any other send does, through the
+same `composer_attachment_fields` reader the composer posts into.
+
+**Who may:** the conversation's owner, or an administrator with content access.
+**Not** a share recipient, even on their own message — a branch is a copy, so it
+answers to the copy predicate (`agents.visibility.may_manage_conversation`, not
+the wider `may_post_to`), and a recipient minting a durable conversation they own
+that survives revocation of the share is a different decision from letting them
+post. Nobody may edit while a turn is in flight, and that clause is
+conversation-wide: the control is **hidden** for the whole thread while an answer
+is running, not merely refused, because a button whose own POST answers 404 is a
+page that lies. The POST refuses anyway — hiding a control is not a gate.
+
+**Where the work is split, and why it has to be.** `agents/chat` imports
+`agents/visibility`, one way, so `branch_conversation` cannot start a turn and
+cannot redirect. It writes the branch and returns it; `turn_edit` validates the
+text against the same `MAX_TURN_CHARS` constant `start_turn` uses **before**
+calling it (so a refused edit writes nothing at all — no conversation row, no
+turns, no taint), then starts the turn through the one existing turn-start
+service and redirects. If that start refuses afterwards — an unbound role, an
+unreachable engine, a queue that is not migrated — the branch exists with its
+copied history and no answer, a state the thread page already renders honestly
+with its existing banner. That is accepted and stated rather than papered over:
+the alternative would be deleting a conversation the operator can already see in
+their sidebar.
+
+**The poller keeps up.** The `done` tick supplies the same three card keys the
+page does, so a swapped exchange renders the disclosure exactly as a reload would
+— the invariant `_done_body`, `_group_html`, `turn_group_cards` and
+`_attachments_by_turn` each state in their own words. The queued and running
+ticks pay nothing for it: the predicate is provably false while a turn of that
+conversation is in flight, which on those two paths is the turn being polled. The
+one value that cannot travel on the wire is the picker's own selection, which
+lives in the thread page's query string and never reaches the poll endpoint — so
+the poller carries it across on the page instead, copying the composer's own
+server-rendered field into each swapped block. A no-JS page load never lost the
+pick; the polled swap was the only path that did, and it no longer does.
+
+**One rule, one definition.** Editability splits in two, and each half lives
+once: `agents.visibility.is_editable_turn_row` is the per-turn half (a finished,
+root-depth USER row — no principal, no query, which is why the card may ask it
+too), and `may_edit_any_turn` is the conversation half (the manage predicate plus
+"nothing in flight"), asked once per render rather than once per message.
+`may_edit_turn` composes both, so the page's answer and the POST's answer are
+built from the same two functions and cannot drift. That matters in both
+directions: a card copy that grew wider would render a disclosure whose own POST
+answers 404, and one that grew narrower would silently hide an available control.
+
+**No new script, and two new template parameters.** The disclosure is a
+`<details>` plus a plain form — the house's zero-JS idiom — and it includes
+`chat/_attach_files.html` alone, never `chat/_composer.html`: that fragment ends
+with two script blocks, and this disclosure renders once per eligible user turn,
+so including it would multiply the page's pinned script counts (4 with the attach
+door, 3 without) by the number of editable messages. `_attach_files.html` gains
+one optional `attach_id`, defaulted so its one existing include site (the
+composer, reachable from three pages) is byte-identical: without it every
+"+ Add files" inside every edit form would
+resolve its `<label for="attach-files">` to the **composer's** input — the first
+match in document order — and stage the chosen file onto a new turn instead of
+onto the branch. The edit textarea carries a per-turn id on the same rule, for a
+real `<label>`: the composer reaches for an `aria-label` only because the shared
+fragment had dropped a visible label that used to exist, and nothing here forces
+that compromise.
+
+**A note for anyone reading `chat/_composer.html`'s own comments:** the invariant
+"exactly one of these renders per page" now holds for the **composer**
+(`#composer-text`, `#turn-form`, and the composer's own `#attach-files`) and no
+longer for anything a turn card can also render. The edit disclosure is the first
+thing to render `_attach_files.html` more than once, and it passes its own
+`attach_id` precisely so the composer keeps the bare id.
+
+**The provenance line.** A branch's thread page opens with a small banner --
+"Branched from *the parent's title* at your message *N*" -- built by
+`thread_context` and rendered above `.thread-scroll` in `chat/conversation.html`,
+styled by that page's own `.branch-provenance` rule (Task 8's page-scoped-CSS
+ruling: one consumer, so it lives in the page's own `chat_style` block, not
+`chat/base.html`). It is static per conversation and sits outside every element
+the poller's `insertBlock`/`swapBlock` ever touch, so the done-tick swap needs no
+changes and carries no risk of clobbering it.
+
+The title and the link are resolved through `agents.visibility.
+visible_conversations`, **never a bare `Conversation.objects.get(pk=...)`** --
+the same rule every other reader in this column follows, because a branch an
+administrator made of somebody's thread must not hand the parent's title back to
+a reader who was only given the branch.
+
+**Two names, and the distinction matters.** `branched_from_id` is the COLUMN;
+`branched_from` is the ROW the view resolved out of it, and it is `None` on two
+different paths on purpose -- the parent was deleted (`SET_NULL` already cleared
+the column, so `branched_from_id` is `None` too, though `branched_at_index`
+survives it) and the parent still exists but this principal may not read it
+(`branched_from_id` is non-null and the resolved row is `None`). Both are "the
+honest version of this came from somewhere you cannot see".
+
+On both of those paths the banner is a WHOLE sentence, never one with a hole in
+it: the template's `{% if branched_from %}...{% else %}...{% endif %}` renders
+the declared stand-in `BRANCH_PROVENANCE_UNNAMED` ("an earlier conversation") in
+the title's place, and the `{% else %}` is load-bearing -- a bare `{% if %}` used
+to render nothing there, leaving the literal "Branched from  at message 3". A
+link appears only when the parent is both present and readable.
+
+**The number is the reader's, not the row's** (whole-branch review I-2).
+`branched_at_index` is `Turn.index`, a dense counter over EVERY row in the parent
+-- assistant answers, tool cards, delegate turns at `depth >= 1` -- and `0` for
+the first one, so rendering it said "at message 0" for a branch off the first
+message and "at message 4" for the second message of a thread that had used a
+tool. The column is unchanged; it is provenance, and queryable, which is the job
+it was added for. What the banner renders is `agents.chat.service.
+branch_point_ordinal`, a display-side count of the parent's own finished
+root-depth USER turns up to that index -- the bubble a reader can point at.
+Both fallback paths above carry NO number: the ordinal is counted over the
+PARENT's rows, and a number counted over a deleted thread, or over one this
+reader cannot open to check, is one nobody can verify. There the banner is
+"Branched from an earlier conversation." and nothing more, which is why the
+whole `<p>` is gated on `is_branch` rather than on the tail.
+
+**Two queries, and only for a branch.** The parent lookup runs only when
+`branched_from_id is not None`, the ordinal `.count()` only when that lookup
+found a readable row -- both threaded through the same `settings_row` every
+other visibility call on this page already reuses, so a thread of any length
+pays them once, never once per turn. The ordinal is bounded by the PARENT's
+length, not this conversation's. `agents/chat/tests/test_thread_meter.py::
+TestTheContextMeter::test_the_meter_costs_the_same_on_a_short_and_a_long_
+conversation` -- the page's existing flat-cost equality pin -- was extended
+rather than copied: both the short and the long conversation it measures are
+branches of the same parent, which now carries a real user turn so the ordinal
+is a live number on both renders, and a later reader who moved either read onto
+a per-turn path would turn this pin red rather than leaving it silently
+unexercised.

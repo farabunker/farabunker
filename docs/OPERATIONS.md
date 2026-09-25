@@ -613,6 +613,53 @@ two processes hold in memory for the life of the process — a plain
 `docker compose restart watcher worker` after the deploy, same as any
 other job-kind change (see [docs/DEV.md](DEV.md)'s restart rule).
 
+## Deploying the chat cluster to a live box
+
+**This deploy runs two migrations, and neither changes what anybody sees on the
+day it lands.** There is no hand step, no posture work, and nothing to decide
+before running it.
+
+`agents.0012_agent_box_wide` adds the agent **audience** column — who may use an
+agent, as distinct from the `resident` marker recording that it started life as a
+shipped default ([ADR 0019](adr/0019-chat-cluster.md), decision 3). It carries a
+`RunPython` step setting the new column from the old marker for every existing
+row, so every shipped default an operator had installed stays visible to
+everybody and every private agent stays private. Its reverse clears the column.
+
+`agents.0013_conversation_branch` adds two nullable columns to `Conversation` —
+the parent a branch came from (`SET_NULL`, so deleting the parent leaves the
+branch readable) and the index of the message it was branched at. **Nothing is
+back-filled**: every existing conversation was started rather than branched, and
+null is the honest value for it. It **depends on 0012**, so the two land together
+or not at all.
+
+```bash
+manage.py migrate
+docker compose restart web watcher worker
+```
+
+**Restart `web`, `watcher` and `worker` after this deploy.** The agents column's
+visibility module changed, and the two job processes
+hold that code in memory for the life of the process — the same rule as any
+other change to code a job runs (see [docs/DEV.md](DEV.md)'s restart rule).
+`web` is in the set because everything this deploy makes visible — the context
+line, both agent mounts, the edit control — is web-request-path only, and the
+base `compose.yaml` runs uvicorn with no auto-reloader. Under the dev override
+(`compose.override.yaml`, auto-merged by a bare `docker compose`) `web` reloads
+itself and the restart is a no-op; on a production-style stack
+(`docker compose -f compose.yaml`) it is the difference between an operator
+seeing this deploy and not. Restarting it costs nothing either way, which is why
+every other restart set in this document already includes it.
+
+**What an operator sees afterwards:** an **Agent library** entry in the settings
+sidebar's Setup group, administrator-gated; a context line under the composer on
+every thread page; and an edit control on a reader's own finished messages, which
+creates a new conversation rather than rewriting the old one. On a box running
+without accounts the entitlement-restriction column on `/settings/agents/` and
+the entitlement-restriction chip on `/chat/agents/` are not rendered at all —
+deliberate, not a rendering fault; the reasoning is
+[ADR 0019](adr/0019-chat-cluster.md), decision 6.
+
 ## Turning on accounts
 
 A box that has been running `open` (no accounts) has conversations, ask

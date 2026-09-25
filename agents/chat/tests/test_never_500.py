@@ -313,6 +313,70 @@ def _turn_malformed_target(client, monkeypatch):
     return response
 
 
+# --- chat-turn-edit (chat cluster, feature C: edit a past prompt) --------
+
+def _editable_thread(slug_prefix):
+    """A conversation whose turns are all FINISHED USER turns, so
+    `agents.visibility.may_edit_turn`'s conversation-wide in-flight
+    clause passes and the second turn is really branchable. `make_
+    thread` cannot serve: its ASSISTANT row is finished too, but its
+    USER row is what an edit addresses and this wants two of them."""
+    conversation = make_conversation(agent=make_agent(slug=_unique_slug(slug_prefix)))
+    turns = [
+        make_turn(conversation=conversation, role=Turn.Role.USER, text=text,
+                  state=Turn.State.DONE)
+        for text in ("first", "second")
+    ]
+    return conversation, turns
+
+
+def _turn_edit_normal(client, monkeypatch):
+    bind_chat_role(CHAT_CONVERSE_ROLE, name=_unique_slug("chat-role"))
+    _patch_queue(monkeypatch)
+    conversation, turns = _editable_thread("edit-ok")
+    response = client.post(
+        reverse("chat-turn-edit", args=[conversation.id, turns[1].pk]),
+        {"text": "edited"},
+    )
+    assert response.status_code == 302
+    return response
+
+
+def _turn_edit_no_agents(client, monkeypatch):
+    import uuid
+
+    return client.post(
+        reverse("chat-turn-edit", args=[uuid.uuid4(), 1]), {"text": "edited"},
+    )
+
+
+def _turn_edit_queue_down(client, monkeypatch):
+    """THE ACCEPTED HALF-STATE, swept rather than hidden: the branch is
+    written, `start_turn` then refuses, and the operator is redirected
+    to a branch that holds its copied history and no answer -- a 302
+    with a banner, never a 500."""
+    bind_chat_role(CHAT_CONVERSE_ROLE, name=_unique_slug("chat-role"))
+    _patch_queue(monkeypatch, raises=QueueUnavailable("down"))
+    conversation, turns = _editable_thread("edit-down")
+    response = client.post(
+        reverse("chat-turn-edit", args=[conversation.id, turns[1].pk]),
+        {"text": "edited"},
+    )
+    assert response.status_code == 302
+    return response
+
+
+def _turn_edit_malformed_target(client, monkeypatch):
+    conversation, _turns = _editable_thread("edit-404")
+    get_response = client.get(
+        reverse("chat-turn-edit", args=[conversation.id, 999999]))
+    assert get_response.status_code == 405         # require_POST, before any row
+    missing = client.post(
+        reverse("chat-turn-edit", args=[conversation.id, 999999]), {"text": "edited"})
+    assert missing.status_code == 404
+    return missing
+
+
 # --- chat-attachment-detach (round 13, message-bound attachments) --------
 
 def _detach_document(conversation):
@@ -1109,6 +1173,89 @@ def _workstream_consolidate_malformed_target(client, monkeypatch):
     return missing
 
 
+# --- the agent pages (chat cluster, feature B) ----------------------------
+#
+# The sweep signs nobody in, so every request below is the OPEN
+# principal -- an administrator by construction (`is_admin` answers True
+# on a box with no accounts), which is what lets `chat-agent-edit`'s own
+# drivers reach the view's body rather than its 404.
+
+
+def _agents_list_normal(client, monkeypatch):
+    make_agent(slug=_unique_slug("sweep"))
+    return client.get(reverse("chat-agents"))
+
+
+def _agents_list_no_agents(client, monkeypatch):
+    return client.get(reverse("chat-agents"))
+
+
+def _agents_list_queue_down(client, monkeypatch):
+    # This route never touches the queue; proves that independence
+    # rather than skipping the condition, the same shape
+    # `_agent_entitlements_queue_down` already takes.
+    _patch_queue(monkeypatch, raises=QueueUnavailable("down"))
+    return client.get(reverse("chat-agents"))
+
+
+def _agents_list_malformed_target(client, monkeypatch):
+    # No path segment to malform (the route takes none); a query string
+    # this view never reads, carrying a NUL byte, is its nearest
+    # equivalent -- the same shape `_index_malformed_target` takes.
+    return client.get(f"{reverse('chat-agents')}?open=%00")
+
+
+def _agent_new_normal(client, monkeypatch):
+    return client.post(reverse("chat-agent-new"), {
+        "name": "Swept", "description": "", "system_prompt": "",
+        "max_steps": "2", "enabled": "on"})
+
+
+def _agent_new_no_agents(client, monkeypatch):
+    return client.get(reverse("chat-agent-new"))
+
+
+def _agent_new_queue_down(client, monkeypatch):
+    _patch_queue(monkeypatch, raises=QueueUnavailable("down"))
+    return client.get(reverse("chat-agent-new"))
+
+
+def _agent_new_malformed_target(client, monkeypatch):
+    """A blank name, a non-numeric step count and an off-box `next` in
+    one body -- every refusal this route can reach, at once."""
+    return client.post(reverse("chat-agent-new"), {
+        "name": "", "description": "", "system_prompt": "", "max_steps": "not-a-number",
+        "enabled": "on", "next": "https://elsewhere.example/steal"})
+
+
+def _agent_edit_normal(client, monkeypatch):
+    agent = make_agent(slug=_unique_slug("sweep-edit"))
+    return client.post(reverse("chat-agent-edit", args=[agent.pk]), {
+        "action": "fields", "name": "Swept", "description": "", "system_prompt": "",
+        "max_steps": "2", "enabled": "on"})
+
+
+def _agent_edit_no_agents(client, monkeypatch):
+    return client.get(reverse("chat-agent-edit", args=[424242]))
+
+
+def _agent_edit_queue_down(client, monkeypatch):
+    agent = make_agent(slug=_unique_slug("sweep-edit-down"))
+    _patch_queue(monkeypatch, raises=QueueUnavailable("down"))
+    return client.get(reverse("chat-agent-edit", args=[agent.pk]))
+
+
+def _agent_edit_malformed_target(client, monkeypatch):
+    # A role string no registry knows on the ROW (the render path must
+    # not explode on a label lookup that misses), an `action` this view
+    # has no branch for, a blank name and a negative step count in the
+    # body -- every refusal this route can reach, at once.
+    agent = make_agent(slug=_unique_slug("sweep-edit-bad"),
+                       llm_role="not.a.registered.role")
+    return client.post(reverse("chat-agent-edit", args=[agent.pk]), {
+        "action": "nonsense", "name": "", "max_steps": "-1"})
+
+
 # The one place every route name and its four drivers are named
 # together -- ANY name present in `chat_urls.urlpatterns` but absent
 # from this dict raises `KeyError` in the sweep below, immediately.
@@ -1125,6 +1272,10 @@ _DRIVERS: dict[str, tuple] = {
         _conversation_queue_down, _conversation_malformed_target,
     ),
     "chat-turn": (_turn_normal, _turn_no_agents, _turn_queue_down, _turn_malformed_target),
+    "chat-turn-edit": (
+        _turn_edit_normal, _turn_edit_no_agents,
+        _turn_edit_queue_down, _turn_edit_malformed_target,
+    ),
     "chat-attachment-detach": (
         _detach_normal, _detach_no_agents, _detach_queue_down, _detach_malformed_target,
     ),
@@ -1150,6 +1301,12 @@ _DRIVERS: dict[str, tuple] = {
     "chat-conversation-share": (
         _share_normal, _share_no_agents, _share_queue_down, _share_malformed_target,
     ),
+    "chat-agents": (_agents_list_normal, _agents_list_no_agents,
+                    _agents_list_queue_down, _agents_list_malformed_target),
+    "chat-agent-new": (_agent_new_normal, _agent_new_no_agents,
+                       _agent_new_queue_down, _agent_new_malformed_target),
+    "chat-agent-edit": (_agent_edit_normal, _agent_edit_no_agents,
+                        _agent_edit_queue_down, _agent_edit_malformed_target),
     # The rename's fourth driver is the blank-title 400 rather than the
     # shared "unknown uuid" one: a body the view really reads, refused
     # for a reason no other route in this group has.

@@ -235,6 +235,20 @@ SETTINGS_GROUPS: tuple[tuple[str, tuple[Entry, ...]], ...] = (
         # answers True for everybody in the open posture, so the page is
         # offered wherever it can be used.
         Entry("Job execution", "jobs-settings", ADMIN),
+        # The agent library (chat cluster, feature B): every agent on the
+        # box, its audience and its owner, linking to the one edit route
+        # `/chat/agents/` also links to. ADMIN like Models/Library/Chat/
+        # Job execution -- it administers box inventory, which is why the
+        # page reads through `agents.visibility.labellable_agents` rather
+        # than through a per-principal filter. NO `feature`: agents are
+        # core, present whatever `FARABUNKER_FEATURES` holds.
+        #
+        # "Agent library", NOT "Agents": the Access group below already
+        # carries "Agent access" (`chat-agent-entitlements`) for a
+        # different job -- which entitlements label a row -- and two
+        # entries sharing one noun is a nav an operator has to learn
+        # rather than read.
+        Entry("Agent library", "settings-agents", ADMIN),
         # Vision-owned, ADMIN like Models/Library, AND flag-guarded: with
         # "vision" off there is no `/vision/` route at all
         # (`config/urls.py`), so this entry must not render either --

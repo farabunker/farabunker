@@ -129,6 +129,24 @@ class Agent(models.Model):
     # (`agents/resident.py`). RULING 3: an origin marker, not a lock --
     # see the class docstring.
     resident = models.BooleanField(default=False)
+    # THE AUDIENCE, distinct from `resident` the ORIGIN MARKER above.
+    # True means "everybody on this box may use this row"; False means
+    # "only the people its ownership and its labels reach".
+    #
+    # A SEPARATE COLUMN RATHER THAN AN OVERLOAD OF `resident` (spec
+    # decision 6, owner ruling flag 2). `resident` has a SECOND READER
+    # -- `agents.visibility.resident_agent_tool_keys`, which warns the
+    # tool-label page that labelling a tool a SHIPPED agent declares
+    # makes the shell path silently weaker -- and overloading it would
+    # make that warning fire for rows that were never shipped defaults,
+    # while making the agent form's own audience control lie about where
+    # a row came from.
+    #
+    # `visible_agents` AND-s the entitlement label clause onto its
+    # ownership OR, so `box_wide=True` is not a bypass: a box-wide row
+    # narrowed to an entitlement reaches everybody on this box WHO HOLDS
+    # IT, which is the useful fourth row of §4.3.1's truth table.
+    box_wide = models.BooleanField(default=False)
     enabled = models.BooleanField(default=True)
     # RULING 4b (2026-08-27 addendum / 2026-08-28 ruling): the principal
     # that owns this row, in the same shape as `Conversation`'s identical
@@ -350,6 +368,27 @@ class Conversation(models.Model):
     # reads.
     consolidated_through_index = models.PositiveIntegerField(null=True, blank=True)
     consolidated_at = models.DateTimeField(null=True, blank=True)
+    # PROVENANCE (chat cluster, feature C). Null for every conversation
+    # that was started rather than branched.
+    #
+    # TWO COLUMNS RATHER THAN A TITLE SUFFIX (spec decision 16, owner
+    # ruling flag 4). Two rows with the same name and no stated
+    # relationship is exactly the sidebar an operator cannot explain to
+    # themselves a week later, and a title suffix is a string nobody can
+    # query. A relationship nobody can query is not a relationship.
+    #
+    # `SET_NULL`, NOT `CASCADE`: a branch is a conversation in its own
+    # right, and losing the row it came from is not a reason to lose it.
+    # `branched_at_index` survives that deletion deliberately, so the
+    # provenance line can still say WHERE this thread left off even when
+    # it can no longer say what it left.
+    branched_from = models.ForeignKey("self", null=True, blank=True,
+                                      on_delete=models.SET_NULL,
+                                      related_name="branches")
+    # THE PARENT'S index of the edited turn -- not this conversation's.
+    # A branch renumbers its copied turns from zero, so an index read
+    # against the branch would name the wrong message.
+    branched_at_index = models.PositiveIntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True, db_index=True)
 

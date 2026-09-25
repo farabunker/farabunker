@@ -114,12 +114,27 @@ shared with the conversation page's own former duplicate too).
     accessible name on EVERY surface -- `/chat/` used to carry a real
     visible `<label for="start-text">Message</label>` (`chat/index.
     html`, pre-round-18) that the shared fragment dropped;
-    `chat/conversation.html`'s own textarea never had one either. One
-    accessible name per page is safe: exactly one composer renders per
-    page (the same invariant `#attach-files`/`#turn-form` already rely
-    on). `aria-label` mirrors `composer_placeholder` rather than a
-    second string to keep in sync -- the placeholder already names what
-    belongs in this box on every surface.
+    `chat/conversation.html`'s own textarea never had one either.
+    `aria-label` mirrors `composer_placeholder` rather than a second
+    string to keep in sync -- the placeholder already names what belongs
+    in this box on every surface.
+
+    THE INVARIANT THIS COMMENT USED TO NAME HAS CHANGED, AND THE
+    REPLACEMENT IS WHAT NOW HOLDS (feature C review, M2). It used to
+    read "one accessible name per page is safe: exactly one composer
+    renders per page (the same invariant `#attach-files`/`#turn-form`
+    already rely on)" -- and the chat cluster's edit disclosure
+    (`chat/_turn_card.html`) broke the `#attach-files` half of that
+    deliberately: it renders `chat/_attach_files.html` ONCE PER ELIGIBLE
+    USER TURN, beside this composer's own copy. What holds now is
+    narrower and stated positively: **exactly one COMPOSER renders per
+    page**, so `#composer-text`, `#turn-form` and this fragment's own
+    `#attach-files` are each still unique -- and every OTHER renderer of
+    `_attach_files.html` passes its own `attach_id`, which is why the
+    composer keeps the bare `attach-files` rather than yielding it. See
+    `chat/_attach_files.html`'s own `attach_id` note for the defect that
+    parameter exists to prevent. Do not reason from "there is only one
+    of these on the page" for anything a TURN CARD can also render.
     {% endcomment %}
     <textarea name="text"{% if composer_mode == "turn" %} required{% endif %}
               id="composer-text" aria-label="{{ composer_placeholder }}"

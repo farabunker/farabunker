@@ -73,6 +73,27 @@ abstractions — the reason a module's code never has to change as hardware or m
   set is usable by everyone who may use its capability; a set with **no** entitlement
   attached restricts **nothing** — both are the opt-in, zero-cost default, not an edge case.
 
+### `context_window` is now read for display as well as sent
+
+`ModelConnection.context_window` rides into `ResolvedModel.config` through
+`resolved_from_connection` and is sent to the engine adapter. The chat
+cluster's context meter also **reads** it for display, through
+`models/contracts/bindings.py::effective_context_window`, which answers the
+operator's value when there is one and the engine adapter's own bounded
+default when there is not. **No engine probe was added**: nothing anywhere
+reads an engine-reported architecture maximum, and ADR 0010's incident
+write-up is why.
+
+Two readers of the same column answer differently, deliberately.
+`tools/rag/views.py::_resolved_answer_context_window` returns "unknown"
+where `effective_context_window` returns the adapter's default: the first
+decides whether to run a top-k fit check at all (skipping a check on a
+guessed number is safe; refusing a legitimate `k` for a reason the operator
+never configured is not), and the second must display something. They also
+ask about different bindings — the fit check about the library's answer
+role, the meter about the conversation's own chat binding or the picked
+connection — so they are not two answers to one question.
+
 ## Model access (IA-2 T14)
 
 `models/registry/access.py::model_access_for(principal)` answers "which registered
