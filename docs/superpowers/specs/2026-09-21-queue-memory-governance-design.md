@@ -1,7 +1,9 @@
 # Queue memory governance — design
 
 **Date:** 2026-09-21
-**Status:** Final, revision 5 (review rounds 1–3 + engine-steward amendment applied — see §13)
+**Status:** Final, revision 5 (review rounds 1–3 + engine-steward amendment applied — see §13),
+amended 2026-09-25 by the engine diagnosis (closing section) — which explains the memory
+tolerances this design consumed without being able to justify, and corrects one of them
 **Columns touched:** `models/queue`, `models/registry` (bindings, connection facts,
 console labels), `models/contracts` (job-kind registry, engine seam docs),
 `agents/chat`, `agents/runtime`
@@ -107,6 +109,13 @@ unset budget.
 
 A connection carries three independent facts and derives one answer:
 
+> **Correction, 2026-09-25 (engine diagnosis amendment).** "Three **independent** facts" holds
+> on the text engine and **not** on the image engine, where rungs 2 and 3 are read from the
+> same run memo and are therefore one source wearing two labels. Read the list below as three
+> *storage slots* with a fixed precedence — which is all the ladder mechanically is — rather
+> than as three independent observations. Nothing anywhere in this spec may be read as rung 3
+> cross-checking rung 2.
+
 1. `footprint_override_bytes` — **the operator's word.** Unchanged, always wins.
 2. `measured_footprint_bytes` / `measured_footprint_at` — **observed**: what the
    engine reported the model occupied right after a run this queue executed.
@@ -117,7 +126,11 @@ A connection carries three independent facts and derives one answer:
    `_residency_snapshot`). No new HTTP call ever: this rung exists precisely because
    the snapshot is already on the wire and its numbers are currently discarded.
    §3.3(f) removes the budget gate that would otherwise have made this rung
-   unreachable on the very boxes that need it.
+   unreachable on the very boxes that need it. *(2026-09-25, engine diagnosis amendment:
+   **independent of rung 2 on the text engine only.** On the image engine the loaded size
+   this rung harvests is read straight out of the same run memo rung 2 writes, so the two
+   share one source and one failure mode — see the labelling paragraph below and §9.1's own
+   correction.)*
 4. `None` — **unknown**, which the scheduler already reads as "this job runs alone".
 
 `effective_footprint_bytes` becomes `override ?? measured ?? engine_reported ?? None`.
@@ -147,7 +160,11 @@ line-by-line check found that the image engine reports no per-model residency or
 at all (`list_installed` carries `size=None` by design); its `loaded_size` is the
 adapter's *own* post-run delta, kept in the same TTL'd memo — so on that engine rung 3
 is very nearly rung 2 restated, with the same provenance and the same memo lifetime,
-and is close to valueless as an independent fact. On the text engine, which answers a
+and is close to valueless as an independent fact. *(2026-09-25, engine diagnosis
+amendment: not "very nearly" — on that engine the two rungs are **one source with one
+failure mode wearing two labels**, since the loaded size it reports is read straight out
+of the same run memo rung 2 writes. Nothing here may be read as rung 3 cross-checking
+rung 2; §9.1's "facts of different quality" holds on the text engine only.)* On the text engine, which answers a
 real residency endpoint, rung 3 is genuinely engine-reported and is worth having. One
 label has to be honest on both; this one is.
 
@@ -184,6 +201,23 @@ engine-reported columns:
   not the timestamp — and one line records the connection, the standing value and
   the refused value. Below a documented "obviously broken" ratio the line is a
   WARNING naming the override as the correction path; a small dip is INFO.
+
+> **Correction, 2026-09-25 (engine diagnosis amendment).** "A small dip is INFO" is the
+> shipped behaviour and stays, but this spec — and the constant's own comment in the tree —
+> read it as "still visible to an operator", and that half does not hold **for this line**.
+> The configuration raises exactly two namespaces to INFO, the queue's and the engine
+> adapters'; everything else falls back to the root's WARNING. This line is logged by the
+> **registry**, which is not one of the two, so today the INFO dip is not emitted at all and
+> the band between the ratio and 1.0 is silent. On a large model that silent band is
+> gigabytes. *(A branch in flight adds the registry to those namespaces; once it lands the
+> line **is** emitted, at INFO. That is a real improvement and this note should not be read as
+> arguing against it — the registry has one such call site and it fires only on a refused
+> reading, so it is not noise. The narrower point stands: present at INFO is weaker than what
+> "still visible" claimed, since the original sentence was defending the choice of level
+> itself.)* The ratio itself is confirmed correct: it fired on both real incidents, at 0.57 and
+> 0.62, and both WARNING lines were verified visible. Raising the level on the **absolute**
+> dip as well as the ratio is the named improvement, not a correction — registry-side work
+> this track does not own, recorded rather than taken.
 
 **No tolerance band, deliberately.** A percentage tolerance measured against the
 *standing* value ratchets geometrically: five successive "within tolerance" 0.75×
@@ -270,6 +304,17 @@ On an `unload_scope="endpoint"` engine the call frees whatever else is there, an
 returns `False` after a 30 s poll when nothing rises. Both facts are load-bearing
 below.
 
+> **Correction, 2026-09-25 (engine diagnosis amendment).** Both statements above are now
+> mechanism rather than observation, and the second one is understated. The image engine's
+> free call **moves** the weights from the accelerator to the host rather than releasing them;
+> on unified memory that is the same physical RAM, so nothing is freed at the moment the call
+> returns, and the sweep it runs covers the accelerator only — anything the engine placed on
+> the host device, which at its default setting includes the text encoders, is
+> **structurally unfreeable through that interface**. So a `True` from `unload` does not mean
+> the endpoint is empty and cannot be made to mean it, at any timeout. The endpoint-wide
+> scope is likewise structural, not a declaration that might one day read `"model"`. See the
+> 2026-09-25 amendment, mechanism B and premise 1.
+
 #### (c) Protected keys: the one safety rule every unload obeys
 
 `protected_keys` = the model keys of **every currently-`RUNNING` job — this tick's
@@ -310,6 +355,16 @@ here as an explicit exception with a named boundary: it applies **only** to the
 admitted job's own keys at its own endpoint, never to another job's key and never to
 a live in-flight attempt's key, either of which still skips the endpoint and refuses
 the launch (§3.3d(2)).
+
+> **Correction, 2026-09-25 (engine diagnosis amendment).** "At worst one reload" is accurate
+> in count and misleading in magnitude. Because the free call is endpoint-wide and there is no
+> per-model release, evicting the image endpoint is closer to an **outage** than a shuffle:
+> undoing it costs the next generation a cold load measured in many minutes, and a policy that
+> treats that eviction as interchangeable with any other one is wrong — it should prefer to
+> refuse or to queue rather than evict that endpoint. **The exact cost is not measured**, and
+> the cold-load durations this spec cites elsewhere are a recorded incident on the chat path,
+> not a measurement of this reload; none of them may be repeated as if they were. See the
+> 2026-09-25 amendment, premise 2.
 
 A skipped endpoint logs one WARNING naming what protected it. This rule governs the
 budget-driven pass, the exclusive pass and the barrier alike; it is the single place
@@ -1047,7 +1102,13 @@ No success language before these pixels exist.
 
 1. **A third footprint rung, with its own columns**, rather than folding engine-reported
    readings into the measured column. Folding would make the recorder rule compare two
-   facts of different quality and would make the console's label a lie again.
+   facts of different quality and would make the console's label a lie again. *(2026-09-25,
+   engine diagnosis amendment: "facts of different quality" is true **on the text engine
+   only**. On the image engine the two rungs are read from one run memo, so they are the same
+   fact with the same failure mode stored twice — which does not change this decision, since
+   separate columns are still what keeps the recorder rule and the console label honest on the
+   engine where the two genuinely differ, but it does mean the separation buys no
+   cross-check.)*
 2. **Keep the maximum; no tolerance band.** A percentage band against the standing value
    ratchets geometrically and reproduces the exact incident it is meant to refuse
    (§3.2). The stricter rule needs no column and no constant.
@@ -1148,7 +1209,12 @@ No success language before these pixels exist.
   finishing work during the poll window can clear it and read as a settled eviction —
   the adapter's own documented false-positive, which additionally drops its run memo and
   therefore its residency belief. A barrier that returns `True` on drift launches on an
-  endpoint nothing actually freed.
+  endpoint nothing actually freed. *(2026-09-25: no longer a possibility but a measured
+  mechanism — every "free" figure this engine reports on this platform is whole-machine
+  available memory, and an idle engine's reading drifts by up to ~52 MB per two-second
+  window with nothing loading or unloading. At a cold endpoint drift is the only thing the
+  poll can ever observe, which is what makes the reuse of the credibility floor as a settle
+  threshold wrong — see the 2026-09-25 amendment, §C.)*
 - **The residency memo is LRU-capped at eight endpoints.** A ninth endpoint evicts the
   oldest belief, so on a box with many registered endpoints an endpoint can report
   "nothing resident" purely because its belief aged out — which, under
@@ -1207,6 +1273,34 @@ No success language before these pixels exist.
   giving up honestly rather than by answering.
 - **Measurement is still not process-peak and still not accelerator-upcast aware.** This
   track makes the estimate honest and monotonic, not exact.
+- *(2026-09-25, engine diagnosis amendment.)* **For the image engine only, the budget's
+  numerator and denominator are measured on different machines.** The memory figure the
+  worker detects for the operator (§3.7) is read **inside the worker container** and describes
+  the container's allocation, while an **image-engine** footprint is a differential of the
+  **host's** whole-machine free memory, read over that engine's own endpoint. §3.7 says the
+  container sees the wrong machine about the *prefill*; for that one engine the same is true
+  of the comparison itself. **This does not generalise, and must not be read as though it
+  did:** the text engine reports a real per-model size rather than a whole-machine
+  differential (which is also why it can declare `residency_authority="endpoint"`), so a
+  footprint sourced from it is commensurable with a budget in the ordinary way. The code is
+  honest about the container reading in comments and the operator sets the budget by hand, so
+  nothing is silently wrong — but §3.1's ladder should not be read as though every rung's
+  number came from the same ruler.
+- *(2026-09-25, engine diagnosis amendment.)* **A peer stack's free call at a shared engine
+  silently invalidates this stack's run memo**, with no way for this process to notice. The
+  TTL is defence against a restart, not against a concurrent writer.
+- *(2026-09-25, engine diagnosis amendment.)* **An eviction's transient peak may approach the
+  model's size again.** The free call allocates a host-side copy before dropping the
+  accelerator-side tensors, so unloading is not monotonically memory-relieving for the
+  duration of the move. The magnitude is unmeasured and is the experiment's question; until
+  it is answered, no budget arithmetic may assume an evicted endpoint's bytes are back before
+  the barrier says so.
+
+> **Read the 2026-09-25 amendment with this section.** Three of the residuals above — the
+> `True` that observed nothing, the drift false-positive, and the credibility floor — were
+> recorded as honest unknowns. They are now explained, and one of them turns out to be a
+> defect rather than a limit. The floor in particular **caught neither real incident**, so
+> nothing in this section may be read as though it were protection.
 
 ## 12. Out of scope (named so nobody builds them by accident)
 
@@ -1225,6 +1319,16 @@ No success language before these pixels exist.
   (the image adapter's pre-cleared), not written here. In particular, closing the
   no-baseline `True` and the drift false-positive named in §11 is adapter work this
   track names and does not attempt.
+- *(2026-09-25, engine diagnosis amendment.)* **Correcting the unload settle threshold** —
+  skipping the poll entirely where the endpoint has no remembered footprint, and taking the
+  degraded path instead. This is the one substantive correction the diagnosis produces, it
+  needs no new constant, and it is **adapter work for the engine's own column**, not a task
+  of this track. Likewise **sizing the unload timeout**: that number cannot be determined
+  read-only and is gated on the confirming experiment.
+- *(2026-09-25.)* **Building either capability gap named in the amendment's premise 3** — a
+  model reference that can express a sequence rather than a set (G-1), or a budget weight
+  that can say "needed, but not worth refusing the job over" (G-2). Both are recorded as
+  named gaps because building either is a separate design decision.
 - Migrating the chat page onto the shared poll loop, and any other poller consolidation.
 - Streaming turn output, or any change to the rule that a tool runner never waits on a
   queue job.
@@ -1362,3 +1466,213 @@ S-1 is the load-bearing one: without a declaration the round-2 narrowing could n
 been built at all, and a plan author would have discovered that only after reading
 adapter source. S-3 changes no mechanism — it makes the barrier's honest failure modes
 visible in the document that claims the barrier is safe. **Revision 5; closed again.**
+
+## Engine diagnosis amendment (2026-09-25) — why the memory tolerances exist, and which one is wrong
+
+This spec was written while nobody could explain **why** several of the memory tolerances it
+consumes exist. A read-only diagnostic explained them on 2026-09-25, at high confidence,
+by reading the image engine's own source on the reference host alongside this repository's
+adapter and worker and twenty-six capture files from the vision-stability proof runs. That
+investigation changed no repository file, ran no test suite, and sent no mutating request to
+the engine.
+
+It landed **after** this track's nineteen tasks had been executed and merged, so nothing here
+is an instruction to a plan executor. It is the missing half of this document's own reasoning:
+every tolerance §3.3 leans on now has a mechanism written beside it, one of them is wrong, and
+three things the body treats as incidental turn out to be structural. Amended in the style
+ADR 0013's own dated amendments use — the body above is **not** rewritten, and where it now
+says something the diagnosis contradicts, a dated correction note sits at that paragraph.
+
+### A. The two mechanisms
+
+**Mechanism A — a reported model size is a whole-machine differential, not a model's memory.**
+On this unified-memory platform the image engine's free-memory reading returns **machine-wide**
+available memory for both the accelerator device and the host: the device total, the host
+total and the allocator's own total are identical values, and the one field that could
+separate allocator cache from everything else — the allocator's held-but-unused bytes — is
+overwritten with that same machine-wide number on this backend. A recorded "footprint" is
+therefore a differential of whole-machine free memory across a run, with two consequences that
+point the same way:
+
+- it is **deflated by any other process releasing memory inside the measurement window**. Not
+  a hypothesis: one recorded incident's missing 6.4 GB matches, to within ordinary noise, the
+  stated size of a second engine's model that a peer session released mid-load, and the
+  proofs recorded both numbers.
+- it is **biased low by the operating system's memory compressor**, which mints free pages
+  under exactly the pressure a large load creates — so the bigger the model, the more it
+  under-reports. Mechanism sound; magnitude unmeasured, and one of the experiment's purposes.
+
+This explains the under-measurement incident §3.2 already describes and refuses to write. The
+reading was not a bad measurement of the model; it was a good measurement of the wrong thing —
+which is why §3.2's keep-the-maximum rule is the right shape and no tolerance band could have
+been.
+
+**Mechanism B — releasing a model moves the weights; it does not free them.** The image
+engine's free call ends at an instruction that moves the weights from the accelerator to the
+host. On unified memory that is the **same physical RAM**, so nothing is released at the
+moment the call returns; the bytes come back later and indirectly, through a reference drop
+and a rate-limited collection inside the engine's own loop. Two further consequences:
+
+- the sweep that call runs covers the **accelerator only**. Anything the engine placed on the
+  host device — which at this engine's default setting includes the text encoders — is
+  **structurally unfreeable through that interface**, at any timeout, by any caller.
+- therefore a `True` from `unload` does not mean the endpoint is empty and **cannot be made to
+  mean it**. §3.3(b) reached that from field observation; it is now mechanism, and it is also
+  the reason a settle threshold set to half the endpoint's known footprint (floored at the
+  credibility floor) is the right *shape*: the endpoint can never give back its whole recorded
+  footprint, so demanding the whole rise would time out on a successful eviction.
+
+Mechanism B also predicts the timing spread the proofs recorded — the same eviction settling
+in ~3.5 s on a quiet box and ~21.0 s on a loaded one — because a multi-gigabyte move must
+itself find room for the copy.
+
+### B. The five tolerance verdicts
+
+Confidence is HIGH unless stated. Where a verdict is WRONG, the replacement is named.
+
+| Tolerance | Verdict | What this document must now say |
+|---|---|---|
+| The **credible-footprint floor**, guarding the footprint reading | **STAYS** | Correctly sized against measurement noise — live sampling of an idle engine showed the underlying number drifting by up to ~52 MB in a two-second window, so the floor is about five times the idle noise band. **But it caught NEITHER real incident**: both recorded dips were two orders of magnitude above it. It guards noise, not the mechanism. Necessary, wholly insufficient, and §11's residuals must not be read as though it were protection. |
+| **The same constant reused as the unload settle threshold**, wherever an endpoint has no remembered footprint | **WRONG** | The one substantive correction this diagnosis produces. See §C below. |
+| The **dip-warning ratio** | **STAYS**, log level only | It cannot be actively wrong (it sets a log level and changes no behaviour) and it **fired on both real incidents** — ratios 0.57 and 0.62, both logged at WARNING, both verified visible at default logging. One correction to §3.2 follows it, recorded in place: a dip *between* the ratio and 1.0 is logged at INFO, and this line's own namespace — the registry's — is not one of the two the configuration raises to INFO, so today that band is silent. |
+| The **unload settle poll**, and its timeout value | Poll **STAYS**; the **VALUE is at MEDIUM confidence** | The poll is *required* by the mechanism, not merely prudent: the free call only sets a flag and the work happens later on another thread, which is exactly the ordering failure §3.3(d) exists for. The `// 2` form of its threshold is confirmed correct for mechanism B's reason. What is at risk is the **cap**: the same eviction was observed settling in ~3.5 s on an idle box and ~21.0 s on a loaded one, a sixfold spread, and mechanism B predicts settle time scales with model size *and* with memory pressure. **The right value cannot be determined read-only** — it needs one timed eviction of the largest checkpoint at a known pressure level, which is a mutating probe. **No number is invented here.** Raising it also breaks an arithmetic that is **not written in this engine's own column**, and a reader re-deriving it would otherwise open the wrong adapter: the worker prices its per-tick unload cap at two calls of **thirty seconds each, naming the TEXT engine's unload timeout**, and reasons the staleness cutoff's margin from that product. The image adapter's own timeout is thirty seconds *because it deliberately matches that number and says so in its comment*, warning that changing it unannounced would invalidate arithmetic it has no business touching. So an experiment that shows the **image** engine needs longer does not simply raise one constant — it breaks that deliberate match, and the worker's cap, the staleness cutoff and the text engine's own constant all have to be reconsidered together. Determining the value is a stated purpose of the confirming experiment (§E). |
+| The **run memo**, its TTL and its cap | **STAYS**, and removing it is **IMPOSSIBLE** | Not "unwise" — impossible. **No route this engine build serves exposes the loaded-model list**; there is no residency signal over HTTP at all. Without the memo the adapter would know nothing about residency, every footprint would be unknown for ever, and every job would run alone. §3.3(a)'s `residency_authority="memo"` declaration for this engine is therefore a permanent structural fact, not a temporary one a future adapter release might retire. |
+
+### C. The one substantive correction — the settle threshold
+
+**Where `unload` has no remembered footprint for an endpoint, the settle poll must not run at
+all.** Skip the poll and take the existing degraded path the same call already takes when it
+is told not to wait: the POST plus the single immediate queue-idle check.
+
+The reasoning is arithmetic, not taste. At an endpoint with nothing resident **nothing can
+rise**, so the poll's only possible exits are ambient machine drift crossing the floor, or the
+full timeout burn — and both are noise. Measured, at a cold endpoint: five waited calls
+returned 5.8 s, 30.0 s (a full burn), 4.7 s, 3.4 s and 1.3 s; the capture's own verdict was
+FAIL, and its own words are that the four early exits are ambient-drift positives rather than
+durable passes. The floor was never sized to be a settle threshold; it was sized against
+measurement noise, and against an empty endpoint it measures only that noise.
+
+This needs no new constant, no invented number and no mutating probe — the path to degrade to
+already exists in the same function. It is **adapter work**, and this track put adapter
+internals out of scope (§12), so it is recorded here as the correction the diagnosis produces
+and named in §12 as work for the engine's own column. The credibility floor keeps its first
+job unchanged.
+
+**The consequence on the shipped system, in the present tense.** The diagnostic argued this
+fix should land *before* the nineteen tasks executed, because the refusal bookkeeping counts
+those results. Those tasks are merged and running, so that bookkeeping is being fed **right
+now** by a poll this diagnosis calls meaningless. The path is exact and is not hypothetical:
+the settle threshold falls back to the bare credibility floor whenever the endpoint's memo
+carries no footprint, and the 2026-09-24 amendment kept the wait in exactly two places. **The
+clean case is the first of them: the barrier at an admitted exclusive job's OWN endpoint with
+nothing remembered there** — a cold or freshly-restarted image endpoint, which is the common
+shape after any worker restart. That call waits, and nothing can rise, so it polls ambient
+drift until it clears the floor or the clock runs out. *(The other waited case, a
+believed-resident model, is narrower than it sounds: at a believed-resident image endpoint the
+memo normally does carry a footprint, so the bare-floor fallback is unusual there.)* A `False`
+from a call made against a believed-resident model is *informative* by §3.3(d)(4) and
+increments the refusal count. Therefore:
+
+- a job can accumulate refusals, take its `BARRIER_HOLDOFF_SECONDS` hold-off, and ultimately
+  be **failed** once `MAX_BARRIER_REFUSALS` and `MIN_BARRIER_REFUSAL_SPAN_SECONDS` are both
+  met, on the strength of polls that observed only ambient machine drift or ran out the clock;
+- and the same threshold can produce the opposite error — an early exit on drift reads as a
+  settled eviction and **resets** the count, which §3.3(d)(5) treats as a successful barrier.
+
+Neither is a new defect this amendment introduces; both are the existing mechanism operating
+on a measurement that cannot carry the meaning §3.3(d) assigns to it. The three constants
+above are sound in *form* — count and wall clock together, protection refusals excluded — and
+are being fed a signal that is noise at exactly the endpoints with no remembered footprint.
+Until the adapter correction lands, an operator reading one of §3.3(d)(5)'s
+did-not-release-memory failures on a job row should treat the *endpoint's* memo state as part
+of the diagnosis, not the engine's behaviour alone.
+
+### D. Three constraints that are premises, not discoveries
+
+1. **The engine's free is ENDPOINT-WIDE. There is no per-model release.** Freeing one model
+   means freeing **every** model at that endpoint. §3.3(a) treats this as a declaration a
+   steward supplies and defaults safely to; it is also a structural fact of this engine's
+   implementation, so the safe default is the true one and cannot drift.
+
+2. **Evicting the image endpoint is closer to an OUTAGE than a shuffle.** Undoing it costs the
+   next generation a cold load measured in many minutes. A scheduler that treats that eviction
+   as interchangeable with any other eviction is wrong, and the policy should prefer to
+   **refuse or queue rather than evict that endpoint**. **The exact cost is not measured**, and
+   this document must not repeat an approximate figure as if it were one: the cold-load
+   durations §3.3(c), §3.4(d) and §11 cite are a recorded incident on the *chat* path, not a
+   measurement of this reload. §3.3(c)'s "at worst one reload" is accurate in count and
+   misleading in magnitude.
+
+3. **Peak residency is enforceable only by handler code, never by admission.** Two capability
+   gaps in the current contract make that so, both verified against the tree by another
+   implementer, and both **named here rather than built** — building either is a separate
+   decision, not a task of this track:
+
+   - **Gap G-1 — a job cannot say it needs one model and THEN another.** The only axis a model
+     reference carries beyond the key itself is `synchronous` (ADR 0013's 2026-09-24
+     amendment), which decides whether the barrier *waits* at that endpoint and nothing else:
+     it changes neither the protected set, nor the swept endpoint set, nor the budget
+     arithmetic. A sequential need therefore reaches the queue as a simultaneous one.
+   - **Gap G-2 — the budget arithmetic counts a non-synchronous reference exactly like a
+     synchronous one.** Nothing in the contract can express "needed, but not worth refusing
+     the job over", so a tool's model is reserved at full weight against admission even when
+     the handler will never hold it at the same time as the model it is reserved beside.
+
+   Together these mean a job whose true peak residency is the larger of two models is admitted
+   as though it were their sum, and a job whose true peak is their sum cannot be described at
+   all. Only the handler can hold the real sequence.
+
+### E. Further findings, and the experiment gate
+
+Two findings beyond the list above, recorded because a reader of §3.3 would otherwise act on
+the opposite belief:
+
+- **Unloading is not monotonically memory-relieving.** Mechanism B's move allocates a
+  host-side copy before dropping the accelerator-side tensors, so an eviction's transient peak
+  can approach the model's size **again**. Whether the move is parameter-by-parameter — which
+  would bound the transient at one tensor rather than the whole model — is the single
+  load-bearing uncertainty in mechanism B, and is exactly what the experiment settles. Until
+  it is settled, no budget arithmetic may assume an evicted endpoint's bytes are back before
+  the barrier says so. The waited path already achieves that ordering, which is a further
+  argument for keeping it.
+- **A peer stack's free call at a shared engine silently invalidates this stack's run memo**,
+  with no way for this process to notice — observed cross-stack in the proofs. The TTL does
+  not close it. §11's memo residuals are about ageing and restarts; this one is about a
+  concurrent writer.
+
+**The experiment gate.** Two confirming experiments are specified in the diagnostic report,
+both mutating, both requiring the owner's word, an announced window, a **restarted** engine
+and a quiet box. Until they have run:
+
+- **do not change the unload timeout value**, and do not derive one from the figures quoted
+  above — they are uncontrolled observations, not a measurement of the largest checkpoint at a
+  known pressure level;
+- **do not size any budget rule against the transient peak** an eviction creates, since its
+  magnitude is the experiment's question;
+- **do not attribute either recorded footprint dip to the memory compressor.** One is fully
+  explained by cross-process release and needs no second cause; the compressor's contribution
+  is unmeasured;
+- **do not derive admission headroom from a recorded image-engine footprint as though it were
+  an upper bound.** This is the prohibition the other three do not cover, and it is the one a
+  reader is most likely to breach without noticing. Mechanism A says such a footprint is
+  biased **low**, and biased low *in proportion to the pressure the load creates* — so the
+  bigger the model, the more it under-reports, and the magnitude of that bias is unmeasured.
+  Any arithmetic of the form "the budget minus what is resident leaves room for this" treats
+  the recorded number as a ceiling when it is a floor of unknown depth, and under-counting
+  resident memory is the direction that crashes hosts. Keep-the-maximum (§3.2) makes the
+  standing value monotonic, which is not the same as making it an upper bound. Until the
+  experiment measures the bias, headroom derived this way is a guess wearing a number's
+  clothes, and no constant may be re-derived from it.
+
+**One unknown that changes what the experiment's own numbers would mean.** The engine reports
+an optional memory-management extension (`comfy-aimdo`) as installed on this host, and the
+diagnostic could not determine read-only whether it is **active** — its module default is off
+and nothing was traced that flips it. If it were active it would add a **fourth footprint
+mechanism**: the initial load device becomes the host device and dynamic models are handled
+differently by the free path (which declines to unload them), so a model's resident size at
+measurement time could be a fraction of the whole rather than the whole, **changing what every number the
+experiment produces means**. The report claims no more than that: it gives **no all-clear for
+mechanisms A or B**, and none should be read into it here.
+**Checking it is cheap and belongs before the experiment runs, not after.**
+
+Everything else in this amendment is read-only-verified and may be acted on.
