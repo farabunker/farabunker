@@ -70,6 +70,13 @@ class TestPlanTurn:
         assert exclusive is True
 
     def test_it_unions_the_roles_of_every_granted_tool(self, bound_chat_role, bound_embed_role):
+        """AND TAGS THEM (2026-09-24): the chat ref is `synchronous` --
+        this handler drives that model in-process every run -- while a
+        TOOL's ref is not. Both are declared, so both stay protected and
+        accounted for; only the execution queue's barrier-wait decision
+        reads the flag (`ModelRef.synchronous`). Without it, an agent
+        granted the image tool put that endpoint in every turn's own-set
+        and paid a settle poll there on every admission."""
         register_tool(ToolSpec(key="stub.embeds", label="S", description="d",
                                runner="agents.runtime.tests._helpers.runner_ok",
                                roles=("rag.embed",)))
@@ -77,6 +84,9 @@ class TestPlanTurn:
         turn = _turn_for(agent)
         refs, _ = plan_turn(_payload(turn))
         assert {r.role for r in refs} == {CHAT_CONVERSE_ROLE, "rag.embed"}
+        assert {r.role: r.synchronous for r in refs} == {
+            CHAT_CONVERSE_ROLE: True, "rag.embed": False,
+        }
 
     def test_a_role_is_declared_once_even_when_two_tools_need_it(self, bound_chat_role,
                                                                 bound_embed_role):
@@ -151,6 +161,13 @@ class TestPlanTurn:
         root = make_agent(slug="general", tool_keys=["agent.library"])
         refs, _ = plan_turn(_payload(_turn_for(root)))
         assert "chat.other" in {r.role for r in refs}
+        # A DELEGATE'S REF FOLLOWS THE TOOL RULE (2026-09-24): this
+        # handler never drives it -- the delegate is reached through an
+        # agent-as-tool call -- so it is declared and protected, but it
+        # is not one of THIS turn's own endpoints for the barrier's wait.
+        assert {r.role: r.synchronous for r in refs} == {
+            CHAT_CONVERSE_ROLE: True, "chat.other": False,
+        }
 
     def test_an_unbound_delegate_chat_role_is_dropped_not_a_hard_failure(
             self, bound_chat_role, caplog):

@@ -70,6 +70,19 @@ def plan_turn(payload: dict) -> tuple[list[ModelRef], bool]:
     `effectively_exclusive`'s unmeasured-footprint branch, which is
     where an undeclared turn would land anyway.
 
+    ONLY THE CHAT ROLE IS `synchronous` (2026-09-24). This handler drives
+    the chat model itself, in-process, every run; every other ref here is
+    a TOOL's role (a delegate's own chat role included -- it is reached
+    through an agent-as-tool call, not by this handler), declared so the
+    queue protects and accounts for it, and tagged `synchronous=False` so
+    the barrier does not treat its endpoint as one this turn is about to
+    load at. The case that made it matter: an agent granted the
+    image-generation tool put the image endpoint in every turn's own-set,
+    and the barrier waited there for a release to settle -- a ~22s stall
+    guarding a load this run never makes, since that tool enqueues its own
+    job and submits on its own path. See `ModelRef.synchronous` and ADR
+    0013's 2026-09-24 amendment.
+
     Footprints are left `None`, per `models/queue/scheduler.py`'s
     provenance contract: claim-time code fills them in from a FRESH
     lookup, never from this snapshot.
@@ -98,7 +111,9 @@ def plan_turn(payload: dict) -> tuple[list[ModelRef], bool]:
     model_access = model_access_for(actor, wall=wall)
     chat_resolved, chat_name = resolve_chat(agent, payload.get("connection"),
                                             access=model_access)
-    refs = [_ref(agent.llm_role, chat_resolved, chat_name)]
+    # `synchronous=True` (the default, said out loud beside the tool
+    # loop's `False`): this handler drives the chat model itself.
+    refs = [_ref(agent.llm_role, chat_resolved, chat_name, synchronous=True)]
 
     # THE ACTING RULE'S GRANT HALF (IA-2): built ONCE, here, and threaded
     # through the whole walk below -- an agent is never a way around
@@ -110,7 +125,18 @@ def plan_turn(payload: dict) -> tuple[list[ModelRef], bool]:
         if role in seen_roles:
             continue
         try:
-            refs.append(_ref(role, resolve(role)))
+            # `synchronous=False`: a TOOL (or a delegate) may use this
+            # model, and this handler never drives it in-process. The
+            # image-generation role is the case that made this matter --
+            # the vision tool enqueues its own job and submits there on
+            # its own path, so the turn never loads at that endpoint
+            # during this run. The ref is still declared, so the model
+            # stays protected and accounted for; it is simply not one of
+            # the turn's OWN endpoints for the barrier's wait decision
+            # (`ModelRef.synchronous`, and ADR 0013's 2026-09-24
+            # amendment: an image endpoint counted as "own" put a ~22s
+            # settle poll in front of every chat turn).
+            refs.append(_ref(role, resolve(role), synchronous=False))
             seen_roles.add(role)
         except Exception:  # noqa: BLE001 -- tolerant drop, see docstring
             logger.info("agent.turn: role %r does not resolve; its tool is dropped", role)
@@ -189,13 +215,15 @@ def _tool_roles(agent, actor, access: ToolAccess) -> set[str]:
     return roles
 
 
-def _ref(role: str, resolved, connection_name: str = "") -> ModelRef:
+def _ref(role: str, resolved, connection_name: str = "", *,
+         synchronous: bool = True) -> ModelRef:
     return ModelRef(
         role=role,
         engine=resolved.engine,
         endpoint=resolved.endpoint,
         model_id=resolved.model_id,
         connection_name=connection_name,
+        synchronous=synchronous,
     )
 
 

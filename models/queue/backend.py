@@ -149,7 +149,9 @@ def _serialize_model_refs(model_refs: list[ModelRef]) -> list[dict]:
     that field's docstring for why this is a snapshot, never a FK.
     `footprint_bytes` rides through unchanged (normally `None` at enqueue
     time; `models.queue.claim.claim_and_admit`'s claim-time admission
-    fills it in)."""
+    fills it in). `synchronous` rides through too, and every reader of
+    this JSON defaults it to `True` when it is absent -- which is what a
+    row enqueued before that field existed looks like."""
     return [
         {
             "role": ref.role,
@@ -158,6 +160,7 @@ def _serialize_model_refs(model_refs: list[ModelRef]) -> list[dict]:
             "model_id": ref.model_id,
             "connection_name": ref.connection_name,
             "footprint_bytes": ref.footprint_bytes,
+            "synchronous": ref.synchronous,
         }
         for ref in model_refs
     ]

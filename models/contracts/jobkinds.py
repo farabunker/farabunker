@@ -46,6 +46,22 @@ class ModelRef:
     `footprint_bytes` is left `None` here -- it is filled in later by
     console-side code at claim time (memory admission needs the model's
     on-disk/VRAM size, which isn't known to the pure planner call).
+
+    `synchronous` says WHO drives this model during the run, which only
+    the kind's own planner can know (2026-09-24). `True` -- the default,
+    and every ref that predates this field -- means this kind's HANDLER
+    drives the model itself, in-process, during the run: the endpoint is
+    one the job is about to load at, so the execution queue treats it as
+    the job's OWN endpoint and makes its exclusive-admission barrier WAIT
+    there for the release to settle (`models/queue/worker.py`'s
+    `_eviction_targets`/`_barrier`; the load-on-top race is real exactly
+    there). `False` means a TOOL or a delegate MAY use the model -- the
+    ref is still declared, so the model stays protected from eviction and
+    its memory stays accounted for, but the endpoint is not one this run
+    loads at in-process, so the barrier has nothing to guard there and
+    does not wait for it. `False` narrows ONE decision, the barrier's
+    wait; it changes neither protection, nor the swept endpoint set, nor
+    the budget arithmetic.
     """
 
     role: str
@@ -54,6 +70,7 @@ class ModelRef:
     model_id: str
     connection_name: str = ""
     footprint_bytes: int | None = None
+    synchronous: bool = True
 
 
 @dataclass(frozen=True)

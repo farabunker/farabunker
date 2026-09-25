@@ -135,6 +135,12 @@ class TestEnqueueSerialization:
                 "model_id": "test-model",
                 "connection_name": "test conn",
                 "footprint_bytes": None,
+                # RE-PINNED 2026-09-24: the snapshot carries
+                # `ModelRef.synchronous` too, so the worker can tell an
+                # endpoint this job's handler loads at from one a tool
+                # may use. `True` here is the dataclass default, which is
+                # also how every reader treats the key's ABSENCE.
+                "synchronous": True,
             }
         ]
 

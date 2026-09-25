@@ -468,6 +468,14 @@ class InferenceEngine(Protocol):
         visibly free" as well as "refused" -- still within this contract,
         since `True` was never promised for the merely-accepted case
         alone, only permitted for it.
+
+        A keyword-only `wait: bool = True` is an OPTIONAL adapter
+        EXTENSION, not part of this signature: an adapter that verifies
+        may offer it so a caller whose decision does not depend on the
+        answer (the execution queue's precautionary barrier calls, spec
+        §3.3d(4)) can skip the verification, and a queue caller passing
+        it MUST degrade to the plain two-argument call for an adapter
+        that does not accept it.
         """
         ...
 

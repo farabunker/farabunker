@@ -844,6 +844,88 @@ class TestUnload:
             assert seen["timeout"] == 7.0
 
 
+class TestUnloadWithoutWaiting:
+    """`unload(..., wait=False)` -- the OPTIONAL no-wait extension the
+    execution queue's PRECAUTIONARY barrier calls use (2026-09-24).
+
+    That caller discards the answer by rule (spec §3.3d(4): a
+    precautionary `False` is logged and never blocks a launch), so the
+    settle poll buys it nothing and costs it up to `UNLOAD_TIMEOUT` per
+    admitted exclusive job -- measured on the live box as up to ~30s
+    before a chat turn's first token. `wait=False` is the same POST plus
+    the SAME single `/queue` confirmation the no-baseline path already
+    degrades to: no baseline read, no poll, and no change to the run
+    memo, because nothing was observed.
+    """
+
+    @staticmethod
+    def _recording(fake):
+        """`(get, paths)` -- `fake.get`, recording the path of every GET
+        it is asked for. The pin here is a CALL LIST, never wall-clock:
+        "no settle poll" means no `/system_stats` request was made."""
+        paths: list[str] = []
+
+        def get(url, params=None, timeout=None):
+            paths.append(url.split("://", 1)[-1].split("/", 1)[-1].split("?", 1)[0])
+            return fake.get(url, params=params, timeout=timeout)
+
+        return get, paths
+
+    def test_no_wait_posts_free_then_checks_the_queue_once_and_never_reads_system_stats(self):
+        fake = FakeComfyUI(ram_free=20_000_000_000)  # never rises: a cold endpoint
+        get, paths = self._recording(fake)
+
+        with patch("models.contracts.engines.comfyui.httpx.get", get), \
+             patch("models.contracts.engines.comfyui.httpx.post", fake.post):
+            assert ComfyUIEngine().unload(ENDPOINT, "sdxl.safetensors", wait=False) is True
+
+        assert fake.free_calls == [{"unload_models": True, "free_memory": True}]
+        assert paths == ["queue"]  # ONE idle check; no `/system_stats` at all
+
+    def test_no_wait_with_a_busy_queue_is_false_and_still_never_polls(self):
+        """A `/free` that raced an actively-running prompt is still not
+        mistaken for a settled eviction -- the one thing the single
+        `/queue` check is there for. It withholds `True`; it never buys a
+        poll to go looking for the rise instead."""
+        fake = FakeComfyUI(ram_free=20_000_000_000)
+        fake.queue_running = [[0, "still-going", {}, {}, []]]
+        get, paths = self._recording(fake)
+
+        with patch("models.contracts.engines.comfyui.httpx.get", get), \
+             patch("models.contracts.engines.comfyui.httpx.post", fake.post):
+            assert ComfyUIEngine().unload(ENDPOINT, "sdxl.safetensors", wait=False) is False
+
+        assert paths == ["queue"]
+
+    def test_no_wait_is_false_immediately_when_the_post_is_refused(self):
+        fake = FakeComfyUI(free_status=500)
+        get, paths = self._recording(fake)
+
+        with patch("models.contracts.engines.comfyui.httpx.get", get), \
+             patch("models.contracts.engines.comfyui.httpx.post", fake.post):
+            assert ComfyUIEngine().unload(ENDPOINT, "sdxl.safetensors", wait=False) is False
+
+        assert paths == []  # not even the confirmation read
+
+    def test_no_wait_leaves_the_run_memo_standing(self):
+        """THE ASYMMETRY against the waiting path, and deliberate: a
+        waited `True` DROPS the memo because the free was observed, while
+        a no-wait `True` observed nothing -- it only knows the POST was
+        accepted and nothing was running. Dropping the residency belief on
+        that would let a later exclusive admission launch on top of memory
+        nobody ever released."""
+        fake = FakeComfyUI(checkpoints=("sdxl.safetensors",), ram_free=40_000_000_000)
+        _submit_once(fake)  # stamps the run memo for this endpoint
+        assert comfyui._run_memo(ENDPOINT) is not None
+
+        with patch("models.contracts.engines.comfyui.httpx.get", fake.get), \
+             patch("models.contracts.engines.comfyui.httpx.post", fake.post):
+            assert ComfyUIEngine().unload(ENDPOINT, "sdxl.safetensors", wait=False) is True
+
+        memo = comfyui._run_memo(ENDPOINT)
+        assert memo is not None and memo.model_key == norm_tag("sdxl.safetensors")
+
+
 class TestResidency:
     """`models/queue/worker.py` only ever calls `unload()` for a model
     `list_installed` reported as loaded (three call sites, each guarded by

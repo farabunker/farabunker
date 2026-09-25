@@ -860,7 +860,7 @@ class ComfyUIEngine:
             _RUN_MEMO[_memo_key(endpoint)] = replace(memo, footprint=delta)
         return delta
 
-    def unload(self, endpoint: str, model_id: str) -> bool:  # noqa: ARG002 - see docstring
+    def unload(self, endpoint: str, model_id: str, *, wait: bool = True) -> bool:  # noqa: ARG002 - see docstring
         """Ask ComfyUI to release its loaded models at `endpoint`, and do
         not report success until that release has actually happened.
 
@@ -946,6 +946,35 @@ class ComfyUIEngine:
         an actively-running prompt still is not mistaken for a settled
         eviction.
 
+        `wait=False` TAKES THAT SAME DEGRADED PATH ON PURPOSE, and is the
+        OPTIONAL extension the execution queue's PRECAUTIONARY barrier
+        calls use (`models/queue/worker.py::_barrier`, 2026-09-24): no
+        baseline read, no settle poll, just `POST /free` and the ONE
+        immediate `/queue` idle check. Those calls are made at FOREIGN
+        endpoints -- not the admitted job's own -- precisely because the
+        residency belief there is worth nothing, and spec §3.3d(4)
+        DISCARDS their answer: a precautionary `False` is logged and
+        never blocks a launch. A poll whose result cannot change any
+        decision buys nothing, while on a cold endpoint (nothing to free,
+        so nothing ever rises) it burns the full `UNLOAD_TIMEOUT` in
+        front of every exclusive admission -- measured live on
+        2026-09-24 as up to ~30s before a chat turn's first token. WHAT
+        `wait=False` CANNOT KNOW is whether anything was actually freed:
+        its `True` means only "the POST was accepted and nothing looked
+        still running", never "the memory is back". A caller whose
+        decision depends on the memory genuinely being free must wait.
+        Adapters predating this keyword keep the full-poll behaviour --
+        the queue degrades to the plain two-argument call, and owns that
+        mechanics itself.
+
+        THE RUN MEMO IS NEVER TOUCHED ON THE `wait=False` PATH, an
+        asymmetry against the waiting one and a deliberate one: the
+        waited `True` drops the memo because the release was OBSERVED,
+        while a no-wait `True` observed nothing. Dropping this adapter's
+        only residency evidence on the strength of an unobserved free is
+        the one error here that could leave two large checkpoints
+        resident at once.
+
         Returns `True` only once the effect was actually observed (or, on
         the no-baseline path above, once the POST was accepted and nothing
         looked still running). `False` covers every other outcome: the
@@ -986,11 +1015,13 @@ class ComfyUIEngine:
         def _remaining() -> float:
             return max(0.0, deadline - time.monotonic())
 
-        free_before = _free_bytes(endpoint, timeout=min(DISCOVERY_TIMEOUT, _remaining()))
-        memo = _run_memo(endpoint)
+        free_before = None
         threshold = _MIN_CREDIBLE_FOOTPRINT
-        if memo is not None and memo.footprint:
-            threshold = max(_MIN_CREDIBLE_FOOTPRINT, memo.footprint // 2)
+        if wait:
+            free_before = _free_bytes(endpoint, timeout=min(DISCOVERY_TIMEOUT, _remaining()))
+            memo = _run_memo(endpoint)
+            if memo is not None and memo.footprint:
+                threshold = max(_MIN_CREDIBLE_FOOTPRINT, memo.footprint // 2)
 
         try:
             response = httpx.post(
@@ -1006,7 +1037,10 @@ class ComfyUIEngine:
             # No baseline -- see the docstring's "SETTLE POLL IS SKIPPED"
             # paragraph. A single confirmation read, not a loop: there is
             # nothing further a poll could learn without something to
-            # measure a rise against.
+            # measure a rise against. `wait=False` arrives here BY
+            # CONSTRUCTION (it never took a baseline), which is what makes
+            # the no-wait path the existing degraded path rather than a
+            # second one to keep in step with it.
             settled = not _queue_running(endpoint, timeout=min(DISCOVERY_TIMEOUT, _remaining()))
         else:
             settled = False
@@ -1025,12 +1059,15 @@ class ComfyUIEngine:
 
         if not settled:
             return False
-        # Everything at this endpoint is gone, so the run memo -- this
-        # adapter's only residency evidence -- is gone with it. Dropped
-        # ONLY once the free was actually observed: believing a model went
-        # away when it did not is the one error here that could leave two
-        # large checkpoints resident at once.
-        _RUN_MEMO.pop(_memo_key(endpoint), None)
+        if wait:
+            # Everything at this endpoint is gone, so the run memo -- this
+            # adapter's only residency evidence -- is gone with it. Dropped
+            # ONLY once the free was actually observed: believing a model
+            # went away when it did not is the one error here that could
+            # leave two large checkpoints resident at once. A `wait=False`
+            # call observed nothing, so it leaves the belief standing (the
+            # docstring's RUN MEMO asymmetry).
+            _RUN_MEMO.pop(_memo_key(endpoint), None)
         return True
 
     def build_llm(self, model_id: str, endpoint: str, **cfg):
