@@ -39,8 +39,7 @@ preview section (linked below), the port table; [README.md](README.md#quickstart
 3. **No AI model or model-family names in committed prose** — capabilities are described
    generically, as "the chat model" or "a distilled few-step family". Engine names are fine;
    checkpoint filenames and vendor model names are not (code identifiers are code, not prose).
-   Since 2026-09-20 `test_docs_model_names.py` walks the planning archive too, and since
-   2026-09-25 it also walks this file and `CLAUDE.md`.
+   Since 2026-09-20 `test_docs_model_names.py` walks the planning archive, this file, and `CLAUDE.md` too.
 4. **No absolute local paths, and no personal data,** in anything committed. Use `<repo>`,
    `<worktree>`, `<home>`. No names, no email addresses, no hardware inventories.
 5. **Offline by default.** No runtime dependency on the public internet, in any code path or posture.
