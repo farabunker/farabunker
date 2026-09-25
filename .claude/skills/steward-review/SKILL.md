@@ -7,10 +7,8 @@ description: Use when a peer session's PR touches a column you steward, before i
 
 ## Purpose
 
-A column has an owning session (a "steward") for the duration of a branch of
-work. When another session's change reaches into that column, the steward
-clears it **before** the peer's PR merges -- never as a post-merge ping, which
-only tells you about damage already shipped.
+A column has an owning session (a "steward") for its branch of work; when another session's
+change reaches into it, the steward clears it **before** the peer's PR merges -- never a post-merge ping.
 
 ## The packet
 

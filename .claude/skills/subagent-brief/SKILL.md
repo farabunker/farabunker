@@ -7,11 +7,8 @@ description: Use when the orchestrating session is dispatching a subagent to imp
 
 ## Purpose
 
-Plans in this repository run 5-12k lines. A brief that hands a subagent only
-the plan's file path forces it to re-read and re-derive everything relevant
-to its one task -- expensive, and it silently drops the rulings and anchors
-that only exist in the orchestrator's head. A brief is written, not pointed
-at.
+Plans here run 5-12k lines; a brief that hands a subagent only the plan's file path forces it
+to re-derive everything relevant and drops the rulings only the orchestrator's head holds.
 
 ## Every brief carries
 

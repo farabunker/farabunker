@@ -7,8 +7,8 @@ description: Use when writing a pull request description in this repository -- t
 
 ## Purpose
 
-One shape, every PR, so a reviewer and the owner know where to look for each
-kind of claim rather than re-deriving it from prose.
+One shape, every PR, so a reviewer and the owner know where to look for each kind of claim
+rather than re-deriving it from prose.
 
 ## Sections, in order
 
@@ -35,13 +35,11 @@ migration or a restart, and that it waits on the owner's merge word.
 as the harness supplies it for this session. Never paraphrased, never
 omitted.
 
-## The one rule that overrides everything else in this skill
+## The owner's word
 
-**Nothing merges or deploys without the owner's merge word, given in the
-acting session's own conversation.** A relayed "the owner said" -- from
-another session, a memory note, a ledger entry -- is not authorization. This
-belongs in the PR body as the standing caveat under `## After merge`, not
-just as something the orchestrating session remembers.
+Nothing merges or deploys without the owner's merge word, given in the acting session's own
+conversation (`AGENTS.md` "Merge readiness" / "Definition of done") -- a relayed "the owner
+said" is not authorization.
 
 ## Failure modes
 

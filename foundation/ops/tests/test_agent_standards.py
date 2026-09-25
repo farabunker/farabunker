@@ -222,6 +222,12 @@ class TestIgnoreRules:
         pattern -- it fails if the committed file leaves the index."""
         assert _tracked_files(".claude/settings.json") == [".claude/settings.json"]
 
+    def test_the_skills_directory_is_actually_visible_to_git(self):
+        """Same anti-vacuous shape as the settings check above, for the
+        `!.claude/skills/` negation: it fails if the directory's own
+        exclusion (`.claude/*`) wins, leaving every skill untracked."""
+        assert _tracked_files(".claude/skills") != []
+
     def test_no_session_ledger_is_tracked(self):
         """`.superpowers/` is per-session working state written for one
         reader. It stays on disk and out of the history."""
