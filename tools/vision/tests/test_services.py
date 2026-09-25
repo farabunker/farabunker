@@ -2198,7 +2198,7 @@ class TestDescribeIfReady:
         output = stored_output(tmp_path)
 
         with patch("tools.vision.services.describe_output") as describe_mock:
-            services.describe_if_ready(output.job, request_timeout=5.0)
+            services.describe_if_ready(output.job, request_timeout=30.0)
 
         describe_mock.assert_not_called()
 
@@ -2207,11 +2207,11 @@ class TestDescribeIfReady:
         self._bind_extract()
 
         with patch("tools.vision.services.describe_output") as describe_mock:
-            services.describe_if_ready(output.job, request_timeout=5.0)
+            services.describe_if_ready(output.job, request_timeout=30.0)
 
         # `request_timeout` (fix round item 3) is simply threaded
         # through, never re-derived or defaulted by the gate itself.
-        describe_mock.assert_called_once_with(output.job, request_timeout=5.0)
+        describe_mock.assert_called_once_with(output.job, request_timeout=30.0)
 
     def test_a_failed_job_is_never_described_even_when_bound(self, tmp_path):
         output = stored_output(tmp_path)
@@ -2220,7 +2220,7 @@ class TestDescribeIfReady:
         self._bind_extract()
 
         with patch("tools.vision.services.describe_output") as describe_mock:
-            services.describe_if_ready(output.job, request_timeout=5.0)
+            services.describe_if_ready(output.job, request_timeout=30.0)
 
         describe_mock.assert_not_called()
 
@@ -2233,7 +2233,7 @@ class TestDescribeIfReady:
         self._bind_extract()
 
         with patch("tools.vision.services.describe_output") as describe_mock:
-            services.describe_if_ready(job, request_timeout=5.0)
+            services.describe_if_ready(job, request_timeout=30.0)
 
         describe_mock.assert_not_called()
 
@@ -2246,6 +2246,28 @@ class TestDescribeIfReady:
         self._bind_extract()
 
         with patch("tools.vision.services.describe_output") as describe_mock:
-            services.describe_if_ready(output.job, request_timeout=5.0)
+            services.describe_if_ready(output.job, request_timeout=30.0)
 
         describe_mock.assert_not_called()
+
+    def test_a_request_timeout_below_the_minimum_never_calls_describe_output(self, tmp_path):
+        """Fix round, later finding: below `services.DESCRIBE_MINIMUM_
+        VIABLE_BUDGET_SECONDS`, this gate skips the call ENTIRELY rather
+        than attempting it with a deadline no real vision inference
+        could plausibly meet -- checked here, in the shared gate, so
+        BOTH callers are protected by the one check. Asserts that
+        `describe_output` is never invoked at all (never merely on what
+        it might have written), and that skipping leaves `job.
+        description` in exactly the field's own "never attempted" state
+        -- `""`, never a third state invented to say "skipped"."""
+        output = stored_output(tmp_path)
+        self._bind_extract()
+        below_minimum = services.DESCRIBE_MINIMUM_VIABLE_BUDGET_SECONDS - 1.0
+        assert below_minimum > 0  # a sane budget this test actually exercises
+
+        with patch("tools.vision.services.describe_output") as describe_mock:
+            services.describe_if_ready(output.job, request_timeout=below_minimum)
+
+        describe_mock.assert_not_called()
+        output.job.refresh_from_db()
+        assert output.job.description == ""

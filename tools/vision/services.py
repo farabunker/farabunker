@@ -1352,20 +1352,130 @@ def job_json(job: GenerationJob) -> dict:
 #   rather than inventing a second one.
 #
 # ITS STATED RELATIONSHIP, so the next reader sees a decision rather
-# than a coincidence: explicitly bounded well below the platform's own
-# default response timeout for an agent/chat turn
-# (`JobSettings.response_timeout_seconds`, default 1800s/30 min,
-# `docs/OPERATIONS.md`) -- not read dynamically (`tools/vision` may not
-# import `models.queue.models.JobSettings`; `tools.vision.jobs`'s own
-# module docstring's import-boundary list has no seam for it), but
-# 1/30th of that default is itself the reasoning: a forty-word judging
-# sentence about one already-generated image should take single-digit
-# seconds on a healthy box, and even a badly stalled one has no business
-# approaching even a small fraction of what this platform already
-# treats as "how long one interactive-adjacent model call may reasonably
-# run" -- true for the queued caller's own wait AND, now, for the most
-# a turn's remaining budget is ever allowed to stretch this call to.
+# than a coincidence -- CORRECTED after an earlier version of this
+# comment claimed no seam exists to read the platform's own response
+# timeout at all, which a later review found FALSE and worth fixing
+# rather than leaving for the next reader to believe:
+#
+# `tools.vision.jobs.run_generate` genuinely CAN read the operator's own
+# `JobSettings.response_timeout_seconds` (default 1800s/30 min,
+# `docs/OPERATIONS.md`) -- not by importing `models.queue.models.
+# JobSettings` directly (`tools/vision` still may not; that half of the
+# earlier claim was true), but because the WORKER already stamps it onto
+# `ctx.response_timeout_seconds` (`models.contracts.jobkinds.
+# JobContext`, a legal import) before the handler ever runs.
+#
+# READING IT WOULD STILL BE THE WRONG MOVE, THOUGH -- established by
+# checking what the field actually IS, not assuming it: `ctx.
+# response_timeout_seconds` is a CEILING, a single policy duration read
+# ONCE by `models.queue.worker.Worker._build_job_context` at claim time
+# and never touched again for the rest of that job's run -- it does NOT
+# shrink as the job executes, the way `tools.vision.tools.run_generate`
+# (the chat tool)'s `ctx.budget.deadline_monotonic - time.monotonic()`
+# genuinely does for the LIVE turn a description belongs to. Deriving
+# this constant's value from a number that never decreases would hand
+# the describer that WHOLE ceiling on every single call -- the
+# unbounded-above defect a second review already found and fixed,
+# arriving back by a different road, dressed as a derivation instead of
+# a bare number. A derivation that reads a ceiling and treats it as a
+# remainder is a false relationship, not a truer one.
+#
+# So: still a PLAIN CHOSEN CONSTANT, not derived -- but its relationship
+# is now stated correctly: bounded well below that CEILING (not "below
+# a remaining budget", which this field is not), at 1/30th of its
+# platform-wide default. That fraction is the actual reasoning, not
+# decoration: a forty-word judging sentence about one already-generated
+# image should take single-digit seconds on a healthy box, and even a
+# badly stalled one has no business approaching even a small fraction of
+# what this platform already treats as "how long one interactive-
+# adjacent model call may reasonably run" -- true for the queued
+# caller's own wait AND, separately, for the most a turn's LIVE
+# remaining budget is ever allowed to stretch the chat caller's own call
+# to (that cap is the genuine derivation; this constant is not).
 DESCRIBE_REQUEST_TIMEOUT_SECONDS = 60.0
+
+# THE MINIMUM VIABLE BUDGET (a THIRD review's finding -- the ceiling
+# above fixed the case where too MUCH turn budget got handed to a
+# stalled describer; this fixes the opposite one, too LITTLE). Checked
+# INSIDE THE SHARED GATE, `describe_if_ready` below -- a STEWARD-CLEARED
+# CORRECTION: an earlier version of this fix checked it only at the chat
+# caller, which protects that one caller but leaves the next caller of
+# `describe_if_ready` to remember the same check itself, or not. One
+# check, in the one place both callers already pass through, is what
+# actually closes it for both -- the queued caller's own `request_
+# timeout` (`DESCRIBE_REQUEST_TIMEOUT_SECONDS` above, well clear of this
+# floor by design) simply never trips it.
+#
+# THIS IS THE EXPECTED LANDING PLACE FOR THE CHAT CALLER, NOT A CORNER
+# CASE: `tools.vision.tools.run_generate` clamps its own GENERATION wait
+# to exactly the turn's remaining budget (`min(GENERATE_WAIT_TIMEOUT_
+# SECONDS, remaining)`, that function's own code), and the poll that
+# finally finds the job terminal is the EXPENSIVE one -- so a generation
+# that genuinely needed most of a turn's budget arrives at the
+# describing call with close to nothing left BY DESIGN, not by
+# misfortune. A turn whose generation ran long is exactly the turn most
+# likely to land here.
+#
+# BY THE CODE'S OWN STATED BEST CASE, A ONE-SECOND BUDGET CANNOT
+# SUCCEED: `DESCRIBE_REQUEST_TIMEOUT_SECONDS`'s own comment already
+# states that a healthy describing call takes single-digit seconds. A
+# call given one second is not an attempt with long odds -- it is a
+# call THIS CODE ALREADY KNOWS will fail, by its own stated numbers.
+#
+# A DOOMED ATTEMPT DOES REAL HARM, NOT JUST WASTED TIME: the honest
+# failure sentence it writes is APPENDED TO THE TOOL RESULT THE
+# GENERATING MODEL READS -- so a model that made a perfectly good image
+# would be told, falsely, that the image "could not be described",
+# when the truth is that the platform allotted it one second. That
+# invites the model to re-run a generation that never needed re-running
+# -- the SAME CLASS OF HARM as the bug this whole task exists to fix: a
+# model acting on a false report about its own output.
+#
+# WHY NOT SIMPLY MATCH THE GENERATION WAIT'S OWN ONE-SECOND FLOOR
+# (`max(1.0, ...)` in `run_generate`'s own `timeout` line)? That would
+# be a FALSE SYMMETRY -- raised and refuted in review: that floor buys
+# one more cheap, genuinely-succeedable poll of a generation ALREADY
+# RUNNING, at zero new load anywhere. This call is not a poll of
+# something already in flight; it is the FIRST touch of a possibly-cold
+# describing endpoint, with no cheap-success path at all. The two
+# floors look alike and are not, and copying one onto the other is
+# exactly the mistake a bare number invites.
+#
+# THE DECISION, STATED PLAINLY: when the turn has no real time left, we
+# SKIP rather than attempt, because an attempt that cannot succeed still
+# costs a model load on a shared engine and still writes a failure that
+# misreports why. No time left means DO NOT CALL, never call-with-a-
+# nonsense-deadline.
+#
+# A CHOSEN LOWER BOUND, NOT A MEASURED ONE -- said plainly, because it
+# cannot honestly be anything else: this platform has no per-engine
+# measurement of how long one vision-judging call actually takes, so
+# this number is not derived from one. What CAN be stated is that below
+# it, no real round trip to a vision-capable model -- reading the
+# image, running one inference pass, producing even a short sentence --
+# could plausibly complete on any engine this platform might reasonably
+# be pointed at, warm or not. Being wrong about it has exactly one
+# failure mode, and it is the cheap one: a description that would
+# genuinely have finished in time gets skipped instead. THAT ASYMMETRY
+# IS WHY THIS MINIMUM IS ALLOWED TO BE GENEROUS RATHER THAN TIGHT, AND
+# WHY ERRING TOWARD SKIPPING IS CORRECT RATHER THAN LAZY: the two
+# outcomes are not comparable quantities. A missed description costs a
+# reader one sentence they could get again just by asking. A doomed
+# call costs the owner's machine a model load it will never use, on
+# hardware where a cold load runs into minutes, at the exact moment the
+# box is under enough pressure that a turn ran out of time in the first
+# place -- machine work started and thrown away on an engine the live
+# stack shares, not merely a sentence that arrived late.
+#
+# ITS RELATIONSHIP TO THE SHARED CEILING, so the two numbers read as one
+# decision rather than two guesses: one twelfth of `DESCRIBE_REQUEST_
+# TIMEOUT_SECONDS`. Small enough that any turn with a genuinely healthy
+# amount of describing time left (anything the ceiling itself would let
+# a call run for) clears this floor with room to spare -- only a turn
+# that is ALREADY nearly exhausted for reasons that have nothing to do
+# with describing (a long tool chain, a slow generation eating most of
+# the turn) ever trips it.
+DESCRIBE_MINIMUM_VIABLE_BUDGET_SECONDS = DESCRIBE_REQUEST_TIMEOUT_SECONDS / 12
 
 # The JUDGING-grade description prompt (this column's OWN -- distinct
 # purpose from `tools.rag.extract.DESCRIPTION_PROMPT`, whose job is a
@@ -1483,7 +1593,32 @@ def describe_if_ready(job: GenerationJob, *, request_timeout: float) -> None:
     see that function's own docstring (fix round item 3) for why it is a
     required parameter here too, never a default: this gate must not
     quietly pick a number on either caller's behalf.
+
+    `request_timeout < DESCRIBE_MINIMUM_VIABLE_BUDGET_SECONDS` IS ALSO A
+    REASON TO RETURN -- CHECKED HERE, IN THE SHARED GATE, NOT AT EITHER
+    CALLER (a steward-cleared correction: checking it caller-side
+    protects only the caller that remembers to). THE DECISION: when
+    there is not enough time left to call with, we SKIP rather than
+    attempt, because an attempt that cannot succeed still costs a real
+    model load on a shared engine and still writes a failure that
+    misreports why -- see `DESCRIBE_MINIMUM_VIABLE_BUDGET_SECONDS`'s own
+    comment for the full reasoning, including why this is the EXPECTED
+    landing place for the chat caller rather than a corner case, and why
+    the asymmetry (a skipped sentence versus a doomed model load) makes
+    erring toward skipping the correct call, not a lazy one. Checked
+    FIRST, before any of the checks above -- it costs nothing (no DB
+    read) and is the one most worth failing fast on.
+
+    SKIPPING HERE LEAVES `job.description` EXACTLY AS IT ALREADY WAS --
+    `""` on any job this function has not yet touched, this field's own
+    "never attempted" state (`DESCRIBE_OUTPUT_FAILURE_SENTENCE` is never
+    `""`, precisely so that state stays unambiguous). No third state is
+    invented for "skipped": it reads identically to "never reached this
+    function at all", which is the honest thing to say about a call this
+    code chose not to make.
     """
+    if request_timeout < DESCRIBE_MINIMUM_VIABLE_BUDGET_SECONDS:
+        return
     if not (job.is_terminal and job.status == GenerationJob.Status.DONE and job.outputs.exists()):
         return
     try:

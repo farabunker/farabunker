@@ -28,8 +28,8 @@ as tools) is the thing this column exists to keep visible in the tree.
   A `tools/*` app reaches model-management work through the queue
   (`models.contracts.queue.enqueue`/`get_job`) and the gateway
   (`models.contracts.gateway.get_llm*`/`get_embed_model*`/
-  `get_image_generator*`/`get_transcriber*`), never by importing
-  `models/registry/` or `models/queue/` directly.
+  `get_image_generator*`/`get_transcriber*`/`describe_image`), never by
+  importing `models/registry/` or `models/queue/` directly.
 
 Each feature is also a [§5 module](../docs/ARCHITECTURE.md#5-the-module-contract)
 in the platform's own sense: it talks only to declared core capabilities

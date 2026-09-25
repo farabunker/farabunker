@@ -678,23 +678,36 @@ separate change.
   stall, in exchange for never charging an unconditional wait for a
   conditional call. **`request_timeout` is a required parameter of the
   describing call, supplied by each caller honestly** (fix round item 3,
-  then tightened by a second review) — never a bare constant living
+  then tightened by two later reviews) — never a bare constant living
   inside it. `services.DESCRIBE_REQUEST_TIMEOUT_SECONDS` (60s —
   explicitly well below the platform's own default agent/chat response
   timeout, 1800s) lives in `services.py`, not `jobs.py`, precisely
   because BOTH callers need it: the QUEUED job kind passes it straight
-  through as its own `request_timeout` (no turn budget to derive one
-  from), and the CHAT tool derives its own from what remains of the
-  turn's own budget but CAPS that derivation at this same constant — a
-  generation that finishes early in a turn leaves most of the response
-  timeout still remaining, and handing all of it to a stalled describer
-  would let a forty-word sentence hold a live chat turn for roughly half
-  an hour, which a second review caught as a regression dressed as a
-  fix. The turn's remaining budget is a ceiling on what is worth waiting
-  for, never a target to spend: past the shared cap, the image already
-  arrived and the sentence only aids judging it, so nothing is lost by
-  giving up on it. **The actual
-  model call is the shared gateway mechanism**
+  through as its own `request_timeout`, and the CHAT tool derives its
+  own from what remains of the turn's own budget but CAPS that
+  derivation at this same constant — a generation that finishes early in
+  a turn leaves most of the response timeout still remaining, and
+  handing all of it to a stalled describer would let a forty-word
+  sentence hold a live chat turn for roughly half an hour, which a
+  review caught as a regression dressed as a fix. The turn's remaining
+  budget is a ceiling on what is worth waiting for, never a target to
+  spend: past the shared cap, the image already arrived and the
+  sentence only aids judging it, so nothing is lost by giving up on it.
+  **The QUEUED caller passes the constant outright rather than reading
+  the operator's real `JobSettings.response_timeout_seconds`, and this
+  is a checked decision, not a missing seam**: that value genuinely
+  reaches `tools.vision.jobs.run_generate` (stamped onto `ctx.
+  response_timeout_seconds` by the worker before the handler ever
+  runs — no `models.queue` import needed), but it is a CEILING, a
+  single policy duration read once at claim time and never decremented
+  as the job runs — unlike the chat path's `ctx.budget.
+  deadline_monotonic`, which genuinely IS a live, shrinking remainder
+  for the turn a description belongs to. Deriving from a number that
+  never shrinks would just hand the describer that whole ceiling on
+  every call — the unbounded-above defect arriving back by a different
+  road, dressed as a derivation. So the constant stays a plain, chosen
+  value, bounded below that ceiling rather than computed from it.
+  **The actual model call is the shared gateway mechanism**
   (`models.contracts.gateway.describe_image`, fix round item 5) — the
   same "ask a vision-capable model about an image file" shape `tools/
   rag`'s own extraction path hand-built independently, now held in ONE
@@ -705,6 +718,28 @@ separate change.
   has no opinion on it. `tools/rag` does not call this seam yet;
   converging its own `_ask_vision` onto it is a named follow-up, not
   part of this task.
+  **Below `services.DESCRIBE_MINIMUM_VIABLE_BUDGET_SECONDS`
+  (1/12th of the shared ceiling), the describing step is SKIPPED
+  entirely rather than attempted with a deadline no real vision
+  inference could plausibly meet** (a fix round finding, checked once
+  inside the shared `describe_if_ready` gate so both callers are
+  protected by it). This is the expected landing place for a CHAT turn
+  whose generation itself used most of the turn's own budget — the
+  generation wait is itself clamped to what remains of that same
+  budget, so a slow generation leaves little behind for describing BY
+  DESIGN, not by misfortune. Skipping leaves `GenerationJob.description`
+  at `""`, the SAME "never attempted" state an unbound role or a
+  not-yet-`done` job already leaves it at — never a third state — and is
+  the deliberately cheap direction to be wrong in: a skipped description
+  costs a reader one sentence they could ask for again, where a doomed
+  attempt would cost the machine a real model load, on an engine the
+  live stack shares, thrown away for nothing, at precisely the moment
+  the box is already busy enough that a turn ran out of time.
+  **The vision PAGE's own `?format=json` endpoint now carries a
+  `description` key nothing renders yet** — `job_json()`'s dict is
+  returned there raw, and the field simply rides along; no template
+  reads it, so this is a stored fact with no visible surface today, not
+  a UI change.
 
 ## Gallery select mode and bulk delete
 
