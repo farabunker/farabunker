@@ -671,11 +671,7 @@ CARDS: tuple[HelpCard, ...] = (
                     "Restore puts the item back immediately, exactly as it was; nothing about "
                     "it was ever changed by being deleted. Delete permanently, offered only to "
                     "somebody who may act on that item, destroys it right now instead of "
-                    "waiting for its date, and cannot be undone. On the organisation posture, "
-                    "a deleted conversation and the images that were part of it always wait "
-                    "their full period, restorable but never destroyed early -- a document "
-                    "deleted from the library or an image deleted straight from the gallery "
-                    "is not on this page yet and still happens at once, on every posture."
+                    "waiting for its date, and cannot be undone."
                 ),
             ),
             HelpField(
@@ -938,11 +934,7 @@ CARDS: tuple[HelpCard, ...] = (
                     "this setting governs future deletions only -- anything already deleted "
                     "keeps the date it was given. Backups are a separate layer this setting "
                     "does not reach: a deleted item can still exist in an earlier backup after "
-                    "that date has passed. On the organisation posture, a deleted conversation "
-                    "and the images that were part of it always wait their full period, "
-                    "restorable but never destroyed early -- a document deleted from the "
-                    "library or an image deleted straight from the gallery is not on the "
-                    "Deleted page yet and still happens at once, on every posture."
+                    "that date has passed."
                 ),
             ),
             HelpField(

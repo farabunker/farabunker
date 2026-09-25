@@ -223,20 +223,6 @@ def delete_content(actor, *, kind: str, key, owner, label: str = "",
                          target_key=str(key),
                          target_label=label if row.audit_detail else "",
                          source=source, kind=kind)
-            # THE CHILDREN GET THEIR OWN TICKETS, not a mention on the
-            # parent's. Same owner, same actor, SAME DATE -- the date is
-            # the promise, and two dates for one click would be two
-            # promises -- and `parent=ticket`, which is how the restore
-            # and the permanent delete below know which tickets this
-            # click created.
-            # A CHILD THAT ALREADY HAS A TICKET IS LEFT EXACTLY AS IT
-            # IS: `get_or_create` on the unique `(kind, key)` returns
-            # it, and it is neither re-dated nor adopted. Somebody
-            # deleted that item on its own and was shown a date for it;
-            # this delete does not get to move it.
-            # NO SEPARATE ZERO-DAY PATH: these rows are due exactly when
-            # the parent is, so the unconditional prune-on-write sweep
-            # below purges them in the same call.
             for child_kind, child_key in run_children(kind, str(key)):
                 _child, child_created = DeletionTicket.objects.get_or_create(
                     kind=child_kind, key=child_key,
@@ -338,13 +324,8 @@ def restore_content(actor, ticket, *, source: str = SOURCE_WEB,
                 pk=child.pk).delete()
             if removed_child:
                 restored_children.append(child)
-        # A HELD CHILD IS DETACHED, NOT MERELY SKIPPED ABOVE: `parent`
-        # is `on_delete=CASCADE`, so the row delete two lines down would
-        # otherwise destroy it anyway, at the database level, without
-        # ever reaching the skip above. `parent=None` is exactly what an
-        # item deleted on its own already looks like -- a held child
-        # left this way keeps its own ticket, still restorable and still
-        # purgeable on its own, the same as any other un-linked ticket.
+        # A HELD CHILD IS DETACHED, NOT MERELY SKIPPED ABOVE -- see
+        # `purge_ticket`'s own matching comment below for why.
         current.children.exclude(hold_by_kind="").update(parent=None)
         current.delete()
         audit.record(actor, CONTENT_RESTORED, target_type=kind, target_key=key,

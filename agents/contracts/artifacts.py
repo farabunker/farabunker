@@ -282,15 +282,8 @@ def register_artifact_children(dotted_path: str) -> None:
     Signature `(refs: Sequence[str], generation_ids: Sequence[str]) ->
     list[str]` -- job keys, destroying nothing.
 
-    **The name changed with the job:** this slot used to hand a tool
-    column a list and let it delete; it now asks a question, because
-    each of those generations is given a deletion of its own -- its own
-    ticket, its own date on the Deleted page, its own restore --
-    instead of being destroyed silently on another item's date.
-
-    ONE SLOT, NOT A PER-KIND DICT, for the reason it always was: the
-    agents column COMPUTES the values and exactly one tool column knows
-    what they mean.
+    ONE SLOT, NOT A PER-KIND DICT: the agents column COMPUTES the values
+    and exactly one tool column knows what they mean.
 
     A DOTTED PATH, resolved at delete time by the caller, never imported
     here -- `agents/` may not import `tools/` at all.

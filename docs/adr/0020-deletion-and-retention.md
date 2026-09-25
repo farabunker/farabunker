@@ -88,13 +88,9 @@ in place rather than followed by a second one, because that migration has never 
 test and preview databases).
 
 **A deleted item's dependents get tickets of their own.** The `parent` column above records the
-link; `RetentionHandler.children` is the mechanism that decides who gets one. Before it, a
-conversation's generated images had no delete of their own at all: the chat's own purge reached
-into the gallery and destroyed them directly, silently, on the chat's own date. Deleting the chat
-did NOT hide its pictures in the meantime — they stayed in the gallery, stayed servable and stayed
-reusable for the whole soft-delete window, never disclosed as their own deleted item, never
-individually restorable, and never shown a date of their own — and were then destroyed on the
-chat's date with no notice at all. The fix is one OPTIONAL dotted-path resolver, `(key: str) ->
+link; `RetentionHandler.children` is the mechanism that decides who gets one — a resolver, not a
+purge, because each generation gets a deletion of its own rather than a silent destruction on the
+chat's own date. It is one OPTIONAL dotted-path resolver, `(key: str) ->
 list[tuple[str, str]]`, asked exactly ONCE, inside `delete_content`'s own transaction, before a
 single row is touched — it only reads, because by the time a purge runs, the answer has already
 become rows. Each pair it returns is written as an ordinary ticket, linked back to the parent via
