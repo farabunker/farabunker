@@ -32,6 +32,15 @@ GONE. The owner delegated the pre-open-source scrub on 2026-09-20 and
 ruled the planning archive IN SCOPE, so it is walked like any other
 document and constraint 25's deferred-scrub note is discharged.
 
+WALK EXTENDED 2026-09-25: a PR named a model family and a checkpoint
+vendor ("Opus", "Fable") in root `CLAUDE.md` prose, and this gate -- not
+walking either root document -- did not catch it before merge. The walk
+now also covers root `CLAUDE.md` and `AGENTS.md`. No new exemption was
+needed: `_ALLOWED_PHRASES` already carried the "claude code", "claude.md",
+"claude-specific", and ".claude/" patterns for the harness-name reason
+below, and both root documents pass the extended walk clean on the
+phrases already in place.
+
 WHAT THE WALK EXEMPTS, and why (the same 2026-09-20 rulings; this docstring
 is where those exemptions are recorded, so a future contributor reading the
 gate reads the reasoning with it):
@@ -169,13 +178,19 @@ def _tracked_files() -> tuple[str, ...]:
 
 def _walked_documents() -> tuple[str, ...]:
     """Every document this gate walks: all of `docs/**`, the root
-    `README.md`, every column `README.md`, and every project skill's
-    `SKILL.md` under `.claude/skills/`. DERIVED from the git index, not a
-    hand-kept list -- a new ADR, a new column README, or a new skill is
-    covered the day it lands, which a hand-kept list could not promise."""
+    `README.md`, the root `CLAUDE.md` and `AGENTS.md`, every column
+    `README.md`, and every project skill's `SKILL.md` under
+    `.claude/skills/`. DERIVED from the git index, not a hand-kept list --
+    a new ADR, a new column README, or a new skill is covered the day it
+    lands, which a hand-kept list could not promise. `CLAUDE.md` and
+    `AGENTS.md` were added 2026-09-25 after a PR named a model family in
+    `CLAUDE.md` prose and this gate, not walking either root document,
+    missed it."""
     return tuple(sorted(
         name for name in _tracked_files()
         if name == "README.md"
+        or name == "CLAUDE.md"
+        or name == "AGENTS.md"
         or (name.startswith("docs/") and name.endswith(".md"))
         or name.endswith("/README.md")
         or (name.startswith(".claude/skills/") and name.endswith("SKILL.md"))
@@ -290,6 +305,8 @@ def test_the_walked_document_set_is_real_and_broad():
     assert missing == []
     for required in (
         "README.md",
+        "CLAUDE.md",
+        "AGENTS.md",
         "tools/vision/README.md",
         "agents/chat/README.md",
         "models/contracts/README.md",
@@ -298,3 +315,15 @@ def test_the_walked_document_set_is_real_and_broad():
     ):
         assert required in walked, required
     assert any(relative.startswith("docs/superpowers/") for relative in walked)
+
+
+def test_root_agent_standards_documents_name_no_model_family():
+    """2026-09-25 regression: RED before the walk covered root `CLAUDE.md`
+    and `AGENTS.md` and a PR had already merged "Opus" and "Fable" into
+    `CLAUDE.md` prose (AGENTS.md non-negotiable 3); GREEN after the walk
+    was extended and that prose was rewritten generically. Checked
+    directly, not only through the combined walk above, exactly like the
+    H18 and 2026-09-20 regression tests for the documents those extensions
+    covered."""
+    for relative in ("CLAUDE.md", "AGENTS.md"):
+        assert _offending_lines(relative) == [], relative
