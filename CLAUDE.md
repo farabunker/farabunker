@@ -14,9 +14,12 @@ to the rules — it records the tooling this harness happens to use.
   is made by a dispatched subagent in a named worktree. The only things it writes itself are
   orchestration artifacts: a brief, a ledger entry, a scratchpad note. If it is about to open
   an editor on a tracked file, it stops and dispatches instead.
-- **Tiers.** Orchestration runs on the most capable tier. Implementers default to the middle
-  tier, mechanical edits to the cheapest, and the top tier is reserved for architectural
-  judgment and whole-branch reviews (`AGENTS.md`, "Subagent-driven development").
+- **Tiers, and Fable.** Opus is the default orchestrating model, and may execute per the
+  rule above; the top tier also covers architectural judgment and whole-branch review
+  (`AGENTS.md`, "Subagent-driven development") — work dispatched to Fable specifically.
+  Fable never executes — only orchestrates and plans, keyed to the model and not the role:
+  as a dispatched subagent it returns a plan or analysis to its caller, not a file edit or
+  the work itself. Implementers default to the middle tier, mechanical edits to the cheapest.
 - **Compact often, at seams.** Compact when a plan is committed, when a task's review closes,
   when a PR merges and its deploy is verified, when an investigation resolves, and whenever
   `/context` shows the conversation past about 40%. Before compacting, write a resume map
