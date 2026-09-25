@@ -8,14 +8,28 @@ to the rules — it records the tooling this harness happens to use.
 
 ## Claude-specific notes
 
+- **The orchestrating session never writes code.** Not production code, not tests, not
+  migrations, not documentation, on any branch, however small the change. It brainstorms,
+  plans, briefs, dispatches, reviews, gates, and deploys; every file change in the repository
+  is made by a dispatched subagent in a named worktree. The only things it writes itself are
+  orchestration artifacts: a brief, a ledger entry, a scratchpad note. If it is about to open
+  an editor on a tracked file, it stops and dispatches instead.
+- **Tiers.** Orchestration runs on the most capable tier. Implementers default to the middle
+  tier, mechanical edits to the cheapest, and the top tier is reserved for architectural
+  judgment and whole-branch reviews (`AGENTS.md`, "Subagent-driven development").
+- **Compact often, at seams.** Compact when a plan is committed, when a task's review closes,
+  when a PR merges and its deploy is verified, when an investigation resolves, and whenever
+  `/context` shows the conversation past about 40%. Before compacting, write a resume map
+  into the plan's ledger (branch and SHA, processes in flight, the next three steps, open
+  owner decisions) so nothing survives only in the transcript. Never compact with a subagent
+  report unread.
 - **Skills.** Work on this repository runs through the superpowers skill set, in order:
   `brainstorming` → `writing-plans` → `plan-hygiene-review` → `subagent-driven-development`
   or `executing-plans` → `test-driven-development` → `requesting-code-review` and
   `receiving-code-review` → `verification-before-completion`.
-- **Compact before implementing**, so the implementer starts from the plan.
 - **Memory is per-user, and never a substitute for `AGENTS.md`.** Anything in a session's
   private memory that should bind the next contributor belongs in the repository, with a test
   where one is possible.
 - **Permissions.** `.claude/settings.json` is committed and read-only by design; it is the
   posture every session in this repository inherits. `.claude/settings.local.json` is yours,
-  is gitignored, and is where anything machine-specific belongs.
+  is gitignored, and is where anything machine-specific belongs — including plugin enablement.
