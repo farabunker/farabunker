@@ -141,28 +141,6 @@ logger = logging.getLogger(__name__)
 # backstop for a genuinely wedged engine.
 GENERATE_WAIT_TIMEOUT_SECONDS = 4 * 3600.0
 
-# The describing call's own `request_timeout` for THIS caller (fix round
-# item 3) -- a MODULE CONSTANT here, deliberately, and NOT derived
-# dynamically: the queued `vision.generate` job kind runs with no turn
-# budget to read at all (`tools.vision.tools.run_generate`, the chat
-# tool, derives its own from `ctx.budget.deadline_monotonic` instead --
-# see that function's own comment; two honest budgets, one shared
-# `describe_output(job, request_timeout=...)` signature).
-#
-# ITS STATED RELATIONSHIP, so the next reader sees a decision rather
-# than a coincidence: explicitly bounded well below the platform's own
-# default response timeout for an agent/chat turn
-# (`JobSettings.response_timeout_seconds`, default 1800s/30 min,
-# `docs/OPERATIONS.md`) -- not read dynamically (`tools/vision` may not
-# import `models.queue.models.JobSettings`; the module docstring's own
-# import-boundary list has no seam for it), but 1/30th of that default
-# is itself the reasoning: a forty-word judging sentence about one
-# already-generated image should take single-digit seconds on a healthy
-# box, and even a badly stalled one has no business approaching even a
-# small fraction of what this platform already treats as "how long one
-# interactive-adjacent model call may reasonably run".
-DESCRIBE_REQUEST_TIMEOUT_SECONDS = 60.0
-
 # This module's job-kind key, named once: `apps.py` registers it, the page
 # enqueues under it, and the queued card reads its label from the registry.
 JOB_KIND = "vision.generate"
@@ -529,7 +507,7 @@ def run_generate(payload: dict, models: list[ModelRef], ctx: JobContext) -> dict
     # not add it back without a per-model free (a different engine, or a
     # future ComfyUI capability) to release against -- see this task's
     # own report for the full finding.
-    services.describe_if_ready(job, request_timeout=DESCRIBE_REQUEST_TIMEOUT_SECONDS)
+    services.describe_if_ready(job, request_timeout=services.DESCRIBE_REQUEST_TIMEOUT_SECONDS)
 
     # One owner for what a job looks like as data: the outputs' serving
     # URLs are `services.job_json`'s, not a second copy of `reverse()`

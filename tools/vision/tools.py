@@ -794,21 +794,38 @@ def run_generate(args: dict, ctx: ToolContext) -> ToolResult:
     # the image role itself), so this call is never reaching for a model
     # the turn's own admission snapshot did not know about.
     #
-    # THE TIMEOUT (fix round item 3, steward-preferred shape): derived
-    # from what is LEFT of the TURN's own budget, exactly like `timeout`
-    # above -- never a bare constant. The description is the LAST thing
-    # this tool call does before returning; a describing call that could
-    # not finish inside the turn's own remaining time has no reader left
-    # to see its answer, whatever it eventually says. `max(1.0, ...)`
-    # matches `timeout`'s own floor: still worth one honest attempt even
-    # this late, since `describe_output` is non-fatal either way. On a
-    # slow describer this means the generation still succeeds and the
-    # description simply does not arrive in time -- a deliberately
-    # chosen degradation (the honest failure sentence explains it if the
-    # call itself fails; a hard deadline miss degrades the same way any
-    # other in-turn client's timeout already does).
+    # THE TIMEOUT (fix round item 3, then tightened by a second review):
+    # derived from what is LEFT of the TURN's own budget, exactly like
+    # `timeout` above -- never a bare constant. FLOORED at 1.0 (matching
+    # `timeout`'s own floor: still worth one honest attempt even this
+    # late, since `describe_output` is non-fatal either way) AND CEILED
+    # at `services.DESCRIBE_REQUEST_TIMEOUT_SECONDS` -- THE SAME CAP the
+    # queued caller passes outright (`tools.vision.jobs.run_generate`),
+    # so both callers agree on the longest a description may ever take.
+    # THE CEILING IS LOAD-BEARING, NOT COSMETIC: a generation that
+    # finishes EARLY in a turn leaves most of the platform's own response
+    # timeout still remaining, and handing ALL of that to a stalled
+    # describer would let a forty-word sentence hold a live chat turn for
+    # roughly half an hour -- worse than the multi-minute engine default
+    # this task exists to bound. The turn's remaining budget is a CEILING
+    # on what is worth waiting for, never a target to spend: a
+    # description that would take longer than the cap has no value even
+    # when the turn would technically permit it, because the image
+    # already arrived and the sentence only aids judging it, not the
+    # result itself. On a slow describer this means the generation still
+    # succeeds and the description simply does not arrive in time -- a
+    # deliberately chosen degradation (the honest failure sentence
+    # explains it if the call itself fails; a bound miss degrades the
+    # same way any other in-turn client's timeout already does).
     services.describe_if_ready(
-        job, request_timeout=max(1.0, ctx.budget.deadline_monotonic - time.monotonic())
+        job,
+        request_timeout=max(
+            1.0,
+            min(
+                services.DESCRIBE_REQUEST_TIMEOUT_SECONDS,
+                ctx.budget.deadline_monotonic - time.monotonic(),
+            ),
+        ),
     )
 
     payload = services.job_json(job)

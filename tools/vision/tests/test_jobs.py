@@ -660,10 +660,12 @@ class TestRunGenerateDescribesItsOutput:
             )
 
         job = GenerationJob.objects.get(pk=result["job_id"])
-        # `request_timeout` (fix round item 3): this caller's own bounded
-        # module constant, never a bare number threaded blind.
+        # `request_timeout` (fix round items 3 and its follow-up): the
+        # shared ceiling BOTH callers use, never a bare number threaded
+        # blind, and never written twice -- lives in `services.py`
+        # because the CHAT caller needs the same number too.
         describe_mock.assert_called_once_with(
-            job, request_timeout=jobs.DESCRIBE_REQUEST_TIMEOUT_SECONDS
+            job, request_timeout=jobs.services.DESCRIBE_REQUEST_TIMEOUT_SECONDS
         )
 
     def test_a_failed_job_never_describes(self, tmp_path):

@@ -606,6 +606,44 @@ class TestVisionGenerateRunner:
         assert describe_mock.call_args.kwargs["request_timeout"] > 0
         assert order == ["wait_for", "describe_if_ready", "job_json"]
 
+    def test_a_large_remainder_is_capped_at_the_shared_describing_ceiling(self):
+        """The regression a second review caught: handing a stalled
+        describer ALL of a turn's remaining budget (most of the
+        platform's own response timeout, when the generation finishes
+        early) could hold a live chat turn for roughly half an hour, for
+        a forty-word sentence -- worse than the engine's own multi-
+        minute default this task exists to bound. `request_timeout` must
+        never exceed `services.DESCRIBE_REQUEST_TIMEOUT_SECONDS` -- the
+        SAME cap the queued caller (`tools.vision.jobs.run_generate`)
+        passes outright -- regardless of how much turn budget is left.
+        Asserts the SHAPE and the BOUND, never a wall-clock value, in
+        the same style as this test's own sibling above."""
+        from agents.contracts.tools import StepBudget
+
+        from tools.vision.tools import run_generate
+        from tools.vision import services as vision_services
+
+        job = MagicMock()
+        payload = {
+            "id": "abc", "status": "succeeded",
+            "outputs": [{"id": 36, "url": "/vision/outputs/36/file/"}],
+        }
+        # A turn with hours left -- the generation finished EARLY, the
+        # exact case the review named.
+        ctx = make_tool_ctx(
+            budget=StepBudget(steps=8, deadline_monotonic=time.monotonic() + 3600.0)
+        )
+        with patch("tools.vision.services.preflight", return_value=_ready_preflight()), \
+             patch("tools.vision.services.submit_job", return_value=job), \
+             patch("tools.vision.services.wait_for", return_value=job), \
+             patch("tools.vision.services.describe_if_ready") as describe_mock, \
+             patch("tools.vision.services.job_json", return_value=payload):
+            run_generate({"operation": "txt2img", "prompt": "x"}, ctx)
+
+        request_timeout = describe_mock.call_args.kwargs["request_timeout"]
+        assert request_timeout <= vision_services.DESCRIBE_REQUEST_TIMEOUT_SECONDS
+        assert request_timeout > 0
+
     def test_a_stored_description_is_appended_verbatim(self):
         """READS the field, never templates it: whatever `describe_if_
         ready` (patched away here, real behaviour covered in `test_

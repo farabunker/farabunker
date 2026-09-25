@@ -677,15 +677,23 @@ separate change.
   `describe_output`'s own `request_timeout` rather than an unbounded
   stall, in exchange for never charging an unconditional wait for a
   conditional call. **`request_timeout` is a required parameter of the
-  describing call, supplied by each caller honestly** (fix round item
-  3) — never a bare constant living inside it: the QUEUED job kind
-  passes its own bounded module constant (`jobs.
-  DESCRIBE_REQUEST_TIMEOUT_SECONDS`, 60s — explicitly well below the
-  platform's own default agent/chat response timeout, 1800s, since no
-  turn budget exists to derive one from here), and the CHAT tool
-  derives its own from what remains of the turn's own budget (the
-  description is the last thing that tool call does, so a call that
-  cannot finish in time has no reader left regardless). **The actual
+  describing call, supplied by each caller honestly** (fix round item 3,
+  then tightened by a second review) — never a bare constant living
+  inside it. `services.DESCRIBE_REQUEST_TIMEOUT_SECONDS` (60s —
+  explicitly well below the platform's own default agent/chat response
+  timeout, 1800s) lives in `services.py`, not `jobs.py`, precisely
+  because BOTH callers need it: the QUEUED job kind passes it straight
+  through as its own `request_timeout` (no turn budget to derive one
+  from), and the CHAT tool derives its own from what remains of the
+  turn's own budget but CAPS that derivation at this same constant — a
+  generation that finishes early in a turn leaves most of the response
+  timeout still remaining, and handing all of it to a stalled describer
+  would let a forty-word sentence hold a live chat turn for roughly half
+  an hour, which a second review caught as a regression dressed as a
+  fix. The turn's remaining budget is a ceiling on what is worth waiting
+  for, never a target to spend: past the shared cap, the image already
+  arrived and the sentence only aids judging it, so nothing is lost by
+  giving up on it. **The actual
   model call is the shared gateway mechanism**
   (`models.contracts.gateway.describe_image`, fix round item 5) — the
   same "ask a vision-capable model about an image file" shape `tools/

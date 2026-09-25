@@ -1334,6 +1334,39 @@ def job_json(job: GenerationJob) -> dict:
     }
 
 
+# THE DESCRIBING CALL'S OWN CEILING (fix round item 3, then tightened by
+# a second review) -- a MODULE CONSTANT, here in `services.py` because
+# BOTH callers of `describe_output` need it, never written twice:
+#
+# - `tools.vision.jobs.run_generate` (the queued job kind, no turn
+#   budget to read at all) passes this value straight through as its
+#   OWN `request_timeout` -- the whole number, not a floor.
+# - `tools.vision.tools.run_generate` (the chat tool) derives its
+#   `request_timeout` from what remains of the TURN's own budget, but
+#   caps that derivation AT this same constant (see that function's own
+#   comment for why a large remainder must still be capped, and the
+#   corresponding test). Kept OUT of `describe_output`'s own body on
+#   purpose -- `request_timeout` stays a plain required parameter there,
+#   never a constant re-derived inside the shared function; the cap is
+#   applied by the ONE caller that needs it, using this shared number
+#   rather than inventing a second one.
+#
+# ITS STATED RELATIONSHIP, so the next reader sees a decision rather
+# than a coincidence: explicitly bounded well below the platform's own
+# default response timeout for an agent/chat turn
+# (`JobSettings.response_timeout_seconds`, default 1800s/30 min,
+# `docs/OPERATIONS.md`) -- not read dynamically (`tools/vision` may not
+# import `models.queue.models.JobSettings`; `tools.vision.jobs`'s own
+# module docstring's import-boundary list has no seam for it), but
+# 1/30th of that default is itself the reasoning: a forty-word judging
+# sentence about one already-generated image should take single-digit
+# seconds on a healthy box, and even a badly stalled one has no business
+# approaching even a small fraction of what this platform already
+# treats as "how long one interactive-adjacent model call may reasonably
+# run" -- true for the queued caller's own wait AND, now, for the most
+# a turn's remaining budget is ever allowed to stretch this call to.
+DESCRIBE_REQUEST_TIMEOUT_SECONDS = 60.0
+
 # The JUDGING-grade description prompt (this column's OWN -- distinct
 # purpose from `tools.rag.extract.DESCRIPTION_PROMPT`, whose job is a
 # retrieval caption; this one exists so an AUTHOR -- an agent, an
