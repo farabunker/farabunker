@@ -48,6 +48,17 @@ from identity.request import principal_for_request, settings_row_for
 REACH_EVERYONE = "Everyone on this box"
 REACH_GIVEN = "The people it is given to"
 
+# THE OWNER CELL'S BLANK-CASE SENTENCE. A row can carry blank
+# `owner_kind`/`owner_key` -- the shipped defaults' rows, and any row
+# older than ruling 4b's owner-stamping, since `agents/chat/README.md`
+# records that a row written with blank owner columns is never
+# backfilled -- and `f"{owner_kind}:{owner_key}"` against two empty
+# strings renders as a bare separator, not a sentence. Declared here
+# for the same reason REACH_EVERYONE/REACH_GIVEN are: a user-facing
+# sentence is declared once, in Python (AGENTS.md, house style), never
+# typed into a template.
+OWNER_BOX_ADMINISTERED = "Administered by this box"
+
 # THE PAGE'S OWN FIRST SENTENCE, in the same two-declared-forms shape and
 # for the same reason the Restrictions column has two states (ADR 0019
 # decision 6, hidden never zeroed): with accounts off the column is not
@@ -88,6 +99,12 @@ def agents_admin_list(request):
     rows = [{
         "agent": agent,
         "reach": REACH_EVERYONE if agent.box_wide else REACH_GIVEN,
+        # BLANK-GUARDED (ponytail): `kind:key` for a real owner, the
+        # declared sentence above when both columns are blank -- never
+        # a bare `:`.
+        "owner": (f"{agent.owner_kind}:{agent.owner_key}"
+                  if agent.owner_kind or agent.owner_key
+                  else OWNER_BOX_ADMINISTERED),
         "label_count": len(labels.get(agent.pk, frozenset())),
     } for agent in labellable_agents()]
     return render(request, "chat/agents_admin.html", {
