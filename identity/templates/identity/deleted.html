@@ -9,8 +9,14 @@ a log, and a disclosure that had to remember which half was open would be
 client state this box does not keep. Both render, always.
 
 NO HOLD CONTROL, IN ANY POSTURE, and nothing here mentions a records
-obligation: the enterprise behaviour is deferred (spec section 10.10) and
-this page must not imply a guarantee that is not built.
+obligation: the hold control and the operator-set cliff floor are
+deferred (spec section 10.10) and this page must not imply a guarantee
+that is not built. THE PERMANENT-DELETE CONTROL, THOUGH, IS ALREADY
+GATED ON `row.may_purge` -- no markup change was needed here to keep
+the organisation posture from offering it: `may_purge` answers False
+for everybody on that posture, so `{% if row.may_purge %}` below simply
+omits the `<details>` block for every row, and the page says nothing
+about why beyond the date it already prints.
 
 HEADINGS, BUTTONS AND THE DATE LINE COME FROM
 `identity/contracts/retention.py` through the `copy` context key --

@@ -47,6 +47,16 @@ def _ticket_for(user, *, key="1", label="A question"):
                                   key=key, owner=item, label=label)
 
 
+def _one_image_child(key: str) -> list[tuple[str, str]]:
+    """A CONVERSATION'S ONE CHILD, for the test below that proves the
+    refusal reaches a child ticket -- an identity-level stand-in for
+    `agents.visibility`'s own resolver, with no dependency on
+    `tools.vision`: this module needs a `(kind, key)` pair that resolves
+    to `KIND_VISION_JOB`, not the real generation row that kind names in
+    production."""
+    return [(copy.KIND_VISION_JOB, f"{key}-image")]
+
+
 class TestTheDeletedTab:
     def test_it_lists_the_viewers_own_items_with_the_promised_date(self, client):
         with posture("personal"):
@@ -242,18 +252,36 @@ class TestRestoreAndPurge:
         assert DeletionTicket.objects.count() == 0
         assert AuditEvent.objects.filter(action=CONTENT_PURGED).count() == 1
 
-    def test_the_enterprise_posture_behaves_exactly_as_personal_does(self, client):
-        """Asserted rather than left untested: the enterprise BEHAVIOUR
-        is a deferred slice (spec section 10.10), and until it is built
-        the item's owner may purge before the cliff here too."""
+    def test_the_enterprise_posture_keeps_an_item_until_its_date(self, client):
+        """SPEC SECTION 3.10's enterprise column, for this one control:
+        nobody destroys content before the date it was promised. The
+        POST answers with a sentence, not a 404 -- the row is right
+        there on the page, and a 404 for something a person can see is
+        a lie about what happened."""
         with posture("enterprise"):
             user = make_user()
             sign_in(client, user)
             ticket = _ticket_for(user)
             response = client.post(
-                reverse("identity-deleted-purge", args=[ticket.pk]))
-        assert response.status_code == 302
-        assert DeletionTicket.objects.count() == 0
+                reverse("identity-deleted-purge", args=[ticket.pk]),
+                follow=True)
+            assert DeletionTicket.objects.filter(pk=ticket.pk).exists()
+            body = response.content.decode()
+            assert copy.purge_refused_line(ticket.purge_on) in body
+
+    def test_the_control_is_not_rendered_on_that_posture(self, client):
+        """Scoped to `<main>`, the rule this module already follows: the
+        settings shell, the sidebar and the assistant panel are shared
+        markup this page does not own, and a substring assertion over
+        them would fail for a word some other surface introduced."""
+        with posture("enterprise"):
+            user = make_user()
+            sign_in(client, user)
+            _ticket_for(user)
+            body = client.get(reverse("identity-deleted")).content.decode()
+            main = body.split("<main>")[1].split("</main>")[0]
+            assert copy.ACTION_RESTORE in main
+            assert copy.ACTION_PURGE not in main
 
     @pytest.mark.parametrize("route",
                              ["identity-deleted-restore", "identity-deleted-purge"])
@@ -443,3 +471,37 @@ class TestTheQueryCost:
         reads = sum(
             1 for q in context.captured_queries if "identity_identitysettings" in q["sql"])
         assert reads == 1, [q["sql"] for q in context.captured_queries]
+
+
+class TestChildTicketsInheritTheRefusal:
+    """15A-15C give a deleted conversation's images their own tickets,
+    linked by `parent`. This proves that link needs no refusal logic of
+    its own: `deleted_page` and `deleted_purge` both call `may_purge` on
+    whichever ticket the row names, and a child ticket is an ordinary
+    row to that call -- it does not ask whether it has a parent."""
+
+    def test_a_childs_generated_image_row_refuses_too(self, client):
+        register_retention_handler(RetentionHandler(
+            kind=copy.KIND_CONVERSATION, key="t.page.conversation",
+            label="Conversation", handler=f"{__name__}.noop",
+            children=f"{__name__}._one_image_child"))
+        with posture("enterprise"):
+            user = make_user()
+            sign_in(client, user)
+            item = make_conversation(owner_kind="user", owner_key=str(user.pk))
+            parent = service.delete_content(
+                user_principal(user), kind=copy.KIND_CONVERSATION,
+                key=str(item.pk), owner=item)
+            child = DeletionTicket.objects.get(
+                kind=copy.KIND_VISION_JOB, parent=parent)
+
+            body = client.get(reverse("identity-deleted")).content.decode()
+            main = body.split("<main>")[1].split("</main>")[0]
+            assert copy.KIND_LABELS[copy.KIND_VISION_JOB] in main
+            assert copy.ACTION_PURGE not in main
+
+            response = client.post(
+                reverse("identity-deleted-purge", args=[child.pk]),
+                follow=True)
+            assert DeletionTicket.objects.filter(pk=child.pk).exists()
+            assert copy.purge_refused_line(child.purge_on) in response.content.decode()

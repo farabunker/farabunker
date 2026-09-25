@@ -218,12 +218,14 @@ Three mechanisms were cut:
   confirmation, no per-item count line on the Deleted page. The confirmation a deletion gets is
   the page itself, where the item sits restorable — a better confirmation than a count, and one
   that costs no second code path per handler.
-- **The enterprise posture's behaviour.** A named, deferred slice: the Hold control, the refusal
-  of an immediate purge before the cliff, the `content.held` audit action. Its FIELDS ship now —
-  the three hold columns on the ticket, and the sweep's due-condition already excludes a held
-  ticket — so the slice needs no later migration against a live ticket table. Until it is built,
-  the enterprise posture behaves exactly as personal does, and the spec, the help text and the
-  Deleted page all say so rather than implying a guarantee that is not built.
+- **Most of the enterprise posture's behaviour.** A named, deferred slice: the Hold control, the
+  `content.held` audit action and an owner-set cliff floor. Its FIELDS ship now — the three hold
+  columns on the ticket, still written by nothing, and the sweep's due-condition already
+  excludes a held ticket — so the slice needs no later migration against a live ticket table.
+  One control, and only one, was pulled out of this deferral by a later owner ruling
+  (2026-09-22): nobody destroys content early on the organisation posture, for anybody, before
+  its date — restore is unchanged. Until the rest is built, the spec, the help text and the
+  Deleted page say so rather than implying a guarantee that is not built.
 
 One thing was added: **the deletion-coverage gate**
 (`foundation/ops/tests/test_deletion_coverage.py`). It walks every model the app registry
@@ -276,9 +278,11 @@ ever configures.
 - **Backups are not, and will not become, a second delete surface.** An operator's retention
   obligation is met by rotating backups on a schedule independent of the deletion cliff, stated
   plainly rather than implied.
-- **The enterprise posture ships fields with no behaviour.** A box running that posture today
-  purges and restores exactly as a personal-posture box does; the Hold control and the refusal
-  it would drive are a named, deferred slice, not a silent gap.
+- **The enterprise posture ships fields with no behaviour behind most of them.** A box running
+  that posture today restores exactly as a personal-posture box does, and refuses to purge
+  anything early, for anybody — the one control this delivery builds on those fields. The Hold
+  control and the operator-set cliff floor that would use the rest of them are a named, deferred
+  slice, not a silent gap.
 
 ## See also
 

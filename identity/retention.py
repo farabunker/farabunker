@@ -40,6 +40,7 @@ from identity.cascades import run_children, run_retention
 from identity.contracts.actions import (
     CONTENT_DELETED, CONTENT_PURGED, CONTENT_RESTORED, SOURCE_WEB,
 )
+from identity.contracts.postures import POSTURE_ENTERPRISE
 from identity.contracts.principals import SERVICE_PRINCIPAL
 from identity.contracts.retention import RetentionRefused
 from identity.models import DeletionTicket, IdentitySettings
@@ -85,10 +86,10 @@ def may_purge(principal, ticket, *, settings_row=None) -> bool:
 
     The item's OWNER, or a `sees_all_content` principal -- the same
     predicate that already lets them read the content, and the same
-    shape `tools.vision.visibility.may_read_job` uses. There is no
-    posture branch: in this delivery the enterprise posture behaves
-    exactly as personal does, and the refusal that will differ is the
-    deferred enterprise slice's (spec section 10.10), not this one's.
+    shape `tools.vision.visibility.may_read_job` uses. ON THE
+    ORGANISATION POSTURE, NEITHER: nobody destroys content before the
+    date they were promised (spec section 3.10), and that refusal
+    applies before the owner/`sees_all_content` question is even asked.
 
     `settings_row`, OPTIONAL, THE SAME SHAPE `visible_tickets` ABOVE
     TAKES: a page building one row per ticket already holds the one
@@ -96,16 +97,27 @@ def may_purge(principal, ticket, *, settings_row=None) -> bool:
     so listing many tickets costs one settings read rather than one per
     row.
 
-    TODAY THIS CANNOT REFUSE A TICKET `visible_tickets` ALREADY LISTS --
-    the two share the same two predicates, owner or `sees_all_content`,
-    so anything visible to `principal` is also purgeable by them. The
-    two functions are still separate rather than one boolean reused,
-    because they answer different questions with different futures: this
-    is the hook the deferred enterprise hold behaviour (spec section
-    10.10) refuses THROUGH, once a held ticket can be visible without
-    being purgeable.
+    THIS CAN NOW REFUSE A TICKET `visible_tickets` ALREADY LISTS -- the
+    difference the two functions always existed to hold. On every
+    posture but enterprise the two still share the same two predicates,
+    owner or `sees_all_content`, so anything visible to `principal` is
+    also purgeable by them there; on enterprise a ticket stays visible
+    (it is still on the page, still restorable) while this refuses. The
+    deferred enterprise hold behaviour (spec section 10.10) is a further
+    refusal on top of this one, once a held ticket exists to refuse.
     """
-    if sees_all_content(principal, settings_row=settings_row):
+    row = settings_row if settings_row is not None else IdentitySettings.get_solo()
+    # THE ORGANISATION POSTURE DESTROYS NOTHING EARLY, for anybody. Not
+    # a standing question and not a hold: the promised date is the whole
+    # policy on that posture, and a box that let one person shorten it
+    # would be a box whose printed date was advice. ONE PREDICATE, HERE,
+    # so every surface agrees by construction -- the page hides the
+    # control because it asks this, the POST refuses because it asks
+    # this -- and WHICH postures enforce it is a policy choice made on
+    # this line and nowhere else.
+    if row.posture == POSTURE_ENTERPRISE:
+        return False
+    if sees_all_content(principal, settings_row=row):
         return True
     return may_read_owned_row(principal, ticket)
 

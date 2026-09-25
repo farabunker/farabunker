@@ -810,3 +810,49 @@ class TestChildTickets:
         assert DeletionTicket.objects.filter(pk=held.pk).exists()
         assert "document:doc-1" in REMOVED
         assert "document:doc-2" not in REMOVED
+
+
+class TestTheOrganisationPostureRefusesAnEarlyDestroy:
+    def test_the_owner_may_not_purge(self):
+        user = make_user()
+        with posture("enterprise"):
+            ticket = service.delete_content(user_principal(user), kind=KIND_ASK,
+                                            key="5", owner=_owner(user))
+            assert service.may_purge(user_principal(user), ticket) is False
+
+    def test_nor_may_a_principal_who_sees_all_content(self):
+        """THE PREDICATE IS NOT ABOUT STANDING. On this posture nobody
+        destroys content early -- not the owner, not an administrator
+        who may already read it."""
+        admin = make_admin()
+        with posture("enterprise"):
+            ticket = service.delete_content(user_principal(admin), kind=KIND_ASK,
+                                            key="5", owner=_owner(admin))
+            assert service.may_purge(user_principal(admin), ticket) is False
+
+    def test_restore_is_untouched(self):
+        user = make_user()
+        with posture("enterprise"):
+            ticket = service.delete_content(user_principal(user), kind=KIND_ASK,
+                                            key="5", owner=_owner(user))
+            service.restore_content(user_principal(user), ticket)
+            assert DeletionTicket.objects.count() == 0
+
+    def test_the_sweep_still_purges_on_the_date(self):
+        """The refusal is about destroying it EARLY. The promised date
+        arrives on this posture exactly as on any other."""
+        user = make_user()
+        with posture("enterprise"):
+            ticket = service.delete_content(user_principal(user), kind=KIND_ASK,
+                                            key="5", owner=_owner(user))
+            DeletionTicket.objects.filter(pk=ticket.pk).update(
+                purge_on=timezone.localdate() - datetime.timedelta(days=1))
+            assert service.sweep() == 1
+
+    @pytest.mark.parametrize("name", ["personal", "open"])
+    def test_the_other_postures_are_unchanged(self, name):
+        user = make_user()
+        with posture(name):
+            ticket = service.delete_content(user_principal(user), kind=KIND_ASK,
+                                            key="5", owner=_owner(user))
+            assert service.may_purge(user_principal(user), ticket) is True

@@ -716,13 +716,14 @@ where nothing is ever deleted has nothing to purge.
 `owned_entitlement_ids` are the predicates, unchanged.
 
 **What this delivery actually builds, stated before the table so the table cannot be misread:
-enterprise behaves exactly as personal does.** The enterprise column below is what the design
-holds, not what ships here. The hold control, the owner-set cliff, the refusal of an early
-"Delete permanently" and the held-row copy are a named, deferred slice (§10.10), to be built
-when a box runs the enterprise posture. Until then, an enterprise box gets the personal
-behaviour: the item's owner may purge it before the cliff, and nothing can be held. **This spec
-does not claim a records guarantee it has not built**, and neither may the help text, the ADR
-or the Deleted page (§3.13).
+enterprise behaves as personal does, except for one control.** The enterprise column below is
+what the design holds, not all of it ships here. The hold control, the owner-set cliff and the
+held-row copy are a named, deferred slice (§10.10), to be built when a box runs the enterprise
+posture; **the refusal of an early "Delete permanently" is not deferred — it ships in this
+delivery (owner ruling, §11).** Until the rest lands, an enterprise box gets the personal
+behaviour for everything else: the item's owner may restore it, and nobody may purge it early.
+Nothing can be held. **This spec does not claim a records guarantee it has not built**, and
+neither may the help text, the ADR or the Deleted page (§3.13).
 
 | | `open` | `personal` | `enterprise` — **built** | `enterprise` — **deferred (§10.10)** |
 |---|---|---|---|---|
@@ -730,7 +731,7 @@ or the Deleted page (§3.13).
 | What "Delete" does | ticket + cliff | ticket + cliff | ticket + cliff | unchanged |
 | The cliff | `retention_days`, default 30; `0` purges inline | same | same — the one box-wide number | operator-set with an enterprise floor |
 | Restore, until the cliff | the item's owner, or `sees_all_content` | same | same | same, unless held |
-| "Delete permanently" (purge now) | yes — the item's owner or `sees_all_content`. `is_admin` is True for everybody here, and there is nobody for anything to be hidden from | yes, same rule | **yes, same rule as personal — this is the honest statement of what is built** | **no. Nobody, before the cliff.** Control not rendered; the POST refuses with its own sentence |
+| "Delete permanently" (purge now) | yes — the item's owner or `sees_all_content`. `is_admin` is True for everybody here, and there is nobody for anything to be hidden from | yes, same rule | **no. Nobody, before the cliff.** Control not rendered; the POST refuses with its own sentence | unchanged |
 | Hold (suspend the cliff) | not offered — no accounts, no owner role to gate it | not offered | **not offered.** The ticket's three hold columns exist and stay empty (§3.2) | an owner-role holder of one of the item's entitlements (`owned_entitlement_ids`) or a superuser |
 | Whose tickets a viewer sees | everyone's — `sees_all_content` is True | own, plus everyone's for an administrator with the content setting on | same as personal | same |
 
@@ -901,9 +902,12 @@ Chat, Ask, Document library, Ask history and Queue unconditionally).
   item's owner or a `sees_all_content` principal. Every ticket on this tab is restorable, in
   every posture — that is what a ticket means (§3.1) — so there is no second row state to
   render and no per-row count of what a purge would reach (§3.5). **No Hold control is rendered
-  in any posture, including enterprise**, and the page says nothing about holds or about a
-  purge an owner cannot perform: the enterprise behaviour is deferred (§3.10, §10.10) and the
-  page must not imply a guarantee that is not built.
+  in any posture, including enterprise**, and the page says nothing about holds: the hold
+  control itself is a deferred slice (§3.10, §10.10). On the organisation posture the
+  permanent-delete control is simply absent, because `may_purge` refuses it for everyone — not
+  a special case this page renders, but the same `{% if row.may_purge %}` gate every posture
+  goes through. Every ticket is still restorable in every posture, which is what a ticket
+  means.
 - **Purged** — content-free audit events, `by_action((CONTENT_PURGED, CONTENT_DELETED,
   CONTENT_RESTORED))`, rendered as "Conversation 59608c35-… deleted at 14:32" and visible in
   every posture with the toggle in either position. With `audit_detail` on, the same lines
@@ -1013,7 +1017,7 @@ design deletes through them.
 | Restore after a partial purge | **A purge that rolled back leaves the ticket, and the ticket is restorable** — no rows were lost, so the item is exactly as it was. **A purge that completed has no ticket**, so there is nothing to restore and nothing to refuse: the Deleted page simply no longer lists the item. Those are the only two outcomes, because the ticket is deleted by the same transaction that destroys the content (§3.3). Files a FILES-band handler already removed before a later handler raised are gone — named in the row above — and the next sweep completes the purge. | §3.3, §3.5 |
 | A hold on a ticket past its cliff | The sweep's due-query excludes held tickets outright (§3.9), so a held ticket would sit past its date indefinitely. **Nothing in this delivery can set a hold**, so this case cannot arise yet; it is specified because the columns and the query clause ship now and the control is the deferred enterprise slice. | §3.2, §3.9, §10.10 |
 | The cliff is changed after tickets exist | **`purge_on` is NOT recomputed.** It is computed once, at delete time, from the setting in force then. The page printed a date and that date is a promise; silently moving it — in either direction — would make the promise worthless, and moving it EARLIER would destroy content sooner than the person was told. A changed `retention_days` governs future deletes only, and the settings page says so in its help text. | §3.2, §8 |
-| A posture switch with tickets pending | Tickets are posture-independent data; nothing is migrated, and in THIS delivery nothing changes at all — every posture behaves the same way (§3.10), so a switch to or from enterprise leaves every pending ticket exactly as it was. `identity/services.py::set_posture` gains no retention branch. When the deferred enterprise slice lands it inherits that property: a hold is a recorded decision, not a posture artefact. | §3.10, §10.10 |
+| A posture switch with tickets pending | Tickets are posture-independent data; nothing is migrated. No ticket, date or row is touched either way by a posture switch. What DOES change is whether the permanent-delete control is offered: a switch to the organisation posture stops `may_purge` offering it, on every existing ticket at once; a switch away offers it again. `identity/services.py::set_posture` gains no retention branch — `may_purge` reads the posture at call time, so nothing needs to run at the switch itself. When the deferred hold slice lands it inherits the same property: a hold is a recorded decision, not a posture artefact. | §3.10, §10.10 |
 | Deleting a conversation whose documents are shared universally | The documents survive. Only `scope=conversation` documents die with their conversation — the invariant `tools/rag/access.py::delete_attachments` already depends on (exactly one attachment row, for that conversation). A universal or stream-contained document loses only its attachment CLAIM, exactly as today. | §3.4, §3.6 |
 | Workstream delete | **Unchanged.** It still refuses while the stream holds conversations (`PROTECT`), still deletes shares and pins, still audits `WORKSTREAM_DELETED`. Streams are not a ticket kind (§10). | §10 |
 | A `sees_all_content` principal viewing tickets | Sees every ticket, including other people's, and may restore or permanently delete them in every posture this delivery builds — the same predicate that already lets them read the content. On an open box that is every principal, which is correct: there is nobody for anything to be hidden from. An administrator with the content setting OFF sees only their own, and the labels on the Purged tab stay empty for them regardless of `audit_detail`. | §3.10 |
@@ -1226,9 +1230,10 @@ It asserts that the wiring EXISTS, which is the failure mode that arrives silent
   all three new names with drivers for each.
 - Never-500 on a forged ticket id, a ticket belonging to somebody else, and a POST to
   `identity-deleted-purge` for a ticket the principal has no standing on — 404, the class-O
-  shape (§3.13). The enterprise-posture refusal is not tested here because it is not built
-  here (§3.10, §10.10); the same POST in the enterprise posture succeeds, exactly as it does in
-  personal, and one test asserts that rather than leaving the posture untested.
+  shape (§3.13). The enterprise-posture refusal IS built here and IS tested here (§3.10, §11):
+  the same POST in the enterprise posture answers a flashed sentence and a redirect, never a
+  404 — the row is right there on the page — and the permanent-delete control is not rendered
+  for that posture; tests assert both.
 
 **The demo, as one end-to-end test** (`identity/tests/test_deletion_demo.py`), personal posture,
 in this order, asserting at each step:
@@ -1295,10 +1300,13 @@ both kinds' rows on the Deleted page; the gallery's own delete and bulk delete r
 retention service for the `vision_job` kind. The coverage gate's covered list reaches its full
 shape here, and the `document`, `ask` and `vision_job` entries are what make it pass.
 
-**There is no third slice in this delivery.** The enterprise behaviour that used to be one is a
-named, deferred slice in §10.10, to be built when a box runs the enterprise posture. The
-`audit_detail` toggle is NOT deferred with it — it is one of the three shipped settings (§4)
-and lands in slice 1 with the rest of the policy.
+**There is no third slice in this delivery.** Most of what used to be an entirely deferred
+enterprise slice still is: the hold control, the owner-set cliff and the held-row copy are a
+named, deferred slice in §10.10, to be built when a box runs the enterprise posture. One
+control from that slice does NOT wait — the refusal of an early "Delete permanently" on that
+posture ships in slice 1, with `may_purge` (owner ruling, §11). The `audit_detail` toggle is
+NOT deferred either — it is one of the three shipped settings (§4) and lands in slice 1 with
+the rest of the policy.
 
 ### Sequencing constraints
 
@@ -1400,18 +1408,20 @@ re-deriving the design:
    settings field; and one honest page state to explain — an item whose content is gone but
    whose bookkeeping is not finished, which is neither restorable nor absent. Today tool
    records are scrubbed inline with their conversation, always (§3.8).
-10. **The enterprise posture's BEHAVIOUR — a named, deferred slice, to be built when a box runs
-    the enterprise posture.** It is: the Hold control on the Deleted page for an owner-role
-    holder of one of the item's entitlements (`owned_entitlement_ids`) or a superuser; the
-    refusal of "Delete permanently" before the cliff in that posture, with the control not
-    rendered and the POST refusing in its own sentence; an owner-set cliff with an enterprise
-    floor; a `CONTENT_HELD` audit action added to the closed tuple in the same commit as the
-    control that writes it; and the held-row copy ("On hold — the purge date is suspended").
-    **Its FIELDS ship now** — `hold_by_kind`, `hold_by_key`, `hold_note` on the ticket (§3.2) —
-    and the sweep's due-condition already excludes a held ticket (§3.9), so the slice needs no
-    migration against a live ticket table. Until it is built, **the enterprise posture behaves
-    exactly as personal does and this spec, the help text, the ADR and the Deleted page all say
-    so** (§3.10, §3.13, §8).
+10. **The rest of the enterprise posture's BEHAVIOUR — a named, deferred slice, to be built when
+    a box runs the enterprise posture.** It is: the Hold control on the Deleted page for an
+    owner-role holder of one of the item's entitlements (`owned_entitlement_ids`) or a
+    superuser; an owner-set cliff with an enterprise floor; a `CONTENT_HELD` audit action added
+    to the closed tuple in the same commit as the control that writes it; and the held-row copy
+    ("On hold — the purge date is suspended"). **Its FIELDS ship now** — `hold_by_kind`,
+    `hold_by_key`, `hold_note` on the ticket (§3.2) — and the sweep's due-condition already
+    excludes a held ticket (§3.9), so the slice needs no migration against a live ticket table.
+    **The refusal of "Delete permanently" before the cliff, on that posture, is NOT part of this
+    deferral — it ships in this delivery** (owner ruling, 2026-09-22, §11): the control is not
+    rendered and the POST refuses in its own sentence, for everybody, on that posture, today.
+    Until the rest is built, an enterprise box behaves as a personal one does everywhere but
+    that one control, and this spec, the help text, the ADR and the Deleted page all say so
+    (§3.10, §3.13, §8).
 11. **A dry-run count of what a purge would remove.** No handler counts without removing, no
     count is shown before a confirmation, and the Deleted page has no per-item count line
     (§3.5). The confirmation a deletion gets is the Deleted page itself, where the item sits
@@ -1519,11 +1529,13 @@ are the author's and are open to the same treatment. Nothing is renumbered.
      where a reader meets it: that registry needs a confirmation count because its delete is
      irreversible on click; a deletion's confirmation is the Deleted page itself, where the item
      sits restorable. → §3.5, §10.11.
-   - **The enterprise BEHAVIOUR** — deferred to a named slice, built when a box runs the
+   - **Most of the enterprise BEHAVIOUR** — deferred to a named slice, built when a box runs the
      enterprise posture. Its FIELDS ship now, in the one migration, so no later migration is
-     needed and the sweep's due-condition already honours a hold. In this delivery enterprise
+     needed and the sweep's due-condition already honours a hold. One control from that slice —
+     the refusal of an early "Delete permanently" — was pulled forward into this delivery by a
+     later owner ruling (2026-09-22, §11); everywhere else, this delivery's enterprise posture
      behaves as personal does, and the spec, the page, the help card and the ADR say so rather
-     than implying a guarantee that is not built. → §3.2, §3.9, §3.10, §3.13, §9, §10.10.
+     than implying a guarantee that is not built. → §3.2, §3.9, §3.10, §3.13, §9, §10.10, §11.
 
    **What it added: one coverage gate** (`foundation/ops/tests/test_deletion_coverage.py`, §7),
    holding a closed list of every model carrying user content mapped to the ticket kind whose
@@ -1534,3 +1546,20 @@ are the author's and are open to the same treatment. Nothing is renumbered.
    complexity this ruling ADDED, and it is the kind the principle favours — a cost paid once,
    by the author, that a maintainer never has to configure and a future contributor cannot
    forget. → §7, §8, §9.
+9. **One control is pulled forward out of the deferred enterprise slice — owner ruling,
+   2026-09-22.** *(Not the author's — recorded here for the same reason decisions 1 and 8
+   are.)*
+
+   A person may put a deleted item back, but where the retention period is enforced, nobody
+   may destroy it early. That is decision 8's own deferral, reconsidered: the refusal of an
+   early "Delete permanently" on the organisation posture is a small enough control, against
+   the same already-shipped `may_purge` predicate, to build now rather than to leave the page
+   implying a guarantee for one more delivery. So it moves out of §10.10's deferred list and
+   into this one, built in `identity/retention.py::may_purge` with no posture branch anywhere
+   else — the page hides the control and the POST refuses because both ask that one function.
+
+   **What stays deferred, unchanged by this ruling:** the Hold control, the operator-set cliff
+   floor for the enterprise posture, `CONTENT_HELD`, and the held-row copy. None of those four
+   has a predicate to hang off yet — a hold needs a hold to check, and a floor needs a second
+   number to enforce against — so none of them is a small addition to an existing predicate the
+   way the refusal was. → §3.10, §10.10.

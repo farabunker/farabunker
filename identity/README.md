@@ -569,7 +569,16 @@ written while the setting was off, renders with the label blank. A
 child ticket — one written alongside a parent item's delete — looks
 like any other row on this page: its own kind, its own date, its own
 restore and its own permanent-delete action, with no visible marker
-tying it back to the item it arrived with.
+tying it back to the item it arrived with. **The permanent-delete
+action itself is per-row, not per-posture, and it depends on one
+predicate**: the template's `{% if row.may_purge %}` around it, and
+the POST view's own `retention.may_purge(...)` check before it acts.
+On the organisation posture that predicate answers False for every
+principal, on every kind — the item's owner included, a child ticket
+included — so the control is simply absent, and a POST reaching the
+URL directly gets a flashed sentence and a redirect rather than a 404:
+the row is still there on the page, still restorable, just not
+destroyable before its date.
 
 ## Tests
 

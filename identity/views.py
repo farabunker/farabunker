@@ -536,9 +536,13 @@ def deleted_page(request):
     page next.
 
     NO HOLD CONTROL IS RENDERED IN ANY POSTURE, including enterprise,
-    and this page says nothing about holds or about a purge an owner
-    cannot perform: that behaviour is a deferred slice (spec section
-    10.10) and the page must not imply a guarantee that is not built.
+    and this page says nothing about holds: the hold control and the
+    operator-set cliff floor are a deferred slice (spec section 10.10)
+    and the page must not imply a guarantee that is not built. The
+    permanent-delete control's own absence on the organisation posture
+    needs no separate branch here -- each row's `may_purge` key already
+    answers False for everybody there, and the template's own
+    `{% if row.may_purge %}` does the rest.
 
     ONE `IdentitySettings` READ FOR THE WHOLE REQUEST, and it is not
     this view's own: `settings_row_for(request)` reads
@@ -677,13 +681,22 @@ def deleted_purge(request, pk: int):
     ids only -- never this item's label or content -- and answered with
     a fixed, contentless sentence; the ticket stays for the next sweep
     or the next click either way. And a clean run flashes success. A
-    caller with no standing to purge (`may_purge` refuses) is a 404,
-    like every other row this principal may not act on.
+    caller with no standing to SEE the row (`_own_ticket_or_404`) is a
+    404; a caller who sees it but may not purge it yet -- the
+    organisation posture, for everybody, before its date -- gets a
+    flashed sentence and a redirect instead: the row is right there on
+    the page this click came from, so pretending it does not exist would
+    be a refusal that lies.
     """
     row = settings_row_for(request)
     principal, ticket = _own_ticket_or_404(request, pk, settings_row=row)
     if not retention.may_purge(principal, ticket, settings_row=row):
-        raise Http404("No such deleted item.")
+        # A SENTENCE, NOT A 404: the row is listed on the page this
+        # click came from, so pretending it does not exist would be a
+        # refusal that lies. 404 stays the answer for a ticket this
+        # principal may not SEE -- `_own_ticket_or_404` above.
+        messages.error(request, retention_copy.purge_refused_line(ticket.purge_on))
+        return settings_redirect(request, "identity-deleted")
     try:
         retention.purge_ticket(principal, ticket, settings_row=row)
     except (services.ServiceRefused, RetentionRefused) as exc:

@@ -85,15 +85,29 @@ _MONTHS = ("January", "February", "March", "April", "May", "June", "July",
            "August", "September", "October", "November", "December")
 
 
-def purge_on_line(day: datetime.date) -> str:
-    """"Purge on 21 October 2026" -- the promise the page prints.
+def _date_words(day: datetime.date) -> str:
+    """"21 October 2026" -- an un-padded day and a month NAME, because
+    the un-padded directive (`%-d`) is platform-specific and these
+    sentences must read identically wherever the box runs."""
+    return f"{day.day} {_MONTHS[day.month - 1]} {day.year}"
 
-    Built from `day.day` and a month NAME rather than a `strftime`
-    format, because the un-padded day directive (`%-d`) is
-    platform-specific and this sentence must read identically wherever
-    the box runs.
+
+def purge_on_line(day: datetime.date) -> str:
+    """"Purge on 21 October 2026" -- the promise the page prints."""
+    return f"Purge on {_date_words(day)}"
+
+
+def purge_refused_line(day: datetime.date) -> str:
+    """"This item is kept until 21 October 2026. It can be restored,
+    not destroyed early."
+
+    WHAT THE ORGANISATION POSTURE SAYS INSTEAD OF DESTROYING SOMETHING.
+    It names the date the page already printed and the door that is
+    still open, and it claims nothing about records obligations, legal
+    holds or who could override it -- none of which this box builds.
     """
-    return f"Purge on {day.day} {_MONTHS[day.month - 1]} {day.year}"
+    return (f"This item is kept until {_date_words(day)}. "
+            f"It can be restored, not destroyed early.")
 
 
 # -- the one refusal ----------------------------------------------------

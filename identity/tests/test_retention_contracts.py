@@ -82,12 +82,18 @@ class TestTheCopyIsDeclaredOnceInPython:
     def test_the_date_line_is_a_promise_a_person_can_check(self):
         assert retention.purge_on_line(datetime.date(2026, 10, 21)) == "Purge on 21 October 2026"
 
+    def test_the_refusal_says_what_can_still_be_done(self):
+        assert retention.purge_refused_line(datetime.date(2026, 10, 21)) == (
+            "This item is kept until 21 October 2026. "
+            "It can be restored, not destroyed early.")
+
     def test_the_copy_never_says_ticket_cliff_or_sweep(self):
         words = " ".join([
             retention.PAGE_TITLE, retention.TAB_LOG, retention.ACTION_RESTORE,
             retention.ACTION_PURGE, retention.LABEL_RETENTION_DAYS,
             retention.LABEL_QUEUE_RETENTION_DAYS, retention.LABEL_AUDIT_DETAIL,
             retention.purge_on_line(datetime.date(2026, 10, 21)),
+            retention.purge_refused_line(datetime.date(2026, 10, 21)),
         ]).lower()
         for jargon in ("ticket", "cliff", "sweep", "cascade", "retention"):
             assert jargon not in words
