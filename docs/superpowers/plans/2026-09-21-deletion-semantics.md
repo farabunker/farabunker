@@ -4367,9 +4367,13 @@ class TestTheDeletedTab:
         response: the settings shell, the sidebar and the assistant
         panel are shared markup this page does not own, and a substring
         assertion over them would fail for a word some other surface
-        introduced. The enterprise BEHAVIOUR is deferred (spec section
-        10.10) and this page must not imply a guarantee that is not
-        built."""
+        introduced. The HOLD control and the operator-set cliff floor
+        are deferred (spec section 10.10) and this page must not imply
+        a guarantee that is not built; the permanent-delete control's
+        absence on the organisation posture is a different rule, pinned
+        by `test_the_control_is_not_rendered_on_that_posture` below. See
+        Task 15D's execution amendment below for the fields this
+        printed block predates."""
         for box in ("open", "personal", "enterprise"):
             with posture(box):
                 user = make_user()
@@ -4473,18 +4477,27 @@ class TestRestoreAndPurge:
         assert DeletionTicket.objects.count() == 0
         assert AuditEvent.objects.filter(action=CONTENT_PURGED).count() == 1
 
-    def test_the_enterprise_posture_behaves_exactly_as_personal_does(self, client):
-        """Asserted rather than left untested: the enterprise BEHAVIOUR
-        is a deferred slice (spec section 10.10), and until it is built
-        the item's owner may purge before the cliff here too."""
+    def test_the_enterprise_posture_keeps_an_item_until_its_date(self, client):
+        """Renamed and inverted by Task 15D's execution amendment below
+        (owner ruling, 2026-09-22): the posture's one built control is
+        the refusal spec section 3.10 defines, not the personal-posture
+        early purge this block used to pin. SPEC SECTION 3.10's
+        enterprise column, for this one control: nobody destroys
+        content before the date it was promised. The POST answers with
+        a sentence, not a 404 -- the row is right there on the page,
+        and a 404 for something a person can see is a lie about what
+        happened."""
         with posture("enterprise"):
             user = make_user()
             sign_in(client, user)
             ticket = _ticket_for(user)
             response = client.post(
-                reverse("identity-deleted-purge", args=[ticket.pk]))
-        assert response.status_code == 302
-        assert DeletionTicket.objects.count() == 0
+                reverse("identity-deleted-purge", args=[ticket.pk]),
+                follow=True)
+            assert response.redirect_chain[0][1] == 302
+            assert DeletionTicket.objects.filter(pk=ticket.pk).exists()
+            body = response.content.decode()
+            assert copy.purge_refused_line(ticket.purge_on) in body
 
     @pytest.mark.parametrize("route",
                              ["identity-deleted-restore", "identity-deleted-purge"])
@@ -4826,15 +4839,25 @@ def deleted_purge(request, pk: int):
     ids only -- never this item's label or content -- and answered with
     a fixed, contentless sentence; the ticket stays for the next sweep
     or the next click either way. And a clean run flashes success. A
-    caller with no standing to purge (`may_purge` refuses) is a 404,
-    like every other row this principal may not act on.
+    caller with no standing to SEE the row (`_own_ticket_or_404`) is a
+    404; a caller who sees it but may not purge it yet -- the
+    organisation posture, for everybody, before its date -- gets a
+    flashed sentence and a redirect instead: the row is right there on
+    the page this click came from, so pretending it does not exist would
+    be a refusal that lies. See Task 15D's execution amendment below for
+    this second branch, which this printed block predates.
     """
     row = settings_row_for(request)
     principal, ticket = _own_ticket_or_404(request, pk, settings_row=row)
     if not retention.may_purge(principal, ticket, settings_row=row):
-        raise Http404("No such deleted item.")
+        # A SENTENCE, NOT A 404: the row is listed on the page this
+        # click came from, so pretending it does not exist would be a
+        # refusal that lies. 404 stays the answer for a ticket this
+        # principal may not SEE -- `_own_ticket_or_404` above.
+        messages.error(request, retention_copy.purge_refused_line(ticket.purge_on))
+        return settings_redirect(request, "identity-deleted")
     try:
-        retention.purge_ticket(principal, ticket)
+        retention.purge_ticket(principal, ticket, settings_row=row)
     except (services.ServiceRefused, RetentionRefused) as exc:
         messages.error(request, str(exc))
     except Exception:  # noqa: BLE001 -- never-500; the traceback goes to the log
@@ -7337,7 +7360,7 @@ Checked end to end: `ticketed_keys` / `visible_tickets` / `may_purge` / `delete_
 - **Execution amendment (Task 12 review round one), 2026-09-21:** six findings, all reflected in Task 12's own code/test/help blocks above. (C1) `deleted_page`'s Deletion log leaked another person's item label to any signed-in viewer, because `audit.by_action`'s read is unscoped by design (the log lists every `content.*` event) and nothing further checked who was looking — `show_labels = sees_all_content(principal, settings_row=row)`, computed once, now gates `event.target_label` per event; the event itself still lists for every viewer, only the label is blanked for one with no standing to read everyone's content. (I2) The Deleted help card said "the retention setting" (the banned word) and omitted the backups sentence its own brief line requires — reworded to `"Keep deleted items for"` in quotes and the backups sentence added, modelled on the identical sentence on the Identity & security card. (I3) Both mutations' generic `except Exception` catches had no test of their own — `views.retention.restore_content`/`purge_ticket` patched to raise a bare `RuntimeError`, asserting the redirect, the fixed flash and the surviving ticket. (I4) `deleted_page`'s own "one read" docstring claim was false: `IdentityGateMiddleware` already reads `IdentitySettings` once per request, and the view's `IdentitySettings.get_solo()` was a second, needless read of the same table — replaced with `settings_row_for(request)` (the row the middleware already stashed), and `_own_ticket_or_404` now takes that row as a required keyword and threads it into `principal_for_request` rather than calling it bare, the same rule `entitlement_edit`'s own comment states; a new `CaptureQueriesContext` pin asserts exactly one `identity_identitysettings` statement per GET. (I5) `identity/README.md` section 9 gained a paragraph for the page itself — its three routes and their classes, the `EVERYONE` gate's reason, the prune-on-read GET, and the log's label-visibility rule — which the section had deferred to "the Deleted page's own tasks' code" until now. (M1/M2/M3/M4/M5) `_RESTORE_FAILED_MESSAGE` reworded ("nothing retries a restore" was itself untrue — the message no longer claims it); the log's own `helptext` reworded off "It never contains the deleted words" to name the real, setting-gated rule; the template's own comment corrected from "every sentence comes from the constants" (false — the page's own prose is typed in the template) to say which half is which; `may_purge`'s docstring gained one sentence naming it as today-inert and the hook for the deferred enterprise hold behaviour; the unused `make_admin` import was dropped from `identity/tests/test_deleted_page.py` (the two new label-visibility tests use `posture("open")` for their sees-all case rather than an administrator account, so the import stayed genuinely unused).
 - **Whole-branch fix wave (slice one), 2026-09-21:** the Deletion log is now scoped to the viewer's own activity unless they see all content (Task 12), not every viewer for every event; the chat delete confirm no longer promises a restore the box may not keep (Task 8); `identity/retention.py::sweep` counts only real purges, not a ticket another overlapping pass already purged.
 - **Steward closure (slice one), 2026-09-22:** seven blocking conditions from the `chat-cluster` steward's review of `0c835c9`, plus four cheap informational items, landed in one commit. `_deleted_document_ids()` (Task 10) gains a third leg for a workstream consolidation note, keyed off `notes_conversation_id` against the same ticketed conversation keys the chat-scoped leg already reads, closing the gap where hide and `purge_conversation_notes` disagreed; `by_action` (Task 3) gains an `actor=` keyword that filters BEFORE its slice, replacing `deleted_page`'s (Task 12) own after-the-slice Python filter, which could show a member "Nothing yet." on a box where a hundred other principals' events crowded their own out of the unscoped top 100; three surfaces claiming the queue's age limit is already live (the Identity & security help card, the Retention section's own helptext (Task 7), and the settings assistant's `queue_retention_line`) now say the value is recorded and the Queue page applies it starting in a following change; four docstrings naming `models.queue.retention.forget_conversation` and the queue-row teardown in the present tense now say so in the future tense, pointing at ADR 0019's residue list; and `docs/OPERATIONS.md` now states `purge_deleted`'s real per-run bound and the queue-row backup residue instead of promising the opposite of both.
-- **Execution amendment (Task 15D review, fix round 1), 2026-09-24:** the code landed correctly in one commit (`5584208`) but left four documentation/docstring passages asserting the enterprise posture "behaves exactly as personal does" after the task's own commit had made that untrue for one control. All four corrected, plus five Minor findings, in the same fix-round commit: `docs/adr/0019-deletion-and-retention.md`'s "ships fields with no behaviour" consequence now says the built refusal reads `IdentitySettings.posture`, not the three hold columns, which still have no behaviour behind them (its dangling "say so" fixed too); `docs/superpowers/specs/2026-09-21-deletion-semantics-design.md` §11's preamble now says "Three entries are not the author's" (decision 9 was already there, un-renumbered, contradicting a preamble that still said two), and its §8 documentation-table row now names the one control pulled forward rather than claiming the whole enterprise behaviour is deferred; `identity/tests/test_deleted_page.py::test_the_page_renders_no_hold_control_in_any_posture`'s own docstring — left over from before this task's edit — now names the Hold control and the operator-set cliff floor as what is deferred, not the posture's whole behaviour, and points at the sibling test that pins the built control; `foundation/settings_help.py`'s "Deleted items" card gained one clause in its `meaning` (not `effects`, where the honesty-scope sentence stays) naming the control's own absence on the organisation posture, per that file's own rule 2 ("a field whose control only renders in some postures says so in its `meaning`"); `docs/OPERATIONS.md`'s guarantee sentence now reads "about that date" rather than "on the date itself"; the two new `<main>`-scoped tests in `test_deleted_page.py` now split with `maxsplit=1` and `.lower()`, matching the module's own existing convention, and the enterprise-refusal test (parent and child) now asserts `response.redirect_chain[0][1] == 302` rather than trusting `follow=True` alone. This plan's own two printed blocks that repeated the pre-15D claim (Task 5's `may_purge` docstring above, Task 12's `deleted_page` docstring and `deleted.html` comment above) and the traceability table's §3.10 row (naming a test that no longer exists under that name) are corrected in this same entry.
+- **Execution amendment (Task 15D review, fix round 1), 2026-09-25:** the code landed correctly in one commit (`5584208`) but left four documentation/docstring passages asserting the enterprise posture "behaves exactly as personal does" after the task's own commit had made that untrue for one control. All four corrected, plus five Minor findings, in the same fix-round commit: `docs/adr/0019-deletion-and-retention.md`'s "ships fields with no behaviour" consequence now says the built refusal reads `IdentitySettings.posture`, not the three hold columns, which still have no behaviour behind them (its dangling "say so" fixed too); `docs/superpowers/specs/2026-09-21-deletion-semantics-design.md` §11's preamble now says "Three entries are not the author's" (decision 9 was already there, un-renumbered, contradicting a preamble that still said two), and its §8 documentation-table row now names the one control pulled forward rather than claiming the whole enterprise behaviour is deferred; `identity/tests/test_deleted_page.py::test_the_page_renders_no_hold_control_in_any_posture`'s own docstring — left over from before this task's edit — now names the Hold control and the operator-set cliff floor as what is deferred, not the posture's whole behaviour, and points at the sibling test that pins the built control; `foundation/settings_help.py`'s "Deleted items" card gained one clause in its `meaning` (not `effects`, where the honesty-scope sentence stays) naming the control's own absence on the organisation posture, per that file's own rule 2 ("a field whose control only renders in some postures says so in its `meaning`"); `docs/OPERATIONS.md`'s guarantee sentence now reads "about that date" rather than "on the date itself"; the two new `<main>`-scoped tests in `test_deleted_page.py` now split with `maxsplit=1` and `.lower()`, matching the module's own existing convention, and the enterprise-refusal test (parent and child) now asserts `response.redirect_chain[0][1] == 302` rather than trusting `follow=True` alone. This plan's own printed blocks that repeated the pre-15D claim -- Task 5's `may_purge` docstring above, Task 12's `deleted_page` docstring and `deleted.html` comment above -- and the traceability table's §3.10 row (naming a test that no longer exists under that name) are corrected in this same entry. A cleanup-wave re-review found three more printed blocks this fix round missed: `test_the_page_renders_no_hold_control_in_any_posture`'s own docstring above, the superseded `test_the_enterprise_posture_behaves_exactly_as_personal_does` block above (now renamed and inverted, matching the real test), and Task 12's `deleted_purge` printed block above (its 404-only branch, updated to the flashed-sentence-and-redirect branch the shipped view actually takes) -- corrected in the cleanup wave that followed. Between the two passes, every printed block in this plan that once repeated the pre-15D claim is now corrected.
 
 ### Slice-one addendum: child tickets for a deleted chat's images (Tasks 15A–15D)
 

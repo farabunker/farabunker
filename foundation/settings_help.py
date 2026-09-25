@@ -608,9 +608,11 @@ CARDS: tuple[HelpCard, ...] = (
         title="Deleted",
         gate=EVERYONE,
         purpose=(
-            "A person's own deleted items -- conversations, documents, Ask records and "
-            "generated images -- each with the date it will be destroyed, and the one place "
-            "to put one back before that date."
+            "A person's own deleted items -- today, conversations and the generated images "
+            "that were part of them -- each with the date it will be destroyed, and the one "
+            "place to put one back before that date. A document deleted from the library or "
+            "an Ask record is not on this page yet and still happens at once, on every "
+            "posture."
         ),
         fields=(
             HelpField(
@@ -886,9 +888,11 @@ CARDS: tuple[HelpCard, ...] = (
                 name="Keep deleted items for",
                 anchor="retention",
                 meaning=(
-                    "How many days a deleted conversation, document, Ask record or generated "
-                    "image stays on the Deleted page before it is permanently removed. Zero "
-                    "removes it straight away, with no grace period."
+                    "How many days a deleted conversation, and the generated images that were "
+                    "part of it, stay on the Deleted page before they are permanently removed. "
+                    "Zero removes them straight away, with no grace period. A document deleted "
+                    "from the library or an Ask record is not on this page yet and still "
+                    "happens at once, on every posture."
                 ),
                 effects=(
                     "The removal date is fixed at the moment something is deleted, so changing "

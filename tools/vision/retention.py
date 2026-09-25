@@ -15,7 +15,7 @@ retention handler (`identity.contracts.cascades.register_retention_handler`,
 on its own -- through the gallery, or through the child ticket a
 conversation's delete wrote for it.
 
-NEITHER FUNCTION IN THIS MODULE QUERIES `GenerationJob.objects` ITSELF:
+NO FUNCTION IN THIS MODULE QUERIES `GenerationJob.objects` ITSELF:
 both resolve to job ids or keys and hand them to `tools.vision.services`
 for the two unscoped reads a deletion needs (`services.existing_job_ids`,
 `services.delete_jobs`) -- `foundation/ops/tests/

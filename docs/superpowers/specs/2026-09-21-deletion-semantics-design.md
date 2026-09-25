@@ -1117,10 +1117,15 @@ because this is identity, posture and visibility work in every column it touches
 
 **`tools/vision`.**
 - `visible_jobs` excludes a ticketed job.
-- The registered artifact purge maps `output:<id>` and `input:<id>` to their jobs through the FK,
-  dedupes two outputs of one job to one delete, accepts a bare generation id, ignores a UUID that
-  matches no job, and calls `delete_job` — so the managed directory goes and the engine-side
-  sweep runs.
+- ~~The registered artifact purge maps `output:<id>` and `input:<id>` to their jobs through the
+  FK, dedupes two outputs of one job to one delete, accepts a bare generation id, ignores a UUID
+  that matches no job, and calls `delete_job` — so the managed directory goes and the engine-side
+  sweep runs.~~ — **superseded (Task 15C, the slice-one addendum): nothing proves this any more.**
+  The slot resolves, it does not destroy (§3.6 step 2's own amendment); the mapping and dedupe
+  claims live in `resolve_artifact_jobs` (`tools/vision/tests/test_retention.py::
+  TestMappingReferencesToJobs`) and the `delete_job` claim lives in `purge_job`
+  (`tools/vision/tests/test_retention.py::TestPurgeJob`), run against the `vision_job` ticket's
+  own handler now, not the conversation purge.
 - The queue rows for those jobs are gone afterwards, via `forget_jobs`.
 
 **`models/queue`.**

@@ -193,10 +193,15 @@ class TestDeleteJobs:
         assert not GenerationJob.objects.filter(pk=gone.pk).exists()
         assert GenerationJob.objects.filter(pk=stays.pk).exists()
 
-    def test_an_empty_list_deletes_nothing(self):
+    def test_an_empty_list_deletes_nothing(self, django_assert_num_queries):
+        """`pk__in=[]` short-circuits Django's own queryset before it
+        ever reaches Postgres (the same zero-query property
+        `TestEmptyInputCostsNothing` above pins for `resolve_artifact_
+        jobs`), so this measures it rather than assuming it."""
         _generation()
 
-        assert services.delete_jobs([]) == 0
+        with django_assert_num_queries(0):
+            assert services.delete_jobs([]) == 0
 
         assert GenerationJob.objects.count() == 1
 

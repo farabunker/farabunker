@@ -285,10 +285,11 @@ ever configures.
 - **Backups are not, and will not become, a second delete surface.** An operator's retention
   obligation is met by rotating backups on a schedule independent of the deletion cliff, stated
   plainly rather than implied.
-- **The enterprise posture ships three hold columns with no behaviour behind them.** A box
-  running that posture today restores exactly as a personal-posture box does, and refuses to
-  purge anything early, for anybody — that refusal reads the posture, not those columns. The
-  Hold control and the operator-set cliff floor, which are what would use them, are a named,
+- **The enterprise posture ships three hold columns nothing writes.** A box running that
+  posture today restores exactly as a personal-posture box does, and refuses to purge anything
+  early, for anybody — that refusal reads the posture, not those columns; the sweep's own
+  due-condition already excludes a held ticket, so the columns are read, just never set. The
+  Hold control and the operator-set cliff floor, which are what would write them, are a named,
   deferred slice, not a silent gap.
 
 ## See also
