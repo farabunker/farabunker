@@ -52,9 +52,13 @@ diagnostic argued that correction should land *before* these tasks executed, bec
 commit 2's refusal bookkeeping counts the results of that poll. These tasks are merged and
 running, so **that bookkeeping is being fed right now** by a poll the diagnosis calls
 meaningless wherever an endpoint's memo carries no footprint: the threshold falls back to the
-bare credibility floor, and a waited call is still made at the admitted job's own endpoints
-and at every believed-resident model — where a `False` is *informative* and increments the
-count. So `MAX_BARRIER_REFUSALS`, `MIN_BARRIER_REFUSAL_SPAN_SECONDS` and
+bare credibility floor, and the wait is still taken. **The clean case is the barrier at an
+admitted exclusive job's own endpoint with nothing remembered there** — a cold or
+freshly-restarted image endpoint, the common shape after any worker restart — where nothing
+can rise and the poll measures ambient drift until it clears the floor or the clock runs out.
+*(The other waited case, a believed-resident model, is narrower: there the memo normally does
+carry a footprint, so the bare-floor fallback is unusual.)* So `MAX_BARRIER_REFUSALS`,
+`MIN_BARRIER_REFUSAL_SPAN_SECONDS` and
 `BARRIER_HOLDOFF_SECONDS` are today acting on ambient machine drift at those endpoints, in
 both directions: a drift-driven `False` can walk a job toward an honest-looking failure, and a
 drift-driven early exit reads as a successful barrier and **resets** the count. The three
@@ -72,9 +76,18 @@ would otherwise file the correction as sequencing history.
 >   `BARRIER_HOLDOFF_SECONDS` (Task 12 commit 2, whose comment requires it to be comfortably
 >   longer than one unload timeout) and, through it, `MIN_BARRIER_REFUSAL_SPAN_SECONDS`; plus
 >   the two in the shipped worker that this plan consumes without introducing —
->   `MAX_UNLOADS_PER_TICK`, set to two precisely so that two calls at this timeout stay inside
->   the staleness cutoff, and `STALE_AFTER_SECONDS`, whose own margin is reasoned from that
->   same product. All four sites carry this marker.
+>   `MAX_UNLOADS_PER_TICK`, set to two so that two calls of thirty seconds each stay inside the
+>   staleness cutoff, and `STALE_AFTER_SECONDS`, whose own margin is reasoned from that same
+>   product. All four sites carry this marker.
+>
+>   **Open the right adapter.** Those two worker constants are priced against the **text**
+>   engine's unload timeout by name, not the image engine's. The image adapter's timeout is
+>   the same thirty seconds *because it deliberately matches that number*, and its own comment
+>   warns that changing it unannounced would invalidate arithmetic it has no business
+>   touching. So the experiment's subject is the image engine, and a result that says it needs
+>   longer does not raise one constant — it breaks that deliberate match, and the worker's
+>   cap, the staleness cutoff and the text engine's constant must all be reconsidered
+>   together.
 > - **Any budget rule sized against an eviction's transient peak.** Mechanism B predicts an
 >   unload transiently needs up to the model's size *again*; the magnitude is unmeasured and is
 >   the experiment's question.
@@ -639,10 +652,12 @@ FOOTPRINT_DIP_WARNING_RATIO = 0.75
 > queue's and the engine adapters' — and everything else falls back to the root's WARNING.
 > This line is the **registry's**, which is not one of the two, so today the INFO dip is not
 > emitted at all and the band between the ratio and 1.0 is silent; on a large model that band
-> is gigabytes. *(A branch in flight adds the registry to those namespaces. The sentence is
-> still wrong afterwards: the line would then be emitted, but at INFO, in the same stream as
-> the eviction pass's per-unload INFO chatter — which is not what "still visible" was
-> claiming.)* Raising the level on the **absolute** dip as well as the ratio is the named
+> is gigabytes. *(A branch in flight adds the registry to those namespaces; once it lands the
+> line **is** emitted, at INFO — a real improvement, and this note is not an argument against
+> it: the registry has one such call site and it fires only on a refused reading. The narrower
+> point survives it — present at INFO is weaker than what "still visible" claimed, since the
+> original sentence was defending the choice of level itself.)* Raising the level on the
+> **absolute** dip as well as the ratio is the named
 > improvement; it is not taken here, because this track is merged and the change belongs to
 > its own commit. See the spec's 2026-09-25 amendment, §B.
 
@@ -1900,12 +1915,15 @@ SLEEP_DETECT_SECONDS = 60
 SLEEP_GRACE_SECONDS = 30
 ```
 
-> **EXPERIMENT-BLOCKED, 2026-09-25 (engine diagnosis amendment) — second-order.** This
-> constant is sized against `STALE_AFTER_SECONDS`, which is itself reasoned from the per-tick
-> unload cap multiplied by the image engine's unload timeout — a figure now at MEDIUM
-> confidence that cannot be determined read-only. Nothing here is wrong today; the marker
-> exists so that a future change to that timeout re-derives this constant too, rather than
-> leaving a grace period sized against a cutoff that has moved underneath it.
+> **EXPERIMENT-BLOCKED, 2026-09-25 (engine diagnosis amendment) — second-order, and only
+> `SLEEP_GRACE_SECONDS`.** `SLEEP_DETECT_SECONDS` above it is a wall-clock-versus-monotonic
+> figure and is bounded by nothing here; this marker does not touch it. `SLEEP_GRACE_SECONDS`
+> is the one sized against `STALE_AFTER_SECONDS`, which is itself reasoned from the per-tick
+> unload cap multiplied by a thirty-second unload timeout — named in the worker against the
+> **text** engine, matched deliberately by the image adapter, and now at MEDIUM confidence
+> because it cannot be determined read-only. Nothing here is wrong today; the marker exists so
+> that a future change to that timeout re-derives this constant too, rather than leaving a
+> grace period sized against a cutoff that has moved underneath it.
 
 In `__init__`: `self._last_tick_wall: float | None = None`, `self._last_tick_monotonic: float | None = None`, `self._sweep_skip_until: float | None = None`.
 
@@ -3145,12 +3163,14 @@ class TestTheInFlightRefsMapNeverLeaks:
         share of `MAX_UNLOADS_PER_TICK`; `None` is uncapped.
 
         EXPERIMENT-BLOCKED (2026-09-25, engine diagnosis amendment):
-        `MAX_UNLOADS_PER_TICK` is two precisely so that two calls at the
-        image engine's unload timeout stay comfortably inside
-        `STALE_AFTER_SECONDS`. That timeout is at MEDIUM confidence and
-        cannot be determined read-only, so this cap may not be raised --
-        and must be re-derived if the timeout moves -- until the
-        confirming experiment has run.
+        `MAX_UNLOADS_PER_TICK` is two so that two calls of thirty seconds
+        each stay comfortably inside `STALE_AFTER_SECONDS`. That figure is
+        named here against the TEXT engine's unload timeout -- the image
+        adapter matches the same number deliberately and says so -- and it
+        is now at MEDIUM confidence, because the image engine's settle
+        behaviour cannot be measured read-only. So this cap may not be
+        raised, and must be re-derived across BOTH adapters if that
+        timeout moves, until the confirming experiment has run.
 
         `self._maybe_heartbeat()` is called after EVERY unload call, not
         once around the loop -- that is what makes an uncapped exclusive
@@ -3470,7 +3490,10 @@ MIN_BARRIER_REFUSAL_SPAN_SECONDS = 300
 > probe. **Do not change the timeout, and do not re-derive either constant here, until that
 > experiment has run** — and when it does, the worker's `MAX_UNLOADS_PER_TICK` and
 > `STALE_AFTER_SECONDS` must be revisited in the same change, since both are reasoned from the
-> same figure.
+> same thirty-second figure. Note which adapter that figure is named against: the worker
+> prices those two constants against the **text** engine's unload timeout, and the image
+> adapter matches the number deliberately — so the re-derivation spans both adapters, not just
+> the one the experiment measures.
 
 `_evict_to_match_plan`'s docstring gains the **fifth ordering rule** paragraph (the protection check runs before the residency snapshot, and why that ordering is about cost rather than taste), and the function now returns the refused set instead of `set()`.
 

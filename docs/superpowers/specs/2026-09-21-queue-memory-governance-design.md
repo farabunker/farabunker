@@ -209,11 +209,12 @@ engine-reported columns:
 > adapters'; everything else falls back to the root's WARNING. This line is logged by the
 > **registry**, which is not one of the two, so today the INFO dip is not emitted at all and
 > the band between the ratio and 1.0 is silent. On a large model that silent band is
-> gigabytes. *(A branch in flight adds the registry to those namespaces. That does not
-> rescue the sentence: once it lands the line is emitted, but at INFO, in the same stream as
-> the eviction pass's per-unload INFO chatter — "present in a verbose stream" is not what
-> "still visible" was claiming, and the claim is not one the configuration supports either
-> way.)* The ratio itself is confirmed correct: it fired on both real incidents, at 0.57 and
+> gigabytes. *(A branch in flight adds the registry to those namespaces; once it lands the
+> line **is** emitted, at INFO. That is a real improvement and this note should not be read as
+> arguing against it — the registry has one such call site and it fires only on a refused
+> reading, so it is not noise. The narrower point stands: present at INFO is weaker than what
+> "still visible" claimed, since the original sentence was defending the choice of level
+> itself.)* The ratio itself is confirmed correct: it fired on both real incidents, at 0.57 and
 > 0.62, and both WARNING lines were verified visible. Raising the level on the **absolute**
 > dip as well as the ratio is the named improvement, not a correction — registry-side work
 > this track does not own, recorded rather than taken.
@@ -1534,7 +1535,7 @@ Confidence is HIGH unless stated. Where a verdict is WRONG, the replacement is n
 | The **credible-footprint floor**, guarding the footprint reading | **STAYS** | Correctly sized against measurement noise — live sampling of an idle engine showed the underlying number drifting by up to ~52 MB in a two-second window, so the floor is about five times the idle noise band. **But it caught NEITHER real incident**: both recorded dips were two orders of magnitude above it. It guards noise, not the mechanism. Necessary, wholly insufficient, and §11's residuals must not be read as though it were protection. |
 | **The same constant reused as the unload settle threshold**, wherever an endpoint has no remembered footprint | **WRONG** | The one substantive correction this diagnosis produces. See §C below. |
 | The **dip-warning ratio** | **STAYS**, log level only | It cannot be actively wrong (it sets a log level and changes no behaviour) and it **fired on both real incidents** — ratios 0.57 and 0.62, both logged at WARNING, both verified visible at default logging. One correction to §3.2 follows it, recorded in place: a dip *between* the ratio and 1.0 is logged at INFO, and this line's own namespace — the registry's — is not one of the two the configuration raises to INFO, so today that band is silent. |
-| The **unload settle poll**, and its timeout value | Poll **STAYS**; the **VALUE is at MEDIUM confidence** | The poll is *required* by the mechanism, not merely prudent: the free call only sets a flag and the work happens later on another thread, which is exactly the ordering failure §3.3(d) exists for. The `// 2` form of its threshold is confirmed correct for mechanism B's reason. What is at risk is the **cap**: the same eviction was observed settling in ~3.5 s on an idle box and ~21.0 s on a loaded one, a sixfold spread, and mechanism B predicts settle time scales with model size *and* with memory pressure. **The right value cannot be determined read-only** — it needs one timed eviction of the largest checkpoint at a known pressure level, which is a mutating probe. **No number is invented here**, and raising the cap silently invalidates the arithmetic the worker's per-tick unload cap rests on: that cap is set to two precisely so that two calls at this timeout stay comfortably inside the staleness cutoff, and the staleness cutoff's own margin is reasoned from the same product. Determining it is a stated purpose of the confirming experiment (§E). |
+| The **unload settle poll**, and its timeout value | Poll **STAYS**; the **VALUE is at MEDIUM confidence** | The poll is *required* by the mechanism, not merely prudent: the free call only sets a flag and the work happens later on another thread, which is exactly the ordering failure §3.3(d) exists for. The `// 2` form of its threshold is confirmed correct for mechanism B's reason. What is at risk is the **cap**: the same eviction was observed settling in ~3.5 s on an idle box and ~21.0 s on a loaded one, a sixfold spread, and mechanism B predicts settle time scales with model size *and* with memory pressure. **The right value cannot be determined read-only** — it needs one timed eviction of the largest checkpoint at a known pressure level, which is a mutating probe. **No number is invented here.** Raising it also breaks an arithmetic that is **not written in this engine's own column**, and a reader re-deriving it would otherwise open the wrong adapter: the worker prices its per-tick unload cap at two calls of **thirty seconds each, naming the TEXT engine's unload timeout**, and reasons the staleness cutoff's margin from that product. The image adapter's own timeout is thirty seconds *because it deliberately matches that number and says so in its comment*, warning that changing it unannounced would invalidate arithmetic it has no business touching. So an experiment that shows the **image** engine needs longer does not simply raise one constant — it breaks that deliberate match, and the worker's cap, the staleness cutoff and the text engine's own constant all have to be reconsidered together. Determining the value is a stated purpose of the confirming experiment (§E). |
 | The **run memo**, its TTL and its cap | **STAYS**, and removing it is **IMPOSSIBLE** | Not "unwise" — impossible. **No route this engine build serves exposes the loaded-model list**; there is no residency signal over HTTP at all. Without the memo the adapter would know nothing about residency, every footprint would be unknown for ever, and every job would run alone. §3.3(a)'s `residency_authority="memo"` declaration for this engine is therefore a permanent structural fact, not a temporary one a future adapter release might retire. |
 
 ### C. The one substantive correction — the settle threshold
@@ -1562,10 +1563,15 @@ fix should land *before* the nineteen tasks executed, because the refusal bookke
 those results. Those tasks are merged and running, so that bookkeeping is being fed **right
 now** by a poll this diagnosis calls meaningless. The path is exact and is not hypothetical:
 the settle threshold falls back to the bare credibility floor whenever the endpoint's memo
-carries no footprint, and a waited call is still made in two cases — at the admitted
-exclusive job's **own** endpoints, and at **every believed-resident** model. A `False` from a
-believed-resident call is *informative* by §3.3(d)(4), so it increments the refusal count.
-Therefore:
+carries no footprint, and the 2026-09-24 amendment kept the wait in exactly two places. **The
+clean case is the first of them: the barrier at an admitted exclusive job's OWN endpoint with
+nothing remembered there** — a cold or freshly-restarted image endpoint, which is the common
+shape after any worker restart. That call waits, and nothing can rise, so it polls ambient
+drift until it clears the floor or the clock runs out. *(The other waited case, a
+believed-resident model, is narrower than it sounds: at a believed-resident image endpoint the
+memo normally does carry a footprint, so the bare-floor fallback is unusual there.)* A `False`
+from a call made against a believed-resident model is *informative* by §3.3(d)(4) and
+increments the refusal count. Therefore:
 
 - a job can accumulate refusals, take its `BARRIER_HOLDOFF_SECONDS` hold-off, and ultimately
   be **failed** once `MAX_BARRIER_REFUSALS` and `MIN_BARRIER_REFUSAL_SPAN_SECONDS` are both
@@ -1664,8 +1670,9 @@ diagnostic could not determine read-only whether it is **active** — its module
 and nothing was traced that flips it. If it were active it would add a **fourth footprint
 mechanism**: the initial load device becomes the host device and dynamic models are handled
 differently by the free path (which declines to unload them), so a model's resident size at
-measurement time could be a fraction of the whole rather than the whole. That would not
-invalidate mechanisms A or B, but it would change what every number the experiment produces
-means. **Checking it is cheap and belongs before the experiment runs, not after.**
+measurement time could be a fraction of the whole rather than the whole, **changing what every number the
+experiment produces means**. The report claims no more than that: it gives **no all-clear for
+mechanisms A or B**, and none should be read into it here.
+**Checking it is cheap and belongs before the experiment runs, not after.**
 
 Everything else in this amendment is read-only-verified and may be acted on.
