@@ -408,7 +408,11 @@ class TestTheDisclosure:
         # THE DROP ITSELF, said directly rather than left implied by the
         # total: the request already holds its `IdentitySettings` row, so
         # a tick that SELECTs one has reached for the principal without
-        # threading it -- I-4(b) coming back. Red at 14 before the fix.
+        # threading it -- I-4(b) coming back. This assertion is
+        # independent of `_DONE_TICK_READS`'s own value above (which the
+        # deletion-semantics merge separately raised, for an unrelated
+        # reason) -- it fails on any `IdentitySettings` re-read, at any
+        # total.
         assert not [q for q in captured.captured_queries
                     if "identity_identitysettings" in q["sql"]], (
             "the done tick re-read the settings singleton")
@@ -830,42 +834,49 @@ class TestThePost:
 
 
 # THE DONE TICK'S WHOLE READ BUDGET, as a literal (whole-branch review
-# I-4). Named here rather than left inline so the assertion reads as a
-# budget and the arithmetic is visible. Measured over `_done_body`
-# itself -- an OWNED, LOOSE conversation, the cheapest real shape -- in
-# the order the body runs them:
+# I-4, raised by two at the deletion-semantics merge). Named here rather
+# than left inline so the assertion reads as a budget and the arithmetic
+# is visible. Measured over `_done_body` itself -- an OWNED, LOOSE
+# conversation, the cheapest real shape -- in the order the body runs
+# them:
 #
 #    1  `_attachments_by_turn` -> `attachments_for` -> `attached_
-#       documents`: the conversation's own `rag_document` read
-#    2  ... its `identity_entitlementgrant` read (what this principal
+#       documents` -> `tools.rag.access._deleted_document_ids`'s first
+#       flat `ticketed_keys()` read (`identity_deletionticket`, document
+#       kind) -- the deletion-semantics document filter every
+#       visibility caller pays, unconditional even when nothing is
+#       ticketed (that function's own docstring)
+#    2  ... its second `ticketed_keys()` read (conversation kind), the
+#       same function threading both into the chat-scoped and notes legs
+#       rather than reading either twice
+#    3  ... `attached_documents`'s own `rag_document` read
+#    4  ... its `identity_entitlementgrant` read (what this principal
 #       holds), and
-#    3  ... the DISTINCT visible-document read those two narrow to
-#    4  `_carrying_user_turn_id`: which user turn this job answered
-#    5  `_edit_context` -> `may_edit_any_turn`'s in-flight
+#    5  ... the DISTINCT visible-document read those two narrow to
+#    6  `_carrying_user_turn_id`: which user turn this job answered
+#    7  `_edit_context` -> `may_edit_any_turn`'s in-flight
 #       `Turn.exists()` probe (`may_manage_conversation` itself adds
 #       none for an owner)
-#    6  ... `composer_attach_context` -> `tool_access_for`'s own grant
+#    8  ... `composer_attach_context` -> `tool_access_for`'s own grant
 #       read, and
-#    7  ... its `agents_toolentitlement` read
-#    8  `_group_html` -> `turn_group_cards`: the preceding user turn
-#    9  ... and the group's own turn read
-#   10  ... and `models.registry.availability.bound_role_keys()`, read
+#    9  ... its `agents_toolentitlement` read
+#   10  `_group_html` -> `turn_group_cards`: the preceding user turn
+#   11  ... and the group's own turn read
+#   12  ... and `models.registry.availability.bound_role_keys()`, read
 #       by the model-availability context processor during the render
 #       (its process cache is bypassed inside a transaction, which is
 #       every test and every write path)
-#   11  `_context_body` -> `context_usage`'s replayed-text slice, and
-#   12  ... its `.count()` -- the two `agents/chat/tests/test_thread_meter.py::
+#   13  `_context_body` -> `context_usage`'s replayed-text slice, and
+#   14  ... its `.count()` -- the two `agents/chat/tests/test_thread_meter.py::
 #       test_the_context_key_costs_exactly_the_two_reads_it_budgets`
 #       pins on their own
 #
-# NOT on the list, and that is the point of the number: an
+# NOT on the list, and that is still the point of the number: an
 # `IdentitySettings` SELECT. `_done_body` resolves the principal ONCE,
-# off the row `IdentityGateMiddleware` already stashed; it used to
-# resolve it twice, bare, each time paying `accounts_on()` ->
-# `get_solo()` (whole-branch review I-4(b)). Dropping this constant from
-# 14 to 12 is what that fix did, and raising it again is what this pin
-# refuses.
-_DONE_TICK_READS = 12
+# off the row `IdentityGateMiddleware` already stashed; the second
+# assertion below guards that regression directly, independent of this
+# literal, and is unaffected by the deletion-semantics reads above.
+_DONE_TICK_READS = 14
 
 
 def _polling_request(owner, conversation):
