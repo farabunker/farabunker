@@ -635,6 +635,33 @@ separate change.
   produces. One submission path, no second store-and-record branch, and nothing but
   strings in the payload. A reference naming a param the operation does not declare
   is refused, not dropped.
+- **Describes its own output, once generation is done** (vision-describes-
+  its-own-output task). `plan_generate` also declares `rag.extract` (the
+  same extraction role `tools/rag`'s own image-ingestion path resolves)
+  ALONGSIDE `vision.generate`, TOLERANTLY — an unbound `rag.extract`
+  simply leaves it out; the image job is planned exactly as before. When
+  it resolves, `run_generate` asks the extraction role to describe the
+  job's first output STRICTLY AFTER the image generation has fully
+  finished — sequential, never overlapped, never started eagerly — and
+  stores the result on `GenerationJob.description`: one extra model
+  call, never fatal to the generation. An unbound role, a failed call,
+  or a blank answer leaves the generation exactly as it already stands,
+  plus a short, honest sentence on that field instead of the real
+  description. Only for a `done` job with at least one output — never
+  for a failed one.
+  **The image model is deliberately NOT released before describing.**
+  An earlier version of this step did release it (the engine's own
+  `unload` seam) so the two models would never be resident at once — but
+  ComfyUI's `/free` has no per-model form: `POST /free` with
+  `unload_models` set frees EVERY model at that endpoint
+  (`ComfyUIEngine.unload`'s own docstring), so releasing would make the
+  NEXT generation at that endpoint pay a full cold load — "up to ~25
+  minutes" on the reference hardware per this job kind's own
+  `GENERATE_WAIT_TIMEOUT_SECONDS` comment — to avoid a few seconds of
+  double residency. Removed for exactly that reason; do not add it back
+  without a genuinely per-model free to release against. See "Tools"
+  below for how a
+  caller reads the field back.
 
 ## Gallery select mode and bulk delete
 
@@ -1228,6 +1255,21 @@ passes the catalog through to `ToolResult.data` verbatim, but an LLM
 reads `.text`: for an unsupported entry, that operation's own line gets
 `" — not runnable here: {unsupported_reason}"` appended, so the cue is
 visible without a caller having to parse `data`.
+
+**A successful generation describes its own output** (vision-describes-
+its-own-output task) so a caller that just made an image can judge or
+retry it without a second turn. The description is produced INSIDE the
+queued `vision.generate` job kind's own handler (`jobs.run_generate`),
+never by `run_generate` above — that runner only reads whatever
+`GenerationJob.description` already holds. It costs one extra call
+through the extraction role's own model, made only after the image
+generation has fully finished (never overlapped with it), and an
+unbound extraction role simply means no description — the generation
+itself is unaffected either way. A generation submitted directly through
+`vision.generate` the TOOL (this section, the chat path) rather than
+through the queued job kind does not run this step today, so its result
+carries no description; see "Queued generation" above for the step
+itself.
 
 `vision.generate`'s params are **computed from `all_operations()` at
 registration time** (a ruling superseding this task's original literal

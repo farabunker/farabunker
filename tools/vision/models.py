@@ -154,6 +154,21 @@ class GenerationJob(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
+    # A plain-language description of the job's FIRST output, produced
+    # through the extraction role once the job kind's own handler
+    # (`tools.vision.jobs.run_generate`) has finished generating -- never
+    # written for a job submitted directly (`tools.vision.tools.
+    # run_generate`, the chat tool's own synchronous path, which does not
+    # run through this job kind at all), never for a job with no outputs,
+    # and never for a failed one. `""` means "no description was ever
+    # attempted for this row" -- the same reading `GeneratedOutput`'s own
+    # blank-on-failure fields use elsewhere in this module -- and is also
+    # what every row written before this field existed carries. A FAILED
+    # description attempt still writes a short, honest, human-readable
+    # sentence here (never "") so a reader of this field never has to ask
+    # "was this simply never tried, or did it fail" -- see
+    # `services.describe_output`.
+    description = models.TextField(blank=True, default="")
 
     class Meta:
         ordering = ["-created_at"]

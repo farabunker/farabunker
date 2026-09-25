@@ -817,6 +817,25 @@ def run_generate(args: dict, ctx: ToolContext) -> ToolResult:
     if artifacts:
         pronoun = "this" if len(artifacts) == 1 else "these"
         lines.append(f"Outputs: {', '.join(artifacts)} — reference {pronoun} to edit.")
+
+    # READS, never produces (RULED CORRECTION, superseding this module's
+    # earlier "no describer" note): `payload["description"]` is written
+    # by `tools.vision.jobs.run_generate` -- the QUEUED `vision.generate`
+    # job kind's own handler, admitted with `rag.extract` alongside the
+    # image model (`jobs.plan_generate`) -- STRICTLY AFTER a generation
+    # finishes, never by this runner. A generation THIS runner submits
+    # (`services.submit_job`/`wait_for`, directly, synchronously, inside
+    # the turn already running this tool call) never passes through that
+    # job kind at all, so `payload["description"]` is `""` for every
+    # generation reached this way today -- this line costs nothing now
+    # and asks nothing new of the turn's own model admission, and it
+    # starts reading a value the moment anything ever writes one for a
+    # generation reached through THIS path. Appended verbatim, no
+    # further templating: `services.describe_output` already writes a
+    # complete, clearly-labelled sentence (or the honest failure
+    # sentence) onto the stored field.
+    if payload.get("description"):
+        lines.append(payload["description"])
     text = " ".join(lines)
 
     return ToolResult(text=text, data=payload, artifacts=artifacts)

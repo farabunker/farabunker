@@ -29,7 +29,7 @@ from models.contracts import operations as operations_module
 from models.contracts.engines import ENGINES
 from models.contracts.engines.base import JobStatus
 from models.contracts.operations import Operation, Param
-from models.contracts.roles import VISION_GENERATE_ROLE
+from models.contracts.roles import RAG_EXTRACT_ROLE, VISION_GENERATE_ROLE
 from tools.vision import jobs
 from tools.vision.models import GenerationJob
 from tools.vision.tests._helpers import (
@@ -85,6 +85,22 @@ def _bind_comfyui():
     return connection
 
 
+def _bind_extract():
+    """Binds `rag.extract` to a SEPARATE stub connection/engine -- the
+    vision-describes-its-own-output task's own multi-role precedent
+    (`plan_ingest`'s image/pdf-scanned branch). A DIFFERENT engine name
+    from `_bind_comfyui`'s ("stubengine", never "comfyui") on purpose:
+    the two roles name two different runtimes in production (an image
+    engine and a vision-capable chat engine), and a test that bound both
+    to the SAME engine name could not catch a bug that mixed them up."""
+    connection = ModelConnection.objects.create(
+        name="vision-capable chat", engine="stubengine", endpoint="http://stub:9999",
+        model_id="describer.gguf", capabilities=["vision"],
+    )
+    RoleBinding.objects.create(role_key=RAG_EXTRACT_ROLE, connection=connection)
+    return connection
+
+
 # --- plan_generate -----------------------------------------------------
 
 
@@ -128,6 +144,37 @@ class TestPlanGenerate:
         refs_b, _ = jobs.plan_generate({"operation": "txt2img", "params": {"prompt": "x"}})
 
         assert refs_a == refs_b
+
+    def test_rag_extract_unbound_declares_only_vision_generate(self):
+        """The tolerant fallback (vision-describes-its-own-output task,
+        mirroring `tools.rag.jobs.plan_ingest`'s own `rag.extract`
+        branch): an unbound extraction role must not stop this job from
+        being planned at all."""
+        _bind_comfyui()
+
+        model_refs, exclusive = jobs.plan_generate({})
+
+        assert exclusive is True
+        assert [ref.role for ref in model_refs] == [VISION_GENERATE_ROLE]
+
+    def test_rag_extract_bound_declares_both_roles(self):
+        _bind_comfyui()
+        _bind_extract()
+
+        model_refs, exclusive = jobs.plan_generate({})
+
+        assert exclusive is True
+        assert [ref.role for ref in model_refs] == [VISION_GENERATE_ROLE, RAG_EXTRACT_ROLE]
+        extract_ref = model_refs[1]
+        assert extract_ref.engine == "stubengine"
+        assert extract_ref.model_id == "describer.gguf"
+        # Same provenance contract as the image ref: never resolved here.
+        assert extract_ref.footprint_bytes is None
+        # The handler drives BOTH models itself, sequentially, as part of
+        # this one job -- not a tool that may or may not call out
+        # (`plan_generate`'s own docstring). `synchronous` therefore stays
+        # at its default (`True`) for both, unset here.
+        assert extract_ref.synchronous is True
 
 
 # --- run_generate: payload-referenced file inputs ------------------------
@@ -545,6 +592,118 @@ class TestRunGenerateEndToEnd:
             )
 
         assert reported[-1]["label"] == "waiting on the image engine"
+
+
+@pytest.mark.django_db
+class TestRunGenerateDescribesItsOutput:
+    """The sequential describe step (vision-describes-its-own-output
+    task; ruling 1 removed an earlier release-the-image-model step --
+    see `run_generate`'s own comment for why: ComfyUI's `/free` frees
+    EVERY model at an endpoint, never one, so releasing would have cost
+    the NEXT generation a cold load of up to ~25 minutes on this
+    hardware). `tools.vision.services.describe_output` is patched
+    directly rather than exercised for real -- the CALL SHAPE (whether
+    it runs at all, and with which job) is what these tests pin, exactly
+    as `_stub_done_job`'s sibling tests elsewhere in this file pin
+    `submit_job`'s call shape rather than exercising a real engine for
+    every case; `TestDescribeOutput` in `test_services.py` covers what
+    the function itself does."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_bindings(self, db):
+        clear_bindings()
+
+    def test_extract_unbound_skips_describing_entirely(self, tmp_path):
+        """The gate that keeps every existing, role-unbound box (and
+        every OTHER test in this file) exactly as fast as it is today:
+        no `rag.extract` binding means this whole step never runs."""
+        _bind_comfyui()
+        fake = FakeComfyUI(
+            prompt_id="p-10", history=history_success("p-10", filenames=("out.png",)),
+            images={"out.png": PNG},
+        )
+
+        with patch("models.contracts.engines.comfyui.httpx.get", fake.get), patch(
+            "models.contracts.engines.comfyui.httpx.post", fake.post
+        ), patch(
+            "models.contracts.engines.comfyui.get_bounded", fake.get_bounded
+        ), patch(
+            "tools.vision.services.describe_output"
+        ) as describe_mock, override_settings(GENERATED_DIR=tmp_path):
+            result = jobs.run_generate(
+                {"operation": "txt2img", "params": dict(RAW)}, [], make_job_ctx()
+            )
+
+        assert result["status"] == GenerationJob.Status.DONE
+        describe_mock.assert_not_called()
+
+    def test_extract_bound_describes_the_finished_job(self, tmp_path):
+        _bind_comfyui()
+        _bind_extract()
+        fake = FakeComfyUI(
+            prompt_id="p-11", history=history_success("p-11", filenames=("out.png",)),
+            images={"out.png": PNG},
+        )
+
+        with patch("models.contracts.engines.comfyui.httpx.get", fake.get), patch(
+            "models.contracts.engines.comfyui.httpx.post", fake.post
+        ), patch(
+            "models.contracts.engines.comfyui.get_bounded", fake.get_bounded
+        ), patch(
+            "tools.vision.services.describe_output"
+        ) as describe_mock, override_settings(GENERATED_DIR=tmp_path):
+            result = jobs.run_generate(
+                {"operation": "txt2img", "params": dict(RAW)}, [], make_job_ctx()
+            )
+
+        job = GenerationJob.objects.get(pk=result["job_id"])
+        describe_mock.assert_called_once_with(job)
+
+    def test_a_failed_job_never_describes(self, tmp_path):
+        """Requirement 4: never for a failed, refused, or cancelled job."""
+        _bind_comfyui()
+        _bind_extract()
+        fake = FakeComfyUI(
+            prompt_id="p-14", prompt_status=400,
+            prompt_body={"error": {"message": "unknown checkpoint"}},
+        )
+
+        with patch("models.contracts.engines.comfyui.httpx.get", fake.get), patch(
+            "models.contracts.engines.comfyui.httpx.post", fake.post
+        ), patch(
+            "models.contracts.engines.comfyui.get_bounded", fake.get_bounded
+        ), patch(
+            "tools.vision.services.describe_output"
+        ) as describe_mock, override_settings(GENERATED_DIR=tmp_path):
+            result = jobs.run_generate(
+                {"operation": "txt2img", "params": dict(RAW)}, [], make_job_ctx()
+            )
+
+        assert result["status"] == GenerationJob.Status.FAILED
+        describe_mock.assert_not_called()
+
+    def test_a_still_running_job_never_describes(self, tmp_path):
+        """Requirement 4 again, the still-running/timed-out edge: a job
+        `wait_for` gave back non-terminal must not be treated as done."""
+        _bind_comfyui()
+        _bind_extract()
+        fake = FakeComfyUI(prompt_id="p-15", queue_pending=[[1, "p-15", {}, {}, []]])
+
+        with patch("models.contracts.engines.comfyui.httpx.get", fake.get), patch(
+            "models.contracts.engines.comfyui.httpx.post", fake.post
+        ), patch(
+            "models.contracts.engines.comfyui.get_bounded", fake.get_bounded
+        ), patch(
+            "tools.vision.services.describe_output"
+        ) as describe_mock, patch(
+            "tools.vision.jobs.GENERATE_WAIT_TIMEOUT_SECONDS", 0.0
+        ):
+            result = jobs.run_generate(
+                {"operation": "txt2img", "params": dict(RAW)}, [], make_job_ctx()
+            )
+
+        assert result["timed_out"] is True
+        describe_mock.assert_not_called()
 
 
 @pytest.mark.django_db

@@ -567,6 +567,60 @@ class TestVisionGenerateRunner:
 
         assert "output:" not in result.text
 
+    def test_a_stored_description_is_appended_verbatim(self):
+        """READS, never produces (vision-describes-its-own-output task,
+        RULED CORRECTION): `payload["description"]` is written by
+        `tools.vision.jobs.run_generate`, the QUEUED job kind's own
+        handler -- never by this runner, which submits and waits
+        directly, synchronously, inside the turn. This test proves only
+        the READ half: whatever `job_json` hands back under that key
+        lands in `.text`, unchanged, alongside the untouched output-id
+        sentence."""
+        from tools.vision.tools import run_generate
+
+        description = (
+            "The platform's own description of the generated image "
+            "(not the request that produced it): a lighthouse at dusk."
+        )
+        payload = {
+            "id": "abc", "status": "succeeded",
+            "outputs": [{"id": 36, "url": "/vision/outputs/36/file/"}],
+            "description": description,
+        }
+        job = MagicMock()
+        with patch("tools.vision.services.preflight", return_value=_ready_preflight()), \
+             patch("tools.vision.services.submit_job", return_value=job), \
+             patch("tools.vision.services.wait_for", return_value=job), \
+             patch("tools.vision.services.job_json", return_value=payload):
+            result = run_generate({"operation": "txt2img", "prompt": "x"}, make_tool_ctx())
+
+        assert description in result.text
+        # The output-id sentence's own wording is untouched -- other
+        # tests already pin it byte-for-byte; this one only proves the
+        # NEW line does not disturb it.
+        assert "output:36" in result.text
+        assert "— reference this to edit." in result.text
+
+    def test_no_description_key_appends_nothing(self):
+        """A generation reached through THIS runner (the chat tool's own
+        synchronous submit/wait, never the queued job kind) carries no
+        `description` key at all today -- `payload.get("description")`
+        must degrade to nothing added, never a raise on a missing key."""
+        from tools.vision.tools import run_generate
+
+        payload = {
+            "id": "abc", "status": "succeeded",
+            "outputs": [{"id": 36, "url": "/vision/outputs/36/file/"}],
+        }
+        job = MagicMock()
+        with patch("tools.vision.services.preflight", return_value=_ready_preflight()), \
+             patch("tools.vision.services.submit_job", return_value=job), \
+             patch("tools.vision.services.wait_for", return_value=job), \
+             patch("tools.vision.services.job_json", return_value=payload):
+            result = run_generate({"operation": "txt2img", "prompt": "x"}, make_tool_ctx())
+
+        assert result.text == "Generation abc finished as succeeded. Outputs: output:36 — reference this to edit."
+
     def test_an_unbound_role_surfaces_the_platforms_own_copy(self):
         """`VisionUnavailable` carries the message
         `services.role_unbound_message()` already writes for the page. A

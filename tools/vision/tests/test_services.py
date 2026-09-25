@@ -9,7 +9,8 @@ import json
 import os
 from datetime import timedelta
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -25,7 +26,7 @@ from models.contracts.engines.base import GenerationRejected, JobStatus
 from models.contracts.operations import (
     EDIT, TXT2IMG, Operation, Param, ParamError, describe, operations_for,
 )
-from models.contracts.roles import IMAGE_GENERATION_CAPABILITY, VISION_GENERATE_ROLE
+from models.contracts.roles import IMAGE_GENERATION_CAPABILITY, RAG_EXTRACT_ROLE, VISION_GENERATE_ROLE
 from identity.access import owner_fields
 from identity.contracts.postures import POSTURE_PERSONAL
 from identity.contracts.principals import OPEN_PRINCIPAL, Principal
@@ -2088,3 +2089,83 @@ class TestOperationCatalogFollowsTheSelectedModel:
         assert all(
             entry["unsupported_reason"] for entry in catalog if not entry["supported"]
         )
+
+
+class TestDescribeOutput:
+    """`services.describe_output` -- the vision column's own "describe what
+    it just made" seam (vision-describes-its-own-output task). Patches
+    `services.get_llm` directly rather than exercising a real gateway
+    resolve: this function's own contract is "never raise, always leave
+    `job.description` readable", not the resolve/health-check machinery
+    `TestPreflight`/`TestSubmitJob` elsewhere in this file already cover
+    for the SIBLING `vision.generate` role.
+    """
+
+    def test_no_outputs_leaves_description_untouched(self):
+        job = GenerationJob.objects.create(
+            operation="txt2img", params={}, engine="stubengine",
+            model_id="stub.safetensors", endpoint="http://stub:9999",
+            model_fingerprint="x", status=GenerationJob.Status.DONE,
+        )
+
+        services.describe_output(job)
+
+        job.refresh_from_db()
+        assert job.description == ""
+
+    def test_happy_path_stores_a_labelled_description(self, tmp_path):
+        output = stored_output(tmp_path)
+        fake_llm = MagicMock()
+        fake_llm.chat.return_value = SimpleNamespace(
+            message=SimpleNamespace(content="A lighthouse on a rocky cliff at dusk.")
+        )
+
+        with patch("tools.vision.services.get_llm", return_value=fake_llm) as get_llm_mock:
+            services.describe_output(output.job)
+
+        get_llm_mock.assert_called_once_with(RAG_EXTRACT_ROLE)
+        output.job.refresh_from_db()
+        assert output.job.description == (
+            f"{services._DESCRIBE_LABEL}A lighthouse on a rocky cliff at dusk."
+        )
+        # The prompt sent is THIS column's own -- never rag's.
+        message = fake_llm.chat.call_args[0][0][0]
+        assert message.blocks[0].text == services.DESCRIBE_OUTPUT_PROMPT
+
+    def test_an_unbound_role_stores_the_honest_sentence_and_never_raises(self, tmp_path):
+        output = stored_output(tmp_path)
+
+        with patch("tools.vision.services.get_llm", side_effect=ValueError("no binding")):
+            services.describe_output(output.job)  # must not raise
+
+        output.job.refresh_from_db()
+        assert output.job.description == services.DESCRIBE_OUTPUT_FAILURE_SENTENCE
+
+    def test_a_raising_call_stores_the_honest_sentence_and_never_raises(self, tmp_path):
+        output = stored_output(tmp_path)
+        fake_llm = MagicMock()
+        fake_llm.chat.side_effect = RuntimeError("engine unreachable")
+
+        with patch("tools.vision.services.get_llm", return_value=fake_llm):
+            services.describe_output(output.job)  # must not raise
+
+        output.job.refresh_from_db()
+        assert output.job.description == services.DESCRIBE_OUTPUT_FAILURE_SENTENCE
+
+    def test_a_blank_answer_stores_the_honest_sentence(self, tmp_path):
+        output = stored_output(tmp_path)
+        fake_llm = MagicMock()
+        fake_llm.chat.return_value = SimpleNamespace(message=SimpleNamespace(content="   "))
+
+        with patch("tools.vision.services.get_llm", return_value=fake_llm):
+            services.describe_output(output.job)
+
+        output.job.refresh_from_db()
+        assert output.job.description == services.DESCRIBE_OUTPUT_FAILURE_SENTENCE
+
+    def test_job_json_carries_the_stored_description(self, tmp_path):
+        output = stored_output(tmp_path)
+        output.job.description = "The platform's own description of the generated image: x"
+        output.job.save(update_fields=["description"])
+
+        assert services.job_json(output.job)["description"] == output.job.description

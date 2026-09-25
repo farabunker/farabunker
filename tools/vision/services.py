@@ -25,11 +25,13 @@ from django.db.models import Q
 from django.urls import reverse
 from django.utils import timezone
 
+from llama_index.core.llms import ChatMessage, ImageBlock, MessageRole, TextBlock
+
 from models.contracts import bindings
 from models.contracts.bindings import ResolvedModel, config_family
 from models.contracts.engines import get_engine
 from models.contracts.engines.base import GenerationRejected
-from models.contracts.gateway import get_image_generator, get_image_generator_for
+from models.contracts.gateway import get_image_generator, get_image_generator_for, get_llm
 from models.contracts.operations import (
     GenerationRequest,
     Operation,
@@ -39,7 +41,7 @@ from models.contracts.operations import (
     operations_for,
     validate_params,
 )
-from models.contracts.roles import IMAGE_GENERATION_CAPABILITY, VISION_GENERATE_ROLE
+from models.contracts.roles import IMAGE_GENERATION_CAPABILITY, RAG_EXTRACT_ROLE, VISION_GENERATE_ROLE
 from agents.contracts.artifacts import file_resolver_for, parse_artifact
 from models.contracts.jobkinds import resolve_dotted_path
 from identity.access import is_admin, owner_fields
@@ -1311,6 +1313,7 @@ def job_json(job: GenerationJob) -> dict:
         "durations": job.durations,
         "stale": job.is_stale,
         "unreachable": bool(getattr(job, "unreachable", False)),
+        "description": job.description,
         "outputs": [
             {
                 "id": output.id,
@@ -1331,6 +1334,90 @@ def job_json(job: GenerationJob) -> dict:
             for job_input in job.inputs.all()
         ],
     }
+
+
+# The JUDGING-grade description prompt (this column's OWN -- distinct
+# purpose from `tools.rag.extract.DESCRIPTION_PROMPT`, whose job is a
+# retrieval caption; this one exists so an AUTHOR -- an agent, an
+# operator -- can tell whether a generation matches what was asked for,
+# without ever seeing the request itself: subject, what is actually
+# depicted, and anything conspicuously wrong or missing. Vendor-neutral,
+# instruction-shaped, no model or family name, matching that module's own
+# rationale for its sibling constants). Short and capped for the same
+# reason theirs is: this becomes one line of `ToolResult.text`, read by a
+# model mid-turn, not a caption a person browses at leisure.
+DESCRIBE_OUTPUT_PROMPT = (
+    "An image-generation model just produced this image, in response to a request you cannot "
+    "see. In one or two plain sentences and at most 40 words, describe what the image actually "
+    "shows: the subject, what is depicted, and anything conspicuously wrong, malformed, "
+    "distorted, or missing. Output only the description, with no preamble and no commentary."
+)
+
+# Prefixed onto a successful description so it reads, unambiguously, as
+# the PLATFORM'S OWN judgment of what it produced -- never mistakable for
+# the operator's own prompt echoed back (requirement 2). Both this and
+# the failure sentence below are stored VERBATIM on `GenerationJob.
+# description`, so `tools.vision.tools.run_generate` (and any other
+# reader of `job_json()`) can append the field's own contents straight
+# onto a tool result with no further templating.
+_DESCRIBE_LABEL = "The platform's own description of the generated image (not the request that produced it): "
+
+# Stored on `GenerationJob.description` when a description was ATTEMPTED
+# and did not produce one -- an unbound role, a raised/timed-out call, or
+# a blank answer. Deliberately never "" for that case: "" means "never
+# attempted" (see the field's own docstring), and this row must not read
+# the same as one this function never touched.
+DESCRIBE_OUTPUT_FAILURE_SENTENCE = "The generated image could not be described."
+
+
+def describe_output(job: GenerationJob) -> None:
+    """Best-effort: describe `job`'s FIRST output through the extraction
+    role, and store the result on `job.description`. Called by `tools.
+    vision.jobs.run_generate` (the queued job kind's own handler) once a
+    generation has finished successfully with at least one output --
+    never for a failed, refused, or still-running job, and never for one
+    with no outputs (requirement 4).
+
+    NON-FATAL BY CONSTRUCTION (requirement 3): an unbound extraction
+    role, a raised/timed-out call, or a blank answer never raises out of
+    this function and never touches any field but `description` -- the
+    generation this job already recorded stays exactly as it is. Logged
+    at WARNING (this column's existing convention for a caught,
+    non-fatal service-layer failure -- `services.py`'s own `logger.
+    exception` calls elsewhere in this module are its siblings) so an
+    operator can see WHY a row carries no description, without that
+    reason ever reaching a caller as an exception.
+
+    ONE call, ONE image, the SAME shape `tools.rag.extract._ask_vision`
+    already keeps for its column's equivalent seam (imitated here, never
+    imported -- tools/vision may not import tools/rag): resolve the
+    extraction role fresh (`models.contracts.gateway.get_llm`, never a
+    cached/shared LLM -- this call is rare, at most once per
+    generation, so there is no per-page cost to amortize the way
+    `tools.rag.media`'s per-document loop amortizes its own resolve), one
+    `ChatMessage` carrying the instruction block before the image block,
+    and the model's answer stored verbatim (stripped), never rewritten.
+    """
+    output = job.outputs.first()
+    if output is None:
+        return
+    try:
+        llm = get_llm(RAG_EXTRACT_ROLE)
+        message = ChatMessage(
+            role=MessageRole.USER,
+            blocks=[TextBlock(text=DESCRIBE_OUTPUT_PROMPT), ImageBlock(path=Path(output.path))],
+        )
+        response = llm.chat([message])
+        text = str(response.message.content or "").strip()
+    except Exception:  # noqa: BLE001 -- non-fatal by construction, see docstring
+        logger.warning(
+            "vision.generate: could not describe output %s of job %s", output.id, job.id,
+            exc_info=True,
+        )
+        job.description = DESCRIBE_OUTPUT_FAILURE_SENTENCE
+    else:
+        job.description = f"{_DESCRIBE_LABEL}{text}" if text else DESCRIBE_OUTPUT_FAILURE_SENTENCE
+    job.save(update_fields=["description"])
 
 
 def wait_for(
