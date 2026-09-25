@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from django.conf import settings
 
 from agents.contracts import artifacts as artifacts_module
 from agents.contracts.artifacts import register_artifact_children
@@ -119,10 +120,9 @@ class TestTheToolRecordScrub:
         path from the conversation to its invocations at all. Collecting
         first is what makes the scrub reachable, and this is the test
         that would fail if somebody reordered it. (This pins the
-        INVOCATION-ID half of collect-before-delete; the ARTIFACT-PURGE
-        half moved to run LAST, after
-        every row delete and the scrub, and is pinned separately by
-        `TestBytesGoLast` below.)"""
+        INVOCATION-ID half of collect-before-delete; the purge never
+        touches a generated image at all any more -- see
+        `TestThePurgeTouchesNoImages` below.)"""
         conversation = make_conversation()
         invocation = ToolInvocation.objects.create(
             principal_kind="user", principal_key="1", tool_key="t",
@@ -162,7 +162,7 @@ class TestFindingTheGeneratedImages:
         conversation = make_conversation()
         make_turn(conversation=conversation, role="tool",
                   artifacts=["output:12:extra", "", "output:4"])
-        conversation_children(str(conversation.pk))
+        assert conversation_children(str(conversation.pk)) == [("vision_job", "output:4")]
         refs, _ids = SEEN[0]
         assert list(refs) == ["output:4"]
 
@@ -506,12 +506,17 @@ class TestZeroDayEndToEnd:
                 conversation_id=conversation.id).exists()
             assert not DeletionTicket.objects.filter(
                 kind="conversation", key=str(conversation.pk)).exists()
-            # THE IMAGE'S OWN TICKET AND ROW ARE BOTH GONE TOO: the
-            # zero-day sweep that purges the conversation's own ticket
-            # reaches its child in the same call.
-            assert not DeletionTicket.objects.filter(
-                kind=KIND_VISION_JOB, key=str(job.pk)).exists()
-            assert not GenerationJob.objects.filter(pk=job.pk).exists()
+            if "vision" in settings.FARABUNKER_FEATURES:
+                # THE IMAGE'S OWN TICKET AND ROW ARE BOTH GONE TOO: the
+                # zero-day sweep that purges the conversation's own
+                # ticket reaches its child in the same call. Guarded:
+                # with "vision" off nothing is registered on the slot,
+                # so `conversation_children` never tickets this image
+                # in the first place and its row is not this handler's
+                # to destroy.
+                assert not DeletionTicket.objects.filter(
+                    kind=KIND_VISION_JOB, key=str(job.pk)).exists()
+                assert not GenerationJob.objects.filter(pk=job.pk).exists()
             purged = by_action([CONTENT_PURGED])
             assert any(
                 event.target_type == "conversation"

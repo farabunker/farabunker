@@ -161,6 +161,19 @@ class TestAFailedParseIsLoggedWithoutWhatItFailedToParse:
         assert not any(raw in record.getMessage() for record in caplog.records)
 
 
+class TestEmptyInputCostsNothing:
+    """The resolver is called on EVERY conversation delete on a vision
+    box, including the common case -- a chat with no images -- which
+    hands it two empty lists. `existing_job_ids` runs no query at all
+    for an empty candidate set (its own docstring's claim), so this
+    must cost zero queries, not one wasted existence check per delete
+    with nothing to check."""
+
+    def test_two_empty_lists_cost_zero_queries(self, django_assert_num_queries):
+        with django_assert_num_queries(0):
+            assert resolve_artifact_jobs([], []) == []
+
+
 class TestDeleteJobs:
     """`tools.vision.services.delete_jobs` -- the second of the two
     unscoped reads of `GenerationJob.objects` a deletion needs (the

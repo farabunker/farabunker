@@ -8,12 +8,21 @@ imports `tools/` or `models.queue` -- both are reached by registration,
 which is what makes the whole purge one transaction across four columns
 that may not import each other.
 
-THE FILES BAND, not the rows band, and deliberately: this handler must
-READ the conversation's turns (their artifacts and their tool payloads)
-before it deletes them, and a handler that must both read and write
-orders its own work internally -- which keeps the registry's ordering
-rule to one field with two values instead of a general dependency graph
-nothing else needs.
+THE FILES BAND, not the rows band -- but not because this handler
+removes bytes any more; it does not (see `purge_conversation`'s own
+docstring below). It stays FILES because `identity.contracts.cascades.
+retention_handlers` is stable WITHIN a band by registration order, and
+`tools.rag.retention.purge_conversation_notes` is also registered for
+`kind=KIND_CONVERSATION`, in the FILES band (`tools/rag/apps.py`).
+Moving this handler to the ROWS band would move it ahead of that one
+too -- every ROWS handler for a kind runs before every FILES handler
+for it, band membership first, registration order only within a band --
+and reordering this column against a sibling column's handler for the
+same kind is not what this change is about. What this handler must
+still do first, inside its own run, is collect the invocation ids
+before it deletes the turns that carry them: `Turn.invocation` is
+`SET_NULL`, so once the turns are gone there is no path left from the
+conversation to its tool records at all.
 """
 from __future__ import annotations
 
@@ -181,6 +190,12 @@ def purge_conversation(key: str) -> int:
     except (ValueError, AttributeError, TypeError):
         return 0
 
+    # `_refs`/`_generation_ids` ARE READ AND DROPPED, DELIBERATELY: this
+    # is the SAME collect step `conversation_children` uses (below), not
+    # a second copy of the turn walk -- brief-mandated, and a
+    # `need_artifacts=` flag to skip the parsing here would be a second
+    # thing to keep in sync with that function's own call. This purge
+    # only needs the invocation ids.
     _refs, _generation_ids, invocation_ids = _collect(conversation_id)
 
     removed = 0

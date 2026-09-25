@@ -619,12 +619,15 @@ the parent, stamped once, never recomputed), its own registered handler, its own
 back to the ticket this delete just created through `DeletionTicket.parent`. A child ticket is not
 a different kind of row; it is an item that happens to have arrived with another item's delete.
 
-**The order guarantee at purge.** `identity.retention.purge_ticket` runs the parent's OWN
-registered handlers first, then purges each child in turn — so a child's bytes are never destroyed
-before the parent's own row handlers have finished. It is not the stronger claim it can look like:
-the parent's own handlers can themselves be `ORDER_FILES` and remove bytes of their own, so a
-child's rows can go after the parent's own bytes are already gone. What the order DOES promise is
-scoped to the parent/child boundary, not to every byte in the whole cascade.
+**The order guarantee at purge.** WHEN THE PARENT'S OWN TICKET IS THE ONE PURGED,
+`identity.retention.purge_ticket` runs the parent's OWN registered handlers first, then purges each
+child in turn — so a child's bytes are never destroyed before the parent's own row handlers have
+finished. It is not the stronger claim it can look like: the parent's own handlers can themselves
+be `ORDER_FILES` and remove bytes of their own, so a child's rows can go after the parent's own
+bytes are already gone. What the order DOES promise is scoped to the parent/child boundary, not to
+every byte in the whole cascade — and not to a child the unconditional sweep reaches on its own,
+before its parent: `identity.retention.sweep`'s own docstring records that case as an ordinary due
+ticket, purged on its own, with the parent's later purge simply finding one child fewer.
 
 **A child restored, or deleted, on its own stays that way.** `restore_content` and `purge_ticket`
 both follow the `parent` link FORWARD ONLY: restoring the parent removes the children that arrived

@@ -248,7 +248,15 @@ class TestTheDemo:
             assert child.parent_id == parent.pk
             assert child.purge_on == parent.purge_on
             body = client.get(reverse("identity-deleted")).content.decode()
-            assert copy.KIND_LABELS[copy.KIND_VISION_JOB] in body
+            # SCOPED TO THE CHILD'S OWN ROW, not a page-wide substring
+            # check that a chrome label happening to match would also
+            # pass: the child's restore form names its own ticket pk
+            # (`deleted.html`'s `row.ticket.pk`), and its kind label sits
+            # just before that form in the same `.item` block.
+            child_restore_url = reverse("identity-deleted-restore", args=[child.pk])
+            row_start = body.index(child_restore_url)
+            row_html = body[max(0, row_start - 400):row_start]
+            assert copy.KIND_LABELS[copy.KIND_VISION_JOB] in row_html
             # The row is still there and the bytes are still on disk --
             # deleted is not destroyed.
             assert Path(world.output_path).exists()

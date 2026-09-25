@@ -155,8 +155,14 @@ class AgentsConfig(AppConfig):
         # ARRIVED", as a DOTTED-PATH STRING so `identity/` can run it
         # without importing `agents/` (import-law rule 4) -- the same
         # mechanism, and the same reason, as the entitlement cascades
-        # just above. FILES band: the handler must READ the turns'
-        # artifacts before it deletes them.
+        # just above. STILL FILES band, though this handler no longer
+        # removes bytes itself: `tools.rag.retention.
+        # purge_conversation_notes` is also registered for this kind, in
+        # the FILES band (`tools/rag/apps.py`), and moving this handler
+        # to ROWS would run it ahead of that one too -- reordering this
+        # column against a sibling column's handler for the same kind is
+        # not this change's business. `agents/retention.py`'s own module
+        # docstring has the full reason.
         from identity.contracts.cascades import (
             ORDER_FILES, RetentionHandler, register_retention_handler,
         )

@@ -470,10 +470,15 @@ three additions. In order, inside the runner's savepoint:
      UUID (§3.7 explains why this is the channel that catches a failed job, and why the agents
      column deliberately does not know the image tool's key);
    - `invocation_id` values, non-null, for step 4.
-2. **Hand the artifact references and generation ids to the registered artifact purge** — one
-   new single slot on `agents/contracts/artifacts.py` (§3.7), resolved with the same savepoint
-   discipline. `tools/vision` registers it; it maps refs and ids to jobs, dedupes by job, and
-   calls `tools/vision/services.py::delete_job` per job.
+2. ~~Hand the artifact references and generation ids to the registered artifact purge~~ —
+   **superseded (Task 15C, the slice-one addendum): this step does not happen here any more.**
+   The single slot on `agents/contracts/artifacts.py` (§3.7) is now a RESOLVER, asked once at
+   DELETE time (`agents.retention.conversation_children`, called from `identity.retention.
+   delete_content`, before any row below is touched) rather than a destroyer called from this
+   purge. `tools/vision` registers `resolve_artifact_jobs`, which maps refs and ids to jobs and
+   dedupes by job, but destroys nothing; every job key it answers becomes a `vision_job` ticket
+   of its own, linked to this conversation's ticket as a child, purged by that ticket's own
+   handler rather than by this one. See the addendum's "The seam" update, below.
 3. **The existing row deletes:** `Share` rows for this conversation; `agents/attachments.py::
    delete_attachments_for` (which reaches `tools/rag/access.py::delete_attachments` through the
    registered cleanup seam — chat-scoped documents are deleted outright there, universal and
