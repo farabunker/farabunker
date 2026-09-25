@@ -1,8 +1,9 @@
 """Test for scripts/ladder.py's run-plan builder.
 
-build_run_plan is pure (no subprocess, no I/O), so this imports the module
-directly rather than shelling out -- contrast scripts/tests/test_preview.py,
-which must shell out because scripts/preview is a bash script.
+build_run_plan never shells out (its only I/O is one stderr line when the
+scoped pair is dropped), so this imports the module directly rather than
+shelling out -- contrast scripts/tests/test_preview.py, which must shell
+out because scripts/preview is a bash script.
 """
 from __future__ import annotations
 
@@ -53,6 +54,15 @@ def test_build_run_plan_pins_features_posture_and_modules_per_run():
     assert by_name["r3-enterprise"]["features"] == "vision,media"
     assert by_name["r3-enterprise"]["posture"] == "enterprise"
     assert by_name["r3-enterprise"]["modules"] == FULL_MODULES
+
+    # Posture is a r3-only concern -- every other run leaves it unset.
+    assert all(run["posture"] is None for run in full if not run["name"].startswith("r3-"))
+
+
+def test_build_run_plan_full_with_no_touched_modules_drops_the_scoped_pair():
+    assert [run["name"] for run in build_run_plan("full", [])] == [
+        "r1-forward", "r1-reverse", "r2-v-forward", "r2-v-reverse", "r3-personal", "r3-enterprise",
+    ]
 
 
 def test_build_run_plan_hotfix_is_only_the_r1_pair():

@@ -526,10 +526,11 @@ without pinning it — fix the test by pinning, never by weakening the
 assertion.
 
 **Running the whole ladder as one command:** `scripts/ladder.py <worktree> <db_url> <outdir>
-full [--max-others N] [touched-modules...]` runs the eight named runs (module order under two
-flag states, the touched-module scope, and the posture sweep) plus `makemigrations --check
---dry-run` and `check`, logging each to `<outdir>/<run>.log` and `<outdir>/SUMMARY`. See
-`.claude/skills/test-ladder/SKILL.md` for the full run table and the hotfix-mode shortcut.
+full [--max-others N] [touched-modules...]` runs the named runs (module order under two flag
+states, the touched-module scope when given, and the posture sweep -- eight runs with touched
+modules, six without) plus `makemigrations --check --dry-run` and `check`, logging each to
+`<outdir>/<run>.log` and `<outdir>/SUMMARY`. See `.claude/skills/test-ladder/SKILL.md` for the
+full run table and the hotfix-mode shortcut.
 
 ### Rung 2 — the branch's own preview stack
 

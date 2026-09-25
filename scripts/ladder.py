@@ -43,13 +43,18 @@ FULL_MODULES = ("scripts", "identity", "agents", "foundation", "models", "tools"
 
 
 def build_run_plan(mode: str, touched_modules: list[str]) -> list[dict]:
-    """Pure: the named runs for `mode`, in order. No subprocess, no I/O --
-    scripts/tests/test_ladder.py imports this directly.
+    """The named runs for `mode`, in order. No subprocess -- scripts/tests/
+    test_ladder.py imports this directly. Its only I/O is the one stderr
+    line below when the scoped pair is dropped.
 
     pytest.ini's own testpaths order ("tools models foundation agents
     identity scripts") already IS FULL_MODULES reversed, so a bare
     `pytest -q` with no path args is not a distinct third order -- every
-    run below states its module list explicitly instead."""
+    run below states its module list explicitly instead.
+
+    With no touched modules, `r2-vm-scoped`/`r2-v-scoped` would run the
+    exact same module list as `r2-v-reverse`/`r1-reverse` -- a silent
+    duplicate, not a distinct run -- so that pair is dropped instead."""
     runs = [
         {"name": "r1-forward", "features": "vision,media", "posture": None, "modules": FULL_MODULES},
         {"name": "r1-reverse", "features": "vision,media", "posture": None, "modules": tuple(reversed(FULL_MODULES))},
@@ -60,8 +65,15 @@ def build_run_plan(mode: str, touched_modules: list[str]) -> list[dict]:
     runs += [
         {"name": "r2-v-forward", "features": "vision", "posture": None, "modules": FULL_MODULES},
         {"name": "r2-v-reverse", "features": "vision", "posture": None, "modules": tuple(reversed(FULL_MODULES))},
-        {"name": "r2-vm-scoped", "features": "vision,media", "posture": None, "modules": scoped},
-        {"name": "r2-v-scoped", "features": "vision", "posture": None, "modules": scoped},
+    ]
+    if scoped:
+        runs += [
+            {"name": "r2-vm-scoped", "features": "vision,media", "posture": None, "modules": scoped},
+            {"name": "r2-v-scoped", "features": "vision", "posture": None, "modules": scoped},
+        ]
+    else:
+        print("skipped: r2-vm-scoped/r2-v-scoped (no touched modules given)", file=sys.stderr)
+    runs += [
         {"name": "r3-personal", "features": "vision,media", "posture": "personal", "modules": FULL_MODULES},
         {"name": "r3-enterprise", "features": "vision,media", "posture": "enterprise", "modules": FULL_MODULES},
     ]
