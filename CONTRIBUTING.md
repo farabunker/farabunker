@@ -78,7 +78,8 @@ automation is live, note in your PR that you have read and agree to [CLA.md](CLA
    [ADR 0011](docs/adr/0011-branch-preview-stacks.md)) and drive its plan's `## Smoke
    Checklist` by hand in a browser.
 5. **Open a pull request** when the checklist in [AGENTS.md](AGENTS.md#merge-readiness) is
-   satisfied. Describe *what* and *why*, link the issue, and confirm CLA agreement.
+   satisfied. Describe *what* and *why*, link the issue, and confirm CLA agreement. Note its
+   last item in particular — the consolidation audit.
 
 ## Developer setup
 

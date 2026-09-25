@@ -26,7 +26,7 @@ from typing import Callable
 from django.conf import settings
 from django.utils.module_loading import import_string
 
-from models.contracts.engines.ollama import OllamaEngine
+from models.contracts.engines.ollama import DEFAULT_CONTEXT_WINDOW, OllamaEngine
 from models.contracts.roles import RAG_ANSWER_ROLE, RAG_EMBED_ROLE
 
 
@@ -77,6 +77,55 @@ def embed_dim_from_fingerprint(fingerprint: str) -> str:
     `Materialization.fingerprint`'s.
     """
     return fingerprint.rsplit(":", 1)[-1]
+
+
+# THE ENGINES THAT DECLARE A BOUNDED DEFAULT WINDOW OF THEIR OWN. A
+# future adapter adds itself here; the function grows a lookup, never a
+# special case. An engine absent from this map answers "unknown" rather
+# than borrowing somebody else's number.
+_ENGINE_DEFAULT_WINDOWS: dict[str, int] = {OllamaEngine.name: DEFAULT_CONTEXT_WINDOW}
+
+
+def effective_context_window(resolved: ResolvedModel) -> tuple[int, str]:
+    """The window this binding will ask its engine to allocate, and where
+    it came from.
+
+    `(n, "connection")`      -- an operator set `ModelConnection.context_window`.
+    `(n, "engine-default")`  -- the engine adapter's own bounded default applies.
+    `(0, "unknown")`         -- this engine declares no default here; say so.
+
+    A PURE READ OF A VALUE THE PLATFORM ALREADY RESOLVED. It never probes
+    an engine for an architecture maximum -- ADR 0010's own fix sentence
+    forbids exactly that, and a display probe is still a probe, one per
+    page render, against a machine that may be asleep. It never shows a
+    model's theoretical maximum either: if the engine is asked for 8,192
+    then 8,192 is the number that truncates the conversation, and showing
+    a larger one would tell the reader they have room they do not have.
+    It writes nothing and sends nothing.
+
+    THE `int()` CAST AND ITS DEGRADATION are the same defence
+    `tools.rag.views._resolved_answer_context_window` already records for
+    its own cast: nothing enforces that a stored `context_window` is an
+    integer, and an uncastable one reaching an arithmetic comparison is a
+    500 on a never-500 surface. A non-positive value is treated the same
+    way -- it is not a ceiling anybody could act on.
+
+    IT ANSWERS DIFFERENTLY FROM `tools.rag.views.
+    _resolved_answer_context_window`, ON PURPOSE -- a fit check may skip
+    a guessed number, a display may not. `models/registry/README.md`
+    records the reconciliation.
+    """
+    raw = (resolved.config or {}).get("context_window")
+    if raw is not None:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return 0, "unknown"
+        return (value, "connection") if value > 0 else (0, "unknown")
+    default = _ENGINE_DEFAULT_WINDOWS.get(resolved.engine)
+    if default is None:
+        return 0, "unknown"
+    return default, "engine-default"
 
 
 # role_key -> resolved binding, or None if this provider has no opinion on that role.

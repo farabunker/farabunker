@@ -1,4 +1,4 @@
-# ADR 0019 — Deletion and retention: one ticket, one registry, delete means delete
+# ADR 0020 — Deletion and retention: one ticket, one registry, delete means delete
 
 **Status:** Accepted
 **Date:** 2026-09-21

@@ -397,11 +397,12 @@ class TestThePayloadCarriesTheActor:
         user = make_user()
         # IA-1: `resident=True` -- a plain, unowned agent is no longer
         # startable by a member once accounts are on
-        # (`agents.visibility.visible_agents`); a resident (shipped
-        # default) agent is visible to everybody, which is the only
-        # fact this test needs and keeps it about the acting rule, not
-        # about ownership.
-        agent = make_agent(resident=True)
+        # (`agents.visibility.visible_agents`); a shipped default agent
+        # (`resident=True, box_wide=True` since task 5, chat cluster
+        # feature B) is visible to everybody, which is the only fact
+        # this test needs and keeps it about the acting rule, not about
+        # ownership.
+        agent = make_agent(resident=True, box_wide=True)
         with posture(POSTURE_PERSONAL):
             sign_in(client, user)
             client.post(reverse("chat-start"), {"agent": agent.slug, "text": "hi"})

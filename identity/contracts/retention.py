@@ -121,7 +121,7 @@ class RetentionRefused(Exception):
     has. Once the queue half lands, `models.queue.retention.
     forget_conversation` will raise it when a worker still holds one of
     the conversation's jobs -- that handler is not yet in the tree, one
-    of the residues ADR 0019 (decision 7) names.
+    of the residues ADR 0020 (decision 7) names.
 
     IT LIVES IN THIS PURE MODULE RATHER THAN BESIDE
     `identity.services.ServiceRefused`, and that is not a stylistic

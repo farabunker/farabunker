@@ -677,11 +677,12 @@ class TestStartingIntoAWorkstream:
         WorkstreamTaint.objects.create(workstream=stream, entitlement=ent)
         Share.objects.create(target_type=Share.Target.WORKSTREAM, target_key=str(stream.pk),
                              user=reader, level=Share.Level.USE)
-        # `resident=True`, so the agent is visible to a non-owning,
-        # non-admin recipient (`visible_agents`'s own resident-or-owned-
-        # or-shared clause) -- the point of this test is gate two's
-        # refusal, not the unrelated "unknown agent" one.
-        make_agent(slug="general", resident=True)
+        # `resident=True, box_wide=True` (task 5, chat cluster feature
+        # B), so the agent is visible to a non-owning, non-admin
+        # recipient (`visible_agents`'s own box-wide-or-owned-or-shared
+        # clause) -- the point of this test is gate two's refusal, not
+        # the unrelated "unknown agent" one.
+        make_agent(slug="general", resident=True, box_wide=True)
         with posture("enterprise"):
             sign_in(client, reader)
             response = client.post(reverse("chat-start"),
@@ -706,7 +707,7 @@ class TestStartingIntoAWorkstream:
         WorkstreamTaint.objects.create(workstream=stream, entitlement=ent)
         Share.objects.create(target_type=Share.Target.WORKSTREAM, target_key=str(stream.pk),
                              user=reader, level=Share.Level.USE)
-        make_agent(slug="general", resident=True)
+        make_agent(slug="general", resident=True, box_wide=True)
         with posture("enterprise"):
             sign_in(client, reader)
             response = client.post(reverse("chat-start"),
@@ -725,7 +726,7 @@ class TestStartingIntoAWorkstream:
         ent = make_entitlement(name="Finance")
         stream = _workstream(**owner_fields(user_principal(owner)))
         WorkstreamTaint.objects.create(workstream=stream, entitlement=ent)
-        make_agent(slug="general", resident=True)
+        make_agent(slug="general", resident=True, box_wide=True)
         with posture("enterprise"):
             sign_in(client, owner)
             response = client.post(reverse("chat-start"),

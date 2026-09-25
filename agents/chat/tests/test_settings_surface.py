@@ -80,7 +80,11 @@ class TestTheWrappers:
         with posture(POSTURE_ENTERPRISE):
             admin = user_principal(make_admin())
             _installed(admin)
-            other = make_agent(slug="ordinary", resident=True)
+            # `box_wide=True` (task 5, chat cluster feature B): `resident`
+            # alone no longer reaches a non-owning admin under
+            # `admin_sees_content=False` -- see
+            # `agents/visibility.py::visible_agents`.
+            other = make_agent(slug="ordinary", resident=True, box_wide=True)
             thread = make_conversation(agent=other, **_owner(admin))
             assert other in chat_surface_agents(admin)
             assert thread in chat_surface_conversations(admin)

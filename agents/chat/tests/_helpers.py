@@ -28,7 +28,8 @@ from __future__ import annotations
 import pytest
 
 from agents.tests._helpers import (           # noqa: F401 -- re-exported on purpose
-    bind_chat_role, bound_chat_role, make_agent, make_conversation, make_flow, make_turn,
+    bind_chat_role, bound_chat_role, make_agent, make_conversation, make_editable_thread,
+    make_flow, make_turn,
 )
 from identity.testing import (                # noqa: F401 -- re-exported on purpose
     grant, make_admin, make_entitlement, make_group, make_user, posture, reset_settings,

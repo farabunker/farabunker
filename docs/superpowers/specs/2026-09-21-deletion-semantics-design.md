@@ -455,7 +455,7 @@ the brief names. Registration is one call in each column's `AppConfig.ready()`, 
 | Order | Key | Dotted path | What it does |
 |---|---|---|---|
 | ROWS | `queue.conversation_jobs` | `models.queue.retention.forget_conversation` | **Cancels** any non-terminal `InferenceJob` whose payload names this conversation through the queue's own cancel path, then deletes every row it names (§3.7) |
-| FILES | `agents.conversation` | `agents.retention.purge_conversation` | The whole of the agents-side purge, in order (below) |
+| ROWS | `agents.conversation` | `agents.retention.purge_conversation` | The whole of the agents-side purge, in order (below) |
 | FILES | `rag.conversation_notes` | `tools.rag.retention.purge_conversation_notes` | The staging note file and the note `Document` |
 
 `agents/retention.py::purge_conversation` is `delete_conversation`'s hard path, moved, plus
@@ -1270,7 +1270,7 @@ Same commit as the code it describes, per non-negotiable 1.
 | Document | What it gains |
 |---|---|
 | `docs/OPERATIONS.md` | The "Deleted content and your backups" section (§6), and one line in the retention discussion pointing at `manage.py purge_deleted` for an operator who wants a cron rather than relying on prune-on-write |
-| `docs/adr/0019-deletion-and-retention.md` | **The next number** (the record runs to `0018-settings-assistant.md`). The policy decision: delete means delete; one ticket table rather than per-model columns; the retention namespace on the existing cascade registry; the content/audit split; backups as their own layer; the named residue (§10); **and the owner's cost/benefit principle (§3.0) with what it cut — no dry-run mode, no second cliff for tool records, most of the enterprise behaviour deferred while its fields ship, and the one control pulled forward by the 2026-09-22 ruling** |
+| `docs/adr/0020-deletion-and-retention.md` | **The next number** (the record runs to `0019-chat-cluster.md`). The policy decision: delete means delete; one ticket table rather than per-model columns; the retention namespace on the existing cascade registry; the content/audit split; backups as their own layer; the named residue (§10); **and the owner's cost/benefit principle (§3.0) with what it cut — no dry-run mode, no second cliff for tool records, most of the enterprise behaviour deferred while its fields ship, and the one control pulled forward by the 2026-09-22 ruling** |
 | `docs/EXTENDING.md` | A new recipe, **"Registering a retention handler"**, beside "Adding an entitlement axis": the `RetentionHandler` fields, the two order bands and when to use each, the one-mode `(key: str) -> int` signature (and one line on why it is not two-mode like `EntitlementCascade`), the idempotence obligation, the one-line `AppConfig.ready()` registration, the one test a new handler owes (re-run-after-failure), **and the deletion-coverage gate: a new model that holds user content must be added to `foundation/ops/tests/test_deletion_coverage.py`'s covered list with a handler that reaches it, or to its exemption list with a reason — the test fails until one of the two is done** |
 | `identity/README.md` | The ticket table **and the fact that a ticket exists only while the item is restorable**, the three-field retention policy on `IdentitySettings` with its plain-words labels, **the new non-creating `identity/access.py::queue_retention_days` seam** (what it returns when there is no row, and why it is not `settings_row()`), the orchestration, the Deleted page, and the sentence that identity answers "which keys are deleted", never "which conversations" |
 | `agents/README.md` | `agents/retention.py`, the new artifact-purge slot, and the tool-record scrub's rule — scrubbed inline with the conversation, always |
@@ -1300,7 +1300,7 @@ agents handler (turn/share/attachment rows, the inline tool-record scrub, the ar
 collection and the vision hand-off); the rag notes handler; the vision artifact-purge
 registration; the Deleted page with both tabs; the sweep and the management command; **the
 deletion-coverage gate (§7)**; and the documentation set (`OPERATIONS.md` backups section, ADR
-0019, the column READMEs, the `EXTENDING.md` recipe, the help card). **The queue half is a
+0020, the column READMEs, the `EXTENDING.md` recipe, the help card). **The queue half is a
 separate, late task inside this slice** (below).
 
 **Slice 2 — documents, Ask history and the gallery, routed through the retention service.**

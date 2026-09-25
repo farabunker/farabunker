@@ -48,7 +48,7 @@ from agents.models import Turn
 from agents.runtime.preflight import (
     AGENT_NOT_PERMITTED, MODEL_NOT_PERMITTED, dropped_tool_notes, preflight_turn,
 )
-from agents.visibility import chat_surface_conversations
+from agents.visibility import EDITABLE_TURN_ROW_FIELDS, chat_surface_conversations
 from agents.workstreams import workstream_scope
 from foundation.settings_area import preserve_assistant_flag
 from identity.access import labelling_entitlements
@@ -113,10 +113,136 @@ MAX_TRANSPORT_RETRIES = 3
 # response-timeout entry for the operator-facing note on this pairing.
 MAX_POLL_DURATION_MS = 7500 * 1000
 
-_BLANK = "Say something: the message cannot be blank."
+BLANK_MESSAGE = "Say something: the message cannot be blank."
 # C-7 (round-3 hardening, H39): `agents.limits.MAX_TURN_CHARS`, the fifth
 # number that bounds a turn -- see that module's own docstring.
-_TOO_LONG = f"That message is too long — the limit is {MAX_TURN_CHARS} characters."
+TOO_LONG_MESSAGE = f"That message is too long — the limit is {MAX_TURN_CHARS} characters."
+# ONE DECLARATION, READ BY TWO CALLERS (chat cluster, feature C).
+# `agents.chat.views.turns.turn_edit` validates the edited text against
+# the SAME `MAX_TURN_CHARS` constant `start_turn` uses, BEFORE
+# `agents.visibility.branch_conversation` is called at all, so a refused
+# edit writes nothing -- no conversation row, no turns, no taint. It
+# therefore needs the refusal WORDING before `start_turn` has run, which
+# is why these are public here rather than module-private: the house
+# rule is one declaration per user-facing sentence, so the blank/too-long
+# message an edit shows and the one a new turn shows can never drift
+# apart.
+# FEATURE C's declared disclosure lead -- what pressing "Send from here"
+# is about to do, said before the button. DECLARED HERE, in the shared
+# leaf, rather than in `views/turns.py` where the view that consumes the
+# POST lives: `agents/chat/views/thread.py` renders it and may not
+# import `views/turns.py` (the package's one-way import direction,
+# `agents/chat/views/__init__.py`'s own docstring), and `views/turns.py`
+# renders it too on the poller's `done` tick, so the ONE module both
+# already import is the only place it can live without a cycle or a
+# second copy.
+#
+# THIS STRING IS THE SENTENCE, and both renderers interpolate it rather
+# than retyping any part of it -- which is what makes the reload/poll
+# parity a property rather than a coincidence.
+EDIT_LEAD = (
+    "This starts a new conversation with everything before this message. "
+    "The original stays as it is. Files attached earlier in this conversation "
+    "are not carried over."
+)
+# FEATURE C's provenance banner, the same public-declaration rule as
+# `EDIT_LEAD` just above and for the same reason: `agents/chat/views/
+# thread.py` renders it and may not import `views/turns.py`, so this
+# shared leaf both already import is where it lives.
+#
+# TASK 14 REVIEW FIX (I1/M3): these used to live in `agents/visibility.py`
+# -- the brief's own placement -- but that module is the column's
+# predicate-and-writer surface (its own string constants, e.g.
+# `AGENT_NOT_YOURS`, are refusal sentences its OWN writers return); this
+# is a chat PAGE's prose, consumed only by `chat/conversation.html`
+# through `thread_context`, exactly the shape `EDIT_LEAD` already lives
+# here for. The import direction does not bite: `agents/chat/service.py`
+# already imports from `agents.visibility` (`chat_surface_conversations`,
+# above), never the reverse, and `thread.py` already imports both
+# modules.
+#
+# `BRANCH_PROVENANCE_UNNAMED` NAMES NOTHING (I1, review Important 1). The
+# banner used to be assembled in the template out of `BRANCH_PROVENANCE_
+# LEAD` plus an `{% if branched_from %}<a>...</a>{% endif %}` that
+# rendered NOTHING on both the deleted-parent and the unreadable-parent
+# path -- `branched_from` is `None` either way -- leaving the literal
+# rendered sentence "Branched from  at message 3" (HTML collapses the
+# double space, so that really is what a reader saw). That is exactly
+# the shape AGENTS.md's "user-facing sentences are declared once, in
+# Python" exists to forbid: a sentence assembled from fragments plus a
+# hole nothing fills. This constant is the hole's own honest filling --
+# a whole, grammatical, disclosure-free phrase -- so the template's own
+# `{% else %}` (never a bare omission) always has a real noun phrase to
+# render, on both fallback paths alike.
+BRANCH_PROVENANCE_LEAD = "Branched from"
+BRANCH_PROVENANCE_UNNAMED = "an earlier conversation"
+
+
+def branch_point_ordinal(parent, index: int) -> int:
+    """WHICH OF THE PARENT'S OWN MESSAGES the branch left off at, 1-based
+    and countable by a reader -- the ordinal of the turn at `index` among
+    `parent`'s finished, root-depth USER turns.
+
+    WHY NOT `Turn.index` (whole-branch review I-2). That column is a
+    DENSE counter over EVERY row in the thread -- user, assistant, tool
+    cards, and delegate turns at `depth >= 1` (`agents/models.py::Turn.
+    next_index` returns `0` for the very first one). Nothing on the
+    thread page renders it, and a reader's notion of "message" is the
+    bubbles they can see, so the banner used to render "at message 0"
+    for a branch off the FIRST message and "at message 4" for the second
+    message of a thread that had used one tool. The column stays exactly
+    what it was -- `branched_at_index` is PROVENANCE, queryable, not
+    display -- and this is the display half, computed at render time
+    from the parent that is being pointed at.
+
+    ONE QUERY, BOUNDED BY THE PARENT'S OWN LENGTH -- a `.count()` over
+    the same `(conversation, index)` index `agents.usage.context_usage`
+    already walks, and flat in the BRANCH's length, which is what
+    `agents/chat/tests/test_thread_meter.py::test_the_meter_costs_the_same_on_
+    a_short_and_a_long_conversation` pins.
+
+    THE FILTER IS `is_editable_turn_row`'S OWN SET, literally --
+    `agents.visibility.EDITABLE_TURN_ROW_FIELDS`, not a second spelling
+    of it: `agents.visibility.may_edit_turn` admits only a finished
+    root-depth USER turn, so by construction the answer is at least 1.
+    It can still be 0 if the parent's earlier rows were deleted after
+    the branch was taken, and `thread_context` renders no number at all
+    in that case rather than "at your message 0".
+    """
+    return parent.turns.filter(**EDITABLE_TURN_ROW_FIELDS,
+                               index__lte=index).count()
+
+
+def branch_provenance_tail(ordinal: int) -> str:
+    """The provenance banner's own closing fragment: where in the parent
+    this thread left off ("at your message N"), N being
+    `branch_point_ordinal` above -- the number the reader can point at,
+    never the raw row index (whole-branch review I-2).
+
+    A FRAGMENT, NAMED AS ONE (review M3) -- `branch_provenance_sentence`
+    was this function's name until the fix round above, and the name
+    overclaimed: it never returned a whole sentence, only this tail, and
+    calling a fragment a sentence is what let the missing-middle defect
+    (I1) go unnoticed as long as it did. The parent's own title (or its
+    declared stand-in, `BRANCH_PROVENANCE_UNNAMED` above) is the
+    TEMPLATE's half, not this function's: whether the title may be NAMED
+    is a visibility question `thread_context` answers through `visible_
+    conversations`, and this function is handed only a number, never the
+    parent row, so it could not leak one if it tried.
+
+    BOTH FALLBACK SENTENCES CARRY NO NUMBER, and that is declared here
+    rather than left to be inferred. The ordinal is counted over the
+    PARENT's rows, so a parent that was deleted (`branched_from_id is
+    None` after `SET_NULL`) or that this reader may not see has no rows
+    to count -- and a number counted over nothing, or over a thread the
+    reader cannot open to check, is exactly the unverifiable number I-2
+    is about. On both paths the banner is the whole, grammatical,
+    disclosure-free sentence "Branched from an earlier conversation."
+    and nothing more.
+    """
+    return f"at your message {ordinal}"
+
+
 # Public (no leading underscore): `agents.chat.views.turns` imports this
 # rather than keeping its own copy of the same sentence (CQ-11).
 QUEUE_UNAVAILABLE = (
@@ -236,9 +362,9 @@ def start_turn(conversation, text: str, *, connection: str = "", actor,
     """
     message = (text or "").strip()
     if not message:
-        return TurnStart(False, 400, _BLANK)
+        return TurnStart(False, 400, BLANK_MESSAGE)
     if len(message) > MAX_TURN_CHARS:
-        return TurnStart(False, 400, _TOO_LONG)
+        return TurnStart(False, 400, TOO_LONG_MESSAGE)
 
     files = [f for f in (files or []) if f]
     resolved_workstream_id = None
@@ -549,8 +675,24 @@ def visible_conversation_or_404(principal, conversation_id):
     `visible_conversations(principal).filter(agent__slug=...)`, the
     un-narrowed gate -- so there is no escape-hatch keyword here and
     nothing needs one.
+
+    THE WORKSTREAM RIDES ALONG (context meter, 2026-09-21).
+    `agents.visibility.visible_conversations` `select_related`s the
+    AGENT only, and `agents.chat.views.thread.thread_context`
+    dereferences `conversation.workstream` on its `may_upload_here`
+    branch alone -- its own comment says so. So every reader who may not
+    upload (a `view`-share recipient; a stream recipient who may not
+    manage it) would pay a LAZY FK READ the moment
+    `agents.usage.context_usage` asked for the stream's instructions.
+    One more LEFT JOIN on a query this path already runs, scoped to the
+    row-addressed `/chat/` views and to nothing else -- the same fix
+    review R2 made for `visible_turn`'s poll path, applied here. The
+    LIST pages are untouched.
     """
-    return get_object_or_404(chat_surface_conversations(principal), pk=conversation_id)
+    return get_object_or_404(
+        chat_surface_conversations(principal).select_related("workstream"),
+        pk=conversation_id,
+    )
 
 
 def composer_attachment_fields(request) -> dict:
@@ -756,6 +898,45 @@ def validated_next_url(request) -> str | None:
     ):
         return next_url
     return None
+
+
+def validated_next_link(request, next_url: str) -> str | None:
+    """A caller-supplied `next`, validated for use as an HREF -- or
+    `None`.
+
+    THE SAME GUARD AS `validated_next_url` ABOVE, PLUS ONE, AND FOR A
+    DIFFERENT MOMENT. That function reads `request.POST` and answers
+    where a completed write should LAND; this one takes a raw value the
+    page is about to RENDER as a link, which on this surface arrives on
+    a GET (`?next=`) and on a refused POST alike. The two exist
+    separately rather than one taking a dictionary, because "which
+    dictionary" is not the difference that matters -- the difference is
+    that a POST value has already been through a CSRF-protected form
+    this box rendered, and a GET value is whatever was in the address
+    bar.
+
+    THE EXTRA CHECK IS THAT IT IS A PATH ON THIS BOX. `url_has_allowed_
+    host_and_scheme` already refuses another origin, a scheme-relative
+    `//host`, and a `javascript:` URL -- but it ADMITS a fully-qualified
+    `https://this-host/...`, which is a correct answer for a redirect
+    and a needlessly wide one for an href. A link this page writes goes
+    to a path on this box or it does not exist, so that is what is
+    required, and the narrowing is here rather than in
+    `validated_next_url` precisely so no existing redirect's behaviour
+    moves.
+
+    `None` -- never a fallback URL -- when there is no usable value, the
+    same contract `validated_next_url` states: each caller picks its own
+    default, because they do not all share one.
+    """
+    next_url = (next_url or "").strip()
+    if not next_url.startswith("/") or next_url.startswith("//"):
+        return None
+    if not url_has_allowed_host_and_scheme(
+        next_url, allowed_hosts={request.get_host()}, require_https=request.is_secure()
+    ):
+        return None
+    return next_url
 
 
 # --- the two access pages' shared transfer-panel plumbing (phase 2) --------

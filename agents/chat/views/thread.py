@@ -26,17 +26,26 @@ from agents.chat.pickers import chat_picker_options
 from agents.chat.rendering import thread_cards
 from agents.chat.sidebar import sidebar_context
 from agents.chat.service import (
-    MAX_POLL_DURATION_MS, MAX_TRANSPORT_RETRIES, POLL_INTERVAL_MS,
-    composer_attach_context, visible_conversation_or_404,
+    BRANCH_PROVENANCE_LEAD, BRANCH_PROVENANCE_UNNAMED, EDIT_LEAD, MAX_POLL_DURATION_MS,
+    MAX_TRANSPORT_RETRIES, POLL_INTERVAL_MS, branch_point_ordinal,
+    branch_provenance_tail, composer_attach_context, visible_conversation_or_404,
 )
 from agents.entitlements import tool_access_for, wall_for
 from agents.models import Share
 from agents.runtime.preflight import dropped_tool_notes, preflight_turn
 from agents.shares import shares_for
-from agents.visibility import may_post_to, may_read_conversation_shares
+from agents.usage import (
+    BAND_FULL, DISCLOSURE_BODY, DISCLOSURE_SUMMARY, ENGINE_DEFAULT_SENTENCE, FULL_CLAUSE,
+    WINDOW_SOURCE_ENGINE_DEFAULT, WINDOW_SOURCE_UNBOUND, context_usage, meter_segments,
+    truncation_clause,
+)
+from agents.visibility import (
+    may_edit_any_turn, may_post_to, may_read_conversation_shares, visible_conversations,
+)
 from agents.workstreams import scope_for_conversation
-from identity.access import accounts_on, share_subjects
+from identity.access import accounts_on, is_admin, share_subjects
 from identity.request import principal_for_request, settings_row_for
+from models.contracts.bindings import effective_context_window
 
 
 def thread_context(request, conversation, *, selected: str | None = None) -> dict:
@@ -172,6 +181,35 @@ def thread_context(request, conversation, *, selected: str | None = None) -> dic
     check = preflight_turn(conversation.agent, selected, actor=principal,
                            conversation=conversation, wall=wall,
                            tool_access=rag_tool_access)
+    # THE PAGE PAYS NOTHING FOR THE CEILING. `check.resolved` is the
+    # `ResolvedModel` for this turn's bound model -- the PICKED
+    # connection when the operator used the picker, this agent's role
+    # binding otherwise -- and the preflight above already holds it.
+    #
+    # THE BRANCH IS `check.resolved is None`, NEVER `check.ok` (spec
+    # review m1). `preflight_turn`'s NO_TOOL_CALLING leg returns a
+    # refusal carrying a real `ResolvedModel`: a turn that cannot run
+    # because the bound model will not call tools still has a known
+    # ceiling, and the meter shows it. Only a genuinely absent binding
+    # -- an unbound role, an unregistered pick, a label refusal --
+    # renders the ceiling-free line, beside the `unavailable` banner
+    # this page already carries.
+    if check.resolved is None:
+        window, window_source = 0, WINDOW_SOURCE_UNBOUND
+    else:
+        window, window_source = effective_context_window(check.resolved)
+    context_meter_usage = context_usage(conversation, conversation.agent,
+                                        window=window, window_source=window_source)
+    # RENDER-VS-GATE: this sentence names OPERATOR CONFIGURATION, so a
+    # non-admin's render never BUILDS it -- it is not a template `{% if
+    # %}` over a string that was computed anyway. `settings_row` is the
+    # one already fetched for this render.
+    engine_default_sentence = (
+        ENGINE_DEFAULT_SENTENCE
+        if context_meter_usage.window_source == WINDOW_SOURCE_ENGINE_DEFAULT
+        and is_admin(principal, settings_row=settings_row)
+        else ""
+    )
     # `?pending=` is a raw query-string read, never validated by the URL
     # resolver the way a path segment is -- a caller can send anything
     # (`?pending=abc`, `?pending=-1`). Accepted only when it is a bare
@@ -203,10 +241,110 @@ def thread_context(request, conversation, *, selected: str | None = None) -> dic
     # fresh, the same as it always called this same logic fresh.
     attachments_by_turn = attachments_for(principal, conversation, stream=stream_scope,
                                           settings_row=settings_row)
+    # FEATURE C's CONVERSATION-LEVEL HALF, computed ONCE for the whole
+    # render: may this principal manage the thread, and is nothing in
+    # flight. The per-turn half (a finished, root-depth USER row) is
+    # already on the card, so a thread of two hundred messages costs one
+    # predicate rather than two hundred -- and `settings_row` is the one
+    # this render already fetched, for exactly the reason
+    # `may_manage_conversation`'s own `settings_row=` docstring records.
+    #
+    # THE ANSWER HIDES THE CONTROL, it does not merely refuse the POST.
+    # The in-flight clause is conversation-wide, so while an answer is
+    # running EVERY message in the thread is unbranchable; rendering the
+    # disclosure anyway would put a button on the page whose own POST
+    # answers 404.
+    may_edit_here = may_edit_any_turn(principal, conversation, settings_row=settings_row)
+    # FEATURE C's provenance line. RESOLVED THROUGH
+    # `visible_conversations`, NEVER A BARE PK READ: a title is content,
+    # and a branch an administrator made of somebody's thread must not
+    # leak the original's title back to whoever is reading the branch.
+    # One query, and only for a conversation that actually has a parent
+    # -- `settings_row` is the one this render already fetched, the same
+    # single-read rule every other visibility call on this page follows.
+    #
+    # `branched_from_id is None` AFTER `SET_NULL` (the parent was
+    # deleted) and "the parent exists but this principal may not read
+    # it" render IDENTICALLY here: `branched_from` is `None` either way,
+    # so the template's own `{% if branched_from %}` cannot tell them
+    # apart and never needs to -- both are "the honest version of this
+    # came from somewhere you cannot see", one because there is nothing
+    # left to see and one because it is not this reader's to see.
+    branched_from = None
+    if conversation.branched_from_id is not None:
+        branched_from = visible_conversations(principal, settings_row=settings_row) \
+            .filter(pk=conversation.branched_from_id).first()
+    # THE NUMBER IS THE READER'S ORDINAL, NOT THE ROW INDEX
+    # (whole-branch review I-2). `branched_at_index` is the parent's
+    # DENSE `Turn.index` -- assistant rows, tool cards and delegate turns
+    # all take a number -- so rendering it said "at message 0" for a
+    # branch off the first message and "at message 4" for the second
+    # message of a thread that had used a tool. `branch_point_ordinal`
+    # counts the parent's own finished root-depth USER turns up to that
+    # index instead: ONE bounded `.count()`, on a page that already pays
+    # two for the meter, and flat in this conversation's own length
+    # (pinned by `test_the_meter_costs_the_same_on_a_short_and_a_long_
+    # conversation`). The column itself is untouched -- it is provenance,
+    # queryable, not display.
+    #
+    # AND ONLY WHEN THERE IS A PARENT TO COUNT OVER. `branched_at_index`
+    # outlives `branched_from_id` (`SET_NULL` clears only the FK), but an
+    # ordinal counted over a deleted thread, or over one this reader may
+    # not open to check, is precisely the unverifiable number I-2 is
+    # about -- so both fallback paths render the whole declared sentence
+    # "Branched from an earlier conversation." with no number at all,
+    # which `branch_provenance_tail`'s own docstring states.
+    branch_provenance = ""
+    if branched_from is not None and conversation.branched_at_index is not None:
+        ordinal = branch_point_ordinal(branched_from, conversation.branched_at_index)
+        # ZERO ONLY IF THE PARENT'S EARLIER ROWS WERE DELETED after the
+        # branch was taken -- `may_edit_turn` admits only a finished
+        # root-depth user turn, so the live answer is at least 1. "at
+        # your message 0" would be the same defect in a new spelling.
+        if ordinal:
+            branch_provenance = branch_provenance_tail(ordinal)
     return {
         "conversation": conversation,
         "agent": conversation.agent,
-        "cards": thread_cards(conversation, attachments_by_turn=attachments_by_turn),
+        # Both attach keys are read DIRECTLY rather than through
+        # `.get(...)` with a default: `composer_attach_context` returns
+        # exactly those two keys, and a default would mask a rename
+        # instead of failing on it.
+        "cards": thread_cards(conversation, attachments_by_turn=attachments_by_turn,
+                              may_edit=may_edit_here,
+                              may_attach_files=attach_context["may_attach_files"],
+                              attach_workstream=attach_context["attach_workstream"]),
+        # FEATURE C's declared sentence, from `agents.chat.service` --
+        # never typed into the template, and the SAME object
+        # `agents.chat.views.turns._group_html` hands the poller's own
+        # `done` tick, so a swapped disclosure says what a reloaded one
+        # says.
+        "edit_lead": EDIT_LEAD,
+        # FEATURE C's provenance line, computed above. `branched_from`
+        # is a `Conversation` or `None` (no parent, a deleted one, or
+        # one this principal may not read -- see the comment above);
+        # `branch_provenance` is the declared tail, or `""` for a
+        # conversation that was never branched, which the template's own
+        # `{% if branch_provenance %}` treats as "nothing to show".
+        # `branch_provenance_lead` and `branch_provenance_unnamed` are
+        # the sentence's own fixed pieces, declared once in
+        # `agents.chat.service` and never typed into the template --
+        # REVIEW FIX I1: `branch_provenance_unnamed` is what the
+        # template's `{% else %}` renders on BOTH the deleted-parent and
+        # the unreadable-parent path, so the banner is always a whole,
+        # grammatical sentence and never one with a hole in it.
+        "branched_from": branched_from,
+        # WHETHER THERE IS A BANNER AT ALL, asked of the COLUMNS rather
+        # than of the tail (whole-branch review I-2). The tail is now
+        # empty on both fallback paths -- deleted parent, unreadable
+        # parent -- and the banner must still render there, saying the
+        # whole declared sentence with no number; gating the `<p>` on the
+        # tail would delete it on exactly those two paths.
+        "is_branch": (conversation.branched_from_id is not None
+                      or conversation.branched_at_index is not None),
+        "branch_provenance": branch_provenance,
+        "branch_provenance_lead": BRANCH_PROVENANCE_LEAD,
+        "branch_provenance_unnamed": BRANCH_PROVENANCE_UNNAMED,
         "picker": chat_picker_options(principal, selected, wall=wall),
         "selected_connection": selected,
         # ROUND 18: `chat/_composer.html`'s own `composer_placeholder`
@@ -237,6 +375,17 @@ def thread_context(request, conversation, *, selected: str | None = None) -> dic
         # queued right now, which `_unavailable.html`'s `{% if %}`
         # treats as "nothing to show".
         "unavailable": check.message if not check.ok else "",
+        # FEATURE A. The line is server-rendered in full; the poller
+        # rewrites two number spans and unhides one pre-rendered clause,
+        # and composes no prose at all (spec decisions 21-22).
+        "context_usage": context_meter_usage,
+        "context_meter": meter_segments(context_meter_usage),
+        "context_truncation_clause": truncation_clause(context_meter_usage),
+        "context_full_clause": (FULL_CLAUSE if context_meter_usage.band == BAND_FULL
+                                else ""),
+        "context_engine_default_sentence": engine_default_sentence,
+        "context_disclosure_summary": DISCLOSURE_SUMMARY,
+        "context_disclosure_body": DISCLOSURE_BODY,
         # A granted tool that is not registered on this install is a
         # NOTE, not a refusal (spec section 8.3 step 3's tolerant
         # half) -- `dropped_tool_notes` (`agents/runtime/preflight.py`)

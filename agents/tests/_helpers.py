@@ -124,6 +124,32 @@ def make_turn(**overrides):
     return Turn.objects.create(**fields)
 
 
+_editable_thread_slugs = itertools.count()
+
+
+def make_editable_thread(owner, *, texts=("first", "second"), slug=None):
+    """A conversation owned by `owner` whose every turn is a finished,
+    root-depth USER turn -- so each is individually editable
+    (`agents.visibility.is_editable_turn_row`) and the conversation as a
+    whole is (`may_edit_any_turn`).
+
+    `slug` AUTO-GENERATES WHEN NONE IS GIVEN, the stricter of this
+    helper's two prior spellings: a caller that needs two threads in one
+    test still passes its own two slugs, and a caller that needs only
+    one never collides with another test's row by sharing a fixed
+    default.
+    """
+    from agents.models import Turn
+    from identity.access import owner_fields
+
+    conversation = make_conversation(
+        agent=make_agent(slug=slug or f"editable-thread-{next(_editable_thread_slugs)}"),
+        **owner_fields(user_principal(owner)))
+    turns = [make_turn(conversation=conversation, role=Turn.Role.USER, text=text,
+                       state=Turn.State.DONE) for text in texts]
+    return conversation, turns
+
+
 def _workstream(principal=None, **overrides):
     """A `Workstream` row for a test that needs one to exist.
 

@@ -478,7 +478,7 @@ deleted items for", default 30, may be 0 for no grace period),
 `queue_retention_days` (`LABEL_QUEUE_RETENTION_DAYS`, "Keep finished
 queue jobs for", default 1, never 0 — blank means "no age cliff" there;
 `models/queue` will read it across this same seam once the queue half
-lands, one of the residues ADR 0019 (decision 7) names — nothing reads
+lands, one of the residues ADR 0020 (decision 7) names — nothing reads
 it today), and `audit_detail`
 (`LABEL_AUDIT_DETAIL`, "Show item names in the deletion log", default
 off). `identity/contracts/retention.py` declares every one of those

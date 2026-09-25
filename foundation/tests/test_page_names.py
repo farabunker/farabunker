@@ -75,6 +75,12 @@ _NAMES = {
     # the policy that governs it.
     "jobs-settings": "Job execution",
     "inference-console": "Models",
+    # The agent library (chat cluster, feature B). ADMIN-gated, not
+    # ACCOUNTS_ADMIN, so it is NOT in `_ADMIN_ONLY` below: `is_admin`
+    # answers True for everybody on an open box, exactly as it does for
+    # `inference-console` and `jobs-settings` above, and this page
+    # renders its real body there.
+    "settings-agents": "Agent library",
     "setup-index": "Install guides",
     "identity-login": "Sign in",
     # The settings sidebar's identity/chat admin pages. Each needs an

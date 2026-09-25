@@ -366,7 +366,7 @@ def conversation_start(request):
     # A BLANK MESSAGE WITH NO FILES EITHER still starts an empty thread
     # (unchanged, existing behaviour -- see this function's own docstring).
     # A blank message WITH files, though, must not go the "empty thread"
-    # route: `start_turn` requires `text` (`_BLANK`), so silently taking
+    # route: `start_turn` requires `text` (`BLANK_MESSAGE`), so silently taking
     # that branch would drop the files on the floor with no error at all
     # -- precisely the "I attached a file and nothing happened" complaint
     # this whole door exists to prevent. `text.strip() or files` routes a
@@ -401,7 +401,7 @@ def conversation_delete(request, conversation_id):
     `agents.retention.purge_conversation` and its sibling handlers
     (Task 9). THE QUEUE ROW DOES NOT JOIN THEM YET -- `models/queue` has
     no retention handler in the landed tree, so it survives purge until
-    the queue half lands and reaches it, one of the residues ADR 0019
+    the queue half lands and reaches it, one of the residues ADR 0020
     (decision 7) names. The tool-call audit trail's own asymmetry -- `Turn.
     invocation` is `SET_NULL`, so a `ToolInvocation` this conversation
     produced is never reachable through it -- is unaffected by any of

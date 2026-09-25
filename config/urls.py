@@ -38,6 +38,12 @@ urlpatterns = [
     # and `config/` is the composition root that already imports every
     # column, so nothing crosses a boundary to put them in front.
     path("settings/assistant/", include("agents.chat.assistant_urls")),
+    # The agent library (chat cluster, feature B). Mounted HERE rather
+    # than under `/chat/`, the same call the settings assistant's own
+    # three routes record just above: a settings-area surface whose view
+    # happens to read `agents/` rows belongs beside `/settings/`, so the
+    # URL an operator sees matches the page they are on.
+    path("settings/agents/", include("agents.chat.agent_admin_urls")),
 ]
 
 # Feature-gated mount (D9): with the "vision" feature off, the page simply

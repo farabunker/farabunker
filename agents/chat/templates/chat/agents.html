@@ -1,0 +1,75 @@
+{% extends "chat/base.html" %}
+{% comment %}
+"THE AGENTS I WORK ON" (`/chat/agents/`, class A). Two sections, and the
+second exists because of a route that predates this page:
+`chat-default-install` is class A and stamps the INSTALLING principal as
+the owner, so a member can own a `box_wide` row that `may_manage_agent`
+refuses them. Listing it read-only, with a sentence, is what stops that
+row from being owned, absent and refused with nothing anywhere
+explaining why.
+
+THE RESTRICTION COUNT IS A BARE NUMBER, NEVER A NAME. The entitlement
+non-disclosure rule is a gate, and `identity/tests/test_route_matrix.py`
+sweeps this route for it. The count is folded in the VIEW from two batch
+reads -- one `agent_entitlement_ids()` and one `labelling_entitlements`
+-- so twenty-five rows cost what one row costs, and no per-row
+`held_entitlement_ids` read happens here (the sidebar N+1, avoided on
+the way in rather than found later).
+
+EVERY SELECTOR THIS PAGE NAMES LIVES IN `chat/base.html`, not in a
+`{% templatetag openblock %} block chat_style {% templatetag
+closeblock %}` of its own: `chat/_agent_form.html` and this page are
+siblings under one base, and the CSS gate's rule is that a fragment's
+rules belong in the nearest common ancestor from the day it is created.
+{% endcomment %}
+{% block title %}Agents — Chat — farabunker{% endblock %}
+{% block chat_sidebar %}{% include "chat/_sidebar.html" %}{% endblock %}
+{% block chat_content %}
+<h1>Agents</h1>
+{% include "chat/_messages.html" %}
+<p><a class="chat-rail-primary"
+      href="{% url 'chat-agent-new' %}?next={{ next_url|urlencode }}">New agent</a></p>
+
+{% for row in rows %}
+<section class="agent-row">
+  <h2><a href="{% url 'chat-agent-edit' row.agent.pk %}?next={{ next_url|urlencode }}">{{ row.agent.name }}</a></h2>
+  {% if row.agent.description %}<p class="muted">{{ row.agent.description }}</p>{% endif %}
+  {% if not row.agent.enabled %}<p class="muted">Switched off</p>{% endif %}
+  {% if row.restrictions %}<p class="muted">{{ row.restrictions }} restriction{{ row.restrictions|pluralize }}</p>{% endif %}
+</section>
+{% empty %}
+<p class="muted">No agents of your own yet — <a href="{% url 'chat-agent-new' %}">make one</a>.</p>
+{% endfor %}
+
+{% if box_wide_rows %}
+<h2 class="agent-group-head">{{ box_wide_section_title }}</h2>
+{% for row in box_wide_rows %}
+{% comment %}
+THE LINK AND THE SENTENCE BOTH FOLLOW `row.manageable`, which is
+`may_manage_agent`'s answer for THIS ROW AND THIS READER -- never the
+section's (fix round, review I2).
+
+FOR A MEMBER WHO OWNS ONE (`chat-default-install` is class A, so that
+happens) the editor refuses them, and a link would be a link to a 404 --
+the defect this section exists to prevent, shipped in a different shape.
+They get the read-only sentence, which is true for them.
+
+FOR AN ADMINISTRATOR -- and on an open box that is EVERY reader, since
+`sees_all_content` answers True with no accounts -- the same absence was
+the bug: the row the owner most wants to edit was listed with a sentence
+saying somebody else could change it and no way in. They get the link and
+a sentence that says what editing one of these actually does.
+{% endcomment %}
+<section class="agent-row">
+  {% if row.manageable %}
+  <h2><a href="{% url 'chat-agent-edit' row.agent.pk %}?next={{ next_url|urlencode }}">{{ row.agent.name }}</a></h2>
+  <p class="muted">{{ box_wide_section_admin_note }}</p>
+  {% else %}
+  <h2>{{ row.agent.name }}</h2>
+  <p class="muted">{{ box_wide_section_note }}</p>
+  {% endif %}
+  {% if row.restrictions %}<p class="muted">{{ row.restrictions }} restriction{{ row.restrictions|pluralize }}</p>{% endif %}
+</section>
+{% endfor %}
+{% endif %}
+{% endblock %}

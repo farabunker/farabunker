@@ -184,5 +184,97 @@ so a polled thread and a reloaded one never disagree by a duplicate.
       {% endfor %}
     </div>
     {% endif %}
+    {% if card.may_edit %}
+    {% comment %}
+    CHAT CLUSTER, FEATURE C -- edit a past prompt and carry on in a
+    BRANCH. The house's zero-JS idiom, already used on this surface: a
+    `<details>` opening a plain form. Nothing here adds a script, so the
+    page's pinned script counts of 4 and 3 stand.
+
+    `chat/_attach_files.html` ALONE, NEVER `chat/_composer.html` (spec
+    review m8) -- that fragment ends with TWO script blocks
+    (`_attach_dragdrop.html` and `_enter_to_send.html`) and this
+    disclosure renders once per eligible user turn, so including it
+    would multiply the page's script count by the number of editable
+    messages. The staged-file chip stack `_attach_dragdrop.html` builds
+    is therefore absent here; the plain `<input type="file">` is the
+    whole control, which is the JS-off behaviour every surface already
+    has.
+
+    `card.attach_id` IS NOT COSMETIC. `_attach_files.html` hardcodes
+    `id="attach-files"` on its input and `for="attach-files"` on the
+    label button that is the ONLY way to reach it (the input carries
+    `class="attach-input"`, the label-button pattern) -- and the
+    COMPOSER already renders one. Every `<label for=...>` resolves to
+    the FIRST match in document order, so on a thread with ten editable
+    messages every "+ Add files" inside every edit form would open the
+    COMPOSER's picker and stage the chosen file onto a NEW TURN instead
+    of onto the branch. The per-turn id is what points each form's label
+    at its own input.
+
+    `card.edit_text_id` IS THE SAME PER-TURN RULE, applied to the
+    TEXTAREA (feature C review, M1). This disclosure renders once per
+    eligible user turn, so a long thread is a run of edit boxes; a fixed
+    id would point every `<label for=>` at the first one in document
+    order, and no id at all would leave every one of them unnamed. A
+    REAL `<label>` rather than an `aria-label`: the composer reaches for
+    the attribute only because the shared fragment had dropped a visible
+    label that used to exist (`chat/_composer.html`'s own recorded
+    decision), and nothing here forces that compromise.
+
+    `card.attach_workstream` IS PASSED EXPLICITLY, not inherited: the
+    fragment reads it to decide between the three-value placement
+    chooser and the two-value one, and on a polled swap the surrounding
+    context does not carry it.
+
+    THIS DISCLOSURE RENDERS IDENTICALLY ON A POLLED `done` SWAP, because
+    `agents.chat.views.turns._done_body` supplies `may_edit`,
+    `may_attach_files` and `attach_workstream` -- see that body's own
+    `_edit_context`.
+
+    `selected_connection` IS THE PAGE'S OWN `?connection=` PICK, and the
+    poll endpoint cannot know it: the picker's selection lives in the
+    thread page's query string, which `chat-turn-status` never sees --
+    the same structural fact spec review M3 turns into "the window never
+    travels". Rendered server-side here, this field is therefore EMPTY
+    on a polled swap, and the poller closes that gap itself by copying
+    the composer's own already-rendered field into the swapped block
+    (see `carryConnection` in `chat/conversation.html`'s existing
+    script). A no-JS page LOAD never lost the pick -- the server renders
+    it into this field -- so the polled swap was the only path that did,
+    and it no longer does.
+
+    THAT FIELD IS ECHOED, NEVER TRUSTED, and this fragment multiplies
+    the echo by the number of editable turns, so the rule is worth
+    stating here rather than left to infer (feature C review, n2).
+    `?connection=` is a raw caller-supplied query value: it is
+    autoescaped into each hidden field, and `agents.chat.service.
+    start_turn` re-resolves it through `preflight_turn` on the POST and
+    refuses an id that names nothing this principal may use. The page
+    never grants anything by rendering it -- the same "carry it, then
+    re-validate it" shape `validated_next_url` keeps for `?next=`.
+
+    `edit_lead` IS ONE DECLARED SENTENCE (`agents.chat.service.
+    EDIT_LEAD`), never typed here, and it reaches BOTH renders: the
+    thread page's context and `_group_html`'s own poll-body context read
+    the same object.
+    {% endcomment %}
+    <details class="turn-edit">
+      <summary>Edit and carry on from here</summary>
+      <p class="muted">{{ edit_lead }}</p>
+      <form method="post" enctype="multipart/form-data"
+            action="{% url 'chat-turn-edit' card.turn.conversation_id card.turn.pk %}">
+        {% csrf_token %}
+        <input type="hidden" name="connection" value="{{ selected_connection }}">
+        <label for="{{ card.edit_text_id }}">Edit this message</label>
+        <textarea name="text" rows="4" required
+                  id="{{ card.edit_text_id }}">{{ card.text }}</textarea>
+        {% if card.may_attach_files %}
+        {% include "chat/_attach_files.html" with attach_workstream=card.attach_workstream attach_id=card.attach_id %}
+        {% endif %}
+        <button type="submit">Send from here</button>
+      </form>
+    </details>
+    {% endif %}
   {% endif %}
 </article>
