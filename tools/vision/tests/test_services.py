@@ -9,8 +9,7 @@ import json
 import os
 from datetime import timedelta
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -2094,9 +2093,12 @@ class TestOperationCatalogFollowsTheSelectedModel:
 class TestDescribeOutput:
     """`services.describe_output` -- the vision column's own "describe what
     it just made" seam (vision-describes-its-own-output task). Patches
-    `services.get_llm` directly rather than exercising a real gateway
-    resolve: this function's own contract is "never raise, always leave
-    `job.description` readable", not the resolve/health-check machinery
+    `models.contracts.gateway.describe_image` -- the SHARED mechanism
+    (fix round item 5) both `tools/vision` and (eventually, a named
+    follow-up) `tools/rag` call -- directly, rather than exercising a
+    real resolve/build: this function's own contract is "never raise,
+    always leave `job.description` readable", not the mechanism itself
+    (the gateway's own concern) nor the resolve/health-check machinery
     `TestPreflight`/`TestSubmitJob` elsewhere in this file already cover
     for the SIBLING `vision.generate` role.
     """
@@ -2108,57 +2110,63 @@ class TestDescribeOutput:
             model_fingerprint="x", status=GenerationJob.Status.DONE,
         )
 
-        services.describe_output(job)
+        services.describe_output(job, request_timeout=5.0)
 
         job.refresh_from_db()
         assert job.description == ""
 
     def test_happy_path_stores_a_labelled_description(self, tmp_path):
         output = stored_output(tmp_path)
-        fake_llm = MagicMock()
-        fake_llm.chat.return_value = SimpleNamespace(
-            message=SimpleNamespace(content="A lighthouse on a rocky cliff at dusk.")
+
+        with patch(
+            "tools.vision.services.gateway.describe_image",
+            return_value="A lighthouse on a rocky cliff at dusk.",
+        ) as describe_mock:
+            services.describe_output(output.job, request_timeout=5.0)
+
+        # THE PROMPT is THIS column's own -- never rag's -- and
+        # `request_timeout` (fix round item 3) travels through verbatim,
+        # never re-derived inside the mechanism.
+        describe_mock.assert_called_once_with(
+            RAG_EXTRACT_ROLE, output.path, services.DESCRIBE_OUTPUT_PROMPT, request_timeout=5.0,
         )
-
-        with patch("tools.vision.services.get_llm", return_value=fake_llm) as get_llm_mock:
-            services.describe_output(output.job)
-
-        get_llm_mock.assert_called_once_with(RAG_EXTRACT_ROLE)
         output.job.refresh_from_db()
         assert output.job.description == (
             f"{services._DESCRIBE_LABEL}A lighthouse on a rocky cliff at dusk."
         )
-        # The prompt sent is THIS column's own -- never rag's.
-        message = fake_llm.chat.call_args[0][0][0]
-        assert message.blocks[0].text == services.DESCRIBE_OUTPUT_PROMPT
 
     def test_an_unbound_role_stores_the_honest_sentence_and_never_raises(self, tmp_path):
         output = stored_output(tmp_path)
 
-        with patch("tools.vision.services.get_llm", side_effect=ValueError("no binding")):
-            services.describe_output(output.job)  # must not raise
+        with patch(
+            "tools.vision.services.gateway.describe_image", side_effect=ValueError("no binding")
+        ):
+            services.describe_output(output.job, request_timeout=5.0)  # must not raise
 
         output.job.refresh_from_db()
         assert output.job.description == services.DESCRIBE_OUTPUT_FAILURE_SENTENCE
 
     def test_a_raising_call_stores_the_honest_sentence_and_never_raises(self, tmp_path):
+        """Also stands in for a TIMED-OUT call (fix round item 3): a
+        request that outran `request_timeout` raises out of the gateway
+        the same as any other transport failure, and this function's
+        `except Exception` does not care which."""
         output = stored_output(tmp_path)
-        fake_llm = MagicMock()
-        fake_llm.chat.side_effect = RuntimeError("engine unreachable")
 
-        with patch("tools.vision.services.get_llm", return_value=fake_llm):
-            services.describe_output(output.job)  # must not raise
+        with patch(
+            "tools.vision.services.gateway.describe_image",
+            side_effect=RuntimeError("engine unreachable"),
+        ):
+            services.describe_output(output.job, request_timeout=5.0)  # must not raise
 
         output.job.refresh_from_db()
         assert output.job.description == services.DESCRIBE_OUTPUT_FAILURE_SENTENCE
 
     def test_a_blank_answer_stores_the_honest_sentence(self, tmp_path):
         output = stored_output(tmp_path)
-        fake_llm = MagicMock()
-        fake_llm.chat.return_value = SimpleNamespace(message=SimpleNamespace(content="   "))
 
-        with patch("tools.vision.services.get_llm", return_value=fake_llm):
-            services.describe_output(output.job)
+        with patch("tools.vision.services.gateway.describe_image", return_value="   "):
+            services.describe_output(output.job, request_timeout=5.0)
 
         output.job.refresh_from_db()
         assert output.job.description == services.DESCRIBE_OUTPUT_FAILURE_SENTENCE
@@ -2190,7 +2198,7 @@ class TestDescribeIfReady:
         output = stored_output(tmp_path)
 
         with patch("tools.vision.services.describe_output") as describe_mock:
-            services.describe_if_ready(output.job)
+            services.describe_if_ready(output.job, request_timeout=5.0)
 
         describe_mock.assert_not_called()
 
@@ -2199,9 +2207,11 @@ class TestDescribeIfReady:
         self._bind_extract()
 
         with patch("tools.vision.services.describe_output") as describe_mock:
-            services.describe_if_ready(output.job)
+            services.describe_if_ready(output.job, request_timeout=5.0)
 
-        describe_mock.assert_called_once_with(output.job)
+        # `request_timeout` (fix round item 3) is simply threaded
+        # through, never re-derived or defaulted by the gate itself.
+        describe_mock.assert_called_once_with(output.job, request_timeout=5.0)
 
     def test_a_failed_job_is_never_described_even_when_bound(self, tmp_path):
         output = stored_output(tmp_path)
@@ -2210,7 +2220,7 @@ class TestDescribeIfReady:
         self._bind_extract()
 
         with patch("tools.vision.services.describe_output") as describe_mock:
-            services.describe_if_ready(output.job)
+            services.describe_if_ready(output.job, request_timeout=5.0)
 
         describe_mock.assert_not_called()
 
@@ -2223,7 +2233,7 @@ class TestDescribeIfReady:
         self._bind_extract()
 
         with patch("tools.vision.services.describe_output") as describe_mock:
-            services.describe_if_ready(job)
+            services.describe_if_ready(job, request_timeout=5.0)
 
         describe_mock.assert_not_called()
 
@@ -2236,6 +2246,6 @@ class TestDescribeIfReady:
         self._bind_extract()
 
         with patch("tools.vision.services.describe_output") as describe_mock:
-            services.describe_if_ready(output.job)
+            services.describe_if_ready(output.job, request_timeout=5.0)
 
         describe_mock.assert_not_called()

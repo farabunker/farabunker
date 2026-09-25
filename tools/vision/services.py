@@ -25,13 +25,11 @@ from django.db.models import Q
 from django.urls import reverse
 from django.utils import timezone
 
-from llama_index.core.llms import ChatMessage, ImageBlock, MessageRole, TextBlock
-
-from models.contracts import bindings
+from models.contracts import bindings, gateway
 from models.contracts.bindings import ResolvedModel, config_family
 from models.contracts.engines import get_engine
 from models.contracts.engines.base import GenerationRejected
-from models.contracts.gateway import get_image_generator, get_image_generator_for, get_llm
+from models.contracts.gateway import get_image_generator, get_image_generator_for
 from models.contracts.operations import (
     GenerationRequest,
     Operation,
@@ -1370,7 +1368,7 @@ _DESCRIBE_LABEL = "The platform's own description of the generated image (not th
 DESCRIBE_OUTPUT_FAILURE_SENTENCE = "The generated image could not be described."
 
 
-def describe_output(job: GenerationJob) -> None:
+def describe_output(job: GenerationJob, *, request_timeout: float) -> None:
     """Best-effort: describe `job`'s FIRST output through the extraction
     role, and store the result on `job.description`. Called by `tools.
     vision.jobs.run_generate` (the queued job kind's own handler) once a
@@ -1388,27 +1386,37 @@ def describe_output(job: GenerationJob) -> None:
     operator can see WHY a row carries no description, without that
     reason ever reaching a caller as an exception.
 
-    ONE call, ONE image, the SAME shape `tools.rag.extract._ask_vision`
-    already keeps for its column's equivalent seam (imitated here, never
-    imported -- tools/vision may not import tools/rag): resolve the
-    extraction role fresh (`models.contracts.gateway.get_llm`, never a
-    cached/shared LLM -- this call is rare, at most once per
-    generation, so there is no per-page cost to amortize the way
-    `tools.rag.media`'s per-document loop amortizes its own resolve), one
-    `ChatMessage` carrying the instruction block before the image block,
-    and the model's answer stored verbatim (stripped), never rewritten.
+    `request_timeout` IS A REQUIRED PARAMETER, DELIBERATELY -- fix round
+    item 3: a bare, hardcoded seconds-value here would be exactly the
+    competing-inner-timeout pattern the one-response-timeout work
+    eliminated, only smaller. Every caller must choose one honestly:
+    `tools.vision.tools.run_generate` (the chat tool) derives it from
+    what remains of the TURN's own budget, because the description is
+    the last thing that turn does and a call that cannot finish inside
+    it has no reader left to see it; `tools.vision.jobs.run_generate`
+    (the queued job kind, no turn budget to read) passes its own bounded
+    module constant instead -- see each caller's own comment for its
+    number and why. On a slow describer, the visible result is a
+    generation that succeeds and a description that does not arrive in
+    time, with the honest failure sentence below explaining why -- a
+    deliberately chosen degradation, not an accident.
+
+    ONE call, ONE image, through the shared gateway seam
+    (`models.contracts.gateway.describe_image`, fix round item 5) that
+    now holds this mechanism for both `tools/rag` and `tools/vision` --
+    this column supplies its OWN prompt (`DESCRIBE_OUTPUT_PROMPT`,
+    judging-purposed) and the extraction role; the mechanism itself
+    (message shape, verbatim answer) lives in ONE place rather than
+    being hand-built per column.
     """
     output = job.outputs.first()
     if output is None:
         return
     try:
-        llm = get_llm(RAG_EXTRACT_ROLE)
-        message = ChatMessage(
-            role=MessageRole.USER,
-            blocks=[TextBlock(text=DESCRIBE_OUTPUT_PROMPT), ImageBlock(path=Path(output.path))],
+        text = gateway.describe_image(
+            RAG_EXTRACT_ROLE, output.path, DESCRIBE_OUTPUT_PROMPT,
+            request_timeout=request_timeout,
         )
-        response = llm.chat([message])
-        text = str(response.message.content or "").strip()
     except Exception:  # noqa: BLE001 -- non-fatal by construction, see docstring
         logger.warning(
             "vision.generate: could not describe output %s of job %s", output.id, job.id,
@@ -1420,7 +1428,7 @@ def describe_output(job: GenerationJob) -> None:
     job.save(update_fields=["description"])
 
 
-def describe_if_ready(job: GenerationJob) -> None:
+def describe_if_ready(job: GenerationJob, *, request_timeout: float) -> None:
     """The ONE gate both `describe_output` callers share -- `tools.vision.
     jobs.run_generate` (the queued job kind's own handler) and `tools.
     vision.tools.run_generate` (the chat tool's own synchronous submit/
@@ -1437,6 +1445,11 @@ def describe_if_ready(job: GenerationJob) -> None:
     already applies to `vision.generate` itself. This is what keeps the
     whole step a true no-op on any box that has not bound the role,
     whichever caller reached this function.
+
+    `request_timeout` is simply threaded through to `describe_output` --
+    see that function's own docstring (fix round item 3) for why it is a
+    required parameter here too, never a default: this gate must not
+    quietly pick a number on either caller's behalf.
     """
     if not (job.is_terminal and job.status == GenerationJob.Status.DONE and job.outputs.exists()):
         return
@@ -1444,7 +1457,7 @@ def describe_if_ready(job: GenerationJob) -> None:
         bindings.resolve(RAG_EXTRACT_ROLE)
     except ValueError:
         return
-    describe_output(job)
+    describe_output(job, request_timeout=request_timeout)
 
 
 def wait_for(

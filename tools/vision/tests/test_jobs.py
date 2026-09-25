@@ -170,11 +170,14 @@ class TestPlanGenerate:
         assert extract_ref.model_id == "describer.gguf"
         # Same provenance contract as the image ref: never resolved here.
         assert extract_ref.footprint_bytes is None
-        # The handler drives BOTH models itself, sequentially, as part of
-        # this one job -- not a tool that may or may not call out
-        # (`plan_generate`'s own docstring). `synchronous` therefore stays
-        # at its default (`True`) for both, unset here.
-        assert extract_ref.synchronous is True
+        # Fix round item 4: declared `False` -- the barrier must not pay
+        # an unconditional wait at this endpoint for a conditional call
+        # that may never run (a failed or output-less generation never
+        # reaches `describe_if_ready` at all). Protection, sweeping and
+        # budget accounting are all unaffected by the flag -- see
+        # `plan_generate`'s own docstring for the full decision.
+        assert extract_ref.synchronous is False
+        assert model_refs[0].synchronous is True  # vision.generate: unchanged
 
 
 # --- run_generate: payload-referenced file inputs ------------------------
@@ -657,7 +660,11 @@ class TestRunGenerateDescribesItsOutput:
             )
 
         job = GenerationJob.objects.get(pk=result["job_id"])
-        describe_mock.assert_called_once_with(job)
+        # `request_timeout` (fix round item 3): this caller's own bounded
+        # module constant, never a bare number threaded blind.
+        describe_mock.assert_called_once_with(
+            job, request_timeout=jobs.DESCRIBE_REQUEST_TIMEOUT_SECONDS
+        )
 
     def test_a_failed_job_never_describes(self, tmp_path):
         """Requirement 4: never for a failed, refused, or cancelled job."""

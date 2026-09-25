@@ -793,7 +793,23 @@ def run_generate(args: dict, ctx: ToolContext) -> ToolResult:
     # tool is granted (tolerantly, and `synchronous=False`, exactly like
     # the image role itself), so this call is never reaching for a model
     # the turn's own admission snapshot did not know about.
-    services.describe_if_ready(job)
+    #
+    # THE TIMEOUT (fix round item 3, steward-preferred shape): derived
+    # from what is LEFT of the TURN's own budget, exactly like `timeout`
+    # above -- never a bare constant. The description is the LAST thing
+    # this tool call does before returning; a describing call that could
+    # not finish inside the turn's own remaining time has no reader left
+    # to see its answer, whatever it eventually says. `max(1.0, ...)`
+    # matches `timeout`'s own floor: still worth one honest attempt even
+    # this late, since `describe_output` is non-fatal either way. On a
+    # slow describer this means the generation still succeeds and the
+    # description simply does not arrive in time -- a deliberately
+    # chosen degradation (the honest failure sentence explains it if the
+    # call itself fails; a hard deadline miss degrades the same way any
+    # other in-turn client's timeout already does).
+    services.describe_if_ready(
+        job, request_timeout=max(1.0, ctx.budget.deadline_monotonic - time.monotonic())
+    )
 
     payload = services.job_json(job)
     artifacts = tuple(f"output:{output['id']}" for output in payload.get("outputs", ()))

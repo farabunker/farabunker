@@ -91,16 +91,17 @@ def plan_turn(payload: dict) -> tuple[list[ModelRef], bool]:
     A FOURTH, NARROWER TOLERANT ADDITION (vision-describes-its-own-output
     task, ruling 3): when `vision.generate`'s own ROLE (`models.
     contracts.roles.VISION_GENERATE_ROLE` -- the same string the tool's
-    `ToolSpec.roles` declares, so its presence in the walked role set
-    below IS "the image tool is granted") turns up in the walk, `rag.
-    extract` is declared TOO, resolved tolerantly (unbound -> declare
-    nothing, exactly the drop every OTHER role above already gets) and
-    `synchronous=False` -- the SAME flag `vision.generate` itself
-    carries, and for the identical reason: this handler never drives
-    either model in-process itself, a TOOL (`tools.vision.tools.
-    run_generate`) does, on its own path, so the barrier must not wait
-    for either endpoint to settle before a turn that may not even call
-    the tool this run.
+    `ToolSpec.roles` declares) is among the RESOLVED roles below (fix
+    round finding 2 -- the resolved set, not merely the granted one; see
+    the code's own comment at that check for why the distinction is
+    load-bearing), `rag.extract` is declared TOO, resolved tolerantly
+    (unbound -> declare nothing, exactly the drop every OTHER role above
+    already gets) and `synchronous=False` -- the SAME flag `vision.
+    generate` itself carries, and for the identical reason: this handler
+    never drives either model in-process itself, a TOOL (`tools.vision.
+    tools.run_generate`) does, on its own path, so the barrier must not
+    wait for either endpoint to settle before a turn that may not even
+    call the tool this run.
 
     DELIBERATELY NOT ADDED TO THE TOOL'S OWN `ToolSpec.roles` -- that was
     investigated and rejected: `_roles_resolve` (`agents.runtime.loop`)
@@ -188,13 +189,21 @@ def plan_turn(payload: dict) -> tuple[list[ModelRef], bool]:
 
     # vision-describes-its-own-output task, ruling 3 -- see this
     # function's own docstring for the full reasoning. `VISION_GENERATE_
-    # ROLE in tool_roles` IS "the image-generation tool is granted (and
-    # resolves)": that role enters `tool_roles` from nowhere but that
-    # tool's own `ToolSpec.roles`. Conditional and tolerant, exactly like
+    # ROLE in seen_roles`, NOT `tool_roles` -- fix round finding 2.
+    # `tool_roles` is the GRANTED set (every role a granted tool
+    # declares, whether or not it resolves); `seen_roles` is the
+    # RESOLVED set, seeded with the chat role above and added to ONLY on
+    # a successful `resolve()` in the loop just above. Checking the
+    # granted set would over-claim: an UNBOUND image role means
+    # `_roles_resolve` (`agents.runtime.loop`) drops the image tool from
+    # this turn's tool list entirely, so a turn that can never call that
+    # tool would still have reserved a SECOND model for a description
+    # that can never happen -- the mirror image of the under-claim this
+    # whole task exists to fix. Conditional and tolerant, exactly like
     # every role in the loop above -- an unbound `rag.extract` declares
     # nothing here, never an error, and never touches whether the image
     # tool itself is offered.
-    if VISION_GENERATE_ROLE in tool_roles and RAG_EXTRACT_ROLE not in seen_roles:
+    if VISION_GENERATE_ROLE in seen_roles and RAG_EXTRACT_ROLE not in seen_roles:
         try:
             refs.append(_ref(RAG_EXTRACT_ROLE, resolve(RAG_EXTRACT_ROLE), synchronous=False))
         except Exception:  # noqa: BLE001 -- tolerant drop, see docstring

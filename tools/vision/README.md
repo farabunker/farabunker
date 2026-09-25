@@ -662,6 +662,41 @@ separate change.
   without a genuinely per-model free to release against. See "Tools"
   below for how a
   caller reads the field back.
+  **`rag.extract`'s own `ModelRef` is `synchronous=False`** (fix round
+  item 4) — deliberately, and for a narrower reason than "the other
+  planner already does it": the flag only ever drops the BARRIER's
+  pre-claim wait at that endpoint, never protection, sweeping or budget
+  accounting (`models.contracts.jobkinds.ModelRef.synchronous`'s own
+  docstring). Paying that wait unconditionally, on EVERY claimed job,
+  for a describing call that only sometimes runs (never on a failed or
+  output-less generation) would be a cost with no matching benefit on
+  every job that never reaches it. The accepted trade: a possibly-slow
+  FIRST describing call at a freshly-touched endpoint (never a
+  correctness problem — releasing MOVES weights rather than freeing
+  them, per this task's own memory diagnosis), bounded by
+  `describe_output`'s own `request_timeout` rather than an unbounded
+  stall, in exchange for never charging an unconditional wait for a
+  conditional call. **`request_timeout` is a required parameter of the
+  describing call, supplied by each caller honestly** (fix round item
+  3) — never a bare constant living inside it: the QUEUED job kind
+  passes its own bounded module constant (`jobs.
+  DESCRIBE_REQUEST_TIMEOUT_SECONDS`, 60s — explicitly well below the
+  platform's own default agent/chat response timeout, 1800s, since no
+  turn budget exists to derive one from here), and the CHAT tool
+  derives its own from what remains of the turn's own budget (the
+  description is the last thing that tool call does, so a call that
+  cannot finish in time has no reader left regardless). **The actual
+  model call is the shared gateway mechanism**
+  (`models.contracts.gateway.describe_image`, fix round item 5) — the
+  same "ask a vision-capable model about an image file" shape `tools/
+  rag`'s own extraction path hand-built independently, now held in ONE
+  place both columns may call. The PROMPT stays this column's own
+  (`DESCRIBE_OUTPUT_PROMPT`) and is never shared with rag's retrieval
+  caption prompt — a reviewer ruled those two purposes must not
+  converge — the gateway function takes the prompt as a parameter and
+  has no opinion on it. `tools/rag` does not call this seam yet;
+  converging its own `_ask_vision` onto it is a named follow-up, not
+  part of this task.
 
 ## Gallery select mode and bulk delete
 

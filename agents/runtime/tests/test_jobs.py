@@ -116,14 +116,20 @@ class TestPlanTurn:
         self, bound_chat_role
     ):
         """vision-describes-its-own-output task, ruling 3: the image tool
-        is granted, but `rag.extract` is not bound anywhere on this box
-        -- the fourth, narrower addition must be a true no-op, the same
-        tolerant drop every other role in this planner already gets."""
+        is granted AND RESOLVES, but `rag.extract` is not bound anywhere
+        on this box -- the fourth, narrower addition must be a true
+        no-op, the same tolerant drop every other role in this planner
+        already gets. The image role itself must be BOUND here (fix
+        round finding 1) -- the gate now reads the RESOLVED set (finding
+        2), not merely the granted one, so an unresolved image role
+        would drop out of the loop above and this test would prove
+        nothing about the new condition at all."""
         from models.contracts.roles import VISION_GENERATE_ROLE
 
         register_tool(ToolSpec(key="vision.generate", label="S", description="d",
                                runner="agents.runtime.tests._helpers.runner_ok",
                                roles=(VISION_GENERATE_ROLE,)))
+        bind_chat_role(VISION_GENERATE_ROLE, name="test-image", capability="image-generation")
         agent = make_agent(tool_keys=["vision.generate"])
         turn = _turn_for(agent)
 
@@ -134,11 +140,16 @@ class TestPlanTurn:
     def test_the_image_tool_granted_with_extract_bound_declares_it_non_synchronous(
         self, bound_chat_role
     ):
+        """The image role must ALSO be bound here (fix round finding 1),
+        for the same reason as its sibling test above: the gate reads
+        the RESOLVED role set, so an unbound image role would drop the
+        image ref itself and never reach the condition under test."""
         from models.contracts.roles import RAG_EXTRACT_ROLE, VISION_GENERATE_ROLE
 
         register_tool(ToolSpec(key="vision.generate", label="S", description="d",
                                runner="agents.runtime.tests._helpers.runner_ok",
                                roles=(VISION_GENERATE_ROLE,)))
+        bind_chat_role(VISION_GENERATE_ROLE, name="test-image", capability="image-generation")
         bind_chat_role(RAG_EXTRACT_ROLE, name="test-extract", capability="vision")
         agent = make_agent(tool_keys=["vision.generate"])
         turn = _turn_for(agent)
@@ -156,6 +167,30 @@ class TestPlanTurn:
         assert by_role[RAG_EXTRACT_ROLE] is False
         assert by_role[VISION_GENERATE_ROLE] is False
         assert exclusive is True
+
+    def test_the_image_tool_granted_but_UNRESOLVED_never_declares_extract(
+        self, bound_chat_role
+    ):
+        """Fix round finding 2, the regression this test exists to pin:
+        the image tool is granted but its OWN role does not resolve --
+        `_roles_resolve` (`agents.runtime.loop`) will drop the image
+        tool from this turn's offered tools entirely, so declaring
+        `rag.extract` here too would reserve a second model for a
+        description that can never happen. `rag.extract` IS bound (the
+        adversarial case): only checking the GRANTED role set, not the
+        RESOLVED one, would have declared it anyway."""
+        from models.contracts.roles import RAG_EXTRACT_ROLE, VISION_GENERATE_ROLE
+
+        register_tool(ToolSpec(key="vision.generate", label="S", description="d",
+                               runner="agents.runtime.tests._helpers.runner_ok",
+                               roles=(VISION_GENERATE_ROLE,)))
+        bind_chat_role(RAG_EXTRACT_ROLE, name="test-extract", capability="vision")
+        agent = make_agent(tool_keys=["vision.generate"])
+        turn = _turn_for(agent)
+
+        refs, _ = plan_turn(_payload(turn))
+
+        assert [r.role for r in refs] == [CHAT_CONVERSE_ROLE]
 
     def test_the_image_tool_NOT_granted_never_declares_extract_even_if_bound(
         self, bound_chat_role

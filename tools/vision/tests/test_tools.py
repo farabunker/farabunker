@@ -573,7 +573,11 @@ class TestVisionGenerateRunner:
         `tools.vision.jobs.run_generate` (the queued job kind) calls --
         one implementation, two callers -- with the job `wait_for` gave
         back, and STRICTLY AFTER `wait_for` returns, BEFORE `job_json` is
-        read (so a description it just wrote is what `job_json` sees)."""
+        read (so a description it just wrote is what `job_json` sees).
+        Also proves `request_timeout` (fix round item 3) is a positive
+        number DERIVED from the turn's own remaining budget, never a
+        bare constant -- the exact value depends on wall-clock timing
+        this test does not pin, only its shape and sign."""
         from tools.vision.tools import run_generate
 
         order = []
@@ -590,7 +594,7 @@ class TestVisionGenerateRunner:
              ), \
              patch(
                  "tools.vision.services.describe_if_ready",
-                 side_effect=lambda j: order.append("describe_if_ready"),
+                 side_effect=lambda j, **k: order.append("describe_if_ready"),
              ) as describe_mock, \
              patch(
                  "tools.vision.services.job_json",
@@ -598,7 +602,8 @@ class TestVisionGenerateRunner:
              ):
             run_generate({"operation": "txt2img", "prompt": "x"}, make_tool_ctx())
 
-        describe_mock.assert_called_once_with(job)
+        assert describe_mock.call_args.args == (job,)
+        assert describe_mock.call_args.kwargs["request_timeout"] > 0
         assert order == ["wait_for", "describe_if_ready", "job_json"]
 
     def test_a_stored_description_is_appended_verbatim(self):

@@ -141,6 +141,28 @@ logger = logging.getLogger(__name__)
 # backstop for a genuinely wedged engine.
 GENERATE_WAIT_TIMEOUT_SECONDS = 4 * 3600.0
 
+# The describing call's own `request_timeout` for THIS caller (fix round
+# item 3) -- a MODULE CONSTANT here, deliberately, and NOT derived
+# dynamically: the queued `vision.generate` job kind runs with no turn
+# budget to read at all (`tools.vision.tools.run_generate`, the chat
+# tool, derives its own from `ctx.budget.deadline_monotonic` instead --
+# see that function's own comment; two honest budgets, one shared
+# `describe_output(job, request_timeout=...)` signature).
+#
+# ITS STATED RELATIONSHIP, so the next reader sees a decision rather
+# than a coincidence: explicitly bounded well below the platform's own
+# default response timeout for an agent/chat turn
+# (`JobSettings.response_timeout_seconds`, default 1800s/30 min,
+# `docs/OPERATIONS.md`) -- not read dynamically (`tools/vision` may not
+# import `models.queue.models.JobSettings`; the module docstring's own
+# import-boundary list has no seam for it), but 1/30th of that default
+# is itself the reasoning: a forty-word judging sentence about one
+# already-generated image should take single-digit seconds on a healthy
+# box, and even a badly stalled one has no business approaching even a
+# small fraction of what this platform already treats as "how long one
+# interactive-adjacent model call may reasonably run".
+DESCRIBE_REQUEST_TIMEOUT_SECONDS = 60.0
+
 # This module's job-kind key, named once: `apps.py` registers it, the page
 # enqueues under it, and the queued card reads its label from the registry.
 JOB_KIND = "vision.generate"
@@ -209,33 +231,59 @@ def plan_generate(payload: dict) -> tuple[list[ModelRef], bool]:
       fallback for the identical reason (that function's own docstring,
       "W1 DECISION D4").
 
-    Both refs are declared `synchronous=True` (the field's own default,
-    left unset here) rather than `False`: `run_generate`'s handler is the
-    thing that drives BOTH models itself, in-process, as part of doing
-    this one job's work -- unconditionally for `vision.generate`,
-    conditionally (on a successful, output-bearing generation) for
-    `rag.extract` -- the same "this job's own handler is the thing that
-    calls it" test `tools.rag.jobs.plan_ingest` applies to ITS multi-role
-    branches (extract+embed, transcribe+embed), never the
-    `synchronous=False` `agents.runtime.jobs.plan_turn` gives a role a
-    TOOL may or may not use without this job's own handler ever driving
-    it. Declaring `rag.extract` here does NOT ask the scheduler to hold
-    both models resident at once, and it cannot ask that: `ModelRef` has
-    no notion of ordering or phase, only membership in the job's declared
-    set (`models/contracts/jobkinds.py::ModelRef.synchronous`'s own
-    docstring -- it "changes neither protection, nor the swept endpoint
-    set, nor the budget arithmetic", only the barrier's wait decision).
-    `run_generate` runs the two calls SEQUENTIALLY -- generation fully
-    finished, then (and only then) the describe call -- but does NOT
-    release the image model first (ruling 1: ComfyUI's `/free` has no
-    per-model form, so releasing would cost the NEXT generation a cold
-    load far larger than the problem it would solve; see that function's
-    own comment). Both models may therefore be resident at once for the
-    duration of the describe call -- an accepted cost, not an oversight
-    -- which is exactly why declaring `rag.extract` here still matters:
-    it tells the queue honestly that this job's memory footprint can
-    include both, rather than letting an unmeasured second model go
-    unprotected and uncounted.
+    `vision.generate` keeps `synchronous=True` (the field's own default):
+    this job's whole purpose is that model, unconditionally, from the
+    moment it is claimed.
+
+    `rag.extract` IS DECLARED `synchronous=False`, A DELIBERATE DECISION
+    (fix round item 4 -- an earlier version of this docstring left it at
+    the default and called that a decision; it was not one, and the
+    turn planner's own `agents.runtime.jobs.plan_turn` was independently
+    declaring the SAME role `synchronous=False` for an unrelated reason,
+    which is two planners disagreeing on one role's flag by accident
+    rather than by choice. Fixed here, not left to read as intentional
+    drift.) The flag's own contract is narrow: it "changes neither
+    protection, nor the swept endpoint set, nor the budget arithmetic",
+    only the barrier's WAIT decision (`models/contracts/jobkinds.py::
+    ModelRef.synchronous`'s own docstring). So `rag.extract` stays fully
+    protected from eviction and fully counted in this job's memory
+    footprint either way -- what `synchronous=False` drops is ONLY the
+    barrier's pre-flight wait at that endpoint before the job is even
+    claimed. That asymmetry is exactly why `False` is right here: the
+    BENEFIT of waiting accrues only on the generations that actually go
+    on to describe (a `DONE` job with an output and a resolved role,
+    checked well after claim -- `services.describe_if_ready`), while the
+    COST of an unconditional wait would fall on every claimed job,
+    including the failed and output-less ones where the describing call
+    never runs at all.
+
+    THE PRICE OF THIS CHOICE, STATED HONESTLY: with the wait dropped, a
+    describing call can begin while a PRIOR release at that same
+    endpoint has not yet settled -- precisely the race the wait exists
+    to prevent. Accepted anyway, because of what the platform's own
+    memory diagnosis already established (ruling 1's own finding):
+    releasing MOVES weights rather than freeing them, and this runtime
+    reclaims memory lazily regardless, with the extraction engine
+    managing its own residency independently of ComfyUI's. So the
+    realistic failure mode is a possibly-slow FIRST describing call at a
+    freshly-touched endpoint, never a correctness problem -- and
+    `describe_output`'s own bounded `request_timeout` (fix round item 3)
+    is what turns "possibly slow" into "bounded, and non-fatal either
+    way" rather than an unbounded stall. The decision, stated once: we
+    accept a possibly-slow description in exchange for never charging an
+    UNCONDITIONAL wait for a CONDITIONAL call.
+
+    `run_generate` still runs the two calls SEQUENTIALLY regardless of
+    this flag -- generation fully finished, then (and only then) the
+    describe call -- and does NOT release the image model first (ruling
+    1: ComfyUI's `/free` has no per-model form, so releasing would cost
+    the NEXT generation a cold load far larger than the problem it would
+    solve; see that function's own comment). Both models may therefore
+    be resident at once for the duration of the describe call -- an
+    accepted cost, not an oversight -- which is exactly why declaring
+    `rag.extract` here still matters at all: it tells the queue honestly
+    that this job's memory footprint can include both, rather than
+    letting an unmeasured second model go unprotected and uncounted.
 
     `footprint_bytes` stays `None` on every ref, per `models/queue/
     scheduler.py`'s provenance contract: claim-time code fills it in
@@ -269,6 +317,10 @@ def plan_generate(payload: dict) -> tuple[list[ModelRef], bool]:
                 engine=extract_resolved.engine,
                 endpoint=extract_resolved.endpoint,
                 model_id=extract_resolved.model_id,
+                # `synchronous=False` -- fix round item 4; see this
+                # function's own docstring for the full decision, not
+                # merely the flag.
+                synchronous=False,
             )
         )
     return model_refs, True
@@ -477,7 +529,7 @@ def run_generate(payload: dict, models: list[ModelRef], ctx: JobContext) -> dict
     # not add it back without a per-model free (a different engine, or a
     # future ComfyUI capability) to release against -- see this task's
     # own report for the full finding.
-    services.describe_if_ready(job)
+    services.describe_if_ready(job, request_timeout=DESCRIBE_REQUEST_TIMEOUT_SECONDS)
 
     # One owner for what a job looks like as data: the outputs' serving
     # URLs are `services.job_json`'s, not a second copy of `reverse()`
