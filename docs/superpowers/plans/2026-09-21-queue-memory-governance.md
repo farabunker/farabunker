@@ -15,6 +15,56 @@ Ordering (Q3) rides on top: a new pure `affinity_order` helper inside `models/qu
 
 **Spec:** `docs/superpowers/specs/2026-09-21-queue-memory-governance-design.md` — **revision 5, FINAL**. Its §10 decisions are all owner-ruled ("accept all recommendations", closing section); its §13 review record (rounds 1–3 plus the 2026-09-21 steward amendment) is adjudicated history. **Do not relitigate any of it.** Where this plan makes a call the spec left to the author, it says so in `## Self-review` under "Resolved ambiguities".
 
+---
+
+## Amendment (2026-09-25) — the engine diagnosis, and what it does and does not change here
+
+**Status first, because it decides how the rest of this document is read: every task below has
+been executed and merged.** The nineteen tasks landed as their own commits, followed by a
+review fix round, a consolidation-audit tidy-up and two post-merge fixes. This plan is history
+(`docs/superpowers/` is the plan and spec archive, per `AGENTS.md`), not a work list, and
+nothing in this amendment asks anyone to start a task in it.
+
+**What arrived after it.** A read-only diagnostic (2026-09-25) explained *why* the memory
+tolerances this track consumed exist — tolerances the spec and this plan carried without being
+able to justify. Its findings are folded into the spec's own closing amendment, **"Engine
+diagnosis amendment (2026-09-25)"**, which is the authority; this section records only what it
+changes for a reader of *this* document.
+
+**What it changes here — three things and no more:**
+
+1. **Task 2's `FOOTPRINT_DIP_WARNING_RATIO` comment states one thing that is now known false**
+   — that a dip logged at INFO is "still visible". Corrected in place, in that task.
+2. **Task 11's two declarations are confirmed as structural facts**, not as a steward's
+   current reading that a future adapter release might revise. Noted in that task.
+3. **Two constants are now premised on a number at MEDIUM confidence** and are marked
+   **EXPERIMENT-BLOCKED** below.
+
+**What it does NOT change.** The one substantive correction the diagnosis produces — the
+unload settle threshold, which must skip the poll entirely where an endpoint has no remembered
+footprint — is **adapter work**, in the column this plan's own Global Constraints and the
+spec's §12 put out of scope. No task here reuses that constant; the reuse is in the engine
+adapter, which this branch touched only through Task 11's two pre-cleared declarations. It
+therefore needs its own track and is named in the spec's §12, not added as a task here.
+
+> **EXPERIMENT-BLOCKED — do not act on these until the confirming experiment has run.**
+> The experiment is mutating, needs the owner's word, an announced window, a restarted engine
+> and a quiet box, and is specified in the diagnostic report.
+>
+> - **The unload timeout's value.** It is at MEDIUM confidence and **cannot be determined
+>   read-only**; no number may be invented for it. Two constants in Task 12 commit 2 are sized
+>   *against* it — `BARRIER_HOLDOFF_SECONDS` ("comfortably longer than one unload timeout") and,
+>   through it, `MIN_BARRIER_REFUSAL_SPAN_SECONDS` — so if that timeout moves, both must be
+>   re-derived in the same change, together with the per-tick unload budget's arithmetic, which
+>   prices one call at the same figure. Both sites carry this marker.
+> - **Any budget rule sized against an eviction's transient peak.** Mechanism B predicts an
+>   unload transiently needs up to the model's size *again*; the magnitude is unmeasured and is
+>   the experiment's question.
+>
+> Everything else in the diagnosis is read-only-verified and may be acted on.
+
+---
+
 **Sequencing (load-bearing, from spec §7):** registry first, then **liveness before the cross-engine eviction widening**. The dependency is not stylistic: the phase the wide sweep lengthens — `_residency_snapshot` — contains no heartbeat call at all, and each `list_installed` can cost a full discovery timeout. Tasks 5–9 land the heartbeat thread and its friends; Task 12 widens the sweep. Never reorder those two blocks.
 
 **Stewardship (before merge):**
@@ -554,6 +604,16 @@ logger = logging.getLogger(__name__)
 # this rule exists to refuse (spec §3.2).
 FOOTPRINT_DIP_WARNING_RATIO = 0.75
 ```
+
+> **Correction, 2026-09-25 (engine diagnosis amendment).** The comment above — shipped as
+> written — says a smaller dip "is recorded at INFO, so the refusal is still visible". The
+> **ratio is confirmed correct**: it fired on both real incidents (0.57 and 0.62), and both
+> WARNING lines were verified visible at default logging. The "still visible" half is false:
+> **INFO is invisible at this platform's default logging configuration**, so a dip between the
+> ratio and 1.0 is silent, and on a large model that silent band is gigabytes. Raising the
+> level on the **absolute** dip as well as the ratio is the named improvement; it is not taken
+> here, because this track is merged and the change belongs to its own commit. See the spec's
+> 2026-09-25 amendment, §B.
 
 Replace `record_measured_footprint`'s body with a thin wrapper over one shared writer, and add its rung-3 twin:
 
@@ -2407,6 +2467,15 @@ admission-side filter costs no scan."
 
 **The text adapter's equivalent lines are that steward's call and are NOT written here.** Factually they are `unload_scope = "model"` and `residency_authority = "endpoint"`; the queue's behaviour is consistent with or without them.
 
+> **Confirmed, 2026-09-25 (engine diagnosis amendment).** Both of the image adapter's values
+> are **structural facts of that engine**, not a steward's current reading that a future
+> release might revise. `unload_scope = "endpoint"` because the free call has no per-model
+> path at all: freeing one model means freeing every model at that endpoint.
+> `residency_authority = "memo"` because **no route this engine build serves exposes the
+> loaded-model list** — there is no residency signal over HTTP for the adapter to prefer, so
+> the memo cannot be replaced or retired without a change to the engine itself. Removing it
+> would make every footprint unknown for ever and run every job alone.
+
 - [ ] **Step 1: Write the failing tests**
 
 ```python
@@ -3341,6 +3410,19 @@ MAX_BARRIER_REFUSALS = 3
 # bounds are met, so "three attempts" can never mean "a second and a half".
 MIN_BARRIER_REFUSAL_SPAN_SECONDS = 300
 ```
+
+> **EXPERIMENT-BLOCKED, 2026-09-25 (engine diagnosis amendment).** Both constants above are
+> sized against the image engine's unload timeout — `BARRIER_HOLDOFF_SECONDS` explicitly
+> ("comfortably longer than one unload timeout (30s)"), and the span through it. That timeout
+> is now at **MEDIUM confidence**: the same eviction was observed settling in ~3.5 s on an
+> idle box and ~21.0 s on a loaded one, and the mechanism predicts settle time scales with
+> model size *and* with memory pressure, so a large checkpoint on a loaded box has little
+> headroom inside it. **The right value cannot be determined read-only** and no number may be
+> invented for it; determining it needs one timed eviction of the largest checkpoint at a
+> known pressure level, which is a mutating probe. **Do not change the timeout, and do not
+> re-derive either constant here, until that experiment has run** — and when it does, the
+> per-tick unload budget's arithmetic, which prices one call at the same figure, must be
+> revisited in the same change.
 
 `_evict_to_match_plan`'s docstring gains the **fifth ordering rule** paragraph (the protection check runs before the residency snapshot, and why that ordering is about cost rather than taste), and the function now returns the refused set instead of `set()`.
 
@@ -5088,7 +5170,7 @@ Task 12 gives the full docstring and rules for every new method plus the **end-s
 - **Migration 2 is authored whole in Task 10.** The spec has `not_before` arriving in its task 3 and the other four columns in tasks 4 and 5, while insisting on exactly two migrations. Django migrations are files, so honouring both means creating all five columns at once, before the tasks that consume them.
 - **Detected memory uses `os.sysconf` behind a module-level `_total_memory_bytes()`, not `psutil`.** `psutil` is not in `requirements.txt` and the offline-by-default rule makes a dependency for one prefill a poor trade; the helper exists so a test can replace this module's answer without patching the stdlib object the whole process shares.
 - **`FOOTPRINT_DIP_WARNING_RATIO = 0.75` is a log-level threshold only.** The spec asks for "a documented 'obviously broken' ratio" without naming one, and is emphatic that no dip is ever written.
-- **`BARRIER_HOLDOFF_SECONDS = 45`, `MIN_BARRIER_REFUSAL_SPAN_SECONDS = 300`.** The spec fixes `MAX_BARRIER_REFUSALS = 3` and requires the hold-off to be "comfortably longer than one unload timeout" (30 s) and the span to make "three attempts" mean real time.
+- **`BARRIER_HOLDOFF_SECONDS = 45`, `MIN_BARRIER_REFUSAL_SPAN_SECONDS = 300`.** The spec fixes `MAX_BARRIER_REFUSALS = 3` and requires the hold-off to be "comfortably longer than one unload timeout" (30 s) and the span to make "three attempts" mean real time. **EXPERIMENT-BLOCKED (2026-09-25):** the 30 s that both are derived from is at medium confidence and cannot be determined read-only — see Task 12 commit 2's marker.
 - **Pinning uses `>=`, not `==`.** A durable counter and a `max_passovers` an operator could see lowered must not leave an over-aged job unpinned.
 - **Affinity requires a non-empty key set.** "All of its keys are resident" is vacuously true for a job declaring no models, which is already effectively exclusive under rule 2c.
 - **The registry's six stewarded `test_views_*.py` modules are edited only for the four re-pinned disclosure assertions**, all of which live in `test_views_tables_and_picker.py`. Every new registry test goes in `test_footprint_provenance.py`.
