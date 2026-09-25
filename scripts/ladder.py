@@ -123,24 +123,52 @@ def _parse_process_line(line: str) -> tuple[int, int, str, str] | None:
     return pid, ppid, parts[2], parts[3]
 
 
-def _runs_pytest(args: str) -> bool:
-    """True only when the runner is what is actually being executed, not
-    when its name merely appears somewhere in the text -- structural,
-    not a sharper string match. Tokenise the arguments and require either
-    some token whose own BASENAME is exactly "pytest" (direct invocation:
-    ".venv/bin/pytest", a bare "pytest") or the adjacent pair "-m pytest"
-    (module-invocation form). A path, output directory, or database name
-    that merely CONTAINS "pytest" as a substring -- a peer's --outdir, an
-    editor's unrelated tooling, a coincidental name -- has no token whose
-    basename equals it outright, so it can never match however the
-    substring is spelled inside a larger token."""
-    tokens = args.split()
+def _runner_token_index(tokens: list[str]) -> int | None:
+    """Index of the token where the runner is actually being executed, or
+    None -- shared by _runs_pytest and _invocation_label so the count and
+    the progress line's label can never disagree about what they matched.
+
+    Require either some token whose own BASENAME is exactly "pytest"
+    (direct invocation: ".venv/bin/pytest", a bare "pytest") or the
+    adjacent pair "-m pytest" (module-invocation form) -- structural, not
+    a sharper string match, so a path/directory/database name that merely
+    CONTAINS "pytest" as a substring inside a component (a peer's
+    --outdir=/tmp/mypytest_results) has no token whose basename equals it
+    outright and never matches.
+
+    A token containing "=" is skipped before the basename check, because
+    an executed runner token never contains one -- this closes the
+    option-valued route (--outdir=/some/path/pytest) outright, where the
+    option's PATH VALUE, not a substring inside one component, ends at a
+    component named "pytest".
+
+    Two residuals are accepted deliberately here, not closed: a bare
+    POSITIONAL path argument (no "=") whose final component happens to be
+    named "pytest", and a transient invocation that names "pytest" as a
+    bare word without executing it (e.g. a package installer's target).
+    Both are phantoms in the safe direction -- extra waiting, never
+    wrongness -- except at --max-others 0, where waiting past the poll
+    interval reads as starvation, so a long-lived process wedged into
+    either shape would stall a strict run. Closing them for real needs
+    positional-vs-flag-value parsing against the runner's own flag
+    grammar, which is gnarly and not worth building for this; the only
+    thing that would make this a true execution assertion instead of an
+    appearance-at-component-granularity one is exactly that parser, and
+    it stays unbuilt."""
     for i, tok in enumerate(tokens):
+        if "=" in tok:
+            continue
         if os.path.basename(tok) == "pytest":
-            return True
+            return i
         if tok == "-m" and i + 1 < len(tokens) and tokens[i + 1] == "pytest":
-            return True
-    return False
+            return i + 1
+    return None
+
+
+def _runs_pytest(args: str) -> bool:
+    """True only when the runner is what is actually being executed --
+    see _runner_token_index for the rule and its two accepted residuals."""
+    return _runner_token_index(args.split()) is not None
 
 
 def _own_process_tree(lines: list[str], root_pid: int) -> set[int]:
@@ -204,19 +232,15 @@ def count_other_pytest(lines: list[str], exclude_pids: set[int]) -> int:
 
 def _invocation_label(args: str, max_len: int = 60) -> str:
     """A short, recognisable slice of `args` for the progress line: start
-    at the runner token (direct or "-m pytest" form) and run to the end,
-    trimmed to `max_len` chars. Recognisability, not completeness -- this
-    names which suite is running, it does not dump the full command
-    line."""
+    at the runner token (found by the same scan _runs_pytest uses, so the
+    label and the count can never disagree about what they matched) and
+    run to the end, trimmed to `max_len` chars. Recognisability, not
+    completeness -- this names which suite is running, it does not dump
+    the full command line."""
     tokens = args.split()
-    start = 0
-    for i, tok in enumerate(tokens):
-        if os.path.basename(tok) == "pytest":
-            start = i
-            break
-        if tok == "-m" and i + 1 < len(tokens) and tokens[i + 1] == "pytest":
-            start = i + 1
-            break
+    start = _runner_token_index(tokens)
+    if start is None:
+        start = 0
     label = " ".join(tokens[start:])
     if len(label) > max_len:
         label = label[: max_len - 3] + "..."

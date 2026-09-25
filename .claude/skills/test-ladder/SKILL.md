@@ -64,11 +64,16 @@ scripts/ladder.py <worktree> <db_url> <outdir> hotfix
   forms the `-m pytest` pair), and its own pid and process tree are excluded -- never by
   shelling out with the pattern on the command line it then searches (a watcher counting its
   own reflection), and never by matching the word anywhere in the text (a real Python process
-  whose path, `--outdir`, or `--db-name` merely contains it). Every 60s it prints one line
-  naming each match by pid and a trimmed invocation, not just a count --
-  `waiting: N other pytest processes -- <pid>:<label>, ...` -- because a count can't say whose
-  run is holding the machine or how far along it is. Default `1` -- AGENTS.md's "at most two
-  full suites" (this run plus one other); pass `0` for a peer-agreed stricter cap.
+  whose path, `--outdir`, or `--db-name` merely contains it -- any token with "=" is skipped
+  before the basename check, since an executed runner token never has one). Two narrower
+  residuals stay open on purpose (see `_runner_token_index`'s docstring): a bare positional path
+  argument ending in a component named `pytest`, and a transient invocation naming `pytest` as a
+  bare word (a package install) without running it -- both are safe-direction phantoms, not
+  worth a positional-vs-flag-value parser. Every 60s it prints one line naming each match by pid
+  and a trimmed invocation, not just a count -- `waiting: N other pytest processes --
+  <pid>:<label>, ...` -- because a count can't say whose run is holding the machine or how far
+  along it is. Default `1` -- AGENTS.md's "at most two full suites" (this run plus one other);
+  pass `0` for a peer-agreed stricter cap.
 - **Pausing** is `kill -STOP <ladder.py's own pid>` (not its process group).
   Its in-flight pytest subprocess is a separate process and keeps running to
   completion regardless -- the result still lands in that run's `.log` and

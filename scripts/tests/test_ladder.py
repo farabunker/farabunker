@@ -160,3 +160,30 @@ def test_count_other_pytest_ignores_a_real_python_process_whose_path_merely_cont
         "420 1 Python /usr/bin/python3 manage.py test --outdir=/tmp/mypytest_results/run1",
     ]
     assert count_other_pytest(lines, exclude_pids=set()) == 0
+
+
+def test_count_other_pytest_ignores_an_equals_joined_option_whose_value_ends_in_pytest():
+    # A different, sharper phantom than the substring-inside-a-component
+    # case above: here the option's VALUE is a path whose final component
+    # is exactly "pytest" (not a substring inside a larger component), so
+    # the basename check alone would match it -- that's the crack. The
+    # "=" skip closes this specific route: an executed runner token never
+    # contains "=", so any token that does is never the runner itself.
+    lines = [
+        "500 1 Python /usr/bin/python3 manage.py test --outdir=/tmp/results/pytest",
+    ]
+    assert count_other_pytest(lines, exclude_pids=set()) == 0
+
+
+def test_count_other_pytest_counts_a_transient_package_install_naming_the_runner():
+    # Documentation of an accepted residual, not a defect: "pytest" named
+    # as a bare install target has no "=" to skip and its own basename is
+    # exactly "pytest", so it matches like a real invocation would. This
+    # is deliberately left open (see _runner_token_index) -- it is a
+    # phantom in the safe direction and lasts only as long as the
+    # install, so it is not worth positional-vs-flag-value parsing to
+    # close.
+    lines = [
+        "510 1 Python /usr/bin/python3 -m pip install pytest",
+    ]
+    assert count_other_pytest(lines, exclude_pids=set()) == 1
