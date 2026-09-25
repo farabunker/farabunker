@@ -111,6 +111,24 @@ class TestTheSettingsList:
         assert REACH_GIVEN in body
         assert f"user:{member.pk}" in body
 
+    def test_a_blank_owner_shows_the_box_administered_sentence_not_a_bare_colon(
+        self, client
+    ):
+        """The three shipped, box-administered defaults (General
+        assistant, Illustrator, Library) render with blank `owner_kind`/
+        `owner_key` on the live box -- `make_agent()` with no
+        `owner_fields` leaves both blank, the same shape. The OWNER cell
+        used to be `f"{owner_kind}:{owner_key}"` with no guard, so a
+        blank row rendered as a bare `:` -- the live defect this pins."""
+        from agents.chat.views.agents_admin import OWNER_BOX_ADMINISTERED
+
+        with posture(POSTURE_ENTERPRISE):
+            make_agent(slug="blank-owner", name="Blank owner")
+            sign_in(client, make_admin())
+            body = client.get(reverse("settings-agents")).content.decode()
+        assert OWNER_BOX_ADMINISTERED in body
+        assert ">:<" not in body
+
     def test_it_counts_the_entitlements_that_restrict_a_row(self, client):
         """A BARE COUNT, NEVER A NAME -- the same rule `/chat/agents/`'s
         own restriction column follows. Naming one here would be the

@@ -169,14 +169,16 @@ def _tracked_files() -> tuple[str, ...]:
 
 def _walked_documents() -> tuple[str, ...]:
     """Every document this gate walks: all of `docs/**`, the root
-    `README.md`, and every column `README.md`. DERIVED from the git index,
-    not a hand-kept list -- a new ADR or a new column README is covered the
-    day it lands, which a hand-kept list could not promise."""
+    `README.md`, every column `README.md`, and every project skill's
+    `SKILL.md` under `.claude/skills/`. DERIVED from the git index, not a
+    hand-kept list -- a new ADR, a new column README, or a new skill is
+    covered the day it lands, which a hand-kept list could not promise."""
     return tuple(sorted(
         name for name in _tracked_files()
         if name == "README.md"
         or (name.startswith("docs/") and name.endswith(".md"))
         or name.endswith("/README.md")
+        or (name.startswith(".claude/skills/") and name.endswith("SKILL.md"))
     ))
 
 

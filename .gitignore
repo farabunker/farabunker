@@ -71,4 +71,5 @@ tmp/
 # pattern it negates.
 .claude/*
 !.claude/settings.json
+!.claude/skills/
 .superpowers/
