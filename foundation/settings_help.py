@@ -623,7 +623,8 @@ CARDS: tuple[HelpCard, ...] = (
                     "on Identity & security governs future deletions only -- an item already "
                     "here keeps the date it was given. Backups are a separate layer the date "
                     "does not reach: a deleted item can still exist in an earlier backup after "
-                    "that date has passed."
+                    "that date has passed. On the organisation posture there is no Delete "
+                    "permanently control: an item waits for its date."
                 ),
                 effects=(
                     "Restore puts the item back immediately, exactly as it was; nothing about "

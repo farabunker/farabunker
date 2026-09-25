@@ -1265,7 +1265,7 @@ Same commit as the code it describes, per non-negotiable 1.
 | Document | What it gains |
 |---|---|
 | `docs/OPERATIONS.md` | The "Deleted content and your backups" section (§6), and one line in the retention discussion pointing at `manage.py purge_deleted` for an operator who wants a cron rather than relying on prune-on-write |
-| `docs/adr/0019-deletion-and-retention.md` | **The next number** (the record runs to `0018-settings-assistant.md`). The policy decision: delete means delete; one ticket table rather than per-model columns; the retention namespace on the existing cascade registry; the content/audit split; backups as their own layer; the named residue (§10); **and the owner's cost/benefit principle (§3.0) with what it cut — no dry-run mode, no second cliff for tool records, enterprise behaviour deferred while its fields ship** |
+| `docs/adr/0019-deletion-and-retention.md` | **The next number** (the record runs to `0018-settings-assistant.md`). The policy decision: delete means delete; one ticket table rather than per-model columns; the retention namespace on the existing cascade registry; the content/audit split; backups as their own layer; the named residue (§10); **and the owner's cost/benefit principle (§3.0) with what it cut — no dry-run mode, no second cliff for tool records, most of the enterprise behaviour deferred while its fields ship, and the one control pulled forward by the 2026-09-22 ruling** |
 | `docs/EXTENDING.md` | A new recipe, **"Registering a retention handler"**, beside "Adding an entitlement axis": the `RetentionHandler` fields, the two order bands and when to use each, the one-mode `(key: str) -> int` signature (and one line on why it is not two-mode like `EntitlementCascade`), the idempotence obligation, the one-line `AppConfig.ready()` registration, the one test a new handler owes (re-run-after-failure), **and the deletion-coverage gate: a new model that holds user content must be added to `foundation/ops/tests/test_deletion_coverage.py`'s covered list with a handler that reaches it, or to its exemption list with a reason — the test fails until one of the two is done** |
 | `identity/README.md` | The ticket table **and the fact that a ticket exists only while the item is restorable**, the three-field retention policy on `IdentitySettings` with its plain-words labels, **the new non-creating `identity/access.py::queue_retention_days` seam** (what it returns when there is no row, and why it is not `settings_row()`), the orchestration, the Deleted page, and the sentence that identity answers "which keys are deleted", never "which conversations" |
 | `agents/README.md` | `agents/retention.py`, the new artifact-purge slot, and the tool-record scrub's rule — scrubbed inline with the conversation, always |
@@ -1439,12 +1439,14 @@ re-deriving the design:
 
 ## 11. Decisions the author made
 
-Each is a place the brief left a choice, with what was chosen and why. **Two entries are not the
-author's.** Decision 1 is an owner ruling of 2026-09-21 that stands in place of the author's
-first draft, and decision 8 is the owner's cost/benefit ruling of the same date, which cut three
-mechanisms out of this design and added one gate to it — both marked as such. **Decision 5 was
-withdrawn** by that second ruling and is kept, empty of a choice, at its own number. The rest
-are the author's and are open to the same treatment. Nothing is renumbered.
+Each is a place the brief left a choice, with what was chosen and why. **Three entries are not
+the author's.** Decision 1 is an owner ruling of 2026-09-21 that stands in place of the author's
+first draft, decision 8 is the owner's cost/benefit ruling of the same date, which cut three
+mechanisms out of this design and added one gate to it, and decision 9 is the owner's ruling of
+2026-09-22 that pulled one control out of decision 8's own deferral — all marked as such.
+**Decision 5 was withdrawn** by the second of those rulings and is kept, empty of a choice, at
+its own number. The rest are the author's and are open to the same treatment. Nothing is
+renumbered.
 
 1. **The retention policy is CENTRALISED on `IdentitySettings`. `JobSettings` gains no field.**
    *(Owner ruling, 2026-09-21 — **overrides the author's first draft**, which put

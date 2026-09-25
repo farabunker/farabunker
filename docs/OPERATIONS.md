@@ -92,10 +92,10 @@ A deleted conversation's generated images are listed individually on the Deleted
 same date as the conversation itself, and can be restored individually — deleting the chat does
 not leave its pictures sitting in the gallery, unnamed, until a later date nobody was shown.
 
-An operator choosing the organisation posture gets one more guarantee on the date itself: a
-deleted conversation and the images that went with it always wait out their full period there,
-restorable but not destroyable early by anybody — an image deleted straight from the gallery, or
-a document deleted from the library, is not on this page yet and is unaffected, on every posture.
+An operator choosing the organisation posture gets one more guarantee about that date: a
+deleted conversation and the images that went with it always wait it out there, restorable but
+not destroyable early by anybody — an image deleted straight from the gallery, or a document
+deleted from the library, is not on this page yet and is unaffected, on every posture.
 
 **Preview stacks are not a backup layer** and are not covered either. A preview stack is a full
 parallel copy with its own database; deleting something on the live box does not touch it. Tear

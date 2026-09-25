@@ -231,7 +231,8 @@ Three mechanisms were cut:
   One control, and only one, was pulled out of this deferral by a later owner ruling
   (2026-09-22): nobody destroys content early on the organisation posture, for anybody, before
   its date — restore is unchanged. Until the rest is built, the spec, the help text and the
-  Deleted page say so rather than implying a guarantee that is not built.
+  Deleted page say exactly that, and no more, rather than implying a guarantee that is not
+  built.
 
 One thing was added: **the deletion-coverage gate**
 (`foundation/ops/tests/test_deletion_coverage.py`). It walks every model the app registry
@@ -284,11 +285,11 @@ ever configures.
 - **Backups are not, and will not become, a second delete surface.** An operator's retention
   obligation is met by rotating backups on a schedule independent of the deletion cliff, stated
   plainly rather than implied.
-- **The enterprise posture ships fields with no behaviour behind most of them.** A box running
-  that posture today restores exactly as a personal-posture box does, and refuses to purge
-  anything early, for anybody — the one control this delivery builds on those fields. The Hold
-  control and the operator-set cliff floor that would use the rest of them are a named, deferred
-  slice, not a silent gap.
+- **The enterprise posture ships three hold columns with no behaviour behind them.** A box
+  running that posture today restores exactly as a personal-posture box does, and refuses to
+  purge anything early, for anybody — that refusal reads the posture, not those columns. The
+  Hold control and the operator-set cliff floor, which are what would use them, are a named,
+  deferred slice, not a silent gap.
 
 ## See also
 

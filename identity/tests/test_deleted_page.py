@@ -88,9 +88,11 @@ class TestTheDeletedTab:
         response: the settings shell, the sidebar and the assistant
         panel are shared markup this page does not own, and a substring
         assertion over them would fail for a word some other surface
-        introduced. The enterprise BEHAVIOUR is deferred (spec section
-        10.10) and this page must not imply a guarantee that is not
-        built."""
+        introduced. The HOLD control and the operator-set cliff floor
+        are deferred (spec section 10.10) and this page must not imply
+        a guarantee that is not built; the permanent-delete control's
+        absence on the organisation posture is a different rule, pinned
+        by `test_the_control_is_not_rendered_on_that_posture` below."""
         for box in ("open", "personal", "enterprise"):
             with posture(box):
                 user = make_user()
@@ -265,6 +267,7 @@ class TestRestoreAndPurge:
             response = client.post(
                 reverse("identity-deleted-purge", args=[ticket.pk]),
                 follow=True)
+            assert response.redirect_chain[0][1] == 302
             assert DeletionTicket.objects.filter(pk=ticket.pk).exists()
             body = response.content.decode()
             assert copy.purge_refused_line(ticket.purge_on) in body
@@ -279,9 +282,9 @@ class TestRestoreAndPurge:
             sign_in(client, user)
             _ticket_for(user)
             body = client.get(reverse("identity-deleted")).content.decode()
-            main = body.split("<main>")[1].split("</main>")[0]
-            assert copy.ACTION_RESTORE in main
-            assert copy.ACTION_PURGE not in main
+            main = body.split("<main>", 1)[1].split("</main>", 1)[0].lower()
+            assert copy.ACTION_RESTORE.lower() in main
+            assert copy.ACTION_PURGE.lower() not in main
 
     @pytest.mark.parametrize("route",
                              ["identity-deleted-restore", "identity-deleted-purge"])
@@ -496,12 +499,13 @@ class TestChildTicketsInheritTheRefusal:
                 kind=copy.KIND_VISION_JOB, parent=parent)
 
             body = client.get(reverse("identity-deleted")).content.decode()
-            main = body.split("<main>")[1].split("</main>")[0]
-            assert copy.KIND_LABELS[copy.KIND_VISION_JOB] in main
-            assert copy.ACTION_PURGE not in main
+            main = body.split("<main>", 1)[1].split("</main>", 1)[0].lower()
+            assert copy.KIND_LABELS[copy.KIND_VISION_JOB].lower() in main
+            assert copy.ACTION_PURGE.lower() not in main
 
             response = client.post(
                 reverse("identity-deleted-purge", args=[child.pk]),
                 follow=True)
+            assert response.redirect_chain[0][1] == 302
             assert DeletionTicket.objects.filter(pk=child.pk).exists()
             assert copy.purge_refused_line(child.purge_on) in response.content.decode()
