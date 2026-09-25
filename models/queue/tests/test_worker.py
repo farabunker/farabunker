@@ -157,6 +157,7 @@ def _ref(
     role="test.role",
     connection_name="",
     footprint_bytes=None,
+    synchronous=True,
 ) -> dict:
     return {
         "role": role,
@@ -165,6 +166,7 @@ def _ref(
         "model_id": model_id,
         "connection_name": connection_name,
         "footprint_bytes": footprint_bytes,
+        "synchronous": synchronous,
     }
 
 
@@ -286,6 +288,38 @@ class FakeEndpointScopeEngine(FakeEngine):
 
     unload_scope = "endpoint"
     residency_authority = "memo"
+
+
+class FakeWaitAwareEngine(FakeEndpointScopeEngine):
+    """An adapter that ACCEPTS the optional `wait` keyword (2026-09-24)
+    and records what it was passed, alongside the same
+    `unload_calls` surface every other stub here offers.
+
+    `unload_waits[i]` is the `wait` value call `i` arrived with -- the
+    DEFAULT (`True`) when the worker passed none, which is the whole
+    point: "the worker did not ask for a no-wait call" and "the worker
+    asked for a waiting call" must be indistinguishable to an adapter,
+    since that is exactly what an adapter predating the keyword sees."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.unload_waits: list[bool] = []
+
+    def unload(self, endpoint, model_id, *, wait: bool = True):
+        self.unload_waits.append(wait)
+        return super().unload(endpoint, model_id)
+
+
+class FakeEngineUnloadRaisesTypeError(FakeEndpointScopeEngine):
+    """An adapter whose `unload` ACCEPTS `wait` and then raises
+    `TypeError` from INSIDE its own body. The worker's degradation must
+    never mistake that for "this adapter has no `wait` parameter" and
+    swallow it -- which is precisely what a `try: unload(..., wait=False)
+    except TypeError:` shape would do."""
+
+    def unload(self, endpoint, model_id, *, wait: bool = True):
+        self.unload_calls.append((endpoint, model_id))
+        raise TypeError("engine exploded from inside unload")
 
 
 class FakeEngineNoOptionalMethods:
@@ -3402,6 +3436,163 @@ class TestTheExclusiveBarrier:
         assert job.state == FAILED
         with worker._active_lock:
             assert worker._active_tokens == {}
+
+
+@pytest.mark.django_db
+class TestThePrecautionaryCallTakesNoWait:
+    """The PRECAUTIONARY call's answer is discarded by rule (§3.3d(4)),
+    so waiting for it to settle buys nothing and costs up to one
+    `UNLOAD_TIMEOUT` per admitted exclusive job at every FOREIGN endpoint
+    whose residency belief is worth nothing -- ~30s in front of every
+    chat turn on a box carrying a memo-authority engine (live, 2026-09-24;
+    ADR 0013's 2026-09-24 amendment).
+
+    THE NARROWING IS THE PRECAUTIONARY-FOREIGN CASE ONLY. The admitted
+    job's OWN endpoint keeps the wait: it is about to load THERE, and the
+    load-on-top race the barrier exists for is exactly what the settle
+    poll rules out. A believed-RESIDENT endpoint keeps it too: that call
+    is a real eviction whose `False` blocks the launch, so it must be
+    seen to settle."""
+
+    FOREIGN = "http://foreign:1"
+
+    def _foreign_connection(self):
+        """One connection row at the foreign endpoint -- what puts that
+        endpoint in `registered_endpoints()` AND supplies the model id
+        `_barrier_address` needs to address the call with."""
+        return ModelConnection.objects.create(
+            name="f", engine="f", endpoint=self.FOREIGN,
+            model_id="foreign-model", capabilities=["image"],
+        )
+
+    def test_a_precautionary_call_at_a_foreign_endpoint_does_not_wait(
+            self, worker, register_engine):
+        self._foreign_connection()
+        register_engine(FakeEngine("e", installed=[]))  # own endpoint, authoritative
+        foreign = register_engine(FakeWaitAwareEngine("f", installed=[]))
+
+        refused = worker._evict_to_match_plan([_admitted_exclusive("e", ENDPOINT, "mine")])
+
+        assert refused == set()
+        assert foreign.unload_calls == [(self.FOREIGN, "foreign-model")]
+        assert foreign.unload_waits == [False]
+
+    def test_the_admitted_jobs_own_endpoint_still_waits(self, worker, register_engine):
+        """Its belief is worth nothing too -- a memo-authority engine
+        reporting nothing resident -- so the call is still made. But this
+        is the endpoint the job is about to load at, so the poll is the
+        only thing standing between this `/free` and a checkpoint loaded
+        on top of it."""
+        own = register_engine(FakeWaitAwareEngine("e", installed=[]))
+
+        worker._evict_to_match_plan([_admitted_exclusive("e", ENDPOINT, "mine")])
+
+        assert own.unload_calls == [(ENDPOINT, "mine")]
+        assert own.unload_waits == [True]
+
+    def test_a_believed_resident_foreign_endpoint_still_waits(self, worker, register_engine):
+        """A real eviction, not a precautionary call: its `False` is
+        informative and blocks the launch, so it must be seen to settle."""
+        self._foreign_connection()
+        register_engine(FakeEngine("e", installed=[]))
+        foreign = register_engine(FakeWaitAwareEngine("f", installed=[
+            _installed("foreign-model", loaded=True),
+        ]))
+
+        worker._evict_to_match_plan([_admitted_exclusive("e", ENDPOINT, "mine")])
+
+        assert foreign.unload_calls == [(self.FOREIGN, "foreign-model")]
+        assert foreign.unload_waits == [True]
+
+    def _admitted_with_a_tool_ref(self):
+        """One admitted exclusive descriptor shaped like a chat turn on a
+        box where the agent is granted the image tool: its OWN chat ref
+        (`synchronous=True`) plus the tool's ref at the foreign endpoint
+        (`synchronous=False`) -- declared, protected, accounted for, but
+        never loaded in-process by this handler."""
+        refs = [
+            _ref(engine="e", endpoint=ENDPOINT, model_id="mine", role="chat.converse"),
+            _ref(engine="f", endpoint=self.FOREIGN, model_id="foreign-model",
+                 role="image.generate", synchronous=False),
+        ]
+        row = _job(state=RUNNING, model_refs=refs)
+        InferenceJob.objects.filter(pk=row.pk).update(exclusive=True)
+        return {
+            "id": row.pk, "kind": row.kind, "payload": {}, "model_refs": refs,
+            "claim_token": uuid.uuid4(), "exclusive": True,
+            "checkpoint": None, "attempts": 0,
+        }
+
+    def test_a_tool_declared_ref_is_not_an_own_endpoint_for_the_wait_decision(
+            self, worker, register_engine):
+        """THE CORRECTION (2026-09-24, after the preview still measured
+        ~22s): a chat turn declares the role of every granted tool, so the
+        image endpoint was landing in `own_endpoints` and keeping the
+        wait -- guarding a load this run never makes, since that tool
+        enqueues its own job and submits on its own path. Only refs the
+        handler drives in-process (`synchronous`) are own endpoints."""
+        self._foreign_connection()
+        own = register_engine(FakeWaitAwareEngine("e", installed=[]))
+        foreign = register_engine(FakeWaitAwareEngine("f", installed=[]))
+
+        refused = worker._evict_to_match_plan([self._admitted_with_a_tool_ref()])
+
+        assert refused == set()
+        # The endpoint the turn's own handler loads at: still waits.
+        assert own.unload_calls == [(ENDPOINT, "mine")]
+        assert own.unload_waits == [True]
+        # The tool's endpoint, declared by the same job: no wait.
+        assert foreign.unload_calls == [(self.FOREIGN, "foreign-model")]
+        assert foreign.unload_waits == [False]
+
+    def test_a_ref_with_no_synchronous_key_is_an_own_endpoint(self, worker, register_engine):
+        """Forward compatibility, pinned: a row enqueued before the field
+        existed carries no such key, and `.get("synchronous", True)` must
+        read it as the job's own -- today's behaviour, never a silent
+        narrowing of an older job's barrier."""
+        own = register_engine(FakeWaitAwareEngine("e", installed=[]))
+        legacy_ref = _ref(engine="e", endpoint=ENDPOINT, model_id="mine")
+        legacy_ref.pop("synchronous")
+        row = _job(state=RUNNING, model_refs=[legacy_ref])
+        InferenceJob.objects.filter(pk=row.pk).update(exclusive=True)
+
+        worker._evict_to_match_plan([{
+            "id": row.pk, "kind": row.kind, "payload": {}, "model_refs": [legacy_ref],
+            "claim_token": uuid.uuid4(), "exclusive": True,
+            "checkpoint": None, "attempts": 0,
+        }])
+
+        assert own.unload_calls == [(ENDPOINT, "mine")]
+        assert own.unload_waits == [True]
+
+    def test_an_adapter_without_the_keyword_is_still_called_and_the_tick_proceeds(
+            self, worker, register_engine):
+        """`wait` is an OPTIONAL adapter extension (the base seam's own
+        docstring says so), so the queue must degrade to the plain
+        two-argument call rather than fail a tick -- the same defensive
+        shape `getattr(engine, "unload", None)` already has."""
+        self._foreign_connection()
+        register_engine(FakeEngine("e", installed=[]))
+        foreign = register_engine(FakeEndpointScopeEngine("f", installed=[]))
+
+        refused = worker._evict_to_match_plan([_admitted_exclusive("e", ENDPOINT, "mine")])
+
+        assert refused == set()
+        assert foreign.unload_calls == [(self.FOREIGN, "foreign-model")]
+
+    def test_a_type_error_from_inside_the_adapter_is_not_swallowed(
+            self, worker, register_engine):
+        """The degradation inspects the SIGNATURE; it never tries the
+        keyword and catches `TypeError`. A `TypeError` raised inside the
+        adapter's own body is that adapter being broken, and hiding it
+        behind "this adapter must not take `wait`" would silently turn
+        every precautionary call at it into a no-op."""
+        self._foreign_connection()
+        register_engine(FakeEngine("e", installed=[]))
+        register_engine(FakeEngineUnloadRaisesTypeError("f", installed=[]))
+
+        with pytest.raises(TypeError, match="from inside unload"):
+            worker._evict_to_match_plan([_admitted_exclusive("e", ENDPOINT, "mine")])
 
 
 @pytest.mark.django_db(transaction=True)
