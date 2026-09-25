@@ -8,21 +8,25 @@ imports `tools/` or `models.queue` -- both are reached by registration,
 which is what makes the whole purge one transaction across four columns
 that may not import each other.
 
-THE ROWS BAND, not the files band -- because this handler no longer
-removes any bytes at all (see `purge_conversation`'s own docstring
-below): its artifact slot became a resolver, and a conversation's
-generated images purge under tickets of their own now, not a silent
-destruction on the conversation's own date. `tools.rag.retention.
-purge_conversation_notes` is also registered for `kind=KIND_CONVERSATION`
-(`tools/rag/apps.py`), in the FILES band, and this handler runs AHEAD of
-it -- the filesystem-last rule `identity.contracts.cascades` states
-exists for exactly this pair: rows go first so that if the later,
-byte-removing handler fails, this handler's row changes are still
-inside the same outer transaction and roll back with it, with nothing
-on disk already gone; and if this handler's own database work is what
-fails, nothing on disk has been touched either way. What this handler
-must still do first, inside its own run, is collect the invocation ids
-before it deletes the turns that carry them: `Turn.invocation` is
+THE FILES BAND, not the rows band -- because this handler DOES remove
+bytes, through the attachment seam (see `purge_conversation`'s own
+docstring below): a conversation's chat-scoped documents die with it,
+by way of `agents.attachments.delete_attachments_for` ->
+`tools.rag.access.delete_attachments` -> `services.delete_document` ->
+`store.remove_document_files`, `shutil.rmtree` on the managed store.
+Its artifact slot is a resolver, not a destroyer -- a conversation's
+GENERATED IMAGES purge under tickets of their own now, not a silent
+destruction on the conversation's own date -- but that is a separate
+kind of content from the documents a person attached to the chat.
+`tools.rag.retention.purge_conversation_notes` is also registered for
+`kind=KIND_CONVERSATION` (`tools/rag/apps.py`), in the same FILES band,
+and it runs AHEAD of this one (`tools.rag` precedes `agents` in
+`INSTALLED_APPS`, and a band is stable by registration order): its one
+raising path is deliberately not swallowed, so a database or disk
+failure there aborts the purge before this handler -- and the bytes it
+removes -- ever run. What this handler must still do first, inside its
+own run, is collect the invocation ids before it deletes the turns that
+carry them: `Turn.invocation` is
 `SET_NULL`, so once the turns are gone there is no path left from the
 conversation to its tool records at all.
 """
@@ -177,8 +181,13 @@ def purge_conversation(key: str) -> int:
     image column's own handler on that ticket's date -- or, when
     somebody clicks "Delete permanently" on this conversation, by the
     same click, after this function has finished: the purge runs this
-    item's row handlers first and destroys its children's bytes
-    afterwards. This function therefore reaches no file on disk at all.
+    item's own handlers first and destroys its children's bytes
+    afterwards. **This function's own bytes are a different story**:
+    step 2's `delete_attachments_for` call reaches every chat-scoped
+    document through `tools.rag.access.delete_attachments`, which
+    deletes that document's managed-store files and pgvector chunks
+    before its row -- this function does reach files on disk, and that
+    is exactly why it is registered in the FILES band.
 
     A DELIBERATE, HONEST LEFTOVER: `agents.models.
     WorkstreamTaint.first_conversation` keeps this conversation's id BY

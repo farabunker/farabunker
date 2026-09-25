@@ -526,22 +526,34 @@ class TestZeroDayEndToEnd:
 
 
 class TestOrderingAgainstRag:
-    """Group A (2026-09-25 cleanup wave): `agents.conversation` moved
-    from the FILES band to the ROWS band because it no longer removes
-    any bytes. Before that move it sat in the FILES band AFTER
-    `rag.conversation_notes` (`tools.rag` precedes `agents` in
-    `INSTALLED_APPS`, and a band is stable by registration order) -- a
-    real byte-removing handler running ahead of a row-only one, the
-    exact inversion the rows-before-files rule in `identity/contracts/
-    cascades.py` exists to prevent. Both pins below run against the
-    REAL registrations `agents/apps.py::ready()` and `tools/rag/apps.py
-    ::ready()` made at Django startup, not a synthetic registry --
-    `identity/tests/test_retention_contracts.py` and `identity/tests/
-    test_retention_runner.py` already pin the GENERAL rows-before-files
-    mechanism; this is the one place that pins these two columns' own
-    order against each other."""
+    """Both handlers registered for `KIND_CONVERSATION` sit in the FILES
+    band: `agents.conversation` (`agents/apps.py`) removes bytes through
+    the attachment seam (a chat's own attached documents), and
+    `rag.conversation_notes` (`tools/rag/apps.py`) removes the
+    consolidated notes file and its ingested copy. A band is stable by
+    registration order, and `tools.rag` precedes `agents` in
+    `INSTALLED_APPS`, so `rag.conversation_notes` runs FIRST.
 
-    def test_the_conversation_handler_is_ordered_ahead_of_rags_notes_handler(
+    THAT ORDER IS WHAT KEEPS A DISK FAILURE SAFE. `rag.conversation_
+    notes`'s one raising path (a non-`FileNotFoundError` `OSError` on
+    `NOTES_DIR` -- a read-only volume, permissions, a full disk --
+    deliberately not swallowed) aborts the purge before `agents.
+    conversation` ever runs, so the bytes THAT handler would have
+    removed are never touched, and `identity.retention.purge_ticket`'s
+    rollback restores exactly what stood before the call. Reversed, the
+    conversation handler would destroy a chat's attached documents --
+    files and pgvector chunks both -- before `rag.conversation_notes`
+    raised, and the rollback would restore the `Document` rows while
+    their bytes stayed gone: a resurrected row pointing at nothing.
+
+    Both pins below run against the REAL registrations `agents/apps.py
+    ::ready()` and `tools/rag/apps.py::ready()` made at Django startup,
+    not a synthetic registry -- `identity/tests/test_retention_contracts.py`
+    and `identity/tests/test_retention_runner.py` already pin the
+    GENERAL rows-before-files mechanism; this is the one place that pins
+    these two columns' own order against each other."""
+
+    def test_rags_notes_handler_is_ordered_ahead_of_the_conversation_handler(
         self, real_registration,
     ):
         from identity.contracts.cascades import retention_handlers
@@ -550,38 +562,49 @@ class TestOrderingAgainstRag:
         keys = [spec.key for spec in retention_handlers(KIND_CONVERSATION)]
         assert "agents.conversation" in keys
         assert "rag.conversation_notes" in keys
-        assert keys.index("agents.conversation") < keys.index("rag.conversation_notes")
+        assert keys.index("rag.conversation_notes") < keys.index("agents.conversation")
 
-    def test_a_raising_rag_handler_leaves_the_conversation_rows_rolled_back(
-        self, real_registration, monkeypatch,
+    def test_a_raising_rag_handler_leaves_the_conversations_rows_and_bytes_untouched(
+        self, real_registration, monkeypatch, tmp_path, settings,
     ):
         """End to end through the real runner, `identity.cascades.
         run_retention`, wrapped the same way `identity.retention.
         purge_ticket` itself wraps every call -- one `transaction.
         atomic()` directly around the run, nothing catching between it
         and a raise, so a handler that fails rolls the whole block back
-        before the exception ever reaches a caller. With the
-        conversation handler in the ROWS band it runs FIRST and really
-        removes the conversation's rows, inside its own savepoint;
-        `tools.rag.retention.purge_conversation_notes` then raises, and
-        because the runner never swallows, that exception propagates
-        out of the `transaction.atomic()` wrapping the call, which
-        rolls back everything inside it -- the conversation is exactly
-        as it was before the call, not half-purged with its rows
-        already gone. Proven by a spy on the conversation handler, not
-        merely by the rows surviving: before this fix, `rag.
-        conversation_notes` ran FIRST and raised immediately, so the
-        conversation handler was never even called, and the same
-        row-survival assertion would have passed for the wrong reason."""
+        before the exception ever reaches a caller. `rag.conversation_
+        notes` runs FIRST and raises immediately; because the runner
+        never swallows, that exception propagates out of the
+        `transaction.atomic()` wrapping the call, which rolls back
+        everything inside it. Proven by a spy on the conversation
+        handler, not merely by the rows surviving: it must never be
+        called at all. And proven on disk, not only in the database --
+        this fixture gives the conversation a real chat-scoped document
+        with a file in the managed store, the one shape no earlier
+        fixture in this module carried, so the file's survival is
+        actually exercised rather than vacuously true because nothing
+        was ever there to lose."""
         import agents.retention as agents_retention_module
         import tools.rag.retention as rag_retention_module
         from django.db import transaction as db_transaction
 
+        from agents.tests._helpers import make_document
         from identity.cascades import run_retention
         from identity.contracts.retention import KIND_CONVERSATION
+        from tools.rag import store
+        from tools.rag.models import DocumentAttachment
+
+        settings.DOCUMENTS_DIR = tmp_path
 
         conversation = make_conversation()
         make_turn(conversation=conversation)
+
+        document = make_document(title="Notes.pdf", scope="conversation")
+        DocumentAttachment.objects.create(
+            document=document, conversation_id=conversation.id)
+        doc_dir = store.document_dir(document.pk)
+        doc_dir.mkdir(parents=True)
+        (doc_dir / "Notes.pdf").write_text("content", encoding="utf-8")
 
         calls: list[str] = []
         real_purge = agents_retention_module.purge_conversation
@@ -601,6 +624,9 @@ class TestOrderingAgainstRag:
             with db_transaction.atomic():
                 run_retention(KIND_CONVERSATION, str(conversation.pk))
 
-        assert calls == ["agents", "rag"]
+        assert calls == ["rag"]
         assert Conversation.objects.filter(pk=conversation.pk).exists()
         assert Turn.objects.filter(conversation_id=conversation.pk).exists()
+        assert DocumentAttachment.objects.filter(
+            document=document, conversation_id=conversation.id).exists()
+        assert doc_dir.exists()
