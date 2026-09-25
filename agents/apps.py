@@ -155,16 +155,18 @@ class AgentsConfig(AppConfig):
         # ARRIVED", as a DOTTED-PATH STRING so `identity/` can run it
         # without importing `agents/` (import-law rule 4) -- the same
         # mechanism, and the same reason, as the entitlement cascades
-        # just above. STILL FILES band, though this handler no longer
-        # removes bytes itself: `tools.rag.retention.
-        # purge_conversation_notes` is also registered for this kind, in
-        # the FILES band (`tools/rag/apps.py`), and moving this handler
-        # to ROWS would run it ahead of that one too -- reordering this
-        # column against a sibling column's handler for the same kind is
-        # not this change's business. `agents/retention.py`'s own module
-        # docstring has the full reason.
+        # just above. ROWS band: this handler removes rows only, never
+        # bytes (its artifact slot became a resolver; a conversation's
+        # generated images purge under tickets of their own). Rows go
+        # first so that `tools.rag.retention.purge_conversation_notes`
+        # -- also registered for this kind, in the FILES band
+        # (`tools/rag/apps.py`) -- runs AFTER this one: if that
+        # byte-removing handler fails, this handler's row changes are
+        # still inside the same outer transaction and roll back with
+        # it, with nothing on disk already gone. `agents/retention.py`'s
+        # own module docstring has the full reason.
         from identity.contracts.cascades import (
-            ORDER_FILES, RetentionHandler, register_retention_handler,
+            ORDER_ROWS, RetentionHandler, register_retention_handler,
         )
         from identity.contracts.retention import KIND_CONVERSATION
 
@@ -173,7 +175,7 @@ class AgentsConfig(AppConfig):
             key="agents.conversation",
             label="Conversation and turns",
             handler="agents.retention.purge_conversation",
-            order=ORDER_FILES,
+            order=ORDER_ROWS,
             # A deleted chat's images are content of their own and get
             # tickets of their own, not a silent destruction on the
             # chat's own date. The answer is computed from the chat's

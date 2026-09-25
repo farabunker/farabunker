@@ -8,18 +8,20 @@ imports `tools/` or `models.queue` -- both are reached by registration,
 which is what makes the whole purge one transaction across four columns
 that may not import each other.
 
-THE FILES BAND, not the rows band -- but not because this handler
-removes bytes any more; it does not (see `purge_conversation`'s own
-docstring below). It stays FILES because `identity.contracts.cascades.
-retention_handlers` is stable WITHIN a band by registration order, and
-`tools.rag.retention.purge_conversation_notes` is also registered for
-`kind=KIND_CONVERSATION`, in the FILES band (`tools/rag/apps.py`).
-Moving this handler to the ROWS band would move it ahead of that one
-too -- every ROWS handler for a kind runs before every FILES handler
-for it, band membership first, registration order only within a band --
-and reordering this column against a sibling column's handler for the
-same kind is not what this change is about. What this handler must
-still do first, inside its own run, is collect the invocation ids
+THE ROWS BAND, not the files band -- because this handler no longer
+removes any bytes at all (see `purge_conversation`'s own docstring
+below): its artifact slot became a resolver, and a conversation's
+generated images purge under tickets of their own now, not a silent
+destruction on the conversation's own date. `tools.rag.retention.
+purge_conversation_notes` is also registered for `kind=KIND_CONVERSATION`
+(`tools/rag/apps.py`), in the FILES band, and this handler runs AHEAD of
+it -- the filesystem-last rule `identity.contracts.cascades` states
+exists for exactly this pair: rows go first so that if the later,
+byte-removing handler fails, this handler's row changes are still
+inside the same outer transaction and roll back with it, with nothing
+on disk already gone; and if this handler's own database work is what
+fails, nothing on disk has been touched either way. What this handler
+must still do first, inside its own run, is collect the invocation ids
 before it deletes the turns that carry them: `Turn.invocation` is
 `SET_NULL`, so once the turns are gone there is no path left from the
 conversation to its tool records at all.
