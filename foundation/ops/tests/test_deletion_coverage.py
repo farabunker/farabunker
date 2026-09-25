@@ -116,9 +116,9 @@ if "vision" in settings.FARABUNKER_FEATURES:
     _COVERED["vision.GenerationJob"] = (KIND_VISION_JOB,)
 else:
     _EXEMPT["vision.GenerationJob"] = (
-        "the image column is not installed in this flag state, so nothing "
-        "registers its handler; with the feature on it is covered by the "
-        "vision_job kind")
+        "the image column registers nothing in this flag state, so no "
+        "handler answers for it; with the feature on it is covered by "
+        "the vision_job kind")
 
 
 def _label(model) -> str:

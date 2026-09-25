@@ -1,9 +1,24 @@
-"""What `tools/vision` destroys for a deleted conversation.
+"""What `tools/vision` destroys, for a deleted conversation and for one
+deleted generation on its own ticket.
 
-REGISTERED THROUGH `agents.contracts.artifacts.register_artifact_purge`,
-a single slot, because the agents column COMPUTES the references and
-exactly one tool column knows what they mean -- the same shape
+TWO THINGS ARE REGISTERED HERE. `purge_artifacts` answers
+`agents.contracts.artifacts.register_artifact_purge`, a single slot,
+because the agents column COMPUTES the references and exactly one tool
+column knows what they mean -- the same shape
 `agents.contracts.attachments.register_attachment_cleanup` already has.
+`purge_job` answers the `vision_job` kind's own retention handler
+(`identity.contracts.cascades.register_retention_handler`,
+`tools/vision/apps.py::VisionConfig.ready()`), for a generation deleted
+on its own, through the gallery, with a ticket of its own.
+
+NEITHER FUNCTION IN THIS MODULE QUERIES `GenerationJob.objects` ITSELF:
+both resolve to job ids or keys and hand them to `tools.vision.services`
+for the two unscoped reads a deletion needs (`services.existing_job_ids`,
+`services.delete_jobs`) -- `foundation/ops/tests/
+test_column_boundaries.py`'s IA-1 gate pins `visibility.py` and
+`services.py` as the only two files in this column allowed to touch
+that manager, and a third site here is exactly the drift it exists to
+catch.
 
 TWO CHANNELS REACH A CONVERSATION'S GENERATED IMAGES, and one of them
 has a hole the other closes:

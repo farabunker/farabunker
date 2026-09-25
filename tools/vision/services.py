@@ -1391,11 +1391,12 @@ def existing_job_ids(candidates) -> list[str]:
     ALL for an empty input -- most conversations reach the retention
     resolver with nothing to ask about.
 
-    THE SECOND UNSCOPED READ OF `GenerationJob.objects` A DELETION
-    NEEDS, and it lives here for the reason `delete_jobs` below does:
-    only `visibility.py` and this module may query that manager, and
-    "does this row exist" is not a visibility question -- a deletion
-    must see a job nobody may currently look at.
+    THE FIRST OF THE TWO UNSCOPED READS OF `GenerationJob.objects` A
+    DELETION NEEDS -- see `delete_jobs` below for the second, which
+    actually deletes -- and it lives here for the same reason that one
+    does: only `visibility.py` and this module may query that manager,
+    and "does this row exist" is not a visibility question -- a
+    deletion must see a job nobody may currently look at.
 
     IT EXISTS BECAUSE A DELETED CHAT'S IMAGES ARE NOW GIVEN DELETIONS
     OF THEIR OWN. A conversation's turns keep a generation id after the
@@ -1403,6 +1404,10 @@ def existing_job_ids(candidates) -> list[str]:
     ticket, and a ticket is a row on the Deleted page with a date and a
     Restore button. This box does not print promises about pictures it
     does not have.
+
+    CANDIDATES MUST ALREADY BE UUIDS (or UUID-shaped strings): this
+    does no parsing, and a non-UUID in the batch raises inside the
+    queryset -- `resolve_artifact_jobs` parses before it ever asks.
     """
     ids = list(candidates or ())
     if not ids:
@@ -1416,17 +1421,18 @@ def delete_jobs(job_ids) -> int:
     `delete_job`, so its files and its best-effort engine sweep go too)
     and return how many were actually deleted.
 
-    THE ONE UNSCOPED READ OF `GenerationJob.objects` A RETENTION PURGE
-    NEEDS, and it lives here rather than in `tools.vision.retention` on
-    purpose: that module maps a conversation's artifact references and
-    generation ids to job ids, and `tools/vision`'s own IA-1 rule
-    (`foundation/ops/tests/test_column_boundaries.py`'s closed set of
-    two) is that only `visibility.py` and this module may query the job
-    table directly -- a THIRD site is exactly the drift that gate
-    exists to catch, and `visibility.py` is the wrong home regardless,
-    since it answers "who may see this", and a purge must reach a
-    ticketed job, or a job owned by somebody else, that nobody may see
-    at all.
+    THE SECOND OF THE TWO UNSCOPED READS OF `GenerationJob.objects` A
+    RETENTION PURGE NEEDS -- `existing_job_ids` above is the first, and
+    only RESOLVES; this one is the read that actually deletes -- and it
+    lives here rather than in `tools.vision.retention` on purpose: that
+    module maps a conversation's artifact references and generation ids
+    to job ids, and `tools/vision`'s own IA-1 rule (`foundation/ops/
+    tests/test_column_boundaries.py`'s closed set of two) is that only
+    `visibility.py` and this module may query the job table directly --
+    a THIRD site is exactly the drift that gate exists to catch, and
+    `visibility.py` is the wrong home regardless, since it answers "who
+    may see this", and a purge must reach a ticketed job, or a job
+    owned by somebody else, that nobody may see at all.
 
     DELIBERATELY NOT VISIBILITY-SCOPED: unlike `visibility.visible_jobs`,
     this reads every matching row regardless of owner or ticket, because

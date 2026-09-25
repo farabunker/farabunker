@@ -966,8 +966,10 @@ stored image or stored input answers the same 404 as one this principal
 could never read in the first place, so a deleted picture cannot be
 fetched by a link that was copied or bookmarked before it was deleted.
 
-This column registers TWO things in `tools/vision/apps.py::VisionConfig.ready()`.
-The first is unchanged: `agents.contracts.artifacts.register_artifact_purge`
+This column registers TWO things for deletion, both in
+`tools/vision/apps.py::VisionConfig.ready()`, alongside its role,
+operations, job kind and tools (see above). The first is unchanged:
+`agents.contracts.artifacts.register_artifact_purge`
 still names `tools/vision/retention.py::purge_artifacts`, and a deleted
 conversation's own purge still hands it the same two things it already
 collected before deleting a single row of its own — the `output:<id>`/
@@ -989,13 +991,14 @@ The second registration is new: `tools/vision/retention.py::purge_job` is
 the `vision_job` kind's handler (`identity.contracts.cascades.RetentionHandler`,
 registered in the same `ready()`), which destroys exactly one generation on
 its own ticket's date, through `services.delete_jobs`, never querying
-`GenerationJob.objects` itself (see `delete_jobs` above). **This is also the
-only reach this platform has into `/engine/output` and `/engine/input`**:
-`delete_job`'s best-effort engine-side sweep (`store.remove_engine_files`,
-which never raises) runs once for every job purged this way — those two
-directories are tracked by no row at all, and the Engine files page (above)
-remains the operator's own manual door onto them, for whatever a sweep never
-reached.
+`GenerationJob.objects` itself (see `delete_jobs` above). Every job either
+of these two registrations destroys goes through `services.delete_job`
+(inside `delete_jobs`), whose own best-effort engine-side sweep
+(`store.remove_engine_files`, which never raises) is **the only reach this
+platform has into `/engine/output` and `/engine/input`** outside the Engine
+files page — those two directories are tracked by no row at all, and that
+page (above) remains the operator's own manual door onto them, for whatever
+a sweep never reached.
 
 **Accepted residue.** A generation whose tool turn was never written at
 all — the job row was created and the chat turn died before it (a

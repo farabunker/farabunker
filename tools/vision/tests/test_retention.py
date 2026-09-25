@@ -1,5 +1,7 @@
-"""The registered artifact purge: from a conversation's references to
-the generation jobs behind them."""
+"""The two ways `tools/vision` answers a deletion: the registered
+artifact-purge slot (a conversation's references and generation ids to
+the jobs still behind them), and the `vision_job` kind's own registered
+handler for one generation deleted on its own ticket."""
 from __future__ import annotations
 
 import uuid
@@ -60,12 +62,12 @@ class TestMappingReferencesToJobs:
     now that the map is split from the delete (see `retention.py`'s
     `resolve_artifact_jobs` docstring for why)."""
 
-    def test_an_output_reference_deletes_its_whole_job(self):
+    def test_an_output_reference_resolves_its_whole_job(self):
         job = _generation()
         output = _output(job=job)
         assert resolve_artifact_jobs([f"output:{output.pk}"], []) == [str(job.pk)]
 
-    def test_two_outputs_of_one_job_are_one_delete(self):
+    def test_two_outputs_of_one_job_resolve_to_one_key(self):
         """Each reference is one FK hop from its job and several outputs
         share one job, so the mapping dedupes BY JOB."""
         job = _generation()
@@ -94,7 +96,7 @@ class TestMappingReferencesToJobs:
         assert not GeneratedOutput.objects.filter(job=job).exists()
         assert resolve_artifact_jobs([], [str(job.pk)]) == [str(job.pk)]
 
-    def test_a_reference_and_an_id_naming_one_job_are_one_delete(self):
+    def test_a_reference_and_an_id_naming_one_job_are_one_key(self):
         job = _generation()
         output = _output(job=job)
         assert resolve_artifact_jobs(
@@ -159,12 +161,12 @@ class TestAFailedParseIsLoggedWithoutWhatItFailedToParse:
 
 
 class TestEmptyInputCostsNothing:
-    """The artifact-purge slot is called on EVERY
-    conversation purge on a vision box, including the common case -- a
-    conversation with no images -- which hands it two empty lists. That
-    must not touch a job, run no engine-side sweep, and cost no more
-    than the mapping itself needs, which is zero queries for empty
-    input."""
+    """The resolver AND the artifact-purge slot that wraps it are both
+    called on EVERY conversation purge on a vision box, including the
+    common case -- a conversation with no images -- which hands each of
+    them two empty lists. Neither must touch a job, run no engine-side
+    sweep, and cost no more than the mapping itself needs, which is zero
+    queries for empty input."""
 
     def test_two_empty_lists_return_zero_and_touch_nothing(
         self, monkeypatch, django_assert_num_queries,
@@ -176,16 +178,23 @@ class TestEmptyInputCostsNothing:
                             lambda job_ids: called.append(list(job_ids)) or 0)
         with django_assert_num_queries(0):
             assert resolve_artifact_jobs([], []) == []
-        assert called == []
+            assert purge_artifacts([], []) == 0
+        # The slot still calls `delete_jobs` on an empty resolve (it is
+        # `resolve_artifact_jobs` then `delete_jobs`, unconditionally) --
+        # what this pins is that the call it makes touches no job: one
+        # call, with an empty list.
+        assert called == [[]]
 
 
 class TestDeleteJobs:
-    """`tools.vision.services.delete_jobs` -- the one unscoped read of
-    `GenerationJob.objects` `purge_artifacts` above hands its mapped job
-    ids to, rather than querying the table itself (IA-1's closed set of
-    two, `foundation/ops/tests/test_column_boundaries.py`). Lives beside
-    `purge_artifacts`'s own tests, not `test_services.py`, which this
-    module's own size keeps under the split threshold."""
+    """`tools.vision.services.delete_jobs` -- the second of the two
+    unscoped reads of `GenerationJob.objects` a deletion needs (the
+    first is `existing_job_ids`, which `resolve_artifact_jobs` calls),
+    and the one that actually destroys, rather than querying the table
+    itself (IA-1's closed set of two, `foundation/ops/tests/
+    test_column_boundaries.py`). Lives beside `purge_artifacts`'s and
+    `purge_job`'s own tests, not `test_services.py`, which this module's
+    own size keeps under the split threshold."""
 
     def test_it_deletes_exactly_the_named_jobs_and_leaves_another_alone(self):
         gone = _generation()
@@ -251,6 +260,21 @@ class TestOnlyJobsThatExistComeBack:
         with django_assert_num_queries(2):
             assert resolve_artifact_jobs([f"output:{output.pk}"], []) == [
                 str(job.pk)]
+
+    def test_both_channels_pay_one_check_between_them(
+            self, django_assert_num_queries):
+        """One ref plus one unrelated id costs the reference's own FK
+        hop PLUS ONE existence query over the union -- never a second
+        existence query for the id channel. A regression that checked
+        each channel separately would still pass every other pin here
+        (each is single-channel) but would cost 3, not 2."""
+        job = _generation()
+        output = _output(job=job)
+        other = _generation()
+        with django_assert_num_queries(2):
+            assert resolve_artifact_jobs(
+                [f"output:{output.pk}"], [str(other.pk)]) == sorted(
+                    [str(job.pk), str(other.pk)])
 
 
 class TestPurgeJob:
