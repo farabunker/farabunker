@@ -51,6 +51,7 @@ from ladder import (  # noqa: E402
     other_pytest_matches,
     read_lock,
     release_lock,
+    run_ask,
 )
 import ladder  # noqa: E402  -- needed to mock ladder._db_activity_present in place
 
@@ -921,3 +922,45 @@ def test_acquire_lock_when_database_clear_names_which_ports_when_partly_unavaila
     assert "could not run on port(s) [5432]" in output
     assert "probed clear" in output and "[5433]" in output
     assert "on any shared port" not in output  # the overstated phrasing
+
+
+# `ask` mode -- wraps an arbitrary command in the same acquire/probe/release
+# chain exercised above, for a small question rather than a declared run.
+# Every test here mocks only `_shared_db_presence` (clear machine), the same
+# boundary the acquire-lock-when-clear tests above mock at, so the real
+# acquire/release/exclusive-create machinery runs for real against `lock_path`.
+
+
+def test_run_ask_propagates_the_wrapped_commands_exit_status_both_directions(lock_path):
+    with mock.patch.object(ladder, "_shared_db_presence", return_value=None):
+        ok = run_ask([sys.executable, "-c", "import sys; sys.exit(0)"],
+                      holder="session", expected_seconds=600, path=lock_path)
+        failing = run_ask([sys.executable, "-c", "import sys; sys.exit(5)"],
+                           holder="session", expected_seconds=600, path=lock_path)
+    assert ok == 0
+    assert failing == 5  # the command's own code, not a generic nonzero
+
+
+def test_run_ask_releases_the_lock_when_the_command_fails(lock_path):
+    with mock.patch.object(ladder, "_shared_db_presence", return_value=None):
+        run_ask([sys.executable, "-c", "import sys; sys.exit(3)"],
+                 holder="session", expected_seconds=600, path=lock_path)
+    assert not lock_path.exists()  # released even though the command failed
+
+
+def test_run_ask_writes_the_commands_purpose_into_the_lock(lock_path, tmp_path):
+    # The command itself reads the lock file WHILE it is held (its own
+    # subprocess, mid-run) and copies out the "running" field -- an
+    # observed outcome, not a mocked call site.
+    captured = tmp_path / "captured-running.txt"
+    command = [
+        sys.executable, "-c",
+        "import json, sys; d = json.load(open(sys.argv[1])); "
+        "open(sys.argv[2], 'w').write(d['running'])",
+        str(lock_path), str(captured),
+    ]
+    with mock.patch.object(ladder, "_shared_db_presence", return_value=None):
+        rc = run_ask(command, holder="session", expected_seconds=600, path=lock_path)
+    assert rc == 0
+    assert captured.read_text(encoding="utf-8") == ladder._command_purpose(command)
+    assert not lock_path.exists()

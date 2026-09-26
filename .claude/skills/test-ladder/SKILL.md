@@ -423,6 +423,16 @@ asked.
   through the whole ladder producing hours of connection-refused noise -- that failure mode
   costs the slot twice, the wasted run and the lock held the entire time it ran for nothing.
 
+## A small question still takes the lock
+
+`scripts/ladder.py ask [--expect-minutes N] <command> [args...]` wraps any command in the same
+acquire/probe/release chain a ladder run uses -- no second lock, just the existing one held for
+one foreground command instead of a whole chain. It exists because a session once bypassed the
+lock for eight seconds to answer a quick question, precisely because there was no cheap compliant
+way to ask one -- the rule only survives that reflex if taking the lock is cheaper than skipping
+it. `ask` defaults `expect_minutes` small, on the assumption of a few seconds' work; long-running
+work still belongs in a declared `full` or `hotfix` run, not here.
+
 ## Failure modes
 
 - Pointing `<db_url>` at a shared/bare `test_farabunker` -- false reds.

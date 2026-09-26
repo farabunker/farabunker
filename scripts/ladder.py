@@ -5,6 +5,11 @@ See .claude/skills/test-ladder/SKILL.md for the full procedure this encodes.
 
 Usage:
     scripts/ladder.py <worktree> <db_url> <outdir> <full|hotfix> [--max-others N] [--expect-minutes N] [touched-modules...]
+    scripts/ladder.py ask [--expect-minutes N] <command> [args...]
+
+`ask` wraps a small question in the same slot lock, for a session that
+would otherwise skip it -- see run_ask below and the skill's "A compliant
+path for a small question".
 
 Each named run writes <outdir>/<run>.log, appends
 "<run> | <returncode> | <last summary line>" to <outdir>/SUMMARY, and
@@ -1174,8 +1179,88 @@ def _run_one(name: str, argv: list[str], env: dict, worktree: Path, outdir: Path
     return proc.returncode
 
 
+# `ask` mode's default expectation. The lock's own floor
+# (_MIN_EXPECTED_SECONDS) is 60s, but stating exactly that floor would
+# read as the bare minimum rather than an honest estimate of a few
+# seconds of real work (interpreter/process startup, a quick query) --
+# one minute of headroom above the floor without reaching for full/
+# hotfix's own defaults (120/20 minutes), which describe a whole chain,
+# not one small question.
+_ASK_DEFAULT_EXPECT_MINUTES = 2.0
+
+
+def _command_purpose(command: list[str], max_len: int = 60) -> str:
+    """The lock's `running` field for `ask` mode: the command itself,
+    trimmed, so a peer reading the lock sees what is being asked rather
+    than a generic label like every other mode writes."""
+    label = " ".join(command)
+    return label if len(label) <= max_len else label[: max_len - 3] + "..."
+
+
+def run_ask(command: list[str], *, holder: str, expected_seconds: float,
+            path: Path = LOCK_PATH) -> int:
+    """`ask` mode: wrap an arbitrary `command` in the same acquire/probe/
+    release chain a ladder run uses (_acquire_lock_when_database_clear,
+    release_lock) -- no second implementation of any of it. Runs
+    `command` as given, never through a shell, in the foreground of this
+    process; its exit status is returned as-is, so a caller can tell a
+    failed command (any int here) from a failed acquisition (LockHeld /
+    DatabaseNeverClear propagate instead of returning). Release handlers
+    are armed by the acquire call itself, so SIGINT/SIGTERM during the
+    command still release; the `finally` covers normal completion and any
+    other exception. Never SIGSTOP -- same as every other mode, nothing
+    here even tries to hook it."""
+    _acquire_lock_when_database_clear(
+        path, holder=holder, running=_command_purpose(command),
+        expected_seconds=expected_seconds, db_port=None,
+    )
+    try:
+        return subprocess.run(command).returncode
+    finally:
+        release_lock(path)
+
+
+def _main_ask(args: list[str]) -> int:
+    """CLI for `ask` mode: `scripts/ladder.py ask [--expect-minutes N]
+    <command> [args...]`. For a small question, not a real run -- long
+    work still belongs in a declared `full` or `hotfix` chain, which
+    reports progress and expects the machine for a while; this mode
+    exists so a session answering something in a few seconds still takes
+    the lock instead of skipping it."""
+    expect_minutes = _ASK_DEFAULT_EXPECT_MINUTES
+    if "--expect-minutes" in args:
+        i = args.index("--expect-minutes")
+        try:
+            expect_minutes = float(args[i + 1])
+        except (IndexError, ValueError):
+            print("--expect-minutes needs a number", file=sys.stderr)
+            return 2
+        del args[i:i + 2]
+
+    if not args:
+        print(
+            "usage: scripts/ladder.py ask [--expect-minutes N] <command> [args...]\n"
+            "Takes the slot lock, runs <command> in the foreground, releases it --\n"
+            "for a small question, not a declared run. Long-running work belongs\n"
+            "in a `full` or `hotfix` ladder run, not here.",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        return run_ask(args, holder=Path.cwd().name, expected_seconds=expect_minutes * 60)
+    except LockHeld as exc:
+        print(f"ladder ask: machine locked -- {exc}", file=sys.stderr)
+        return 2
+    except DatabaseNeverClear as exc:
+        print(f"ladder ask: {exc}", file=sys.stderr)
+        return 2
+
+
 def main(argv: list[str]) -> int:
     args = list(argv[1:])
+    if args and args[0] == "ask":
+        return _main_ask(args[1:])
     max_others = 1
     if "--max-others" in args:
         i = args.index("--max-others")
