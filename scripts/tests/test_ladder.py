@@ -399,6 +399,11 @@ def test_read_lock_parses_the_verbatim_fleet_lock_line():
     # ACTUAL byte-for-byte line off a live lock on the review machine,
     # copied, not reconstructed:
     #     session=farabunker-2b pid=4520 purpose=deletion-semantics-fix-wave-5-dirty-tree-gate-flag2 started=2026-09-26T14:46:15Z expect_min=15
+    #
+    # This proves we SPEAK their language -- one real session's line,
+    # correctly aliased. It is a sample of ONE hold, not of the format:
+    # its session name, pid length and purpose length are all incidental
+    # to that one capture. See the next test for the general case.
     lock_path = Path(tempfile.mkdtemp()) / "test.lock"
     try:
         lock_path.write_text(
@@ -413,6 +418,41 @@ def test_read_lock_parses_the_verbatim_fleet_lock_line():
             "running": "deletion-semantics-fix-wave-5-dirty-tree-gate-flag2",
             "started": 1790433975.0,  # 2026-09-26T14:46:15Z, computed independently
             "expected_seconds": 900,  # expect_min=15 * 60
+        }
+    finally:
+        lock_path.unlink(missing_ok=True)
+        lock_path.parent.rmdir()
+
+
+def test_read_lock_parses_awkward_values_within_the_same_field_contract():
+    # This proves we PARSE the language, not just that one sentence --
+    # hand-built (not captured) with deliberately awkward values the
+    # single verbatim capture above happens not to exercise: a short pid
+    # (single digit), a session name mixing digits and hyphens, a long
+    # purpose, an embedded "=" inside a value (partition-on-first-"=" must
+    # keep the rest of the value intact, not truncate at it), and an
+    # unrecognised trailing key that must be ignored rather than break
+    # anything after it. Run directly against the parser before being
+    # written here as a fixture, per doctrine -- it parses clean; no
+    # value shape here defeated it.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        lock_path.write_text(
+            "session=fb-9-x2-alpha pid=1 "
+            "purpose=a=very-long-purpose-with-an-embedded-equals-sign-to-stress-"
+            "separator-and-length-assumptions-in-the-parser "
+            "started=2026-09-26T14:46:15Z expect_min=999 unexpected_future_key=zzz\n",
+            encoding="utf-8",
+        )
+        assert read_lock(lock_path) == {
+            "holder": "fb-9-x2-alpha",
+            "pid": 1,
+            "running": (
+                "a=very-long-purpose-with-an-embedded-equals-sign-to-stress-"
+                "separator-and-length-assumptions-in-the-parser"
+            ),
+            "started": 1790433975.0,
+            "expected_seconds": 59940,  # expect_min=999 * 60
         }
     finally:
         lock_path.unlink(missing_ok=True)
