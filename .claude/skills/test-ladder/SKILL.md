@@ -315,9 +315,18 @@ conjunction) asks "is THIS LOCK'S HOLDER still alive", needs the holder's own `d
 filters on `state = 'active'` -- narrow, because a false negative there is one input of three and
 the cost of getting it wrong is stealing something that already looked stale on the other two
 counts too. `_shared_db_presence` (the before-run gate) asks "should I START a run AT ALL", checks
-every shared port plus this session's own, and counts ANY connection to a real database, not only
-an active one -- wide, because a suite holds its connection between tests even while idle, and a
-false negative here directly reintroduces the defect the gate exists to prevent. Same query shape,
+every shared port plus this session's own, and counts ANY connection -- not only an active one --
+to a database matching the TEST-DATABASE naming convention (`^test_`, Django's own default: "test_"
+prepended to the application database's name). BOTH filters are required, and a version that
+widened the second one too -- to "every non-system database" -- shipped in the same commit as the
+warning about untested permit paths and could never once have permitted a run: a preview stack's
+own web/worker/watcher hold persistent idle connections to their APPLICATION database on every
+port with a preview stack up, which is every box this repository runs on. The name-prefix match is
+a SILENT dependency on the test framework's own naming convention -- if that convention ever
+changes, this filter stops matching real test databases with no error and no warning, because
+"found nothing" and "matched wrong" look identical from here. Widening `state='active'` to any
+connection stays correct: a suite holds its connections between tests even while idle, and a false
+negative there directly reintroduces the defect the gate exists to prevent. Same query shape,
 opposite stakes, and the stakes earn the different predicate.
 
 UNAVAILABLE MEANS THE OPPOSITE THING AT EACH SITE, on purpose, and both must say so or a future
@@ -350,9 +359,19 @@ VERIFICATION BOUNDARY, worth keeping as a rule rather than a one-off judgment ca
 (mock) for a leg whose exception mapping is total and already verified by reading -- the
 unavailable/degraded leg of either probe is pure routing once its exception handling is read
 closely, and exercising it for real would just test subprocess plumbing, not the resource. Exercise
-for real any leg whose OUTPUT IS EVIDENCE -- both probes' busy/idle legs were run against an actual
-Postgres, in both directions, because that's the leg that could be quietly wrong about the thing
-that matters.
+for real any leg whose OUTPUT IS EVIDENCE, and keep that exercise IN THE SUITE rather than parked
+as a hand-verified note: hand verification is true once, at the moment somebody runs it; a
+committed test's assertion is true every run, and is the thing that catches the NEXT
+over-widening or filter typo -- exactly the kind that shipped in this file's own history (the
+"every non-system database" defect above). `_db_activity_present`'s busy/idle legs and
+`_shared_db_presence`'s clear/busy legs are all run against an actual Postgres, in both
+directions, on the shared port (5433, never 5432, the live application's own). The busy-direction
+tests are SAFE to run there because the whole gate is serialized by the slot lock: every ladder
+run holds it for its whole chain, so no session that has adopted the lock protocol can be
+sampling this database at its own run gate while a test's manufactured connection is open -- that
+peer is parked at acquisition, not the probe loop. The unmistakable scratch names and
+crash-surviving teardown are defence in depth against a protocol violation, not the primary
+containment.
 
 TEST-DESIGN NOTE, aimed at whoever changes this next: the refusal path announces, refuses,
 releases and retries -- it is loud, it is easy to exercise, and it is where a reader's eye and a

@@ -60,6 +60,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -68,6 +69,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -811,6 +814,132 @@ def test_acquire_lock_floors_a_tiny_expected_duration_so_it_cannot_self_stale():
     finally:
         release_lock(lock_path)
         lock_path.parent.rmdir()
+
+
+def _require_reachable_postgres(port: int) -> None:
+    """VISIBLE skip, not a silent one -- a reader must be able to tell
+    "this did not run" from "this passed" in the suite's own output.
+    Used only by the two _shared_db_presence tests below, which need a
+    real Postgres to open real connections against; the rest of this
+    file needs no live database at all."""
+    if shutil.which("psql") is None:
+        pytest.skip("psql not on PATH -- cannot exercise _shared_db_presence for real")
+    env = dict(os.environ)
+    env.setdefault("PGPASSWORD", "farabunker")
+    try:
+        result = subprocess.run(
+            ["psql", "-h", "localhost", "-p", str(port), "-U", "farabunker",
+             "-d", "postgres", "-tAc", "SELECT 1"],
+            capture_output=True, text=True, timeout=5, env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pytest.skip(f"no reachable Postgres on port {port} in this environment")
+    if result.returncode != 0:
+        pytest.skip(f"no reachable Postgres on port {port} in this environment")
+
+
+def test_shared_db_presence_reads_clear_with_a_real_application_connection():
+    # Manufactures REAL state and drives _shared_db_presence through its
+    # REAL subprocess path -- not a synthetic row, not a re-implementation
+    # of the filter, not a mock standing in for the database client. A
+    # test that only re-states the query cannot fail when the query is
+    # wrong, which is exactly how the "every non-system database" defect
+    # shipped in this same commit's own permit test. Reproduces the
+    # measured failure shape directly: a real connection to a real
+    # APPLICATION-named database (not test-prefixed) must read CLEAR --
+    # a preview stack's own web/worker/watcher hold idle connections like
+    # this one on every port with a preview stack up, which is every box
+    # this repository runs on, so this is the case that must never read
+    # busy.
+    #
+    # Port 5433 only, never 5432 (the live application's own port,
+    # untouchable by any test). Runs FOR REAL in the suite, not
+    # hand-verified and parked: hand verification is true once, at the
+    # moment somebody runs it, while this assertion is true every run --
+    # and the busy-direction test below is the one that would catch the
+    # NEXT over-widening or filter typo, the mirror image of the test
+    # whose absence let this one through.
+    #
+    # SAFE TO RUN HERE BECAUSE SERIALIZED BY THE SLOT LOCK, not because
+    # of anything about this test's own brevity: every ladder run holds
+    # the machine-wide slot lock for its whole chain, including whatever
+    # test module is executing right now, so no OTHER session that has
+    # adopted the lock protocol can be sampling this database at its own
+    # run gate while this connection is open -- that peer is parked at
+    # lock ACQUISITION, the correct and already-announced state for a
+    # machine whose slot is taken, and never reaches its probe loop at
+    # all. A session that has not adopted the protocol has no gate here
+    # to mislead. The unmistakable scratch name, the brief hold, and the
+    # crash-surviving teardown below are defence in depth against a
+    # PROTOCOL VIOLATION (something touching this port outside the slot
+    # lock) -- not the primary containment, which is the lock itself.
+    #
+    # Teardown: a crashed test needs no invented timeout, because a
+    # connection dies with its process and Postgres reaps the socket on
+    # its own -- the residual hazard is a HANG (this process wedged,
+    # holding the connection AND the slot lock), and that is exactly the
+    # state the staleness conjunction and the orphan-visibility sweep
+    # already handle, not a new failure mode. A leftover scratch
+    # DATABASE, if the DROP below is ever missed, does not matter to the
+    # gate at all -- presence is judged on CONNECTIONS, never on the
+    # catalogue, so no future cleanup of the database list is needed
+    # either.
+    _require_reachable_postgres(5433)
+    dbname = f"ladder_gate_probe_clear_scratch_{os.getpid()}"
+    env = dict(os.environ)
+    env.setdefault("PGPASSWORD", "farabunker")
+    psql_base = ["psql", "-h", "localhost", "-p", "5433", "-U", "farabunker"]
+    subprocess.run([*psql_base, "-d", "postgres", "-c", f"CREATE DATABASE {dbname}"],
+                    capture_output=True, text=True, timeout=10, env=env, check=True)
+    conn = subprocess.Popen(
+        [*psql_base, "-d", dbname, "-c", "SELECT pg_sleep(6)"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
+    )
+    try:
+        time.sleep(1.5)  # let the connection register in pg_stat_activity
+        assert ladder._shared_db_presence(5433) is None
+    finally:
+        conn.wait(timeout=10)
+        subprocess.run(
+            [*psql_base, "-d", "postgres", "-c", f"DROP DATABASE IF EXISTS {dbname} WITH (FORCE)"],
+            capture_output=True, text=True, timeout=10, env=env,
+        )
+
+
+def test_shared_db_presence_reads_busy_with_a_real_test_db_connection():
+    # The mirror image of the test above, and the one the reviewer
+    # specifically required run for real rather than be parked as
+    # hand-verified -- see that test's own comment for why this is safe
+    # to do on the shared port (serialized by the slot lock) and what
+    # its teardown does and doesn't need to guard against.
+    #
+    # This is the one real side effect worth naming plainly: for as long
+    # as this connection is open, it manufactures the exact condition
+    # that makes every session's run gate decline -- which is fine under
+    # the slot-lock reasoning above, but is why the scratch name must be
+    # unmistakably this test's own (never a plausible real suite name)
+    # and the hold as brief as this file's style allows.
+    _require_reachable_postgres(5433)
+    dbname = f"test_ladder_gate_probe_busy_scratch_{os.getpid()}"
+    env = dict(os.environ)
+    env.setdefault("PGPASSWORD", "farabunker")
+    psql_base = ["psql", "-h", "localhost", "-p", "5433", "-U", "farabunker"]
+    subprocess.run([*psql_base, "-d", "postgres", "-c", f"CREATE DATABASE {dbname}"],
+                    capture_output=True, text=True, timeout=10, env=env, check=True)
+    conn = subprocess.Popen(
+        [*psql_base, "-d", dbname, "-c", "SELECT pg_sleep(6)"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
+    )
+    try:
+        time.sleep(1.5)
+        result = ladder._shared_db_presence(5433)
+        assert result is not None and result is not ladder._PROBE_UNAVAILABLE
+    finally:
+        conn.wait(timeout=10)
+        subprocess.run(
+            [*psql_base, "-d", "postgres", "-c", f"DROP DATABASE IF EXISTS {dbname} WITH (FORCE)"],
+            capture_output=True, text=True, timeout=10, env=env,
+        )
 
 
 def test_acquire_lock_when_database_clear_permits_the_run_on_a_clear_machine():

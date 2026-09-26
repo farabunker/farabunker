@@ -606,13 +606,51 @@ def _shared_db_presence(port: int) -> dict | None | object:
     forever (see _acquire_lock_when_database_clear for how that's
     handled -- announced, never silently overridden or timed past).
 
+    TWO FILTERS, BOTH REQUIRED, measured against a live machine after an
+    earlier version that dropped the second one shipped and could never
+    have permitted a run: `datname` matching the TEST-DATABASE naming
+    convention, AND presence regardless of state. Widening "active" to
+    "any connection" was correct and stays -- a suite holds its
+    connections between tests while idle. Widening "test databases" to
+    "every non-system database" was not asked for and breaks the gate
+    completely: a preview stack's own web/worker/watcher hold persistent
+    idle connections to their APPLICATION database on every port that has
+    a preview stack up, which is every box this repository runs on, so a
+    query that counted those would read busy forever and this gate would
+    never once permit a run. Measured: port 5433 (an app database with
+    three idle connections, no test database) reads CLEAR with this
+    filter; port 5435 (the same shape plus one genuine test database)
+    reads BUSY.
+
+    THE CONVENTION THIS FILTER RESTS ON, named explicitly because a
+    silent dependency on it is the exact failure mode this repository
+    has spent two days removing everywhere else: `^test_` is a NAME-PREFIX
+    match on Django's own default test-database name -- "test_" prepended
+    to the application database's name, e.g. "farabunker" (app) /
+    "test_farabunker" (its test db). This filter depends entirely on that
+    convention holding. If the test framework's own naming ever changes
+    (a custom TEST NAME setting, a different runner with a different
+    default), this filter stops matching real test databases SILENTLY --
+    it degrades back to exactly the defect this fix closes, with no
+    error and no warning, because "found nothing" and "matched wrong"
+    look identical from here.
+
+    Verified against REAL rows in pg_stat_activity, not a synthetic
+    substitute or a re-implementation of this filter in a test -- see
+    test_shared_db_presence_reads_clear_with_a_real_application_connection
+    and test_shared_db_presence_reads_busy_with_a_real_test_db_connection,
+    which open actual Postgres connections and drive this exact function
+    through its real subprocess path, because a permit path proven only
+    against a substitute is exactly what let this defect through the
+    first time.
+
     Returns _PROBE_UNAVAILABLE (a distinct sentinel, not None) if the
     client is missing or the connection itself fails -- the CALLER, not
     this function, decides what unavailable means, and it means the
     OPPOSITE thing here than it does for the staleness probe (see the
     caller). Returns None if the probe ran and found nothing. Returns a
     {pid, datname, state, since} dict for the first non-self connection
-    found to a real database on `port`."""
+    found to a TEST database on `port`."""
     psql = shutil.which("psql")
     if psql is None:
         return _PROBE_UNAVAILABLE
@@ -620,7 +658,7 @@ def _shared_db_presence(port: int) -> dict | None | object:
         "SELECT pid, datname, state, "
         "COALESCE(state_change, query_start, xact_start, backend_start) "
         "FROM pg_stat_activity "
-        "WHERE datname NOT IN ('postgres', 'template0', 'template1') "
+        "WHERE datname ~ '^test_' "  # Django's default test-db name prefix -- see docstring
         "AND pid != pg_backend_pid() "
         "LIMIT 1"
     )
