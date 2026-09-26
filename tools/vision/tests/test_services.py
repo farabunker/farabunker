@@ -25,7 +25,7 @@ from models.contracts.engines.base import GenerationRejected, JobStatus
 from models.contracts.operations import (
     EDIT, TXT2IMG, Operation, Param, ParamError, describe, operations_for,
 )
-from models.contracts.roles import IMAGE_GENERATION_CAPABILITY, VISION_GENERATE_ROLE
+from models.contracts.roles import IMAGE_GENERATION_CAPABILITY, RAG_EXTRACT_ROLE, VISION_GENERATE_ROLE
 from identity.access import owner_fields
 from identity.contracts.postures import POSTURE_PERSONAL
 from identity.contracts.principals import OPEN_PRINCIPAL, Principal
@@ -2088,3 +2088,186 @@ class TestOperationCatalogFollowsTheSelectedModel:
         assert all(
             entry["unsupported_reason"] for entry in catalog if not entry["supported"]
         )
+
+
+class TestDescribeOutput:
+    """`services.describe_output` -- the vision column's own "describe what
+    it just made" seam (vision-describes-its-own-output task). Patches
+    `models.contracts.gateway.describe_image` -- the SHARED mechanism
+    (fix round item 5) both `tools/vision` and (eventually, a named
+    follow-up) `tools/rag` call -- directly, rather than exercising a
+    real resolve/build: this function's own contract is "never raise,
+    always leave `job.description` readable", not the mechanism itself
+    (the gateway's own concern) nor the resolve/health-check machinery
+    `TestPreflight`/`TestSubmitJob` elsewhere in this file already cover
+    for the SIBLING `vision.generate` role.
+    """
+
+    def test_no_outputs_leaves_description_untouched(self):
+        job = GenerationJob.objects.create(
+            operation="txt2img", params={}, engine="stubengine",
+            model_id="stub.safetensors", endpoint="http://stub:9999",
+            model_fingerprint="x", status=GenerationJob.Status.DONE,
+        )
+
+        services.describe_output(job, request_timeout=5.0)
+
+        job.refresh_from_db()
+        assert job.description == ""
+
+    def test_happy_path_stores_a_labelled_description(self, tmp_path):
+        output = stored_output(tmp_path)
+
+        with patch(
+            "tools.vision.services.gateway.describe_image",
+            return_value="A lighthouse on a rocky cliff at dusk.",
+        ) as describe_mock:
+            services.describe_output(output.job, request_timeout=5.0)
+
+        # THE PROMPT is THIS column's own -- never rag's -- and
+        # `request_timeout` (fix round item 3) travels through verbatim,
+        # never re-derived inside the mechanism.
+        describe_mock.assert_called_once_with(
+            RAG_EXTRACT_ROLE, output.path, services.DESCRIBE_OUTPUT_PROMPT, request_timeout=5.0,
+        )
+        output.job.refresh_from_db()
+        assert output.job.description == (
+            f"{services._DESCRIBE_LABEL}A lighthouse on a rocky cliff at dusk."
+        )
+
+    def test_an_unbound_role_stores_the_honest_sentence_and_never_raises(self, tmp_path):
+        output = stored_output(tmp_path)
+
+        with patch(
+            "tools.vision.services.gateway.describe_image", side_effect=ValueError("no binding")
+        ):
+            services.describe_output(output.job, request_timeout=5.0)  # must not raise
+
+        output.job.refresh_from_db()
+        assert output.job.description == services.DESCRIBE_OUTPUT_FAILURE_SENTENCE
+
+    def test_a_raising_call_stores_the_honest_sentence_and_never_raises(self, tmp_path):
+        """Also stands in for a TIMED-OUT call (fix round item 3): a
+        request that outran `request_timeout` raises out of the gateway
+        the same as any other transport failure, and this function's
+        `except Exception` does not care which."""
+        output = stored_output(tmp_path)
+
+        with patch(
+            "tools.vision.services.gateway.describe_image",
+            side_effect=RuntimeError("engine unreachable"),
+        ):
+            services.describe_output(output.job, request_timeout=5.0)  # must not raise
+
+        output.job.refresh_from_db()
+        assert output.job.description == services.DESCRIBE_OUTPUT_FAILURE_SENTENCE
+
+    def test_a_blank_answer_stores_the_honest_sentence(self, tmp_path):
+        output = stored_output(tmp_path)
+
+        with patch("tools.vision.services.gateway.describe_image", return_value="   "):
+            services.describe_output(output.job, request_timeout=5.0)
+
+        output.job.refresh_from_db()
+        assert output.job.description == services.DESCRIBE_OUTPUT_FAILURE_SENTENCE
+
+    def test_job_json_carries_the_stored_description(self, tmp_path):
+        output = stored_output(tmp_path)
+        output.job.description = "The platform's own description of the generated image: x"
+        output.job.save(update_fields=["description"])
+
+        assert services.job_json(output.job)["description"] == output.job.description
+
+
+class TestDescribeIfReady:
+    """`services.describe_if_ready` -- the ONE gate both `describe_output`
+    callers share (vision-describes-its-own-output task, ruling 3):
+    `tools.vision.jobs.run_generate` (the queued job kind) and `tools.
+    vision.tools.run_generate` (the chat tool). Patches `describe_output`
+    itself -- `TestDescribeOutput` above already covers what THAT
+    function does; this class only proves the GATE."""
+
+    def _bind_extract(self):
+        connection = ModelConnection.objects.create(
+            name="describer", engine="stubengine", endpoint="http://stub:9999",
+            model_id="describer.gguf", capabilities=["vision"],
+        )
+        RoleBinding.objects.create(role_key=RAG_EXTRACT_ROLE, connection=connection)
+
+    def test_unbound_role_never_calls_describe_output(self, tmp_path):
+        output = stored_output(tmp_path)
+
+        with patch("tools.vision.services.describe_output") as describe_mock:
+            services.describe_if_ready(output.job, request_timeout=30.0)
+
+        describe_mock.assert_not_called()
+
+    def test_bound_role_describes_a_done_job_with_outputs(self, tmp_path):
+        output = stored_output(tmp_path)
+        self._bind_extract()
+
+        with patch("tools.vision.services.describe_output") as describe_mock:
+            services.describe_if_ready(output.job, request_timeout=30.0)
+
+        # `request_timeout` (fix round item 3) is simply threaded
+        # through, never re-derived or defaulted by the gate itself.
+        describe_mock.assert_called_once_with(output.job, request_timeout=30.0)
+
+    def test_a_failed_job_is_never_described_even_when_bound(self, tmp_path):
+        output = stored_output(tmp_path)
+        output.job.status = GenerationJob.Status.FAILED
+        output.job.save(update_fields=["status"])
+        self._bind_extract()
+
+        with patch("tools.vision.services.describe_output") as describe_mock:
+            services.describe_if_ready(output.job, request_timeout=30.0)
+
+        describe_mock.assert_not_called()
+
+    def test_no_outputs_is_never_described_even_when_bound(self):
+        job = GenerationJob.objects.create(
+            operation="txt2img", params={}, engine="stubengine",
+            model_id="stub.safetensors", endpoint="http://stub:9999",
+            model_fingerprint="x", status=GenerationJob.Status.DONE,
+        )
+        self._bind_extract()
+
+        with patch("tools.vision.services.describe_output") as describe_mock:
+            services.describe_if_ready(job, request_timeout=30.0)
+
+        describe_mock.assert_not_called()
+
+    def test_a_still_running_job_is_never_described_even_when_bound(self, tmp_path):
+        output = stored_output(tmp_path, job=GenerationJob.objects.create(
+            operation="txt2img", params={}, engine="stubengine",
+            model_id="stub.safetensors", endpoint="http://stub:9999",
+            model_fingerprint="x", status=GenerationJob.Status.QUEUED,
+        ))
+        self._bind_extract()
+
+        with patch("tools.vision.services.describe_output") as describe_mock:
+            services.describe_if_ready(output.job, request_timeout=30.0)
+
+        describe_mock.assert_not_called()
+
+    def test_a_request_timeout_below_the_minimum_never_calls_describe_output(self, tmp_path):
+        """Fix round, later finding: below `services.DESCRIBE_MINIMUM_
+        VIABLE_BUDGET_SECONDS`, this gate skips the call ENTIRELY rather
+        than attempting it with a deadline no real vision inference
+        could plausibly meet -- checked here, in the shared gate, so
+        BOTH callers are protected by the one check. Asserts that
+        `describe_output` is never invoked at all (never merely on what
+        it might have written), and that skipping leaves `job.
+        description` in exactly the field's own "never attempted" state
+        -- `""`, never a third state invented to say "skipped"."""
+        output = stored_output(tmp_path)
+        self._bind_extract()
+        below_minimum = services.DESCRIBE_MINIMUM_VIABLE_BUDGET_SECONDS - 1.0
+        assert below_minimum > 0  # a sane budget this test actually exercises
+
+        with patch("tools.vision.services.describe_output") as describe_mock:
+            services.describe_if_ready(output.job, request_timeout=below_minimum)
+
+        describe_mock.assert_not_called()
+        output.job.refresh_from_db()
+        assert output.job.description == ""

@@ -780,6 +780,53 @@ def run_generate(args: dict, ctx: ToolContext) -> ToolResult:
 
     job = services.wait_for(job, timeout=timeout, on_poll=on_poll)
 
+    # Describe the job's OWN output, STRICTLY AFTER generation has fully
+    # finished (vision-describes-its-own-output task, ruling 3): the
+    # SAME `services.describe_if_ready` gate `tools.vision.jobs.
+    # run_generate` (the queued job kind's own handler) already calls --
+    # one implementation, two callers, both non-fatal by construction. An
+    # unbound `rag.extract` role, or a job that is not a terminal `DONE`
+    # with at least one output, means this is a true no-op: no call, no
+    # extra latency, and the turn's own admission is what makes this
+    # safe to attempt at all -- `agents.runtime.jobs.plan_turn` now
+    # declares `rag.extract` alongside `vision.generate` whenever this
+    # tool is granted (tolerantly, and `synchronous=False`, exactly like
+    # the image role itself), so this call is never reaching for a model
+    # the turn's own admission snapshot did not know about.
+    #
+    # THE TIMEOUT (fix round item 3, then tightened by two later reviews):
+    # derived from what is LEFT of the TURN's own budget, exactly like
+    # `timeout` above -- never a bare constant. CEILED at `services.
+    # DESCRIBE_REQUEST_TIMEOUT_SECONDS` -- THE SAME CAP the queued caller
+    # passes outright (`tools.vision.jobs.run_generate`), so both callers
+    # agree on the longest a description may ever take. THE CEILING IS
+    # LOAD-BEARING, NOT COSMETIC: a generation that finishes EARLY in a
+    # turn leaves most of the platform's own response timeout still
+    # remaining, and handing ALL of that to a stalled describer would let
+    # a forty-word sentence hold a live chat turn for roughly half an
+    # hour -- worse than the multi-minute engine default this task
+    # exists to bound. The turn's remaining budget is a CEILING on what
+    # is worth waiting for, never a target to spend: a description that
+    # would take longer than the cap has no value even when the turn
+    # would technically permit it, because the image already arrived and
+    # the sentence only aids judging it, not the result itself.
+    #
+    # NO FLOOR HERE -- CALLED UNCONDITIONALLY, EVEN WHEN `remaining` IS
+    # TINY OR NEGATIVE (a steward-cleared correction: an earlier version
+    # of this fix floored/skipped at THIS call site; the check now lives
+    # in `services.describe_if_ready` itself -- see that function's own
+    # comment and `services.DESCRIBE_MINIMUM_VIABLE_BUDGET_SECONDS`'s for
+    # the full reasoning -- so BOTH callers are protected by the ONE
+    # shared gate rather than each caller having to remember its own
+    # copy of the same check).
+    services.describe_if_ready(
+        job,
+        request_timeout=min(
+            services.DESCRIBE_REQUEST_TIMEOUT_SECONDS,
+            ctx.budget.deadline_monotonic - time.monotonic(),
+        ),
+    )
+
     payload = services.job_json(job)
     artifacts = tuple(f"output:{output['id']}" for output in payload.get("outputs", ()))
 
@@ -817,6 +864,16 @@ def run_generate(args: dict, ctx: ToolContext) -> ToolResult:
     if artifacts:
         pronoun = "this" if len(artifacts) == 1 else "these"
         lines.append(f"Outputs: {', '.join(artifacts)} — reference {pronoun} to edit.")
+
+    # `describe_if_ready` (above) already wrote `job.description` (or
+    # left it "" -- unbound role, or nothing to describe yet); `payload`
+    # (freshly built from the SAME `job` via `job_json`, right after)
+    # simply carries whatever that call left there. Appended verbatim,
+    # no further templating: `services.describe_output` already writes a
+    # complete, clearly-labelled sentence (or the honest failure
+    # sentence, never "") onto the field whenever it actually ran.
+    if payload.get("description"):
+        lines.append(payload["description"])
     text = " ".join(lines)
 
     return ToolResult(text=text, data=payload, artifacts=artifacts)

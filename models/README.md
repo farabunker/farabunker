@@ -114,6 +114,6 @@ happens to be bound in that scope. See spec §3.7
 - **Rule 3 — cross-column *work* goes through a seam, never an import:**
   the queue (`models.contracts.queue.enqueue`/`get_job`) and the gateway
   (`models.contracts.gateway.get_llm*`/`get_embed_model*`/
-  `get_image_generator*`/`get_transcriber*`) are both defined here, and
-  are how every other column reaches model-management work without
-  importing `registry/` or `queue/` directly.
+  `get_image_generator*`/`get_transcriber*`/`describe_image`) are both
+  defined here, and are how every other column reaches model-management
+  work without importing `registry/` or `queue/` directly.

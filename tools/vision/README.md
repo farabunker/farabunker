@@ -635,6 +635,111 @@ separate change.
   produces. One submission path, no second store-and-record branch, and nothing but
   strings in the payload. A reference naming a param the operation does not declare
   is refused, not dropped.
+- **Describes its own output, once generation is done** (vision-describes-
+  its-own-output task). `plan_generate` also declares `rag.extract` (the
+  same extraction role `tools/rag`'s own image-ingestion path resolves)
+  ALONGSIDE `vision.generate`, TOLERANTLY — an unbound `rag.extract`
+  simply leaves it out; the image job is planned exactly as before. When
+  it resolves, `run_generate` asks the extraction role to describe the
+  job's first output STRICTLY AFTER the image generation has fully
+  finished — sequential, never overlapped, never started eagerly — and
+  stores the result on `GenerationJob.description`: one extra model
+  call, never fatal to the generation. An unbound role, a failed call,
+  or a blank answer leaves the generation exactly as it already stands,
+  plus a short, honest sentence on that field instead of the real
+  description. Only for a `done` job with at least one output — never
+  for a failed one.
+  **The image model is deliberately NOT released before describing.**
+  An earlier version of this step did release it (the engine's own
+  `unload` seam) so the two models would never be resident at once — but
+  ComfyUI's `/free` has no per-model form: `POST /free` with
+  `unload_models` set frees EVERY model at that endpoint
+  (`ComfyUIEngine.unload`'s own docstring), so releasing would make the
+  NEXT generation at that endpoint pay a full cold load — "up to ~25
+  minutes" on the reference hardware per this job kind's own
+  `GENERATE_WAIT_TIMEOUT_SECONDS` comment — to avoid a few seconds of
+  double residency. Removed for exactly that reason; do not add it back
+  without a genuinely per-model free to release against. See "Tools"
+  below for how a
+  caller reads the field back.
+  **`rag.extract`'s own `ModelRef` is `synchronous=False`** (fix round
+  item 4) — deliberately, and for a narrower reason than "the other
+  planner already does it": the flag only ever drops the BARRIER's
+  pre-claim wait at that endpoint, never protection, sweeping or budget
+  accounting (`models.contracts.jobkinds.ModelRef.synchronous`'s own
+  docstring). Paying that wait unconditionally, on EVERY claimed job,
+  for a describing call that only sometimes runs (never on a failed or
+  output-less generation) would be a cost with no matching benefit on
+  every job that never reaches it. The accepted trade: a possibly-slow
+  FIRST describing call at a freshly-touched endpoint (never a
+  correctness problem — releasing MOVES weights rather than freeing
+  them, per this task's own memory diagnosis), bounded by
+  `describe_output`'s own `request_timeout` rather than an unbounded
+  stall, in exchange for never charging an unconditional wait for a
+  conditional call. **`request_timeout` is a required parameter of the
+  describing call, supplied by each caller honestly** (fix round item 3,
+  then tightened by two later reviews) — never a bare constant living
+  inside it. `services.DESCRIBE_REQUEST_TIMEOUT_SECONDS` (60s —
+  explicitly well below the platform's own default agent/chat response
+  timeout, 1800s) lives in `services.py`, not `jobs.py`, precisely
+  because BOTH callers need it: the QUEUED job kind passes it straight
+  through as its own `request_timeout`, and the CHAT tool derives its
+  own from what remains of the turn's own budget but CAPS that
+  derivation at this same constant — a generation that finishes early in
+  a turn leaves most of the response timeout still remaining, and
+  handing all of it to a stalled describer would let a forty-word
+  sentence hold a live chat turn for roughly half an hour, which a
+  review caught as a regression dressed as a fix. The turn's remaining
+  budget is a ceiling on what is worth waiting for, never a target to
+  spend: past the shared cap, the image already arrived and the
+  sentence only aids judging it, so nothing is lost by giving up on it.
+  **The QUEUED caller passes the constant outright rather than reading
+  the operator's real `JobSettings.response_timeout_seconds`, and this
+  is a checked decision, not a missing seam**: that value genuinely
+  reaches `tools.vision.jobs.run_generate` (stamped onto `ctx.
+  response_timeout_seconds` by the worker before the handler ever
+  runs — no `models.queue` import needed), but it is a CEILING, a
+  single policy duration read once at claim time and never decremented
+  as the job runs — unlike the chat path's `ctx.budget.
+  deadline_monotonic`, which genuinely IS a live, shrinking remainder
+  for the turn a description belongs to. Deriving from a number that
+  never shrinks would just hand the describer that whole ceiling on
+  every call — the unbounded-above defect arriving back by a different
+  road, dressed as a derivation. So the constant stays a plain, chosen
+  value, bounded below that ceiling rather than computed from it.
+  **The actual model call is the shared gateway mechanism**
+  (`models.contracts.gateway.describe_image`, fix round item 5) — the
+  same "ask a vision-capable model about an image file" shape `tools/
+  rag`'s own extraction path hand-built independently, now held in ONE
+  place both columns may call. The PROMPT stays this column's own
+  (`DESCRIBE_OUTPUT_PROMPT`) and is never shared with rag's retrieval
+  caption prompt — a reviewer ruled those two purposes must not
+  converge — the gateway function takes the prompt as a parameter and
+  has no opinion on it. `tools/rag` does not call this seam yet;
+  converging its own `_ask_vision` onto it is a named follow-up, not
+  part of this task.
+  **Below `services.DESCRIBE_MINIMUM_VIABLE_BUDGET_SECONDS`
+  (1/12th of the shared ceiling), the describing step is SKIPPED
+  entirely rather than attempted with a deadline no real vision
+  inference could plausibly meet** (a fix round finding, checked once
+  inside the shared `describe_if_ready` gate so both callers are
+  protected by it). This is the expected landing place for a CHAT turn
+  whose generation itself used most of the turn's own budget — the
+  generation wait is itself clamped to what remains of that same
+  budget, so a slow generation leaves little behind for describing BY
+  DESIGN, not by misfortune. Skipping leaves `GenerationJob.description`
+  at `""`, the SAME "never attempted" state an unbound role or a
+  not-yet-`done` job already leaves it at — never a third state — and is
+  the deliberately cheap direction to be wrong in: a skipped description
+  costs a reader one sentence they could ask for again, where a doomed
+  attempt would cost the machine a real model load, on an engine the
+  live stack shares, thrown away for nothing, at precisely the moment
+  the box is already busy enough that a turn ran out of time.
+  **The vision PAGE's own `?format=json` endpoint now carries a
+  `description` key nothing renders yet** — `job_json()`'s dict is
+  returned there raw, and the field simply rides along; no template
+  reads it, so this is a stored fact with no visible surface today, not
+  a UI change.
 
 ## Gallery select mode and bulk delete
 
@@ -1228,6 +1333,34 @@ passes the catalog through to `ToolResult.data` verbatim, but an LLM
 reads `.text`: for an unsupported entry, that operation's own line gets
 `" — not runnable here: {unsupported_reason}"` appended, so the cue is
 visible without a caller having to parse `data`.
+
+**A successful generation describes its own output** (vision-describes-
+its-own-output task) so a caller that just made an image can judge or
+retry it without a second turn. Both callers of `services.submit_job`/
+`wait_for` — the queued `vision.generate` job kind's own handler
+(`jobs.run_generate`) and `run_generate` above, the chat tool's own
+synchronous submit/wait — call the SAME shared gate,
+`services.describe_if_ready`, right after `wait_for` returns: one
+implementation, two callers. It costs one extra call through the
+extraction role's own model, made only after the image generation has
+fully finished (never overlapped with it, and the image model is never
+released first — see "Queued generation" above for why), and an unbound
+extraction role simply means no description — the generation itself is
+unaffected either way, for either caller.
+
+For the CHAT path specifically (ruling 3): `agents.runtime.jobs.
+plan_turn` — the `agent.turn` job kind's own planner, which is what
+actually admits a chat turn to the execution queue — now declares
+`rag.extract` alongside `vision.generate` whenever this tool is granted,
+tolerantly (unbound → declares nothing) and `synchronous=False` (the
+same flag `vision.generate`'s own ref there already carries, for the
+same reason: neither model loads in-process inside the turn's own
+handler). `rag.extract` is deliberately NOT added to this tool's own
+`ToolSpec.roles` — `agents.runtime.loop._roles_resolve` drops a tool
+from the turn ENTIRELY when any of its declared roles fails to resolve,
+so doing that would make image generation itself vanish whenever
+`rag.extract` is unbound, a far worse regression than the one this task
+fixes.
 
 `vision.generate`'s params are **computed from `all_operations()` at
 registration time** (a ruling superseding this task's original literal

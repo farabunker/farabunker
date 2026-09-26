@@ -22,6 +22,7 @@ from agents.runtime.flowtool import FLOW_RUN_KEY, flow_row_roles
 from identity.contracts.principals import principal_from_payload
 from models.contracts.bindings import resolve
 from models.contracts.jobkinds import ModelRef
+from models.contracts.roles import RAG_EXTRACT_ROLE, VISION_GENERATE_ROLE
 from models.registry.bindings import model_access_for
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,50 @@ def plan_turn(payload: dict) -> tuple[list[ModelRef], bool]:
     Footprints are left `None`, per `models/queue/scheduler.py`'s
     provenance contract: claim-time code fills them in from a FRESH
     lookup, never from this snapshot.
+
+    A FOURTH, NARROWER TOLERANT ADDITION (vision-describes-its-own-output
+    task, ruling 3): when `vision.generate`'s own ROLE (`models.
+    contracts.roles.VISION_GENERATE_ROLE` -- the same string the tool's
+    `ToolSpec.roles` declares) is among the RESOLVED roles below (fix
+    round finding 2 -- the resolved set, not merely the granted one; see
+    the code's own comment at that check for why the distinction is
+    load-bearing), `rag.extract` is declared TOO, resolved tolerantly
+    (unbound -> declare nothing, exactly the drop every OTHER role above
+    already gets) and `synchronous=False` -- the SAME flag `vision.
+    generate` itself carries, and for the identical reason: this handler
+    never drives either model in-process itself, a TOOL (`tools.vision.
+    tools.run_generate`) does, on its own path, so the barrier must not
+    wait for either endpoint to settle before a turn that may not even
+    call the tool this run.
+
+    DELIBERATELY NOT ADDED TO THE TOOL'S OWN `ToolSpec.roles` -- that was
+    investigated and rejected: `_roles_resolve` (`agents.runtime.loop`)
+    drops a tool from the turn ENTIRELY when any of its declared roles
+    fails to resolve, so an unbound `rag.extract` would make image
+    generation itself vanish from every turn that granted it -- a far
+    worse regression than the missing description this task fixes.
+    Declaring it here, conditionally, alongside the walk's own tolerant
+    drops, is what keeps the turn's own admission honest about a SECOND
+    model the granted tool may now use, without EVER gating the tool's
+    own availability on it.
+
+    VERIFIED (never assumed) THAT THIS CANNOT REFUSE A TURN under memory
+    pressure: this function already returns `exclusive=True`
+    UNCONDITIONALLY, above -- the same declaration `tools.vision.jobs.
+    plan_generate` makes, and for the same reason `models/queue/
+    scheduler.py`'s rule 2(a) makes it moot: an exclusive candidate is
+    admitted ONLY into a genuinely idle machine (rule 5) or held for a
+    later round while something else runs (rule 3) -- an OVERSIZE
+    exclusive candidate STILL gets that same "admit alone when idle"
+    treatment, never a permanent refusal (rule 6's own words: "refusing
+    it forever would deadlock the owner's own job forever, which is
+    worse than one job running over the operator's stated budget"). A
+    turn was already exclusive, with or without this ref -- adding one
+    more `ModelRef` cannot change whether the machine admits it, only
+    what stays protected/swept while it runs. Whether the describing
+    model actually loads is therefore a genuinely runtime question,
+    answered honestly by `services.describe_output`'s own non-fatal
+    contract, never an admission-time refusal.
     """
     turn = Turn.objects.select_related(
         "conversation__agent", "conversation__workstream").get(pk=payload["turn"])
@@ -121,7 +166,8 @@ def plan_turn(payload: dict) -> tuple[list[ModelRef], bool]:
     # principal's access, never a wider one recomputed per agent visited.
     access = tool_access_for(actor, wall=wall)
     seen_roles = {agent.llm_role}
-    for role in sorted(_tool_roles(agent, actor, access)):
+    tool_roles = sorted(_tool_roles(agent, actor, access))
+    for role in tool_roles:
         if role in seen_roles:
             continue
         try:
@@ -140,6 +186,31 @@ def plan_turn(payload: dict) -> tuple[list[ModelRef], bool]:
             seen_roles.add(role)
         except Exception:  # noqa: BLE001 -- tolerant drop, see docstring
             logger.info("agent.turn: role %r does not resolve; its tool is dropped", role)
+
+    # vision-describes-its-own-output task, ruling 3 -- see this
+    # function's own docstring for the full reasoning. `VISION_GENERATE_
+    # ROLE in seen_roles`, NOT `tool_roles` -- fix round finding 2.
+    # `tool_roles` is the GRANTED set (every role a granted tool
+    # declares, whether or not it resolves); `seen_roles` is the
+    # RESOLVED set, seeded with the chat role above and added to ONLY on
+    # a successful `resolve()` in the loop just above. Checking the
+    # granted set would over-claim: an UNBOUND image role means
+    # `_roles_resolve` (`agents.runtime.loop`) drops the image tool from
+    # this turn's tool list entirely, so a turn that can never call that
+    # tool would still have reserved a SECOND model for a description
+    # that can never happen -- the mirror image of the under-claim this
+    # whole task exists to fix. Conditional and tolerant, exactly like
+    # every role in the loop above -- an unbound `rag.extract` declares
+    # nothing here, never an error, and never touches whether the image
+    # tool itself is offered.
+    if VISION_GENERATE_ROLE in seen_roles and RAG_EXTRACT_ROLE not in seen_roles:
+        try:
+            refs.append(_ref(RAG_EXTRACT_ROLE, resolve(RAG_EXTRACT_ROLE), synchronous=False))
+        except Exception:  # noqa: BLE001 -- tolerant drop, see docstring
+            logger.info(
+                "agent.turn: rag.extract does not resolve; the image tool's own "
+                "description step will simply be skipped this turn"
+            )
     return refs, True
 
 

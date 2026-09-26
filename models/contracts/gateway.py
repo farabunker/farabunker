@@ -52,6 +52,10 @@ by another's mid-flight. Explicit construction per call sidesteps both.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
+from llama_index.core.llms import ChatMessage, ImageBlock, MessageRole, TextBlock
+
 from models.contracts.bindings import ResolvedModel, resolve
 from models.contracts.engines import get_engine
 from models.contracts.roles import (
@@ -100,6 +104,71 @@ def get_llm(role: str = RAG_ANSWER_ROLE):
     here directly.
     """
     return get_llm_for(resolve(role))
+
+
+def describe_image(
+    role: str, image_path, prompt: str, *, request_timeout: float | None = None
+) -> str:
+    """Ask `role`'s bound vision-capable model about ONE local image, and
+    return exactly what it said — stripped, never rewritten.
+
+    THE SHARED "ask a vision-capable model about an image file" MECHANISM
+    (vision-describes-its-own-output task, fix round item 5): `tools.rag.
+    extract._ask_vision` and `tools.vision.services.describe_output` had
+    each hand-built this same shape independently — one `ChatMessage`,
+    instruction block before the image block, verbatim-stripped answer —
+    because neither column may import the other and this seam did not
+    exist yet. It does now, so a THIRD column never re-derives it either.
+    `tools.vision.services.describe_output` calls this; `tools.rag.
+    extract` does NOT yet (a named follow-up, not part of this task —
+    converging it onto this seam is its own change, reviewed on its own).
+
+    THE PROMPT IS DELIBERATELY A PARAMETER, NEVER OWNED HERE. A reviewer
+    ruled explicitly that rag's retrieval-caption prompt
+    (`tools.rag.extract.DESCRIPTION_PROMPT`) and vision's own judging
+    prompt (`tools.vision.services.DESCRIBE_OUTPUT_PROMPT`) are different
+    things that must not converge into one shared constant — retrieval
+    wants a searchable caption, judging wants a verdict against an
+    unseen request. This function is MECHANISM ONLY: it has no opinion on
+    what to ask, only how to ask it and how to hand back the answer.
+
+    `request_timeout` (one-timeout task pattern, extended here): passed
+    straight through to `get_llm_for`, the SAME "one firing authority"
+    seam `tools.rag.tools`'s own in-turn calls already use for their
+    embedder/answer-role clients. `None` (the default) leaves the engine
+    adapter's own default in place, exactly like every other caller of
+    `get_llm_for` that passes nothing. EVERY caller of this function
+    should pass one deliberately, not rely on the default -- see `tools.
+    vision.services.describe_output`'s own two callers for the two
+    honest shapes (a turn's own remaining budget; a bounded module
+    constant where no turn budget exists).
+
+    `image_path`: a LOCAL file (`str` or `Path`) -- this platform is
+    offline-first, so the block reads the file itself rather than
+    fetching a URL (`ImageBlock(path=...)`, never `image=...`/`url=...`).
+
+    VERBATIM: `str(response.message.content or "").strip()` is the whole
+    return -- no post-processing, no re-wording. `content or ""` guards
+    only a `None` content (some engines return that for a truly blank
+    answer); `.strip()` then collapses a whitespace-only answer to `""`,
+    which every caller already treats as "no description" (verified
+    against `tools.rag.extract._ask_vision`'s identical contract, which
+    this function replaces the BODY of, never the meaning).
+
+    Raises whatever `resolve()`/`get_llm_for()`/`llm.chat()` raise --
+    unbound role, engine failure, timeout -- uncaught: this is MECHANISM,
+    not policy, and every caller today (`describe_output`, `tools.rag.
+    extract._ask_vision`'s own future migration) already owns its own
+    catch-and-degrade contract; a second one here would just be a second
+    place for that policy to drift from the caller's real one.
+    """
+    llm = get_llm_for(resolve(role), request_timeout=request_timeout)
+    message = ChatMessage(
+        role=MessageRole.USER,
+        blocks=[TextBlock(text=prompt), ImageBlock(path=Path(image_path))],
+    )
+    response = llm.chat([message])
+    return str(response.message.content or "").strip()
 
 
 def get_embed_model_for(resolved: ResolvedModel, *, request_timeout: float | None = None):
