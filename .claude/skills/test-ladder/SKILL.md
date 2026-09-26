@@ -44,7 +44,7 @@ same trailing `makemigrations --check --dry-run` and `check` pair.
 ## Running it
 
 ```bash
-scripts/ladder.py <worktree> <db_url> <outdir> full [--max-others N] <touched-module>...
+scripts/ladder.py <worktree> <db_url> <outdir> full [--max-others N] [--expect-minutes N] <touched-module>...
 scripts/ladder.py <worktree> <db_url> <outdir> hotfix
 ```
 
@@ -74,6 +74,10 @@ scripts/ladder.py <worktree> <db_url> <outdir> hotfix
   <pid>:<label>, ...` -- because a count can't say whose run is holding the machine or how far
   along it is. Default `1` -- AGENTS.md's "at most two full suites" (this run plus one other);
   pass `0` for a peer-agreed stricter cap.
+- The script also holds the slot lock for its whole chain (see "Sharing the machine" below) --
+  `--expect-minutes` states how long that chain expects to take (default `120` full / `20`
+  hotfix); it is written into the lock so a peer can decide between waiting and doing something
+  else, not enforced as a timeout.
 - **Pausing** is `kill -STOP <ladder.py's own pid>` (not its process group).
   Its in-flight pytest subprocess is a separate process and keeps running to
   completion regardless -- the result still lands in that run's `.log` and
@@ -84,18 +88,40 @@ scripts/ladder.py <worktree> <db_url> <outdir> hotfix
 
 ## Sharing the machine
 
-The wait is advisory, not mutual exclusion -- checking the count and starting the run are two
-separate steps with a gap between them, so two sessions can both see a clear machine in the
-same instant and start together. Explicit handover -- saying out loud what you're about to run
-and when, and correcting it when that changes -- is therefore the protocol, not a politeness:
-it is what stopped and restarted a chain here when the count alone would not have, and it is
-the part that survives whoever eventually lands a lock, since a lock only says the machine is
-taken, never for how long or what to do instead. Next step, not yet built: a lock file created
-exclusively (so the loser of a race fails to create it rather than reading stale state),
-carrying the holder's pid and a timestamp, with a waiter treating a missing holder or an
-implausibly old timestamp as stale and taking it -- it would turn "I looked and nobody was
-running" into "I hold the only token", giving every session one place to see who holds the
-machine and since when.
+The wait alone is advisory, not mutual exclusion -- checking the count and starting the run are
+two separate steps with a gap between them, so two sessions could always see a clear machine in
+the same instant and start together. `acquire_lock`/`release_lock`/`read_lock`/`is_stale`
+(`LOCK_PATH`) close that gap for any session that adopts them: one machine-wide token, created
+exclusively (the loser of a race FAILS TO CREATE rather than reading stale state and proceeding
+anyway). AUTHORITATIVE for a session that acquires it; the process check above stays a
+SECONDARY ADVISORY, for a run started by a session that has not adopted the lock.
+
+ROLLOUT RULE, both halves, because a lock introduced mid-flight is a failure mode that looks
+exactly like the protocol working: while some sessions still run without the lock, its ABSENCE
+is NOT evidence the machine is idle -- a pre-lock session can genuinely hold the machine with no
+lock file ever written, and seeing that holder is exactly the process check's remaining job.
+Only once every session acquires the lock does "no lock file" mean idle, and only then does the
+process check stop being load-bearing.
+
+A lock is stale -- and stolen, with an announcement to stderr first, never silently -- when its
+holding process is gone, or its start time is more than 3x its own stated `expected_seconds` in
+the past. Stale-detection is the flimsiest part of this whole scheme and is deliberately the
+LAST line of defence, not the first: `main` arms the release handlers the instant `acquire_lock`
+returns, before anything else in the run gets a chance to fail and leave the lock waiting to go
+stale instead of being released properly.
+
+NOTE, LOUDLY: release happens on normal exit, on SIGINT, and on SIGTERM -- NEVER on SIGSTOP.
+This runner's own pause mechanism (below) is SIGSTOP, and a paused run STILL OWNS THE MACHINE --
+a stop that freed the lock would hand the box to a peer while a suite sits frozen holding it.
+SIGSTOP can't be caught by any handler regardless, by the OS's own design, so there's no
+accidental path to releasing on pause even if this forgot to be careful about it.
+
+Explicit handover -- saying out loud what you're about to run and when, and correcting it when
+that changes -- remains the protocol underneath all of this, not a politeness: it is what
+stopped and restarted a chain here when a count alone would not have, and it survives the lock
+too, since the lock only says the machine is taken, never for how long or what to do instead --
+its `running`/`expected_seconds` fields narrow that gap but are a stated expectation, not a
+guarantee.
 
 ## Trusting the matcher
 
@@ -108,6 +134,33 @@ same before trusting it: run it both directions against known ground truth -- th
 output is the evidence, not the reasoning that produced it. Do not count matching processes;
 read their arguments and say which suite is running -- a count cannot tell you whose run it is,
 and whose run it is turns out to be the thing every session actually needs to know.
+
+The same disease shows up outside this file, and it's the same lesson, not a separate one: a
+process-name match that can never match its actual target (a daemon that runs under a different
+name entirely) is an OPINION about state, not a check of it, and it was reported as truth here
+more than once. A socket that refuses a connection, or a request that times out, is EVIDENCE --
+it asked the thing itself rather than guessing from a name nobody ran against a known-good case.
+Prefer asking the thing directly over pattern-matching a name for it whenever the target can be
+asked.
+
+## Standing rules
+
+- **No private guard variants.** Five different versions of the other-pytest predicate got
+  written in one day across two sessions, and one nearly shipped to every implementer here --
+  one canonical, reviewed, tested matcher, or the same phantom comes back wearing someone else's
+  copy of it.
+- **No background watcher whose command line mentions the runner.** One blocked its own
+  session's chain -- the pattern must never travel on a command line anything is watching,
+  including that watcher's own.
+- **A process check is untrusted until it has been run in both directions against a machine
+  known busy and known idle.** Its own output is the evidence; a check that only reads correctly
+  has proven nothing.
+- **Announce identity and expected duration, never a bare count.** A count can't say whose run
+  is holding the machine or how much longer it has -- that's exactly what the lock's fields
+  (holder, pid, running, started, expected_seconds) exist to answer instead.
+- **A void run stops immediately when the database is absent or refusing**, rather than grinding
+  through the whole ladder producing hours of connection-refused noise -- that failure mode
+  costs the slot twice, the wasted run and the lock held the entire time it ran for nothing.
 
 ## Failure modes
 

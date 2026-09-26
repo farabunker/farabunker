@@ -4,7 +4,7 @@
 See .claude/skills/test-ladder/SKILL.md for the full procedure this encodes.
 
 Usage:
-    scripts/ladder.py <worktree> <db_url> <outdir> <full|hotfix> [--max-others N] [touched-modules...]
+    scripts/ladder.py <worktree> <db_url> <outdir> <full|hotfix> [--max-others N] [--expect-minutes N] [touched-modules...]
 
 Each named run writes <outdir>/<run>.log, appends
 "<run> | <returncode> | <last summary line>" to <outdir>/SUMMARY, and
@@ -38,6 +38,24 @@ than just a count -- "waiting: N other pytest processes -- <pid>:<label>,
 ...": a count can't say whose run it is holding the machine or how far
 along it is, and that's what a waiting session actually needs to know.
 
+The slot lock (LOCK_PATH, acquire_lock/release_lock/read_lock/is_stale):
+one machine-wide token, exclusively created (os.O_EXCL -- the loser of a
+race FAILS TO CREATE rather than reading stale state), held for a whole
+chain. AUTHORITATIVE for any session that adopts it; the process check
+above stays a SECONDARY ADVISORY for a run started by a session that has
+not. ROLLOUT RULE, both halves: while some sessions still run without the
+lock, the ABSENCE of a lock file is NOT evidence of an idle machine --
+that is exactly the process check's remaining job, to see a holder who
+has not yet adopted the lock. Only once every session acquires it does
+"no lock file" mean idle, and the process check stop being load-bearing.
+
+NOTE, LOUDLY: this script's own pause mechanism is SIGSTOP (below), and a
+paused run STILL OWNS THE MACHINE. The lock is released on normal exit,
+on SIGINT and on SIGTERM -- NEVER on SIGSTOP. A stop that freed the lock
+would hand the machine to a peer while a suite sits frozen holding it.
+Nothing here even tries to hook SIGSTOP: the OS never lets a handler
+catch it, by design, so there is no accidental path to releasing on pause.
+
 Pausing: SIGSTOP this script's own pid (not its process group). Its
 in-flight pytest subprocess is a separate process and keeps running to
 completion regardless -- the result lands in that run's .log and gets
@@ -45,13 +63,36 @@ appended to SUMMARY normally the moment SIGCONT lets the parent resume.
 """
 from __future__ import annotations
 
+import json
 import os
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 FULL_MODULES = ("scripts", "identity", "agents", "foundation", "models", "tools")
+
+# The slot lock: a single machine-wide token, exclusively created, that a
+# session holds for its whole chain. AUTHORITATIVE for any session that
+# acquires it -- the process check above (other_pytest_matches et al.)
+# remains a SECONDARY ADVISORY only, for a run started by a session that
+# has not adopted the lock. Neither replaces the other yet: the lock gives
+# true mutual exclusion (one holder, ever) where it's used; the count-based
+# wait still runs underneath it and is all a non-adopting session gets.
+# ROLLOUT RULE (module docstring has the full text): mid-rollout, no lock
+# file does NOT mean idle -- a pre-lock session can genuinely hold the
+# machine with none written. That's the process check's remaining job.
+LOCK_PATH = Path(tempfile.gettempdir()) / "farabunker-ladder.lock"
+
+
+class LockHeld(Exception):
+    """Raised by acquire_lock when the lock is held by another live,
+    non-stale session. str(exc) names who holds it and what they're
+    running, for a caller to print and give up on rather than retry in a
+    loop -- looping here would just be the poll's race window rewritten
+    under a lock's name."""
 
 
 def build_run_plan(mode: str, touched_modules: list[str]) -> list[dict]:
@@ -252,6 +293,137 @@ def _other_pytest_matches() -> list[tuple[int, str]]:
     return other_pytest_matches(lines, _own_process_tree(lines, os.getpid()))
 
 
+def read_lock(path: Path = LOCK_PATH) -> dict | None:
+    """The lock's contents, or None if there is none or it's unreadable.
+    Public so a session can check by hand: `python3 -c "import ladder as
+    l; print(l.read_lock())"` answers who holds the machine, what they're
+    running, and how long they expect to take -- the question a count
+    never could."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _pid_alive(pid: int) -> bool:
+    """Signal 0 probes existence without sending a real one -- stdlib
+    os.kill, no subprocess."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, just owned by someone else
+    return True
+
+
+def _lock_age_exceeds_budget(info: dict, now: float) -> bool:
+    """Pure: True once `now` is more than 3x the lock's own stated
+    expectation past its start -- separated from is_stale so this half of
+    the staleness rule is testable with no process on the machine at
+    all."""
+    return (now - info["started"]) > 3 * info["expected_seconds"]
+
+
+def is_stale(info: dict, now: float | None = None) -> bool:
+    """A lock is stale when its holding process is gone, or its start
+    time is older than three times its own stated expectation -- a
+    crashed session must not wedge the machine forever. Public: a
+    session can check a lock it's looking at by hand before deciding
+    whether to steal it."""
+    if not _pid_alive(info["pid"]):
+        return True
+    return _lock_age_exceeds_budget(info, time.time() if now is None else now)
+
+
+def acquire_lock(path: Path, *, holder: str, running: str, expected_seconds: float) -> None:
+    """Exclusively create the lock file -- the loser of a race FAILS TO
+    CREATE (os.O_EXCL) rather than reading stale state and deciding to
+    proceed anyway, which is the whole reason this beats a poll: checking
+    and starting are two separate steps for a poll, racy in the gap
+    between them, and one atomic step here. Raises LockHeld if a live,
+    non-stale session already holds it. A stale lock is announced to
+    stderr and stolen -- never silently -- then acquired the same way;
+    if that second create also loses a race, LockHeld is raised rather
+    than looping.
+
+    The lock's contents answer what a count never could: which session
+    (`holder`), which process (`os.getpid()`), what it's running in
+    recognisable terms (`running`), when it started, and how long it
+    expects to take (`expected_seconds`) -- enough for a peer to decide
+    between waiting ten minutes and doing something else for two hours."""
+    info = {
+        "holder": holder,
+        "pid": os.getpid(),
+        "running": running,
+        "started": time.time(),
+        "expected_seconds": expected_seconds,
+    }
+
+    def _create() -> int:
+        return os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+
+    try:
+        fd = _create()
+    except FileExistsError:
+        existing = read_lock(path)
+        holder_desc = existing.get("holder", "?") if existing else "?"
+        pid_desc = existing.get("pid", "?") if existing else "?"
+        running_desc = existing.get("running", "?") if existing else "?"
+        expected_s = existing.get("expected_seconds", 0) if existing else 0
+        age_s = (time.time() - existing["started"]) if existing else 0
+
+        if existing is not None and not is_stale(existing):
+            raise LockHeld(
+                f"held by {holder_desc!r} (pid {pid_desc}), running "
+                f"{running_desc!r}, expecting {expected_s / 60:.0f}m"
+            )
+        print(
+            f"stealing stale lock: held by {holder_desc!r} (pid {pid_desc}), "
+            f"started {age_s:.0f}s ago, expected {expected_s:.0f}s",
+            file=sys.stderr,
+        )
+        path.unlink(missing_ok=True)
+        try:
+            fd = _create()
+        except FileExistsError:
+            raise LockHeld("lost the race to steal the stale lock -- retry")
+
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(info, f)
+
+
+def release_lock(path: Path) -> None:
+    """Remove the lock file -- but only if it's still ours. A paused
+    (SIGSTOP'd) run can be outlived by its own staleness budget and get
+    stolen while stopped; when it's later resumed and finishes, its
+    release must not delete the NEW holder's lock. Safe to call when the
+    lock is already gone."""
+    info = read_lock(path)
+    if info is not None and info.get("pid") != os.getpid():
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _install_release_handlers(path: Path) -> None:
+    """Release on SIGTERM and SIGINT (termination, interrupt) so a killed
+    run doesn't wedge the machine for whoever's waiting. Deliberately NOT
+    on SIGSTOP: that's this runner's own documented pause mechanism (see
+    module docstring), and a paused run still owns the machine -- it must
+    NOT release. Nothing here even tries: SIGSTOP can't be caught by any
+    handler, by the OS's own design, so there is no hook that could fire
+    on it by accident."""
+    def _handler(signum, _frame):
+        release_lock(path)
+        sys.exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _handler)
+    signal.signal(signal.SIGINT, _handler)
+
+
 def _wait_for_the_machine(max_others: int, poll_seconds: float = 5.0) -> None:
     last_print = 0.0
     while True:
@@ -295,9 +467,19 @@ def main(argv: list[str]) -> int:
             return 2
         del args[i:i + 2]
 
+    expect_minutes = None
+    if "--expect-minutes" in args:
+        i = args.index("--expect-minutes")
+        try:
+            expect_minutes = float(args[i + 1])
+        except (IndexError, ValueError):
+            print("--expect-minutes needs a number")
+            return 2
+        del args[i:i + 2]
+
     if len(args) < 4:
         print("usage: scripts/ladder.py <worktree> <db_url> <outdir> <full|hotfix> "
-              "[--max-others N] [touched-modules...]")
+              "[--max-others N] [--expect-minutes N] [touched-modules...]")
         return 2
 
     worktree, db_url, outdir_raw, mode = args[:4]
@@ -313,28 +495,48 @@ def main(argv: list[str]) -> int:
     base_env = os.environ.copy()
     base_env["DATABASE_URL"] = db_url
 
-    failures = 0
-    for run in build_run_plan(mode, touched_modules):
-        env = dict(base_env)
-        env["FARABUNKER_FEATURES"] = run["features"]
-        if run["posture"] is not None:
-            env["FARABUNKER_TEST_POSTURE"] = run["posture"]
-        rc = _run_one(run["name"], [".venv/bin/pytest", "-q", *run["modules"]],
-                      env, worktree_path, outdir, max_others=max_others)
+    # The slot lock, held for this whole chain -- see LOCK_PATH's comment
+    # for the authoritative/advisory split with the process check below.
+    if expect_minutes is None:
+        expect_minutes = 120.0 if mode == "full" else 20.0
+    holder = worktree_path.name
+    running = f"{mode} ladder: " + " ".join(touched_modules or FULL_MODULES)
+    try:
+        acquire_lock(LOCK_PATH, holder=holder, running=running,
+                     expected_seconds=expect_minutes * 60)
+    except LockHeld as exc:
+        print(f"ladder: machine locked -- {exc}", file=sys.stderr)
+        return 2
+    _install_release_handlers(LOCK_PATH)
+
+    try:
+        failures = 0
+        for run in build_run_plan(mode, touched_modules):
+            env = dict(base_env)
+            env["FARABUNKER_FEATURES"] = run["features"]
+            if run["posture"] is not None:
+                env["FARABUNKER_TEST_POSTURE"] = run["posture"]
+            rc = _run_one(run["name"], [".venv/bin/pytest", "-q", *run["modules"]],
+                          env, worktree_path, outdir, max_others=max_others)
+            failures += rc != 0
+
+        rc = _run_one(
+            "makemigrations-check",
+            [".venv/bin/python", "manage.py", "makemigrations", "--check", "--dry-run"],
+            base_env, worktree_path, outdir, wait=False,
+        )
+        failures += rc != 0
+        rc = _run_one("check", [".venv/bin/python", "manage.py", "check"],
+                       base_env, worktree_path, outdir, wait=False)
         failures += rc != 0
 
-    rc = _run_one(
-        "makemigrations-check",
-        [".venv/bin/python", "manage.py", "makemigrations", "--check", "--dry-run"],
-        base_env, worktree_path, outdir, wait=False,
-    )
-    failures += rc != 0
-    rc = _run_one("check", [".venv/bin/python", "manage.py", "check"],
-                   base_env, worktree_path, outdir, wait=False)
-    failures += rc != 0
-
-    (outdir / "LADDER_DONE").touch()
-    return 1 if failures else 0
+        (outdir / "LADDER_DONE").touch()
+        return 1 if failures else 0
+    finally:
+        # Release on normal completion AND on any exception -- the
+        # signal handlers above cover SIGTERM/SIGINT; SIGSTOP (pause)
+        # never reaches here or them, by design.
+        release_lock(LOCK_PATH)
 
 
 if __name__ == "__main__":

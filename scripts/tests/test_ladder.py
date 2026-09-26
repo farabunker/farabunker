@@ -18,15 +18,39 @@ argument, starves a strict run exactly like the reflection bug did. The
 fix asks whether the runner is what is being EXECUTED (some argument
 token's own basename is exactly "pytest", or the adjacent "-m pytest"
 pair), not whether the word appears somewhere in the text.
+
+The slot lock (acquire_lock/release_lock/read_lock/is_stale) gets the
+same treatment as the matcher: pure functions over inputs where a real
+process isn't the point (the age-vs-budget half of staleness), and an
+actual exercise of the exclusive-create where it is (a poll can't be
+tested this way, but O_EXCL can and must be, per our own "run it, don't
+just reason about it" doctrine). Every lock in these tests is created
+under a fresh tempfile.mkdtemp() directory, never LOCK_PATH itself.
 """
 from __future__ import annotations
 
+import contextlib
+import io
+import json
+import os
+import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ladder import FULL_MODULES, build_run_plan, count_other_pytest  # noqa: E402
+from ladder import (  # noqa: E402
+    FULL_MODULES,
+    LockHeld,
+    acquire_lock,
+    build_run_plan,
+    count_other_pytest,
+    is_stale,
+    read_lock,
+    release_lock,
+)
 
 REVERSED = tuple(reversed(FULL_MODULES))
 
@@ -187,3 +211,101 @@ def test_count_other_pytest_counts_a_transient_package_install_naming_the_runner
         "510 1 Python /usr/bin/python3 -m pip install pytest",
     ]
     assert count_other_pytest(lines, exclude_pids=set()) == 1
+
+
+def test_is_stale_true_when_age_exceeds_three_times_expected_seconds():
+    # Pure half of staleness: no process on the machine matters here --
+    # the holder is this test itself (alive), only the clock math is
+    # under test. started 31 minutes ago, expected 10 minutes -> 3x
+    # budget is 30 minutes, so this is just past it.
+    info = {"pid": os.getpid(), "started": 1_000_000.0, "expected_seconds": 600}
+    assert is_stale(info, now=1_000_000.0 + 31 * 60) is True
+
+
+def test_is_stale_false_when_alive_and_within_budget():
+    info = {"pid": os.getpid(), "started": 1_000_000.0, "expected_seconds": 600}
+    assert is_stale(info, now=1_000_000.0 + 5 * 60) is False
+
+
+def test_is_stale_true_when_the_holding_process_is_gone_even_if_fresh():
+    # The other half needs a real, genuinely dead pid -- asking the OS
+    # directly (os.kill(pid, 0)) rather than pattern-matching a name is
+    # exactly the "ask the thing itself" doctrine this predicate exists
+    # to follow, so it's exercised with a real process, not asserted.
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    info = {"pid": proc.pid, "started": time.time(), "expected_seconds": 999999}
+    assert is_stale(info, now=time.time()) is True
+
+
+def test_acquire_lock_is_exclusive_then_release_lets_the_next_acquire_through():
+    # The behaviour a pure function can't stand in for: os.O_EXCL itself.
+    # Acquire, attempt a second acquire and assert it fails, release,
+    # assert the next acquire succeeds -- actually exercised, not reasoned
+    # about.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        acquire_lock(lock_path, holder="session-a", running="full ladder: tools",
+                     expected_seconds=600)
+
+        raised = False
+        try:
+            acquire_lock(lock_path, holder="session-b", running="hotfix ladder: identity",
+                         expected_seconds=300)
+        except LockHeld:
+            raised = True
+        assert raised, "a live lock must make the loser FAIL TO CREATE, not read and proceed"
+        assert read_lock(lock_path)["holder"] == "session-a"  # untouched by the loser
+
+        release_lock(lock_path)
+        assert not lock_path.exists()
+
+        acquire_lock(lock_path, holder="session-c", running="full ladder: models",
+                     expected_seconds=600)
+        assert read_lock(lock_path)["holder"] == "session-c"
+    finally:
+        release_lock(lock_path)
+        lock_path.parent.rmdir()
+
+
+def test_acquire_lock_steals_a_stale_lock_with_an_announcement_not_silently():
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()  # a genuinely dead pid, like a crashed session's leftover
+        stale = {
+            "holder": "dead-session", "pid": proc.pid, "running": "full ladder: tools",
+            "started": time.time() - 10, "expected_seconds": 600,
+        }
+        lock_path.write_text(json.dumps(stale), encoding="utf-8")
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            acquire_lock(lock_path, holder="rescuer", running="full ladder: models",
+                         expected_seconds=600)
+        assert "stealing stale lock" in stderr.getvalue()  # never silent
+        assert read_lock(lock_path)["holder"] == "rescuer"
+    finally:
+        release_lock(lock_path)
+        lock_path.parent.rmdir()
+
+
+def test_release_lock_does_not_delete_a_lock_it_no_longer_owns():
+    # The pause+steal+resume race this guards against: a session paused
+    # past its own staleness budget can be stolen from while stopped;
+    # when it resumes and finishes, its release must not delete whoever
+    # holds the lock now. Simulated here by planting a lock with a
+    # different pid than this test's own.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        someone_else = {
+            "holder": "someone-else", "pid": os.getpid() + 1, "running": "full ladder: tools",
+            "started": time.time(), "expected_seconds": 600,
+        }
+        lock_path.write_text(json.dumps(someone_else), encoding="utf-8")
+        release_lock(lock_path)  # must be a no-op -- not our pid in the file
+        assert lock_path.exists()
+        assert read_lock(lock_path)["holder"] == "someone-else"
+    finally:
+        lock_path.unlink(missing_ok=True)
+        lock_path.parent.rmdir()
