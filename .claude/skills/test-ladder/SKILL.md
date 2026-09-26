@@ -204,11 +204,22 @@ the resource the lock actually exists to protect. `_db_activity_present` is the 
 signal here that asks the database ITSELF whether anything is connected and active on the
 recorded `db_port`, rather than reading a proxy for that and hoping. So a lock is stolen only
 when the process looks gone or aged out AND the probe finds no contradicting activity -- never
-on the process signal alone while a real answer is available. DIRECTION, stated plainly rather
-than built: eventually the probe could carry the whole staleness decision, with the process id
-and the age demoted to tie-breakers for when the probe itself can't run. Not now, mid-rollout --
-but the reason is worth keeping, because every defect this week came from measuring a proxy and
-believing it.
+on the process signal alone while a real answer is available. DIRECTION, stated as a MIRROR IMAGE
+of today's arrangement rather than a replacement for it, and this is the corrected version of an
+earlier note that had it backwards: the probe could eventually become PRIMARY, since it measures
+the resource, but the process id and the age do not then retire -- they become the resolver of
+THE PROBE'S OWN STUCK CASE. A live peer lock verified against this exact probe showed why: the
+connection it saw was IDLE IN TRANSACTION, not active -- exactly what the probe should catch (a
+live suite paused between tests), but in a SINGLE SAMPLE that state is indistinguishable from a
+CRASHED run that left a transaction open, and an abandoned connection sits there indefinitely. A
+conjunction that trusted the probe alone would read busy forever and wedge the machine on
+exactly the input it exists to interpret; the process clause -- for all that it lies today about
+a harness that splits acquire from run -- is the thing that would eventually notice the crash and
+release it. Closing this needs either two samples a minute apart (activity that persists is a
+live suite; activity that vanishes was a snapshot of a transaction already gone) or watching the
+connection's state change rather than sampling it once. Not now, mid-rollout -- but the reason is
+worth keeping, because every defect this week came from measuring a proxy and believing it, and
+the fix for that is not "trust the resource signal instead" but "know what each signal is FOR".
 
 Degradation is RULED, not improvised: if the probe can't run at all (`psql` missing, no
 `db_port` ever recorded, the connection attempt itself refused or timed out), this does not
@@ -234,6 +245,14 @@ misleading rather than merely unreliable. This script's own `main()` satisfies t
 (acquire and the whole run to `release_lock` share one process, verified by reading it) --
 whoever changes the call site must re-verify this, not assume it, and the specific way to break
 it is splitting acquisition into a separate setup step.
+
+THE RULE HAD A HOLE: "acquire, run and release in one call" is not enough on its own, because a
+run BACKGROUNDED from that call satisfies the words while destroying the purpose -- the acquiring
+shell reaches its own end and exits immediately, leaving a live suite behind a lock that already
+names a dead process. This is exactly what makes a rule dangerous: it is easy to write while
+genuinely believing it is being followed. The rule as it actually has to read: acquire, run and
+release in ONE SHELL, AND THE RUN MUST BE IN THE FOREGROUND OF THAT SHELL -- not backgrounded
+(`&`), not detached, not handed to a supervisor that returns before the run ends.
 
 Two general lessons this saga produced, worth stating outside this file's own case:
 

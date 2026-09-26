@@ -686,6 +686,18 @@ def acquire_lock(path: Path, *, holder: str, running: str, expected_seconds: flo
         # of the locking logic above or below, which is why this note is
         # here at the write site and not in the module docstring, where
         # an editor of the call site would not see it.
+        #
+        # ONE CALL IS NOT ENOUGH BY ITSELF, EITHER: the run inside that
+        # one call must be in the FOREGROUND of it. A run BACKGROUNDED
+        # from the acquiring call (`&`, a detached process, a supervisor
+        # that returns before the run ends) satisfies "acquire, run and
+        # release in one call" by the letter while destroying it in
+        # substance -- the acquiring shell reaches its own end and exits
+        # immediately, leaving a live suite behind a lock that already
+        # names a dead process. This is easy to write while genuinely
+        # believing the rule is being followed, which is exactly what
+        # makes it worth stating here rather than trusting it to be
+        # obvious.
         "pid": os.getpid(),
         "running": running,
         "started": time.time(),
