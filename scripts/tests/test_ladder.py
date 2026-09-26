@@ -883,22 +883,57 @@ def test_shared_db_presence_reads_clear_with_a_real_application_connection():
     # DATABASE, if the DROP below is ever missed, does not matter to the
     # gate at all -- presence is judged on CONNECTIONS, never on the
     # catalogue, so no future cleanup of the database list is needed
-    # either.
+    # either. The connection is TERMINATED the instant the assertion
+    # finishes rather than left to run out its own sleep -- the busy
+    # window this test manufactures should be exactly as wide as the
+    # assertion needs, not as wide as a round number happened to be.
+    #
+    # PRECONDITION, found by running this in REVERSE module-collection
+    # order rather than reasoned about: the run plan executes its whole
+    # module list in ONE process, forward order runs this before any
+    # database test ever opens a connection, but reverse order runs it
+    # LAST -- by which point the enclosing test session's own
+    # session-persistent connection to ITS test database is open on this
+    # same port, and this probe (by design) matches ANY test-named
+    # database, including that one. The lock's containment doesn't
+    # reach this case: it parks PEER sessions, not the suite this test
+    # is running inside, which holds its own test-database connection
+    # within the very slot this test holds. So: check for a
+    # pre-existing test-named connection FIRST, before manufacturing
+    # anything, and skip visibly (naming what was found) rather than
+    # asserting through it -- weakening the assertion to tolerate a
+    # test-named row would stop proving the permit outcome at all and
+    # make the over-widening defect this exists to catch nondeterministic
+    # whenever both an application and a test row happen to coexist.
     _require_reachable_postgres(5433)
+    preexisting = ladder._shared_db_presence(5433)
+    if preexisting is not None and preexisting is not ladder._PROBE_UNAVAILABLE:
+        pytest.skip(
+            f"a test-named database already has a connection on port 5433 "
+            f"(pid {preexisting['pid']} on {preexisting['datname']!r}, "
+            f"{preexisting['state']!r}) -- the enclosing suite's own test "
+            f"database, most likely, in reverse collection order. The clear "
+            f"condition cannot be manufactured while that connection exists."
+        )
     dbname = f"ladder_gate_probe_clear_scratch_{os.getpid()}"
     env = dict(os.environ)
     env.setdefault("PGPASSWORD", "farabunker")
     psql_base = ["psql", "-h", "localhost", "-p", "5433", "-U", "farabunker"]
+    subprocess.run(
+        [*psql_base, "-d", "postgres", "-c", f"DROP DATABASE IF EXISTS {dbname} WITH (FORCE)"],
+        capture_output=True, text=True, timeout=10, env=env,
+    )  # self-heal: a survivor of a previous forced kill must not error this one
     subprocess.run([*psql_base, "-d", "postgres", "-c", f"CREATE DATABASE {dbname}"],
                     capture_output=True, text=True, timeout=10, env=env, check=True)
     conn = subprocess.Popen(
-        [*psql_base, "-d", dbname, "-c", "SELECT pg_sleep(6)"],
+        [*psql_base, "-d", dbname, "-c", "SELECT pg_sleep(30)"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
     )
     try:
         time.sleep(1.5)  # let the connection register in pg_stat_activity
         assert ladder._shared_db_presence(5433) is None
     finally:
+        conn.terminate()
         conn.wait(timeout=10)
         subprocess.run(
             [*psql_base, "-d", "postgres", "-c", f"DROP DATABASE IF EXISTS {dbname} WITH (FORCE)"],
@@ -924,10 +959,14 @@ def test_shared_db_presence_reads_busy_with_a_real_test_db_connection():
     env = dict(os.environ)
     env.setdefault("PGPASSWORD", "farabunker")
     psql_base = ["psql", "-h", "localhost", "-p", "5433", "-U", "farabunker"]
+    subprocess.run(
+        [*psql_base, "-d", "postgres", "-c", f"DROP DATABASE IF EXISTS {dbname} WITH (FORCE)"],
+        capture_output=True, text=True, timeout=10, env=env,
+    )  # self-heal: a survivor of a previous forced kill must not error this one
     subprocess.run([*psql_base, "-d", "postgres", "-c", f"CREATE DATABASE {dbname}"],
                     capture_output=True, text=True, timeout=10, env=env, check=True)
     conn = subprocess.Popen(
-        [*psql_base, "-d", dbname, "-c", "SELECT pg_sleep(6)"],
+        [*psql_base, "-d", dbname, "-c", "SELECT pg_sleep(30)"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
     )
     try:
@@ -935,6 +974,7 @@ def test_shared_db_presence_reads_busy_with_a_real_test_db_connection():
         result = ladder._shared_db_presence(5433)
         assert result is not None and result is not ladder._PROBE_UNAVAILABLE
     finally:
+        conn.terminate()
         conn.wait(timeout=10)
         subprocess.run(
             [*psql_base, "-d", "postgres", "-c", f"DROP DATABASE IF EXISTS {dbname} WITH (FORCE)"],
@@ -1067,3 +1107,29 @@ def test_acquire_lock_when_database_clear_gives_up_after_the_bound_rather_than_w
             release_lock(lock_path)
         if lock_path.parent.exists():
             lock_path.parent.rmdir()
+
+
+def test_acquire_lock_when_database_clear_names_which_ports_when_partly_unavailable():
+    # The message used to say the probe "could not run on any shared
+    # port" whenever at least one port was unavailable, even if the
+    # REST probed clear -- overstating what actually happened. Must name
+    # which ports were unavailable and which were confirmed clear.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        def mixed(port):
+            return ladder._PROBE_UNAVAILABLE if port == 5432 else None
+
+        stderr = io.StringIO()
+        with mock.patch.object(ladder, "_shared_db_presence", side_effect=mixed):
+            with contextlib.redirect_stderr(stderr):
+                ladder._acquire_lock_when_database_clear(
+                    lock_path, holder="waiter", running="full ladder: tools",
+                    expected_seconds=600, db_port=None,
+                )
+        output = stderr.getvalue()
+        assert "could not run on port(s) [5432]" in output
+        assert "probed clear" in output and "[5433]" in output
+        assert "on any shared port" not in output  # the overstated phrasing
+    finally:
+        release_lock(lock_path)
+        lock_path.parent.rmdir()

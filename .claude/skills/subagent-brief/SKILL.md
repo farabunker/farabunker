@@ -32,6 +32,20 @@ to re-derive everything relevant and drops the rulings only the orchestrator's h
 - **The report shape expected back**: the SHA it left, test counts (not just
   "passed"), and any deviation from the brief with its reason.
 
+## Briefs that ask for real-state verification against a shared resource
+
+A brief that says "verify this for real against the live database/port" without saying HOW is an
+invitation to evade the containment it's implicitly assuming. A constraint written about the
+usual way of doing a thing (run the suite, which takes the slot lock) is silently evaded by an
+unusual way of doing the same thing (call the function directly, which doesn't) -- this happened
+here: standalone verification against a shared Postgres port ran outside the slot lock the code
+under test itself exists to enforce, and its clean result proved nothing about interference the
+lock is specifically there to prevent. So brief this shape structurally, not by asking nicely:
+**one foreground script that acquires the slot, runs the exercise, and releases** -- the
+verification runs under the exact containment it is verifying, the same way the code path it's
+checking would. See `.claude/skills/test-ladder/SKILL.md` ("The lock protects the resource, not
+the ceremony of running a suite") for the case that found this.
+
 ## Reviewer briefs additionally carry
 
 - **BASE and HEAD SHAs** -- a reviewer diffs those exact commits, not "the

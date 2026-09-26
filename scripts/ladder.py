@@ -372,9 +372,15 @@ def _parse_keyvalue_lock(text: str) -> dict | None:
     survives the NEXT field the fleet adds without this script even
     noticing, which would by itself have contained the whole class of
     break this round fixes (the now-gone two-process variant would have
-    been read correctly instead of mis-parsed). `purpose` is tolerated
-    with spaces even though the fleet's own convention hyphenates it
-    instead and never emits them.
+    been read correctly instead of mis-parsed). A SPACE IN `purpose`
+    TRUNCATES IT, silently, at the first word -- the line is tokenised
+    by whitespace before each token is split on "=", so "purpose=foo
+    bar" becomes the token "purpose=foo" (parsed) and the bare token
+    "bar" (no "=", dropped). Not fixed, because `running`/`purpose` is
+    DISPLAY-ONLY (never compared, matched, or judged) and the fleet's
+    own convention hyphenates instead of using spaces and so never emits
+    one in practice -- but the letter here should say what actually
+    happens rather than "tolerated", which this parser does not do.
 
     Returns None when NOTHING in the text looks like a key=value pair at
     all, AND ALSO when every pair present is a key this parser doesn't
@@ -1131,31 +1137,47 @@ def _acquire_lock_when_database_clear(
 
         busy_port = None
         busy_detail = None
-        any_unavailable = False
+        unavailable_ports: list[int] = []
+        clear_ports: list[int] = []
         for port in ports:
             result = _shared_db_presence(port)
             if result is _PROBE_UNAVAILABLE:
-                any_unavailable = True
+                unavailable_ports.append(port)
                 continue
             if result is not None:
                 busy_port, busy_detail = port, result
                 break
+            clear_ports.append(port)
 
-        if busy_port is None and not any_unavailable:
+        if busy_port is None and not unavailable_ports:
             return  # confirmed clear on every shared port -- run
 
-        if busy_port is None:  # every port checked was unavailable
-            print(
-                "WARNING: the before-run database probe could not run on any "
-                "shared port (client missing, or every connection attempt "
-                "itself failed) -- proceeding on the lock alone, the same "
-                "protection this repository had before this gate existed. "
-                "Unlike the staleness probe, an unavailable run-gate probe "
-                "means PROCEED, not decline: treating it as busy here would "
-                "wedge the machine forever on a box where the probe can "
-                "never succeed.",
-                file=sys.stderr,
-            )
+        if busy_port is None:  # at least one port unavailable, none busy
+            if clear_ports:
+                print(
+                    f"WARNING: the before-run database probe could not run on "
+                    f"port(s) {unavailable_ports} (client missing, or the "
+                    f"connection attempt itself failed) -- port(s) {clear_ports} "
+                    f"probed clear. Proceeding on the lock alone for the "
+                    f"unavailable port(s), the same protection this repository "
+                    f"had before this gate existed. Unlike the staleness probe, "
+                    f"an unavailable run-gate probe means PROCEED, not decline: "
+                    f"treating it as busy here would wedge the machine forever "
+                    f"on a box where the probe can never succeed.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"WARNING: the before-run database probe could not run on "
+                    f"any shared port {ports} (client missing, or every "
+                    f"connection attempt itself failed) -- proceeding on the "
+                    f"lock alone, the same protection this repository had "
+                    f"before this gate existed. Unlike the staleness probe, an "
+                    f"unavailable run-gate probe means PROCEED, not decline: "
+                    f"treating it as busy here would wedge the machine forever "
+                    f"on a box where the probe can never succeed.",
+                    file=sys.stderr,
+                )
             return
 
         consecutive_declines += 1

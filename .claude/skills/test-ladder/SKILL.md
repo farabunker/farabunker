@@ -274,6 +274,16 @@ gone, and two full suites ran at once at load twelve to fifteen -- the same load
 container daemon down the night before. Same defect, both ends: not backgrounded (`&`), not
 detached, not handed to a supervisor that returns before the run it's guarding actually ends.
 
+THE LOCK PROTECTS THE RESOURCE, NOT THE CEREMONY OF RUNNING A SUITE, which is the same shape of
+hole as the one just above: a constraint written about the USUAL way of doing a thing, evaded by
+an unusual way of doing the same thing. Backgrounding evades "acquire, run and release in one
+foreground shell" without touching a word of it; calling this file's functions directly rather
+than invoking the suite evades the lock the same way, without touching a word of the lock's own
+code. So: any real-state verification that touches a shared port -- exercising a probe directly,
+not just running the suite -- takes the slot lock too, even though nothing forces it to. See
+`.claude/skills/subagent-brief/SKILL.md` for the structural form this takes when briefing that
+kind of verification, so the gap closes by how the work is shaped rather than by asking nicely.
+
 Two general lessons this saga produced, worth stating outside this file's own case:
 
 - **A record can be simultaneously informative and unsafe.** The peer lock this defect was found
@@ -282,12 +292,13 @@ Two general lessons this saga produced, worth stating outside this file's own ca
   field only a machine reads, because the parts a human checks are exactly the parts that were
   correct. MACHINE-CONSUMED FIELDS NEED MACHINE-EXECUTED CHECKS -- the same negative-control
   discipline the documentation gate already applies, aimed at lock files instead of prose.
-- **A fixture for a foreign format must be COPIED from the foreign artefact, never reconstructed
-  from its description.** This file's own dual-format tests failed to catch F1 for exactly this
-  reason: their fixtures wrote this script's OWN schema transliterated into key=value form,
-  which is a test built from the same misunderstanding as the code, and a machine-executed check
-  running the wrong thing cannot fail -- the one way the remedy just above can itself go wrong.
-  Copy the bytes.
+- **A test that substitutes the thing under test cannot fail, whether it substitutes a format or
+  an answer.** This file's dual-format tests failed to catch F1 because their fixtures wrote this
+  script's OWN schema transliterated into key=value form -- a foreign-format fixture must be
+  COPIED from the real artefact, never reconstructed from a description of it. The permit-path
+  test that shipped in the same commit as the "every non-system database" defect passed
+  throughout for the identical reason: its probe was mocked, so a test that only re-states what
+  the real query should return cannot fail when the real query is wrong. One mistake, two shapes.
 - **A lock's evidence must have the same lifetime as the thing it claims.** Every safety property
   added this round was defeated by something outliving or predating what it measured -- a
   watcher outliving its purpose, a lock predating its protocol, a process dying before its run
