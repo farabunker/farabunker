@@ -1200,14 +1200,23 @@ class TestHeartbeat:
 
     def test_the_thread_closes_its_own_connections_each_iteration(self, worker, monkeypatch):
         """Nothing else ever closes or health-checks this thread's own
-        connection -- Django's are thread-local."""
+        connection -- Django's are thread-local.
+
+        Waits for the first call rather than sleeping a fixed amount and
+        then checking `calls` is non-empty: that made the assertion about
+        whether the loop got scheduled at all inside an arbitrary window,
+        which holds on an idle machine and is exactly the shape that
+        fails under contention -- see the sibling
+        `test_a_transient_write_error_does_not_kill_the_thread`."""
         calls = []
         monkeypatch.setattr(worker_module, "HEARTBEAT_SECONDS", 0.05)
         monkeypatch.setattr(worker_module, "close_old_connections", lambda: calls.append(1))
 
         worker._start_heartbeat_thread()
         try:
-            time.sleep(0.2)
+            deadline = time.monotonic() + 2
+            while not calls and time.monotonic() < deadline:
+                time.sleep(0.01)
         finally:
             worker._stopping.set()
             worker._heartbeat_thread.join(timeout=5)
@@ -1215,6 +1224,17 @@ class TestHeartbeat:
         assert calls
 
     def test_a_transient_write_error_does_not_kill_the_thread(self, worker, monkeypatch, caplog):
+        """What is under test is survival, not throughput: the thread must
+        keep calling `_maybe_heartbeat` after it raises, not stop dead at
+        the first error. That is provable only by WAITING for a third
+        call to happen, with a timeout, rather than sleeping a fixed
+        amount of wall clock and then counting how many calls fit inside
+        it -- a fixed sleep ties the assertion to how many iterations THIS
+        machine completes in that window, which holds on an idle box and
+        fails under contention (a real gate run once saw the loop starved
+        down to two iterations, one short of the old threshold). A dead
+        thread still fails this test -- at the timeout, once
+        `failures["count"]` never reaches 3."""
         monkeypatch.setattr(worker_module, "HEARTBEAT_SECONDS", 0.05)
         failures = {"count": 0}
 
@@ -1228,7 +1248,9 @@ class TestHeartbeat:
         with caplog.at_level("WARNING", logger="models.queue.worker"):
             worker._start_heartbeat_thread()
             try:
-                time.sleep(0.3)
+                deadline = time.monotonic() + 2
+                while failures["count"] <= 2 and time.monotonic() < deadline:
+                    time.sleep(0.01)
             finally:
                 worker._stopping.set()
                 worker._heartbeat_thread.join(timeout=5)
@@ -1237,12 +1259,24 @@ class TestHeartbeat:
         assert any("heartbeat" in r.getMessage() for r in caplog.records)
 
     def test_the_thread_says_so_loudly_if_it_ever_exits(self, worker, monkeypatch, caplog):
+        """The start message is logged once, at the top of the thread's
+        own function, before it ever waits on anything -- so what this
+        test needs is for the thread to have been SCHEDULED at all, not
+        for a fixed sleep to have given it enough of the machine. Waiting
+        for the log line (with a timeout) rather than sleeping a fixed
+        amount and then checking for it keeps this test out of the same
+        contended-machine trap as its heartbeat-thread siblings."""
         monkeypatch.setattr(worker_module, "HEARTBEAT_SECONDS", 0.05)
 
         with caplog.at_level("INFO", logger="models.queue.worker"):
             worker._start_heartbeat_thread()
             try:
-                time.sleep(0.15)
+                deadline = time.monotonic() + 2
+                while (
+                    not any("heartbeat thread" in r.getMessage() for r in caplog.records)
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.01)
             finally:
                 worker._stopping.set()
                 worker._heartbeat_thread.join(timeout=5)
