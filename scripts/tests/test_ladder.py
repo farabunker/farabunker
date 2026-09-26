@@ -73,6 +73,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from ladder import (  # noqa: E402
     FULL_MODULES,
+    DatabaseNeverClear,
     LockHeld,
     acquire_lock,
     build_run_plan,
@@ -528,6 +529,137 @@ def test_acquire_lock_treats_a_malformed_lock_as_stale_not_a_crash():
         lock_path.parent.rmdir()
 
 
+def test_acquire_lock_treats_all_unrecognised_keys_as_held_not_stealable():
+    # F1 (round-6 re-check), MAJOR: a lock whose pairs are ALL
+    # unrecognised (a full field rename, a foreign tool's lock, or
+    # corruption that happens to contain "=") used to parse as an EMPTY
+    # dict, not None -- an empty dict is not nothing, so it slipped past
+    # both treat-as-held gates and got silently stolen with only the
+    # degraded warning. Must now be HELD, exactly like a lock
+    # unparseable in either format.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        lock_path.write_text("foo=bar baz=qux unrelated_key=zzz\n", encoding="utf-8")
+        assert read_lock(lock_path) is None  # recognises nothing -- not a lock at all
+        raised = False
+        try:
+            acquire_lock(lock_path, holder="thief", running="full ladder: tools",
+                         expected_seconds=600)
+        except LockHeld:
+            raised = True
+        assert raised, "all-unrecognised-keys must be HELD, never silently stolen"
+        assert lock_path.exists()
+    finally:
+        lock_path.unlink(missing_ok=True)
+        lock_path.parent.rmdir()
+
+
+def test_read_lock_falls_through_non_mapping_json_to_the_keyvalue_parser():
+    # F1's adjacent hole: json.loads succeeds on bare JSON that isn't an
+    # object at all ("42", "[1,2]") -- returning it directly used to
+    # crash later the first time something called .get() on it, with a
+    # tombstone already captured and the path already empty. Must fall
+    # through to the keyvalue parser (which also finds nothing here) and
+    # come back None, exactly like any other unparseable content.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        lock_path.write_text("42", encoding="utf-8")
+        assert read_lock(lock_path) is None
+        raised = False
+        try:
+            acquire_lock(lock_path, holder="thief", running="full ladder: tools",
+                         expected_seconds=600)
+        except LockHeld:
+            raised = True
+        assert raised, "a bare JSON scalar must be HELD, never crash acquisition"
+    finally:
+        lock_path.unlink(missing_ok=True)
+        lock_path.parent.rmdir()
+
+
+def test_sweep_runs_on_the_uncontended_fast_path_too():
+    # F2 (round-6 re-check), MODERATE: the sweep used to run only after
+    # the fast-path write failed, i.e. only on a CONTENDED acquisition --
+    # but a capturer killed mid-capture leaves the path EMPTY, so the
+    # very NEXT acquirer wins the fast path and would return before a
+    # later-positioned sweep ever ran. Moved to the top of acquire_lock
+    # so it fires on every acquisition, making the skill's "announces on
+    # every acquisition" claim actually true.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    stray = lock_path.parent / "test.lock.captured-99999-deadbeef"
+    try:
+        stray.write_text("orphaned", encoding="utf-8")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            acquire_lock(lock_path, holder="x", running="y", expected_seconds=600)
+        assert "orphaned lock artefact" in stderr.getvalue()
+    finally:
+        release_lock(lock_path)
+        stray.unlink(missing_ok=True)
+        lock_path.parent.rmdir()
+
+
+def test_restore_captured_lock_attributes_dispossession_to_the_restored_party():
+    # F3 (round-6 re-check), MINOR but incident-critical: the message
+    # used to say the party now AT `path` (the fresh, legitimate
+    # acquirer, whose claim stands untouched) was "dispossessed". The
+    # actually-dispossessed party is the one being restored, whose hold
+    # cannot be returned. Exercised via the db-conjunction restore site
+    # (process evidence says stale, but the mocked probe says active --
+    # the pre-read gate lets this one through, unlike a genuinely live
+    # pid, which the gate would refuse before ever reaching capture): a
+    # genuine third party wins the path during the capture window, via a
+    # real os.rename hook, before the restore's link-back runs.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        stale_but_db_active = {
+            "holder": "restored-party", "pid": dead.pid, "running": "full ladder: tools",
+            "started": time.time() - 10, "expected_seconds": 600, "db_port": 5433,
+        }
+        lock_path.write_text(json.dumps(stale_but_db_active), encoding="utf-8")
+
+        real_rename = os.rename
+        injected = {"done": False}
+
+        def rename_then_let_a_third_party_win(src, dst):
+            real_rename(src, dst)
+            if not injected["done"]:
+                injected["done"] = True
+                lock_path.write_text(json.dumps({
+                    "holder": "third-party", "pid": os.getpid(),
+                    "running": "full ladder: models", "started": time.time(),
+                    "expected_seconds": 600,
+                }), encoding="utf-8")
+
+        stderr = io.StringIO()
+        with mock.patch.object(os, "rename", side_effect=rename_then_let_a_third_party_win), \
+             mock.patch.object(ladder, "_db_activity_present", return_value=True):
+            with contextlib.redirect_stderr(stderr):
+                raised = False
+                try:
+                    acquire_lock(lock_path, holder="stealer", running="full ladder: tools",
+                                 expected_seconds=600)
+                except LockHeld:
+                    raised = True
+        assert raised
+        output = stderr.getvalue()
+        assert "'restored-party'" in output and "DISPOSSESSED" in output
+        # The attribution: the dispossessed party named BEFORE the word
+        # "DISPOSSESSED" is restored-party (being restored), not
+        # third-party (whose claim stands and is described as such).
+        dispossessed_clause = output.split("DISPOSSESSED")[0]
+        assert "restored-party" in dispossessed_clause
+        assert "stands, untouched" in output
+        assert read_lock(lock_path)["holder"] == "third-party"  # never overwritten
+    finally:
+        release_lock(lock_path)
+        for stray in lock_path.parent.iterdir():
+            stray.unlink(missing_ok=True)
+        lock_path.parent.rmdir()
+
+
 def test_acquire_lock_refuses_to_steal_when_the_db_probe_finds_activity():
     # The conjunction, positive case: process evidence alone says stale
     # (a genuinely dead pid), but the database probe says otherwise --
@@ -679,3 +811,130 @@ def test_acquire_lock_floors_a_tiny_expected_duration_so_it_cannot_self_stale():
     finally:
         release_lock(lock_path)
         lock_path.parent.rmdir()
+
+
+def test_acquire_lock_when_database_clear_permits_the_run_on_a_clear_machine():
+    # THE PERMIT PATH, not the refuse path -- worth calling out by name,
+    # because the refusal path announces, releases and retries and is
+    # loud and easy to exercise by construction, while the permit path
+    # on a genuinely clear machine produces no output worth noticing and
+    # is exactly the case a test suite can quietly stop covering. A gate
+    # that wrongly refuses costs waiting; a gate that wrongly permits
+    # costs two suites on one machine -- the more expensive failure, and
+    # the one this test exists to keep visible. Asserts the actual
+    # OBSERABLE OUTCOME of permitting -- the lock genuinely held, with
+    # this process's own pid, ready for the run that follows -- not
+    # merely that the probe function returned a clear value on paper,
+    # and confirms no decline/retry cycle happened first.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        stderr = io.StringIO()
+        with mock.patch.object(ladder, "_shared_db_presence", return_value=None) as probe:
+            with contextlib.redirect_stderr(stderr):
+                ladder._acquire_lock_when_database_clear(
+                    lock_path, holder="waiter", running="full ladder: tools",
+                    expected_seconds=600, db_port=None,
+                )
+        assert probe.call_count >= 1  # the gate genuinely consulted the probe
+        assert "declining" not in stderr.getvalue()  # clean permit, no retry cycle
+        info = read_lock(lock_path)
+        assert info is not None and info["pid"] == os.getpid()  # lock genuinely held
+    finally:
+        release_lock(lock_path)
+        lock_path.parent.rmdir()
+
+
+def test_acquire_lock_when_database_clear_releases_the_won_lock_on_decline():
+    # The order this whole gate exists to enforce: ACQUIRE, then PROBE,
+    # then if busy, RELEASE what was just won (never hold it while
+    # waiting) and retry -- confirmed by checking the lock file's
+    # existence from inside a mocked time.sleep, i.e. exactly during the
+    # window between the decline and the retry.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    observed = {}
+    calls = {"n": 0}
+
+    def fake_presence(port):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"pid": 4823, "datname": "farabunker_other",
+                     "state": "idle in transaction", "since": "2026-09-26T14:46:15Z"}
+        return None
+
+    def fake_sleep(seconds):
+        observed["lock_exists_while_waiting"] = lock_path.exists()
+
+    try:
+        with mock.patch.object(ladder, "_shared_db_presence", side_effect=fake_presence), \
+             mock.patch("time.sleep", side_effect=fake_sleep):
+            ladder._acquire_lock_when_database_clear(
+                lock_path, holder="waiter", running="full ladder: tools",
+                expected_seconds=600, db_port=None, retry_seconds=0.01,
+            )
+        assert observed.get("lock_exists_while_waiting") is False
+        assert read_lock(lock_path) is not None  # held after the successful retry
+    finally:
+        release_lock(lock_path)
+        lock_path.parent.rmdir()
+
+
+def test_acquire_lock_when_database_clear_warns_after_repeated_declines():
+    # THE DISTINCT ANNOUNCEMENT must NAME the connection (pid, database,
+    # state, since) rather than merely say the resource looks busy --
+    # actionable without the recipient having to re-derive anything.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        calls = {"n": 0}
+
+        def fake_presence(port):
+            calls["n"] += 1
+            if calls["n"] <= ladder._DB_GATE_WARN_THRESHOLD:
+                return {"pid": 4823, "datname": "farabunker_other",
+                         "state": "idle in transaction", "since": "2026-09-26T14:46:15Z"}
+            return None
+
+        stderr = io.StringIO()
+        with mock.patch.object(ladder, "_shared_db_presence", side_effect=fake_presence), \
+             mock.patch.object(ladder, "_other_pytest_matches", return_value=[]):
+            with contextlib.redirect_stderr(stderr):
+                ladder._acquire_lock_when_database_clear(
+                    lock_path, holder="waiter", running="full ladder: tools",
+                    expected_seconds=600, db_port=None, retry_seconds=0.01,
+                )
+        output = stderr.getvalue()
+        assert output.count("declining to start") == ladder._DB_GATE_WARN_THRESHOLD
+        assert "looked busy for" in output
+        assert "4823" in output and "farabunker_other" in output
+        assert "idle in transaction" in output and "2026-09-26T14:46:15Z" in output
+    finally:
+        release_lock(lock_path)
+        lock_path.parent.rmdir()
+
+
+def test_acquire_lock_when_database_clear_gives_up_after_the_bound_rather_than_waiting_forever():
+    # THE BOUND: release-and-retry is a poll loop by another name: cap it
+    # and exit non-zero (via DatabaseNeverClear) rather than waiting
+    # forever or, worse, proceeding anyway once the cap is hit.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        def always_busy(port):
+            return {"pid": 111, "datname": "db", "state": "active", "since": "t0"}
+
+        raised = None
+        with mock.patch.object(ladder, "_shared_db_presence", side_effect=always_busy), \
+             mock.patch.object(ladder, "_other_pytest_matches", return_value=["x"]):
+            try:
+                ladder._acquire_lock_when_database_clear(
+                    lock_path, holder="waiter", running="full ladder: tools",
+                    expected_seconds=600, db_port=None, retry_seconds=0.001,
+                    max_attempts=3,
+                )
+            except DatabaseNeverClear as exc:
+                raised = exc
+        assert raised is not None
+        assert not lock_path.exists()  # never left holding a lock it gave up on
+    finally:
+        if lock_path.exists():
+            release_lock(lock_path)
+        if lock_path.parent.exists():
+            lock_path.parent.rmdir()

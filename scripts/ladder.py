@@ -116,6 +116,18 @@ class LockHeld(Exception):
     under a lock's name."""
 
 
+class DatabaseNeverClear(Exception):
+    """Raised by _acquire_lock_when_database_clear when the before-run
+    database gate declined every attempt up to its bound. The bound
+    exists because release-and-retry is a poll loop by another name, and
+    an unbounded one lets two polite waiters ping-pong silently forever
+    -- the invisible-stall failure this whole file keeps coming back to.
+    The caller is expected to exit non-zero on this, never wait longer
+    and never proceed anyway: a session that waits when it could have
+    run chose the safe failure; the other direction is the one that
+    took the container daemon down."""
+
+
 def build_run_plan(mode: str, touched_modules: list[str]) -> list[dict]:
     """The named runs for `mode`, in order. No subprocess -- scripts/tests/
     test_ladder.py imports this directly. Its only I/O is the one stderr
@@ -364,11 +376,22 @@ def _parse_keyvalue_lock(text: str) -> dict | None:
     with spaces even though the fleet's own convention hyphenates it
     instead and never emits them.
 
-    Returns None only when NOTHING in the text looks like a key=value
-    pair at all -- a line that parses but is missing a field is a
-    malformed but REAL lock, not an absent one (is_stale's hardened reads
-    judge it stale rather than crash; F5's rule below is what a lock
-    parsing as NEITHER format gets, which is different and stronger)."""
+    Returns None when NOTHING in the text looks like a key=value pair at
+    all, AND ALSO when every pair present is a key this parser doesn't
+    recognise -- recognising nothing means this is not this format
+    either, not a real-but-empty lock. An earlier version returned `{}`
+    in that second case (a lock whose pairs are ALL unrecognised, e.g. a
+    full field rename, a foreign tool's lock at the shared path, or
+    corruption that happens to contain an "=") -- an empty dict is not
+    nothing, so it slipped past both of read_lock's treat-as-held gates,
+    got judged stale on a missing process field, degraded the database
+    conjunction on a missing port, and the lock was STOLEN with only the
+    degraded warning. Epistemically identical to unparseable-in-either-
+    format, which the fleet's own rule says must be HELD -- fixed by
+    returning None here too, so the caller's None-means-held gate
+    actually catches it. A line that parses AND has at least one
+    recognised field, but is missing others, stays a malformed-but-REAL
+    lock (is_stale's hardened reads judge it stale rather than crash)."""
     raw: dict[str, str] = {}
     for line in text.splitlines():
         for token in line.strip().split():
@@ -403,6 +426,8 @@ def _parse_keyvalue_lock(text: str) -> dict | None:
             fields["db_port"] = int(raw["db_port"])
         except ValueError:
             pass
+    if not fields:
+        return None
     return fields
 
 
@@ -413,6 +438,16 @@ def read_lock(path: Path = LOCK_PATH) -> dict | None:
     parses in EITHER format is a live holder and must never be treated as
     vanished just because this script doesn't natively write that shape.
 
+    A successful `json.loads` is only a structured lock if it's a MAPPING
+    -- a file containing bare JSON like "42" or "[1,2]" parses without
+    error but isn't a lock shape at all. Without this check that value
+    would sail past both of the caller's held-vs-stale-vs-absent checks
+    (which only test for None) and crash later the first time something
+    calls `.get(...)` on it, by which point a tombstone may already be
+    captured and the path already empty. Anything that parses but isn't
+    a dict falls through to the key=value parser, and thence to None,
+    exactly like any other unparseable content.
+
     Public so a session can check by hand: `python3 -c "import ladder as
     l; print(l.read_lock())"` answers who holds the machine, what they're
     running, and how long they expect to take -- the question a count
@@ -422,9 +457,15 @@ def read_lock(path: Path = LOCK_PATH) -> dict | None:
     except OSError:
         return None
     try:
-        return json.loads(text)
+        parsed = json.loads(text)
     except ValueError:
-        return _parse_keyvalue_lock(text)
+        parsed = None
+    if isinstance(parsed, dict) and parsed:
+        # A non-empty mapping only -- an empty "{}" recognises nothing,
+        # the same epistemic hole _parse_keyvalue_lock's own empty-fields
+        # fix closes below, so it falls through the same way.
+        return parsed
+    return _parse_keyvalue_lock(text)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -473,18 +514,42 @@ def is_stale(info: dict, now: float | None = None) -> bool:
     return _lock_age_exceeds_budget(info, time.time() if now is None else now)
 
 
+_PROBE_UNAVAILABLE = object()  # sentinel: distinct from both "found nothing" (None)
+                                # and "found something" (a real value) -- see both
+                                # probes below, which read it oppositely on purpose.
+
+_SHARED_TEST_DB_PORTS = (5432, 5433)  # docs/DEV.md's primary + default preview ports;
+                                       # a peer's custom --db-port is invisible to the
+                                       # before-run gate unless it's also this session's
+                                       # own db_port -- a known, accepted gap, not a
+                                       # silent one (see _acquire_lock_when_database_clear).
+
+
 def _db_activity_present(port: int) -> bool | None:
-    """The database probe: measures the RESOURCE the lock exists to
-    protect, not a proxy for it -- a process id and an age both only
-    answer "does the holder LOOK alive"; this asks Postgres itself
-    whether anything is actually connected and active on `port`. Shells
-    out to `psql` (stdlib subprocess, at most one call) if it's on PATH.
+    """THE STALENESS PROBE -- one of two probes in this file with two
+    different purposes and, on the surface, the same shape; see
+    _shared_db_presence below for the other, and read both before
+    touching either, because a future tidy-up that notices they "look
+    the same" and merges them would be wrong. This one asks "is THIS
+    LOCK'S HOLDER still alive" -- it measures the resource the lock
+    exists to protect, not a proxy for it (a process id and an age both
+    only answer "does the holder LOOK alive") -- and it needs the
+    HOLDER'S OWN `db_port`, checked nowhere else. Narrower query than
+    the sibling on purpose: `state = 'active'` only. A false negative
+    here (a live suite sampled between queries, so nothing shows
+    'active') is tolerable -- it's one input of three in a conjunction,
+    and the cost of getting it wrong is stealing something that already
+    looked stale on the other two counts as well. Shells out to `psql`
+    (stdlib subprocess, at most one call) if it's on PATH.
 
     Returns None -- PROBE UNAVAILABLE, never read as "clear" -- when the
     client isn't installed or the connection attempt itself fails (auth,
     refusal, timeout): a refused connection is ambiguous (nothing there,
     vs. something wrong with how this asked) and must not be read as a
-    confident "no activity" by the caller."""
+    confident "no activity" by the caller. The caller's own degraded
+    path (warn, then steal on process evidence alone) is what makes
+    "unavailable" safe to fold into a bare bool here rather than a
+    three-way sentinel like the sibling needs."""
     psql = shutil.which("psql")
     if psql is None:
         return None
@@ -509,6 +574,81 @@ def _db_activity_present(port: int) -> bool | None:
         return int(result.stdout.strip()) > 0
     except ValueError:
         return None
+
+
+def _shared_db_presence(port: int) -> dict | None | object:
+    """THE BEFORE-RUN GATE'S PROBE -- see _db_activity_present above for
+    its sibling and why the two must not be merged. This one asks "should
+    I START a run AT ALL" -- deliberately crude, and deliberately WIDER
+    than the sibling's query in two ways: it checks ANY shared port
+    (_SHARED_TEST_DB_PORTS plus this session's own), not the specific
+    holder a lock names, because the failure being prevented (two full
+    suites exhausting one machine's memory) does not care whose database
+    they are; and it counts ANY connection at all to a real database --
+    not only 'active' -- excluding only this probe's own. A test suite
+    holds its connection between tests even while idle (mid-fixture,
+    mid-assertion, between one test and the next), so for THIS question
+    presence is the right signal and activity is not: a narrower 'active'
+    filter would read a peer's idle moment as "clear" and let a second
+    suite start, which is the exact defect this gate exists to prevent,
+    now carrying the gate's own blessing.
+
+    THIS PROBE'S OWN BLIND SPOT, stated here rather than in a distant
+    note, because it is the mirror of the process id's failure and
+    nobody should read either signal as the one that cannot be wrong:
+    it cannot see a suite that has CREATED its database but not yet
+    CONNECTED (a startup window), nor one whose connection DROPPED while
+    the suite process still lives (a lost connection, retried or not).
+    Both read as absent while a run is genuinely in progress -- the same
+    shape of wrongness as a lock naming a dead pid while its holder
+    lives, arriving from the opposite direction. It is also wrong in the
+    other direction: an ABANDONED connection of any kind reads as busy
+    forever (see _acquire_lock_when_database_clear for how that's
+    handled -- announced, never silently overridden or timed past).
+
+    Returns _PROBE_UNAVAILABLE (a distinct sentinel, not None) if the
+    client is missing or the connection itself fails -- the CALLER, not
+    this function, decides what unavailable means, and it means the
+    OPPOSITE thing here than it does for the staleness probe (see the
+    caller). Returns None if the probe ran and found nothing. Returns a
+    {pid, datname, state, since} dict for the first non-self connection
+    found to a real database on `port`."""
+    psql = shutil.which("psql")
+    if psql is None:
+        return _PROBE_UNAVAILABLE
+    query = (
+        "SELECT pid, datname, state, "
+        "COALESCE(state_change, query_start, xact_start, backend_start) "
+        "FROM pg_stat_activity "
+        "WHERE datname NOT IN ('postgres', 'template0', 'template1') "
+        "AND pid != pg_backend_pid() "
+        "LIMIT 1"
+    )
+    env = dict(os.environ)
+    env.setdefault("PGPASSWORD", "farabunker")
+    try:
+        result = subprocess.run(
+            [psql, "-h", "localhost", "-p", str(port), "-U", "farabunker",
+             "-d", "postgres", "-tAc", query],
+            capture_output=True, text=True, timeout=5, env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return _PROBE_UNAVAILABLE
+    if result.returncode != 0:
+        return _PROBE_UNAVAILABLE
+    line = result.stdout.strip()
+    if not line:
+        return None
+    parts = line.split("|")
+    if len(parts) != 4:
+        return _PROBE_UNAVAILABLE
+    pid_text, datname, state, since = parts
+    try:
+        backend_pid = int(pid_text)
+    except ValueError:
+        return _PROBE_UNAVAILABLE
+    return {"pid": backend_pid, "datname": datname, "state": state or "unknown",
+            "since": since or "unknown"}
 
 
 def _sweep_orphaned_tombstones(path: Path) -> None:
@@ -558,22 +698,33 @@ def _restore_captured_lock(tombstone: Path, path: Path, holder_desc, pid_desc) -
     announces LOUDLY -- naming both the party being restored and whoever
     is now at `path` -- and refuses, deliberately leaving the tombstone
     in place (the orphan sweep will report it) rather than deleting the
-    only forensic trail of what happened."""
+    only forensic trail of what happened.
+
+    ATTRIBUTION, precisely: the party now AT `path` is the fresh
+    acquirer, and its claim STANDS untouched -- it is not the one
+    dispossessed. The party being restored (`holder_desc`/`pid_desc`,
+    the captured lock this call is trying to put back) is the one whose
+    hold is DISPOSSESSED: it existed, was captured, and now cannot be
+    returned because someone else legitimately claimed the path in the
+    meantime. Get this backwards in an incident and the wrong session
+    gets asked what happened."""
     try:
         os.link(str(tombstone), str(path))
     except FileExistsError:
-        dispossessed = read_lock(path)
-        dispossessed_desc = dispossessed.get("holder", "?") if dispossessed else "?"
+        current = read_lock(path)
+        current_desc = current.get("holder", "?") if current else "?"
         print(
-            f"CRITICAL: restoring a captured lock (holder {holder_desc!r}, pid "
-            f"{pid_desc}) found a LIVE holder ({dispossessed_desc!r}) already at "
-            f"{path} -- that holder was DISPOSSESSED mid-capture; refusing to "
-            f"overwrite either side. Tombstone left at {tombstone} for inspection.",
+            f"CRITICAL: restoring captured lock (holder {holder_desc!r}, pid "
+            f"{pid_desc}) failed -- {current_desc!r} legitimately claimed {path} "
+            f"during the capture window, so {holder_desc!r} is DISPOSSESSED: its "
+            f"hold cannot be restored. {current_desc!r}'s claim stands, untouched. "
+            f"Refusing to overwrite either side. Tombstone left at {tombstone} "
+            f"for inspection.",
             file=sys.stderr,
         )
         raise LockHeld(
-            f"a live holder ({dispossessed_desc!r}) was dispossessed mid-capture "
-            f"while restoring {holder_desc!r} -- refusing"
+            f"{holder_desc!r} (pid {pid_desc}) was dispossessed mid-capture by "
+            f"{current_desc!r}'s legitimate claim on {path} -- refusing"
         )
     tombstone.unlink(missing_ok=True)
 
@@ -706,15 +857,21 @@ def acquire_lock(path: Path, *, holder: str, running: str, expected_seconds: flo
     if db_port is not None:
         info["db_port"] = db_port
 
+    # Surface any wreckage from a previous capturer killed mid-operation
+    # before anything else, on EVERY acquisition -- not only a contended
+    # one. A capturer killed mid-capture leaves `path` EMPTY, so the very
+    # next acquirer wins the uncontended fast-path create below and would
+    # return before a sweep placed after it ever ran, leaving exactly
+    # that wreckage invisible until some later, unrelated contended
+    # acquisition happened to trip over it. Visible every time, not
+    # auto-cleaned (F4).
+    _sweep_orphaned_tombstones(path)
+
     try:
         _write_lock_exclusively(path, info)
         return
     except FileExistsError:
         pass
-
-    # Surface any wreckage from a previous capturer killed mid-operation
-    # before doing anything else (F4) -- visible, not auto-cleaned.
-    _sweep_orphaned_tombstones(path)
 
     # PRE-READ GATE (cheap, NOT authoritative): judge on a read taken
     # BEFORE ever capturing, so an obviously-live lock is (almost) never
@@ -865,6 +1022,137 @@ def _install_release_handlers(path: Path) -> None:
     signal.signal(signal.SIGINT, _handler)
 
 
+_DB_GATE_RETRY_SECONDS = 30.0
+_DB_GATE_MAX_ATTEMPTS = 20  # ~10 minutes total at the default retry interval
+_DB_GATE_WARN_THRESHOLD = 3  # consecutive declines before the distinct announcement
+
+
+def _acquire_lock_when_database_clear(
+    path: Path, *, holder: str, running: str, expected_seconds: float,
+    db_port: int | None, retry_seconds: float = _DB_GATE_RETRY_SECONDS,
+    max_attempts: int = _DB_GATE_MAX_ATTEMPTS,
+) -> None:
+    """WINNING THE LOCK IS NOT PERMISSION TO RUN. Order, exactly:
+    ACQUIRE; PROBE; if busy, RELEASE what was just won and retry; only
+    THEN run. Never inverted to probe-then-acquire, which reintroduces
+    the check-then-act gap the lock exists to close in the first place.
+    Holding the token stops meaning "the machine is mine" and starts
+    meaning "I have the right to ask the resource" -- the resource
+    decides whether this run actually starts. Release handlers are
+    (re-)armed immediately after every successful acquire, including
+    across retries, so a kill during the probe window still releases
+    cleanly.
+
+    This machine produced the reason for this gate directly: a peer's
+    release fired when its WRAPPER exited rather than when its tests
+    ended (see Rule 0), so the next session's exclusive create succeeded
+    completely legitimately into a box that was still busy -- two full
+    suites at once, the load that took the container daemon down the
+    night before. The lock alone cannot prevent that; only asking the
+    resource itself, after winning the token and before trusting it, can.
+
+    Checks _shared_db_presence (deliberately crude and deliberately WIDE
+    -- see its own docstring for why "any connection" is the right
+    predicate here and "active" is not) against every port in
+    _SHARED_TEST_DB_PORTS plus `db_port`. UNAVAILABLE MEANS THE OPPOSITE
+    THING HERE THAN IT DOES ON THE STEAL PATH, and that opposition is
+    deliberate, not an inconsistency for a future edit to "fix": the
+    steal path asks whether to take something from someone, so an
+    unavailable probe degrades to warn-and-steal-anyway, because waiting
+    forever on a lock that might already be dead is the worse failure.
+    This gate asks whether to ADD LOAD, so an unavailable probe degrades
+    to warn-and-PROCEED, falling back to the lock alone (exactly where
+    this repository was before this gate existed) -- treating unavailable
+    as busy here would wedge the machine forever on any box where the
+    probe can never succeed (a wrong PGPASSWORD, `psql` not installed).
+
+    BLIND SPOT, announced rather than designed around, never overridden
+    and never timed past: an ABANDONED connection of any kind reads as
+    busy forever (see _shared_db_presence's own docstring for the
+    mirror-image blind spot -- a live suite this gate cannot see at
+    all). Every decline is announced with the connection's identity and
+    state; after `_DB_GATE_WARN_THRESHOLD` consecutive declines with NO
+    test process visible on the machine at all (see
+    `_other_pytest_matches`), a distinct, actionable message names the
+    stuck connection instead of merely saying the resource looks busy --
+    a recipient should never have to re-derive what this function
+    already knew. THE BOUND: after `max_attempts`, this raises
+    DatabaseNeverClear rather than waiting longer or proceeding anyway --
+    a session that waits when it could have run chose the safe failure;
+    an unbounded wait lets two polite waiters ping-pong forever, and a
+    timeout into running anyway is the failure this gate exists to
+    prevent, now with the gate's own blessing."""
+    ports = sorted(set(_SHARED_TEST_DB_PORTS) | ({db_port} if db_port else set()))
+    consecutive_declines = 0
+    attempt = 0
+    while True:
+        attempt += 1
+        acquire_lock(path, holder=holder, running=running,
+                     expected_seconds=expected_seconds, db_port=db_port)
+        _install_release_handlers(path)
+
+        busy_port = None
+        busy_detail = None
+        any_unavailable = False
+        for port in ports:
+            result = _shared_db_presence(port)
+            if result is _PROBE_UNAVAILABLE:
+                any_unavailable = True
+                continue
+            if result is not None:
+                busy_port, busy_detail = port, result
+                break
+
+        if busy_port is None and not any_unavailable:
+            return  # confirmed clear on every shared port -- run
+
+        if busy_port is None:  # every port checked was unavailable
+            print(
+                "WARNING: the before-run database probe could not run on any "
+                "shared port (client missing, or every connection attempt "
+                "itself failed) -- proceeding on the lock alone, the same "
+                "protection this repository had before this gate existed. "
+                "Unlike the staleness probe, an unavailable run-gate probe "
+                "means PROCEED, not decline: treating it as busy here would "
+                "wedge the machine forever on a box where the probe can "
+                "never succeed.",
+                file=sys.stderr,
+            )
+            return
+
+        consecutive_declines += 1
+        print(
+            f"declining to start: connection {busy_detail['pid']} on database "
+            f"{busy_detail['datname']!r} (port {busy_port}) has been "
+            f"{busy_detail['state']!r} since {busy_detail['since']} -- winning "
+            f"the lock is not permission to run; releasing it and retrying "
+            f"(attempt {attempt}/{max_attempts})",
+            file=sys.stderr,
+        )
+        release_lock(path)
+
+        if consecutive_declines >= _DB_GATE_WARN_THRESHOLD and not _other_pytest_matches():
+            minutes = consecutive_declines * retry_seconds / 60
+            print(
+                f"WARNING: the resource has looked busy for {minutes:.0f} "
+                f"minutes with no test process on the machine, and connection "
+                f"{busy_detail['pid']} on database {busy_detail['datname']!r} "
+                f"has been {busy_detail['state']!r} since {busy_detail['since']} "
+                f"-- identify that connection, don't weaken the probe",
+                file=sys.stderr,
+            )
+
+        if attempt >= max_attempts:
+            raise DatabaseNeverClear(
+                f"gave up after {attempt} attempts ({attempt * retry_seconds / 60:.0f}m) "
+                f"waiting for a clear database -- last seen: connection "
+                f"{busy_detail['pid']} on {busy_detail['datname']!r} "
+                f"{busy_detail['state']!r} since {busy_detail['since']}"
+            )
+
+        time.sleep(retry_seconds)
+
+
 def _wait_for_the_machine(max_others: int, poll_seconds: float = 5.0) -> None:
     last_print = 0.0
     while True:
@@ -938,18 +1226,25 @@ def main(argv: list[str]) -> int:
 
     # The slot lock, held for this whole chain -- see LOCK_PATH's comment
     # for the authoritative/advisory split with the process check below.
+    # Winning it is not permission to run: _acquire_lock_when_database_clear
+    # probes the shared ports before returning, releasing and retrying on
+    # its own if something is already using them.
     if expect_minutes is None:
         expect_minutes = 120.0 if mode == "full" else 20.0
     holder = worktree_path.name
     running = f"{mode} ladder: " + " ".join(touched_modules or FULL_MODULES)
-    db_port = urlparse(db_url).port  # for the staleness conjunction's db probe
+    db_port = urlparse(db_url).port  # for both probes -- see their own docstrings
     try:
-        acquire_lock(LOCK_PATH, holder=holder, running=running,
-                     expected_seconds=expect_minutes * 60, db_port=db_port)
+        _acquire_lock_when_database_clear(
+            LOCK_PATH, holder=holder, running=running,
+            expected_seconds=expect_minutes * 60, db_port=db_port,
+        )
     except LockHeld as exc:
         print(f"ladder: machine locked -- {exc}", file=sys.stderr)
         return 2
-    _install_release_handlers(LOCK_PATH)
+    except DatabaseNeverClear as exc:
+        print(f"ladder: {exc}", file=sys.stderr)
+        return 2
 
     try:
         failures = 0

@@ -190,6 +190,16 @@ a stop that freed the lock would hand the box to a peer while a suite sits froze
 SIGSTOP can't be caught by any handler regardless, by the OS's own design, so there's no
 accidental path to releasing on pause even if this forgot to be careful about it.
 
+A TRAP DOES NOT SURVIVE A FORCED KILL, and this file used to read as though "release on exit,
+interrupt and terminate" were a guarantee -- it is not one. `kill -9` (SIGKILL) cannot be caught
+by any handler, the same way SIGSTOP cannot, so a holder killed that way leaves its lock behind
+with nobody having released it. A STALE LOCK AFTER A FORCED KILL IS EXPECTED, NOT ANOMALOUS --
+the session that found the backgrounding hole above had to kill its own runaway chain and then
+remove its own stale lock by hand, on purpose, because nothing else would. Reading a stale lock
+as proof of a crashed holder is a different conclusion from a killed one, and the two justify
+different next actions -- do not treat "stale" as self-explanatory without checking which one it
+was.
+
 Explicit handover -- saying out loud what you're about to run and when, and correcting it when
 that changes -- remains the protocol underneath all of this, not a politeness: it is what
 stopped and restarted a chain here when a count alone would not have, and it survives the lock
@@ -246,13 +256,23 @@ misleading rather than merely unreliable. This script's own `main()` satisfies t
 whoever changes the call site must re-verify this, not assume it, and the specific way to break
 it is splitting acquisition into a separate setup step.
 
-THE RULE HAD A HOLE: "acquire, run and release in one call" is not enough on its own, because a
-run BACKGROUNDED from that call satisfies the words while destroying the purpose -- the acquiring
-shell reaches its own end and exits immediately, leaving a live suite behind a lock that already
-names a dead process. This is exactly what makes a rule dangerous: it is easy to write while
-genuinely believing it is being followed. The rule as it actually has to read: acquire, run and
-release in ONE SHELL, AND THE RUN MUST BE IN THE FOREGROUND OF THAT SHELL -- not backgrounded
-(`&`), not detached, not handed to a supervisor that returns before the run ends.
+THE RULE HAD A HOLE, AND THEN IT HAD THE SAME HOLE AT THE OTHER END: "acquire, run and release in
+one call" is not enough on its own, because a run BACKGROUNDED from that call satisfies the words
+while destroying the purpose -- the acquiring shell reaches its own end and exits immediately,
+leaving a live suite behind a lock that already names a dead process. This is exactly what makes
+a rule dangerous: it is easy to write while genuinely believing it is being followed. RULE 0,
+stated with BOTH ends, because fixing only the acquire end left the release end free to fail the
+same way in reverse: acquire, run AND RELEASE in ONE SHELL, and the run must be in the FOREGROUND
+of that shell the whole time, from acquire to release. Break the acquire end (background between
+acquiring and running) and the lock records a dead process from the start. Break the release end
+(the releasing shell exits, or is triggered, before the suite it's supposed to guard actually
+finishes) and the lock frees itself at exactly the wrong moment -- not stale, not stolen, just
+released early, so the NEXT session's exclusive create succeeds completely legitimately into a
+machine that is still busy. That happened on this machine: a session's gate released while its
+suite kept running, a second session's create correctly succeeded on a lock that was genuinely
+gone, and two full suites ran at once at load twelve to fifteen -- the same load that took the
+container daemon down the night before. Same defect, both ends: not backgrounded (`&`), not
+detached, not handed to a supervisor that returns before the run it's guarding actually ends.
 
 Two general lessons this saga produced, worth stating outside this file's own case:
 
@@ -274,6 +294,73 @@ Two general lessons this saga produced, worth stating outside this file's own ca
   ended. The starting question for reviewing any guard, before anything else: what resource does
   this protect, and does anything here actually MEASURE it -- a check that verifies that finds
   the whole class in one pass; a check that assumes it finds nothing, by construction.
+
+## Winning the lock is not permission to run
+
+The executable form of this whole saga, in one sentence: **holding the token stops meaning "the
+machine is mine" and starts meaning "I have the right to ask the resource" -- the resource
+decides whether a run actually starts.** `_acquire_lock_when_database_clear` is the order this
+implies, exactly: ACQUIRE, then PROBE, then if busy, RELEASE what was just won and retry, and
+only THEN run. Never probe-then-acquire, which reintroduces the check-then-act gap the lock
+exists to close in the first place. The reason this exists at all: a peer's release fired when
+its wrapper exited rather than when its tests ended (Rule 0's release-end hole), so the next
+session's exclusive create succeeded completely legitimately into a box that was still busy --
+two full suites at once, the load that took the container daemon down the night before. The lock
+alone cannot prevent that; only asking the resource itself, after winning the token and before
+trusting it, can.
+
+TWO PROBES, TWO PREDICATES, DELIBERATELY DIFFERENT, and each call site names the other so a
+future tidy-up doesn't collapse them for looking alike: `_db_activity_present` (the staleness
+conjunction) asks "is THIS LOCK'S HOLDER still alive", needs the holder's own `db_port`, and
+filters on `state = 'active'` -- narrow, because a false negative there is one input of three and
+the cost of getting it wrong is stealing something that already looked stale on the other two
+counts too. `_shared_db_presence` (the before-run gate) asks "should I START a run AT ALL", checks
+every shared port plus this session's own, and counts ANY connection to a real database, not only
+an active one -- wide, because a suite holds its connection between tests even while idle, and a
+false negative here directly reintroduces the defect the gate exists to prevent. Same query shape,
+opposite stakes, and the stakes earn the different predicate.
+
+UNAVAILABLE MEANS THE OPPOSITE THING AT EACH SITE, on purpose, and both must say so or a future
+edit will "fix" one to match the other. On the staleness path, unavailable degrades to
+warn-and-steal-anyway -- waiting forever on a lock that might already be dead is the worse
+failure. At the run gate, unavailable means PROCEED WITH A WARNING, falling back to the lock
+alone (exactly where this repository was before the gate existed) -- treating unavailable as busy
+there would wedge the machine forever on any box where the probe can never succeed (a wrong
+`PGPASSWORD`, `psql` not installed). One asks whether to take something from someone; the other
+asks whether to add load; the safe direction is not the same for both.
+
+BOTH PROBES HAVE BLIND SPOTS, and neither is the signal that cannot be wrong -- say so next to
+each rather than in a distant note. The run gate's probe cannot see a suite that has CREATED its
+database but not yet CONNECTED, nor one whose connection DROPPED while the suite still lives --
+both read as absent while a run is genuinely in progress, the process id's own failure mode
+arriving from the other side. It is also wrong the other way: an ABANDONED connection of any kind
+reads as busy forever. No override exists for that, and none should be added -- a session that
+waits when it could have run chose the safe failure; a session that timed out into running chose
+the one that took the daemon down. Instead: every decline is announced with the connection's
+identity (backend pid, database, state, and since when that state held) rather than merely that
+the resource looks busy, so nobody has to re-derive what the check already knew; after several
+consecutive declines with no test process visible on the machine, a distinct message names that
+same stuck connection instead of just repeating that things look slow. And release-and-retry is
+a poll loop by another name, so it is BOUNDED: after enough attempts, this raises
+`DatabaseNeverClear` and the caller exits non-zero, rather than waiting longer or, worse,
+proceeding anyway once the cap is hit -- an unbounded wait lets two polite waiters ping-pong
+forever, which is the invisible-stall failure this file keeps coming back to.
+
+VERIFICATION BOUNDARY, worth keeping as a rule rather than a one-off judgment call: substitute
+(mock) for a leg whose exception mapping is total and already verified by reading -- the
+unavailable/degraded leg of either probe is pure routing once its exception handling is read
+closely, and exercising it for real would just test subprocess plumbing, not the resource. Exercise
+for real any leg whose OUTPUT IS EVIDENCE -- both probes' busy/idle legs were run against an actual
+Postgres, in both directions, because that's the leg that could be quietly wrong about the thing
+that matters.
+
+TEST-DESIGN NOTE, aimed at whoever changes this next: the refusal path announces, refuses,
+releases and retries -- it is loud, it is easy to exercise, and it is where a reader's eye and a
+test suite's attention both go by default; the permit path on a genuinely clear machine produces
+no output worth noticing and is exactly the case that quietly stops being covered. A gate that
+wrongly refuses only costs waiting; a gate that wrongly permits costs two suites on one machine --
+test the YES path as deliberately as the NO path, not merely that the probe function returned a
+clear value on paper.
 
 ## Trusting the matcher
 
