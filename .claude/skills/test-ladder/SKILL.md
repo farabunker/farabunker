@@ -425,13 +425,23 @@ asked.
 
 ## A small question still takes the lock
 
-`scripts/ladder.py ask [--expect-minutes N] <command> [args...]` wraps any command in the same
-acquire/probe/release chain a ladder run uses -- no second lock, just the existing one held for
-one foreground command instead of a whole chain. It exists because a session once bypassed the
-lock for eight seconds to answer a quick question, precisely because there was no cheap compliant
-way to ask one -- the rule only survives that reflex if taking the lock is cheaper than skipping
-it. `ask` defaults `expect_minutes` small, on the assumption of a few seconds' work; long-running
-work still belongs in a declared `full` or `hotfix` run, not here.
+`scripts/ladder.py ask [--expect-minutes N] [--] <command> [args...]` wraps any command in the
+same acquire/probe/release chain a ladder run uses -- no second lock, just the existing one held
+for one foreground command instead of a whole chain. It exists because a session once bypassed
+the lock for eight seconds to answer a quick question, precisely because there was no cheap
+compliant way to ask one -- the rule only survives that reflex if taking the lock is cheaper than
+skipping it. `ask` defaults `expect_minutes` small, on the assumption of a few seconds' work;
+long-running work still belongs in a declared `full` or `hotfix` run, not here. `--expect-minutes`
+is recognised only before the command starts (a leading `--` separates it explicitly), never
+searched for anywhere in the arguments the way the chain modes do for their own options, because
+here the trailing arguments are an arbitrary command that may carry that same flag as its own --
+silently eating it would hand back a plausible result of something nobody asked for. A failed
+acquisition exits 75, never 2, so a caller scripting on exit status can always tell a locked
+machine from the wrapped command's own exit status (2 included); a command that doesn't exist
+exits 127, the shell's convention. This mode cannot see work a command hands to something
+self-daemonising -- a process that detaches and outlives the command that started it runs
+unlocked the instant that command returns and the release fires, exactly as backgrounding a
+chain run defeats the rule above, without needing a shell to do it.
 
 ## Failure modes
 

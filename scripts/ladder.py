@@ -5,11 +5,11 @@ See .claude/skills/test-ladder/SKILL.md for the full procedure this encodes.
 
 Usage:
     scripts/ladder.py <worktree> <db_url> <outdir> <full|hotfix> [--max-others N] [--expect-minutes N] [touched-modules...]
-    scripts/ladder.py ask [--expect-minutes N] <command> [args...]
+    scripts/ladder.py ask [--expect-minutes N] [--] <command> [args...]
 
 `ask` wraps a small question in the same slot lock, for a session that
-would otherwise skip it -- see run_ask below and the skill's "A compliant
-path for a small question".
+would otherwise skip it -- see run_ask/_main_ask below and the skill's
+"A small question still takes the lock".
 
 Each named run writes <outdir>/<run>.log, appends
 "<run> | <returncode> | <last summary line>" to <outdir>/SUMMARY, and
@@ -1188,6 +1188,17 @@ def _run_one(name: str, argv: list[str], env: dict, worktree: Path, outdir: Path
 # not one small question.
 _ASK_DEFAULT_EXPECT_MINUTES = 2.0
 
+# Distinct from any wrapped command's own exit status, which occupies the
+# whole normal range (0-255) including 2 -- a test runner's usage error, a
+# search tool's "found nothing", many real tools. 75 is EX_TEMPFAIL from
+# BSD's sysexits.h ("temporary failure, user is invited to retry"), the
+# conventional code for "resource busy, try later" and one almost no real
+# command returns on its own, so a caller scripting on exit status can
+# always tell a failed acquisition from the command's own answer. 127 is
+# the shell's own convention for "command not found".
+_ASK_LOCK_BUSY_EXIT = 75
+_ASK_COMMAND_NOT_FOUND_EXIT = 127
+
 
 def _command_purpose(command: list[str], max_len: int = 60) -> str:
     """The lock's `running` field for `ask` mode: the command itself,
@@ -1197,64 +1208,106 @@ def _command_purpose(command: list[str], max_len: int = 60) -> str:
     return label if len(label) <= max_len else label[: max_len - 3] + "..."
 
 
-def run_ask(command: list[str], *, holder: str, expected_seconds: float,
-            path: Path = LOCK_PATH) -> int:
+def run_ask(command: list[str], *, holder: str, expected_seconds: float, path: Path) -> int:
     """`ask` mode: wrap an arbitrary `command` in the same acquire/probe/
     release chain a ladder run uses (_acquire_lock_when_database_clear,
     release_lock) -- no second implementation of any of it. Runs
     `command` as given, never through a shell, in the foreground of this
-    process; its exit status is returned as-is, so a caller can tell a
-    failed command (any int here) from a failed acquisition (LockHeld /
-    DatabaseNeverClear propagate instead of returning). Release handlers
-    are armed by the acquire call itself, so SIGINT/SIGTERM during the
-    command still release; the `finally` covers normal completion and any
-    other exception. Never SIGSTOP -- same as every other mode, nothing
-    here even tries to hook it."""
+    process; its exit status is returned as-is (mapped to
+    _ASK_COMMAND_NOT_FOUND_EXIT if `command` doesn't exist), so a caller
+    can tell a failed command from a failed acquisition (LockHeld /
+    DatabaseNeverClear propagate instead of returning -- see _main_ask for
+    the CLI's mapping of those to a code outside the command's own range).
+    Release handlers are armed by the acquire call itself, so
+    SIGINT/SIGTERM during the command still release; the `finally` covers
+    normal completion, a missing executable, and any other exception.
+    Never SIGSTOP -- same as every other mode, nothing here even tries to
+    hook it.
+
+    THIS MODE CANNOT SEE WORK THAT OUTLIVES THE COMMAND. A command that
+    hands its work to something self-daemonising -- starts a process that
+    detaches and keeps running, then exits itself -- returns immediately,
+    the release fires right behind it, and the daemonised work then runs
+    completely unlocked. There is no shell here, so a literal trailing
+    `&` is inert, but that is not the same protection: a command that
+    daemonises itself defeats this mode exactly as backgrounding defeats
+    the acquire-run-release rule the chain modes rely on (see
+    acquire_lock's own comment on that rule) -- without needing a shell
+    at all."""
     _acquire_lock_when_database_clear(
         path, holder=holder, running=_command_purpose(command),
         expected_seconds=expected_seconds, db_port=None,
     )
     try:
         return subprocess.run(command).returncode
+    except FileNotFoundError as exc:
+        print(f"ladder ask: command not found -- {exc}", file=sys.stderr)
+        return _ASK_COMMAND_NOT_FOUND_EXIT
     finally:
         release_lock(path)
 
 
 def _main_ask(args: list[str]) -> int:
     """CLI for `ask` mode: `scripts/ladder.py ask [--expect-minutes N]
-    <command> [args...]`. For a small question, not a real run -- long
-    work still belongs in a declared `full` or `hotfix` chain, which
+    [--] <command> [args...]`. For a small question, not a real run --
+    long work still belongs in a declared `full` or `hotfix` chain, which
     reports progress and expects the machine for a while; this mode
     exists so a session answering something in a few seconds still takes
-    the lock instead of skipping it."""
+    the lock instead of skipping it.
+
+    Wrapper options are recognised ONLY BEFORE the command begins -- never
+    searched for anywhere in `args` the way `--max-others`/
+    `--expect-minutes` are for the chain modes above, where the trailing
+    arguments are module names and a collision is exotic. Here the
+    trailing arguments are an arbitrary command, where a flag of its own
+    spelled `--expect-minutes` is exactly the kind of thing a real command
+    could have, and silently stripping it from the command a caller asked
+    for -- rather than refusing or erroring -- would be the worst kind of
+    wrong: a plausible-looking result of something nobody asked for. A
+    leading bare `--` is an explicit separator, consumed and never passed
+    to the command, for a command whose own first argument would otherwise
+    be mistaken for a wrapper option.
+
+    Exit codes: the command's own status; _ASK_LOCK_BUSY_EXIT (75) if the
+    machine is locked or the database never clears; _ASK_COMMAND_NOT_FOUND_EXIT
+    (127) if `command` doesn't exist; 2 for a usage error in the wrapper's
+    own arguments (no command given, or a malformed --expect-minutes) --
+    none of that is the command's own answer, so 2 here can't collide with
+    it the way it would for an acquisition failure."""
     expect_minutes = _ASK_DEFAULT_EXPECT_MINUTES
-    if "--expect-minutes" in args:
-        i = args.index("--expect-minutes")
+    while args and args[0] == "--expect-minutes":
         try:
-            expect_minutes = float(args[i + 1])
+            expect_minutes = float(args[1])
         except (IndexError, ValueError):
             print("--expect-minutes needs a number", file=sys.stderr)
             return 2
-        del args[i:i + 2]
+        args = args[2:]
+    if args and args[0] == "--":
+        args = args[1:]
 
     if not args:
         print(
-            "usage: scripts/ladder.py ask [--expect-minutes N] <command> [args...]\n"
+            "usage: scripts/ladder.py ask [--expect-minutes N] [--] <command> [args...]\n"
             "Takes the slot lock, runs <command> in the foreground, releases it --\n"
             "for a small question, not a declared run. Long-running work belongs\n"
-            "in a `full` or `hotfix` ladder run, not here.",
+            "in a `full` or `hotfix` ladder run, not here. Wrapper options must come\n"
+            "before the command; use -- to separate them from a command whose own\n"
+            "first argument looks like one. Exit codes: the command's own status;\n"
+            f"{_ASK_LOCK_BUSY_EXIT} if the machine is locked or the database never\n"
+            f"clears; {_ASK_COMMAND_NOT_FOUND_EXIT} if <command> doesn't exist.",
             file=sys.stderr,
         )
         return 2
 
     try:
-        return run_ask(args, holder=Path.cwd().name, expected_seconds=expect_minutes * 60)
+        return run_ask(args, holder=Path.cwd().name, expected_seconds=expect_minutes * 60,
+                        path=LOCK_PATH)
     except LockHeld as exc:
         print(f"ladder ask: machine locked -- {exc}", file=sys.stderr)
-        return 2
+        return _ASK_LOCK_BUSY_EXIT
     except DatabaseNeverClear as exc:
         print(f"ladder ask: {exc}", file=sys.stderr)
-        return 2
+        return _ASK_LOCK_BUSY_EXIT
 
 
 def main(argv: list[str]) -> int:
