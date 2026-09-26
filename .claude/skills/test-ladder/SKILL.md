@@ -425,6 +425,25 @@ asked.
 
 ## A small question still takes the lock
 
+THE RULE IS WIDER THAN TEST RUNS: the token serialises anything that makes the shared machine
+unavailable to another session, not only a pytest chain. A stack rebuild does that as completely
+as a test run -- more completely, because no probe anyone has built would see it coming; at the
+moment of a swap there is nothing suspicious to sample. The incident that makes this concrete: a
+peer's browser verification tore down a preview stack and rebuilt it on the same ports for a
+different worktree, voiding another session's in-flight gate run mid-chain -- while that run's own
+lock was held correctly the entire time. The lock models one shared resource; there are two, and
+the token only ever covered one of them. So: if what you are about to do makes the machine
+unavailable to another session, it takes the token, whether or not it is a test -- a test run
+takes it, a stack rebuild takes it, a small question takes it, which is where this mode came from.
+`ask` is simply how you take it for anything that is not already a declared `full`/`hotfix` run. A
+stack rebuild is minutes of work, not seconds, so it states `--expect-minutes` accordingly -- the
+mode does not police that number and should not start trying to.
+
+HONEST LIMIT: the token is a CONVENTION, never an enforcement. Nothing stops a session rebuilding
+a stack, or running a suite, without taking it first -- that omission is the exact incident that
+produced this mode (below), and the stack-rebuild incident just above is the same omission wearing
+a different action. The convention holds only as long as complying is cheaper than skipping it.
+
 `scripts/ladder.py ask [--expect-minutes N] [--] <command> [args...]` wraps any command in the
 same acquire/probe/release chain a ladder run uses -- no second lock, just the existing one held
 for one foreground command instead of a whole chain. It exists because a session once bypassed
