@@ -201,34 +201,14 @@ def _runner_token_index(tokens: list[str]) -> int | None:
     """Index of the token where the runner is actually being executed, or
     None -- shared by _runs_pytest and _invocation_label so the count and
     the progress line's label can never disagree about what they matched.
-
-    Require either some token whose own BASENAME is exactly "pytest"
-    (direct invocation: ".venv/bin/pytest", a bare "pytest") or the
-    adjacent pair "-m pytest" (module-invocation form) -- structural, not
-    a sharper string match, so a path/directory/database name that merely
-    CONTAINS "pytest" as a substring inside a component (a peer's
-    --outdir=/tmp/mypytest_results) has no token whose basename equals it
-    outright and never matches.
-
-    A token containing "=" is skipped before the basename check, because
-    an executed runner token never contains one -- this closes the
-    option-valued route (--outdir=/some/path/pytest) outright, where the
-    option's PATH VALUE, not a substring inside one component, ends at a
-    component named "pytest".
-
-    Two residuals are accepted deliberately here, not closed: a bare
-    POSITIONAL path argument (no "=") whose final component happens to be
-    named "pytest", and a transient invocation that names "pytest" as a
-    bare word without executing it (e.g. a package installer's target).
-    Both are phantoms in the safe direction -- extra waiting, never
-    wrongness -- except at --max-others 0, where waiting past the poll
-    interval reads as starvation, so a long-lived process wedged into
-    either shape would stall a strict run. Closing them for real needs
-    positional-vs-flag-value parsing against the runner's own flag
-    grammar, which is gnarly and not worth building for this; the only
-    thing that would make this a true execution assertion instead of an
-    appearance-at-component-granularity one is exactly that parser, and
-    it stays unbuilt."""
+    Structural, not a sharper string match: a token whose own BASENAME is
+    exactly "pytest", or the adjacent "-m pytest" pair. Tokens containing
+    "=" are skipped first, closing the option-valued route
+    (--outdir=/path/pytest). Two narrower residuals stay open on purpose
+    (see this module's tests and SKILL.md's "Running it"): a bare
+    positional path ending in a "pytest" component, and a transient
+    install naming "pytest" as a bare word -- both safe-direction
+    phantoms, not worth a positional-vs-flag-value parser."""
     for i, tok in enumerate(tokens):
         if "=" in tok:
             continue
@@ -295,13 +275,6 @@ def other_pytest_matches(lines: list[str], exclude_pids: set[int]) -> list[tuple
         if "python" in ucomm.lower() and _runs_pytest(args):
             matches.append((pid, args))
     return matches
-
-
-def count_other_pytest(lines: list[str], exclude_pids: set[int]) -> int:
-    """How many other pytest processes -- see other_pytest_matches for the
-    predicate. Kept as its own pure entry point since some callers (and
-    the existing tests) only need the number."""
-    return len(other_pytest_matches(lines, exclude_pids))
 
 
 def _invocation_label(args: str, max_len: int = 60) -> str:
@@ -584,71 +557,36 @@ def _db_activity_present(port: int) -> bool | None:
 
 def _shared_db_presence(port: int) -> dict | None | object:
     """THE BEFORE-RUN GATE'S PROBE -- see _db_activity_present above for
-    its sibling and why the two must not be merged. This one asks "should
-    I START a run AT ALL" -- deliberately crude, and deliberately WIDER
-    than the sibling's query in two ways: it checks ANY shared port
-    (_SHARED_TEST_DB_PORTS plus this session's own), not the specific
-    holder a lock names, because the failure being prevented (two full
-    suites exhausting one machine's memory) does not care whose database
-    they are; and it counts ANY connection at all to a real database --
-    not only 'active' -- excluding only this probe's own. A test suite
-    holds its connection between tests even while idle (mid-fixture,
-    mid-assertion, between one test and the next), so for THIS question
-    presence is the right signal and activity is not: a narrower 'active'
-    filter would read a peer's idle moment as "clear" and let a second
-    suite start, which is the exact defect this gate exists to prevent,
-    now carrying the gate's own blessing.
+    its sibling and why the two must not be merged. Asks "should I START
+    a run AT ALL": checks every shared port (_SHARED_TEST_DB_PORTS plus
+    this session's own), not just a lock's specific holder, since the
+    failure being prevented (two full suites exhausting one machine's
+    memory) doesn't care whose database it is; and counts ANY connection
+    (not only 'active') to a database matching the TEST-DATABASE naming
+    convention (`^test_`, Django's own default: "test_" prepended to the
+    application database's name) -- a suite holds its connections between
+    tests while idle, so presence is the right signal and activity is
+    not. BOTH filters are required: presence alone, without the
+    name-prefix match, once counted every application database's own
+    persistent connections too and could never permit a run on any box
+    with a preview stack up.
 
-    THIS PROBE'S OWN BLIND SPOT, stated here rather than in a distant
-    note, because it is the mirror of the process id's failure and
-    nobody should read either signal as the one that cannot be wrong:
-    it cannot see a suite that has CREATED its database but not yet
-    CONNECTED (a startup window), nor one whose connection DROPPED while
-    the suite process still lives (a lost connection, retried or not).
-    Both read as absent while a run is genuinely in progress -- the same
-    shape of wrongness as a lock naming a dead pid while its holder
-    lives, arriving from the opposite direction. It is also wrong in the
-    other direction: an ABANDONED connection of any kind reads as busy
-    forever (see _acquire_lock_when_database_clear for how that's
-    handled -- announced, never silently overridden or timed past).
-
-    TWO FILTERS, BOTH REQUIRED, measured against a live machine after an
-    earlier version that dropped the second one shipped and could never
-    have permitted a run: `datname` matching the TEST-DATABASE naming
-    convention, AND presence regardless of state. Widening "active" to
-    "any connection" was correct and stays -- a suite holds its
-    connections between tests while idle. Widening "test databases" to
-    "every non-system database" was not asked for and breaks the gate
-    completely: a preview stack's own web/worker/watcher hold persistent
-    idle connections to their APPLICATION database on every port that has
-    a preview stack up, which is every box this repository runs on, so a
-    query that counted those would read busy forever and this gate would
-    never once permit a run. Measured: port 5433 (an app database with
-    three idle connections, no test database) reads CLEAR with this
-    filter; port 5435 (the same shape plus one genuine test database)
-    reads BUSY.
-
-    THE CONVENTION THIS FILTER RESTS ON, named explicitly because a
-    silent dependency on it is the exact failure mode this repository
-    has spent two days removing everywhere else: `^test_` is a NAME-PREFIX
-    match on Django's own default test-database name -- "test_" prepended
-    to the application database's name, e.g. "farabunker" (app) /
-    "test_farabunker" (its test db). This filter depends entirely on that
-    convention holding. If the test framework's own naming ever changes
-    (a custom TEST NAME setting, a different runner with a different
-    default), this filter stops matching real test databases SILENTLY --
-    it degrades back to exactly the defect this fix closes, with no
+    THE CONVENTION THIS FILTER RESTS ON is a silent dependency, named
+    explicitly rather than assumed: if the test framework's own naming
+    ever changes, this filter stops matching real test databases with no
     error and no warning, because "found nothing" and "matched wrong"
     look identical from here.
 
-    Verified against REAL rows in pg_stat_activity, not a synthetic
-    substitute or a re-implementation of this filter in a test -- see
-    test_shared_db_presence_reads_clear_with_a_real_application_connection
-    and test_shared_db_presence_reads_busy_with_a_real_test_db_connection,
-    which open actual Postgres connections and drive this exact function
-    through its real subprocess path, because a permit path proven only
-    against a substitute is exactly what let this defect through the
-    first time.
+    TWO BLIND SPOTS, stated here rather than in a distant note, because
+    neither signal in this file is the one that cannot be wrong: it
+    cannot see a suite that has CREATED its database but not yet
+    CONNECTED, nor one whose connection DROPPED while the suite still
+    lives -- both read as absent while a run is genuinely in progress,
+    the process id's own failure mode arriving from the other side. It
+    is also wrong the other way: an ABANDONED connection of any kind
+    reads as busy forever (see _acquire_lock_when_database_clear for how
+    that's handled -- announced, never silently overridden or timed
+    past).
 
     Returns _PROBE_UNAVAILABLE (a distinct sentinel, not None) if the
     client is missing or the connection itself fails -- the CALLER, not
@@ -908,7 +846,7 @@ def acquire_lock(path: Path, *, holder: str, running: str, expected_seconds: flo
     # return before a sweep placed after it ever ran, leaving exactly
     # that wreckage invisible until some later, unrelated contended
     # acquisition happened to trip over it. Visible every time, not
-    # auto-cleaned (F4).
+    # auto-cleaned.
     _sweep_orphaned_tombstones(path)
 
     try:
@@ -927,8 +865,8 @@ def acquire_lock(path: Path, *, holder: str, running: str, expected_seconds: flo
     # be stale by the time the capture runs.
     pre_read = read_lock(path)
     if pre_read is None:
-        # F5: a lock unparseable in EITHER format is HELD by fleet rule
-        # -- "we can't tell" is not "nobody's there". Never captured.
+        # A lock unparseable in EITHER format is HELD by fleet rule -- "we
+        # can't tell" is not "nobody's there". Never captured.
         raise LockHeld(
             "existing lock is unparseable in either known format -- "
             "treating as held (unknown state), refusing to steal"
@@ -960,7 +898,7 @@ def acquire_lock(path: Path, *, holder: str, running: str, expected_seconds: flo
     captured = read_lock(tombstone)
 
     if captured is None:
-        # F5, on the captured copy too: content changed between the
+        # Same rule on the captured copy too: content changed between the
         # pre-read and the capture into something unparseable in either
         # format -- still HELD by fleet rule, not vanished. Restore
         # (there is nothing sensible to write back INTO other than what
@@ -1153,31 +1091,22 @@ def _acquire_lock_when_database_clear(
             return  # confirmed clear on every shared port -- run
 
         if busy_port is None:  # at least one port unavailable, none busy
-            if clear_ports:
-                print(
-                    f"WARNING: the before-run database probe could not run on "
-                    f"port(s) {unavailable_ports} (client missing, or the "
-                    f"connection attempt itself failed) -- port(s) {clear_ports} "
-                    f"probed clear. Proceeding on the lock alone for the "
-                    f"unavailable port(s), the same protection this repository "
-                    f"had before this gate existed. Unlike the staleness probe, "
-                    f"an unavailable run-gate probe means PROCEED, not decline: "
-                    f"treating it as busy here would wedge the machine forever "
-                    f"on a box where the probe can never succeed.",
-                    file=sys.stderr,
-                )
-            else:
-                print(
-                    f"WARNING: the before-run database probe could not run on "
-                    f"any shared port {ports} (client missing, or every "
-                    f"connection attempt itself failed) -- proceeding on the "
-                    f"lock alone, the same protection this repository had "
-                    f"before this gate existed. Unlike the staleness probe, an "
-                    f"unavailable run-gate probe means PROCEED, not decline: "
-                    f"treating it as busy here would wedge the machine forever "
-                    f"on a box where the probe can never succeed.",
-                    file=sys.stderr,
-                )
+            # Names BOTH lists explicitly, even when one is empty, so a
+            # PARTIAL failure (some ports unavailable, the rest clear)
+            # never reads as a TOTAL one -- the two prior messages this
+            # merges differed by exactly that one clause.
+            print(
+                f"WARNING: the before-run database probe could not run on "
+                f"port(s) {unavailable_ports} (client missing, or the "
+                f"connection attempt itself failed); port(s) {clear_ports} "
+                f"probed clear. Proceeding on the lock alone, the same "
+                f"protection this repository had before this gate existed. "
+                f"Unlike the staleness probe, an unavailable run-gate probe "
+                f"means PROCEED, not decline: treating it as busy here "
+                f"would wedge the machine forever on a box where the probe "
+                f"can never succeed.",
+                file=sys.stderr,
+            )
             return
 
         consecutive_declines += 1

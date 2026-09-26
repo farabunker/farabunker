@@ -243,18 +243,9 @@ degrades PERMANENTLY, always taking the warned-and-proceed path rather than ever
 clear. `PGPASSWORD` in the environment overrides it; nothing here detects the permanently-degraded
 state itself.
 
-THE PID FIELD'S OWN DANGER, pinned as a comment at the exact line it's written in
-`acquire_lock` (not here, and not in the module docstring, because an editor of the call site
-would not see either): the field is meaningful only if the process that writes it is the SAME
-process that holds the lock for the whole run. In an agent harness, EVERY SHELL CALL IS A
-SEPARATE PROCESS -- acquiring the lock in one call and running the suite in a second call cannot
-ever satisfy this, because the writing process is gone before the run it was supposed to
-describe even starts. That is not a race, not clock drift, not an overrun: a lock built this way
-is BORN stealable with nothing having gone wrong, which is what makes the field actively
-misleading rather than merely unreliable. This script's own `main()` satisfies the requirement
-(acquire and the whole run to `release_lock` share one process, verified by reading it) --
-whoever changes the call site must re-verify this, not assume it, and the specific way to break
-it is splitting acquisition into a separate setup step.
+THE PID FIELD'S OWN DANGER has one home: the comment at the exact line it's written in
+`acquire_lock`, not here -- read it before touching how or where that field gets written or
+consumed.
 
 THE RULE HAD A HOLE, AND THEN IT HAD THE SAME HOLE AT THE OTHER END: "acquire, run and release in
 one call" is not enough on its own, because a run BACKGROUNDED from that call satisfies the words
@@ -293,8 +284,9 @@ Two general lessons this saga produced, worth stating outside this file's own ca
   correct. MACHINE-CONSUMED FIELDS NEED MACHINE-EXECUTED CHECKS -- the same negative-control
   discipline the documentation gate already applies, aimed at lock files instead of prose.
 - **A test that substitutes the thing under test cannot fail, whether it substitutes a format or
-  an answer.** This file's dual-format tests failed to catch F1 because their fixtures wrote this
-  script's OWN schema transliterated into key=value form -- a foreign-format fixture must be
+  an answer.** This file's dual-format tests failed to catch the wrong-field-name defect because
+  their fixtures wrote this script's OWN schema transliterated into key=value form -- a
+  foreign-format fixture must be
   COPIED from the real artefact, never reconstructed from a description of it. The permit-path
   test that shipped in the same commit as the "every non-system database" defect passed
   throughout for the identical reason: its probe was mocked, so a test that only re-states what
@@ -398,7 +390,7 @@ A process check isn't proven by reading it. Five different versions of this pred
 written in one day across two sessions, each looking obviously correct, each a sharper
 exclusion than the last -- sharpness is exactly what didn't help. Only the two that were
 actually run against a machine in a known state, once with a real pytest run present and once
-confirmed absent, ever gave a right answer. Whoever changes `count_other_pytest` owes it the
+confirmed absent, ever gave a right answer. Whoever changes `other_pytest_matches` owes it the
 same before trusting it: run it both directions against known ground truth -- the check's own
 output is the evidence, not the reasoning that produced it. Do not count matching processes;
 read their arguments and say which suite is running -- a count cannot tell you whose run it is,
