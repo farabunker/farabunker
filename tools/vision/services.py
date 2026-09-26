@@ -1567,6 +1567,20 @@ def describe_output(job: GenerationJob, *, request_timeout: float) -> None:
         )
         job.description = DESCRIBE_OUTPUT_FAILURE_SENTENCE
     else:
+        # `.strip()` AGAIN, HERE, EVEN THOUGH THE GATEWAY ALREADY
+        # PROMISES ONE (`describe_image`'s own docstring, twice) -- a
+        # real defect the gate ran into: that promise is a REMOTE seam
+        # this DURABLE FIELD must not depend on to keep its own two
+        # states meaningful ("" means never attempted, the sentence
+        # means attempted and failed). A second caller of that gateway
+        # function is coming (tools/rag's own eventual convergence,
+        # fix round item 5) and its behaviour is not this column's to
+        # control -- so a whitespace-only answer takes the FAILURE
+        # branch here regardless of whether the seam that produced it
+        # kept its own promise. `text` is REASSIGNED, not just tested,
+        # so the stored description is never accidentally the label
+        # glued to leading/trailing whitespace either.
+        text = text.strip()
         job.description = f"{_DESCRIBE_LABEL}{text}" if text else DESCRIBE_OUTPUT_FAILURE_SENTENCE
     job.save(update_fields=["description"])
 

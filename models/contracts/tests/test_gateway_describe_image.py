@@ -117,3 +117,35 @@ class TestDescribeImage:
         with patch("models.contracts.gateway.resolve", side_effect=ValueError("unbound")):
             with pytest.raises(ValueError):
                 gateway.describe_image("rag.extract", image_path, "describe it")
+
+    def test_a_raising_get_llm_for_propagates_uncaught(self, tmp_path):
+        """The docstring names THREE raise sources -- `resolve()`,
+        `get_llm_for()`, `llm.chat()` -- and only the first had a test
+        before this one (fix round gate finding: a promise stated in the
+        docstring is not pinned merely because a SIBLING promise on the
+        same line is). An engine build failure (a bound role pointing at
+        an engine with no `build_llm`, say) must propagate exactly like
+        an unbound role does."""
+        image_path = tmp_path / "out.png"
+        image_path.write_bytes(b"x")
+
+        with patch("models.contracts.gateway.resolve", return_value=_resolved()), \
+             patch(
+                 "models.contracts.gateway.get_llm_for",
+                 side_effect=ValueError("engine cannot build_llm"),
+             ):
+            with pytest.raises(ValueError):
+                gateway.describe_image("rag.extract", image_path, "describe it")
+
+    def test_a_raising_chat_call_propagates_uncaught(self, tmp_path):
+        """The third named raise source -- a transport failure (a
+        timeout, a dead engine) from the LLM's own `.chat()` call."""
+        image_path = tmp_path / "out.png"
+        image_path.write_bytes(b"x")
+        fake_llm = MagicMock()
+        fake_llm.chat.side_effect = RuntimeError("engine unreachable")
+
+        with patch("models.contracts.gateway.resolve", return_value=_resolved()), \
+             patch("models.contracts.gateway.get_llm_for", return_value=fake_llm):
+            with pytest.raises(RuntimeError):
+                gateway.describe_image("rag.extract", image_path, "describe it")
