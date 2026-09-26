@@ -26,6 +26,33 @@ actual exercise of the exclusive-create where it is (a poll can't be
 tested this way, but O_EXCL can and must be, per our own "run it, don't
 just reason about it" doctrine). Every lock in these tests is created
 under a fresh tempfile.mkdtemp() directory, never LOCK_PATH itself.
+
+The steal path had two versions of the same bug in one round, both closed
+by moving from "judge, then act" to "act, then judge the captured copy" --
+the first (an unlink aimed at whatever's at the path NOW, not the file
+that was judged) is closed by an atomic rename; the second (still judging
+a lock BEFORE renaming it, leaving the same read-then-act gap one level
+up: a slow thief can rename away content that changed between the read
+and the rename) is closed by renaming UNCONDITIONALLY first and judging
+the CAPTURED copy, which nothing else can be racing for.
+test_two_simultaneous_stealers_cannot_both_win_the_same_stale_lock caught
+the second version directly -- it read as fixed after the first change,
+passed dozens of runs, and then failed on iteration 33 of a stress loop,
+which is exactly why this file's own doctrine is to run a check both
+directions rather than trust that it reads correctly. It exercises the
+real interleave with two threads racing the actual os.rename syscalls the
+fix uses -- not two OS processes (getting those to hit the same tick
+needs its own synchronization primitive anyway, and a threading.Barrier
+does that job with less machinery; the atomicity under test is the
+kernel's guarantee on rename, which doesn't care whether the two callers
+are threads or processes).
+
+The database-probe conjunction (_db_activity_present) is mocked rather
+than exercised against a real Postgres -- this test harness has no
+database to probe -- so those tests are honest about testing the DECISION
+LOGIC in acquire_lock (does it refuse to steal when the probe says
+active? does it warn loudly and proceed when the probe can't run at
+all?), not the probe's own subprocess call.
 """
 from __future__ import annotations
 
@@ -36,8 +63,10 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -51,6 +80,7 @@ from ladder import (  # noqa: E402
     read_lock,
     release_lock,
 )
+import ladder  # noqa: E402  -- needed to mock ladder._db_activity_present in place
 
 REVERSED = tuple(reversed(FULL_MODULES))
 
@@ -308,4 +338,268 @@ def test_release_lock_does_not_delete_a_lock_it_no_longer_owns():
         assert read_lock(lock_path)["holder"] == "someone-else"
     finally:
         lock_path.unlink(missing_ok=True)
+        lock_path.parent.rmdir()
+
+
+def test_two_simultaneous_stealers_cannot_both_win_the_same_stale_lock():
+    # F1, the break the earlier exercises never ran: both waiters judge
+    # the SAME stale lock stale on nearby ticks. Real threads racing the
+    # real os.rename syscall, lined up as closely as a barrier can put
+    # them -- exactly one may win; the loser must get LockHeld, not a
+    # silent second holder.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()  # a genuinely dead pid -- this lock really is stale
+        stale = {
+            "holder": "dead-session", "pid": dead.pid, "running": "full ladder: tools",
+            "started": time.time() - 10, "expected_seconds": 600,
+        }
+        lock_path.write_text(json.dumps(stale), encoding="utf-8")
+
+        barrier = threading.Barrier(2)
+        outcomes: dict[str, str] = {}
+
+        def steal(name: str) -> None:
+            barrier.wait()
+            try:
+                acquire_lock(lock_path, holder=name, running="full ladder: tools",
+                             expected_seconds=600)
+                outcomes[name] = "won"
+            except LockHeld as exc:
+                outcomes[name] = f"lost: {exc}"
+
+        threads = [threading.Thread(target=steal, args=(n,)) for n in ("A", "B")]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=10)
+
+        winners = [v for v in outcomes.values() if v == "won"]
+        losers = [v for v in outcomes.values() if v.startswith("lost")]
+        assert len(winners) == 1 and len(losers) == 1, outcomes
+        final = read_lock(lock_path)
+        assert final is not None and final["holder"] in ("A", "B")
+        # No tombstone left behind by either the winner or the loser.
+        leftovers = [p.name for p in lock_path.parent.iterdir() if p != lock_path]
+        assert leftovers == [], leftovers
+    finally:
+        release_lock(lock_path)
+        for stray in lock_path.parent.iterdir():
+            stray.unlink(missing_ok=True)
+        lock_path.parent.rmdir()
+
+
+def test_read_lock_parses_the_plain_key_value_format_too():
+    # F2: the format four sessions adopted by hand before this script had
+    # a lock at all -- one "key=value" pair per line, same field names.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        lock_path.write_text(
+            "holder=hand-session\npid=12345\nrunning=full ladder tools\n"
+            "started=1000000.0\nexpected_seconds=600\n",
+            encoding="utf-8",
+        )
+        assert read_lock(lock_path) == {
+            "holder": "hand-session", "pid": 12345, "running": "full ladder tools",
+            "started": 1000000.0, "expected_seconds": 600.0,
+        }
+    finally:
+        lock_path.unlink(missing_ok=True)
+        lock_path.parent.rmdir()
+
+
+def test_acquire_lock_refuses_a_live_holder_written_in_the_plain_format():
+    # F2's actual danger, closed: read_lock returning None for a foreign
+    # format used to route straight into the vanished-lock steal, so this
+    # script would unlink a LIVE holder. Uses this test's own pid --
+    # guaranteed alive -- as the foreign-format holder.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        lock_path.write_text(
+            f"holder=hand-session\npid={os.getpid()}\nrunning=full ladder tools\n"
+            f"started={time.time()}\nexpected_seconds=600\n",
+            encoding="utf-8",
+        )
+        raised = False
+        try:
+            acquire_lock(lock_path, holder="script-session", running="full ladder: tools",
+                         expected_seconds=600)
+        except LockHeld:
+            raised = True
+        assert raised, "a live holder in the plain format must refuse, never read as vanished"
+        assert lock_path.exists()  # never unlinked out from under it
+        assert read_lock(lock_path)["holder"] == "hand-session"
+    finally:
+        lock_path.unlink(missing_ok=True)
+        lock_path.parent.rmdir()
+
+
+def test_acquire_lock_treats_a_malformed_lock_as_stale_not_a_crash():
+    # F3: well-formed JSON, wrong shape (no pid/started/expected_seconds)
+    # -- must be judged stale and stolen with an announcement, not raise
+    # out of is_stale/_lock_age_exceeds_budget on a missing field.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        lock_path.write_text(json.dumps({"holder": "weird-session"}), encoding="utf-8")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            acquire_lock(lock_path, holder="rescuer", running="full ladder: tools",
+                         expected_seconds=600)
+        assert "stealing stale lock" in stderr.getvalue()  # announced, not silent
+        assert read_lock(lock_path)["holder"] == "rescuer"
+    finally:
+        release_lock(lock_path)
+        lock_path.parent.rmdir()
+
+
+def test_acquire_lock_refuses_to_steal_when_the_db_probe_finds_activity():
+    # The conjunction, positive case: process evidence alone says stale
+    # (a genuinely dead pid), but the database probe says otherwise --
+    # must refuse, not steal, and must put the lock back untouched.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        stale = {
+            "holder": "dead-session", "pid": dead.pid, "running": "full ladder: tools",
+            "started": time.time() - 10, "expected_seconds": 600, "db_port": 5433,
+        }
+        lock_path.write_text(json.dumps(stale), encoding="utf-8")
+
+        with mock.patch.object(ladder, "_db_activity_present", return_value=True):
+            raised = False
+            try:
+                acquire_lock(lock_path, holder="thief", running="full ladder: tools",
+                             expected_seconds=600)
+            except LockHeld:
+                raised = True
+        assert raised, "an active database must refuse the steal, not just weaken it"
+        assert read_lock(lock_path) == stale  # put back exactly as it was
+        assert not any(lock_path.parent.glob("*.captured-*"))  # no leftover tombstone
+    finally:
+        release_lock(lock_path)
+        for stray in lock_path.parent.iterdir():
+            stray.unlink(missing_ok=True)
+        lock_path.parent.rmdir()
+
+
+def test_acquire_lock_warns_loudly_and_proceeds_when_the_db_probe_is_unavailable():
+    # Degraded case: process evidence says stale, and the probe can't run
+    # at all (mocked here as None, the same outcome psql-missing or a
+    # refused connection produces) -- must NOT silently fall back to the
+    # process-only check; it steals, but announces the weaker evidence.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        stale = {
+            "holder": "dead-session", "pid": dead.pid, "running": "full ladder: tools",
+            "started": time.time() - 10, "expected_seconds": 600, "db_port": 5433,
+        }
+        lock_path.write_text(json.dumps(stale), encoding="utf-8")
+
+        stderr = io.StringIO()
+        with mock.patch.object(ladder, "_db_activity_present", return_value=None):
+            with contextlib.redirect_stderr(stderr):
+                acquire_lock(lock_path, holder="rescuer", running="full ladder: tools",
+                             expected_seconds=600)
+        output = stderr.getvalue()
+        assert "WARNING" in output and "STRUCTURALLY invalid" in output
+        assert read_lock(lock_path)["holder"] == "rescuer"
+    finally:
+        release_lock(lock_path)
+        lock_path.parent.rmdir()
+
+
+def test_acquire_lock_steals_quietly_on_confirmed_no_db_activity():
+    # activity is False (probe ran, found nothing) -- steal proceeds with
+    # the ordinary steal announcement only, no extra warning.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        stale = {
+            "holder": "dead-session", "pid": dead.pid, "running": "full ladder: tools",
+            "started": time.time() - 10, "expected_seconds": 600, "db_port": 5433,
+        }
+        lock_path.write_text(json.dumps(stale), encoding="utf-8")
+
+        stderr = io.StringIO()
+        with mock.patch.object(ladder, "_db_activity_present", return_value=False):
+            with contextlib.redirect_stderr(stderr):
+                acquire_lock(lock_path, holder="rescuer", running="full ladder: tools",
+                             expected_seconds=600)
+        output = stderr.getvalue()
+        assert "WARNING" not in output
+        assert "stealing stale lock" in output
+        assert read_lock(lock_path)["holder"] == "rescuer"
+    finally:
+        release_lock(lock_path)
+        lock_path.parent.rmdir()
+
+
+def test_acquire_lock_probes_an_int_port_even_from_a_plain_format_lock():
+    # A hand-written (key=value) lock's db_port round-trips through
+    # _parse_keyvalue_lock's numeric coercion as a float ("5433" ->
+    # 5433.0). psql's -p wants an integer -- assert the probe is actually
+    # called with one, not the float, using the same dead-pid-plus-mock
+    # setup as the other conjunction tests.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        lock_path.write_text(
+            f"holder=dead-session\npid={dead.pid}\nrunning=full ladder tools\n"
+            f"started={time.time() - 10}\nexpected_seconds=600\ndb_port=5433\n",
+            encoding="utf-8",
+        )
+        assert isinstance(read_lock(lock_path)["db_port"], float)  # confirms the setup
+
+        with mock.patch.object(ladder, "_db_activity_present", return_value=False) as probe:
+            acquire_lock(lock_path, holder="rescuer", running="full ladder: tools",
+                         expected_seconds=600)
+        probe.assert_called_once_with(5433)  # int, not 5433.0
+    finally:
+        release_lock(lock_path)
+        lock_path.parent.rmdir()
+
+
+def test_acquire_lock_warns_when_no_db_port_was_ever_recorded():
+    # The other degraded trigger: a lock (e.g. a hand-written peer lock)
+    # with no db_port at all -- must warn and proceed, never crash on
+    # the missing field and never silently treat it as a clean probe.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        stale = {
+            "holder": "dead-session", "pid": dead.pid, "running": "full ladder: tools",
+            "started": time.time() - 10, "expected_seconds": 600,
+        }
+        lock_path.write_text(json.dumps(stale), encoding="utf-8")
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            acquire_lock(lock_path, holder="rescuer", running="full ladder: tools",
+                         expected_seconds=600)
+        assert "WARNING" in stderr.getvalue()
+        assert read_lock(lock_path)["holder"] == "rescuer"
+    finally:
+        release_lock(lock_path)
+        lock_path.parent.rmdir()
+
+
+def test_acquire_lock_floors_a_tiny_expected_duration_so_it_cannot_self_stale():
+    # F4: expected_seconds=0 would make even a fresh lock's own 3x budget
+    # zero, so it goes stale under itself the instant a waiter checks.
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        acquire_lock(lock_path, holder="quick", running="hotfix ladder: identity",
+                     expected_seconds=0)
+        info = read_lock(lock_path)
+        assert info["expected_seconds"] >= 60
+        assert is_stale(info, now=info["started"] + 1) is False
+    finally:
+        release_lock(lock_path)
         lock_path.parent.rmdir()

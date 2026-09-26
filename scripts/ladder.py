@@ -49,6 +49,16 @@ that is exactly the process check's remaining job, to see a holder who
 has not yet adopted the lock. Only once every session acquires it does
 "no lock file" mean idle, and the process check stop being load-bearing.
 
+Staleness is a CONJUNCTION, not the process-and-age check alone: a lock
+whose process looks gone is stolen only after the database probe
+(_db_activity_present) also finds no activity on its recorded db_port --
+a process id and an age both only measure whether the HOLDER looks alive,
+never whether the database it's protecting is actually in use, which is
+what a lock exists to protect in the first place. The pid field's own
+comment in acquire_lock explains the harness-specific way that field can
+be structurally meaningless rather than merely stale (see it before
+touching how or where that field gets written).
+
 NOTE, LOUDLY: this script's own pause mechanism is SIGSTOP (below), and a
 paused run STILL OWNS THE MACHINE. The lock is released on normal exit,
 on SIGINT and on SIGTERM -- NEVER on SIGSTOP. A stop that freed the lock
@@ -65,12 +75,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 FULL_MODULES = ("scripts", "identity", "agents", "foundation", "models", "tools")
 
@@ -84,7 +96,13 @@ FULL_MODULES = ("scripts", "identity", "agents", "foundation", "models", "tools"
 # ROLLOUT RULE (module docstring has the full text): mid-rollout, no lock
 # file does NOT mean idle -- a pre-lock session can genuinely hold the
 # machine with none written. That's the process check's remaining job.
-LOCK_PATH = Path(tempfile.gettempdir()) / "farabunker-ladder.lock"
+#
+# This is the path the four sessions agreed on by hand, not a name this
+# script invented -- landing on their path (rather than asking them to
+# move to ours) is why read_lock also has to understand their plain
+# key=value format below: two tokens for one machine is worse than one
+# token in a format this script had to learn.
+LOCK_PATH = Path(tempfile.gettempdir()) / "farabunker-test-slot"
 
 
 class LockHeld(Exception):
@@ -293,16 +311,63 @@ def _other_pytest_matches() -> list[tuple[int, str]]:
     return other_pytest_matches(lines, _own_process_tree(lines, os.getpid()))
 
 
+# A tiny or zero expected_seconds would make a lock's own 3x budget tiny
+# too, so a fresh, live holder could read as stale to a waiter moments
+# later. Floored at both ends: acquire_lock clamps what THIS script
+# writes; _lock_age_exceeds_budget clamps whatever it reads, since a
+# foreign-format or hand-written lock may not have floored its own.
+_MIN_EXPECTED_SECONDS = 60.0
+
+
+def _parse_keyvalue_lock(text: str) -> dict | None:
+    """Fallback for the plain `key=value` (one pair per line) convention
+    the other sessions adopted by hand before this script had a lock at
+    all -- same field names as the structured (JSON) format this script
+    writes, so both normalize to one shape once parsed. Returns None only
+    when NOTHING in the text looks like a key=value line -- a line that
+    parses but is missing a field is a malformed but REAL lock, not an
+    absent one, and must come back as a dict (is_stale's hardened reads
+    judge it stale rather than crash; it is never treated as vanished by
+    virtue of a missing field alone)."""
+    fields: dict[str, object] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        fields[key.strip()] = value.strip()
+    if not fields:
+        return None
+    for numeric_key in ("pid", "started", "expected_seconds", "db_port"):
+        if numeric_key in fields:
+            try:
+                fields[numeric_key] = float(fields[numeric_key])
+            except ValueError:
+                pass  # left as a string; the hardened reads below catch it
+    if isinstance(fields.get("pid"), float):
+        fields["pid"] = int(fields["pid"])
+    return fields
+
+
 def read_lock(path: Path = LOCK_PATH) -> dict | None:
-    """The lock's contents, or None if there is none or it's unreadable.
+    """The lock's contents, or None if there is none or it parses as
+    NEITHER format. Tries the structured (JSON) format this script writes
+    first, then the plain key=value format adopted by hand -- a lock that
+    parses in EITHER format is a live holder and must never be treated as
+    vanished just because this script doesn't natively write that shape.
+
     Public so a session can check by hand: `python3 -c "import ladder as
     l; print(l.read_lock())"` answers who holds the machine, what they're
     running, and how long they expect to take -- the question a count
     never could."""
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        text = path.read_text(encoding="utf-8")
+    except OSError:
         return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        return _parse_keyvalue_lock(text)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -319,78 +384,278 @@ def _pid_alive(pid: int) -> bool:
 
 def _lock_age_exceeds_budget(info: dict, now: float) -> bool:
     """Pure: True once `now` is more than 3x the lock's own stated
-    expectation past its start -- separated from is_stale so this half of
-    the staleness rule is testable with no process on the machine at
-    all."""
-    return (now - info["started"]) > 3 * info["expected_seconds"]
+    expectation (floored, see _MIN_EXPECTED_SECONDS) past its start.
+    Separated from is_stale so this half of the staleness rule is
+    testable with no process on the machine at all. A missing or
+    non-numeric `started`/`expected_seconds` also reads True (stale) --
+    a malformed lock is real and dangerous to leave forever, and crashing
+    here would abort the caller's whole acquire instead of letting it
+    steal (announced) and move on."""
+    try:
+        started = float(info["started"])
+        expected_seconds = float(info["expected_seconds"])
+    except (KeyError, TypeError, ValueError):
+        return True
+    return (now - started) > 3 * max(expected_seconds, _MIN_EXPECTED_SECONDS)
 
 
 def is_stale(info: dict, now: float | None = None) -> bool:
     """A lock is stale when its holding process is gone, or its start
     time is older than three times its own stated expectation -- a
-    crashed session must not wedge the machine forever. Public: a
-    session can check a lock it's looking at by hand before deciding
-    whether to steal it."""
-    if not _pid_alive(info["pid"]):
+    crashed session must not wedge the machine forever. A missing or
+    non-numeric `pid` also reads True (stale), for the same reason
+    _lock_age_exceeds_budget hardens its own fields: judge, don't crash.
+    Public: a session can check a lock it's looking at by hand before
+    deciding whether to steal it."""
+    try:
+        pid = int(info["pid"])
+    except (KeyError, TypeError, ValueError):
+        return True
+    if not _pid_alive(pid):
         return True
     return _lock_age_exceeds_budget(info, time.time() if now is None else now)
 
 
-def acquire_lock(path: Path, *, holder: str, running: str, expected_seconds: float) -> None:
+def _db_activity_present(port: int) -> bool | None:
+    """The database probe: measures the RESOURCE the lock exists to
+    protect, not a proxy for it -- a process id and an age both only
+    answer "does the holder LOOK alive"; this asks Postgres itself
+    whether anything is actually connected and active on `port`. Shells
+    out to `psql` (stdlib subprocess, at most one call) if it's on PATH.
+
+    Returns None -- PROBE UNAVAILABLE, never read as "clear" -- when the
+    client isn't installed or the connection attempt itself fails (auth,
+    refusal, timeout): a refused connection is ambiguous (nothing there,
+    vs. something wrong with how this asked) and must not be read as a
+    confident "no activity" by the caller."""
+    psql = shutil.which("psql")
+    if psql is None:
+        return None
+    query = (
+        "SELECT count(*) FROM pg_stat_activity "
+        "WHERE datname NOT IN ('postgres', 'template0', 'template1') "
+        "AND state = 'active'"
+    )
+    env = dict(os.environ)
+    env.setdefault("PGPASSWORD", "farabunker")  # docs/DEV.md's documented local default
+    try:
+        result = subprocess.run(
+            [psql, "-h", "localhost", "-p", str(port), "-U", "farabunker",
+             "-d", "postgres", "-tAc", query],
+            capture_output=True, text=True, timeout=5, env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        return int(result.stdout.strip()) > 0
+    except ValueError:
+        return None
+
+
+def _write_lock_exclusively(path: Path, info: dict) -> None:
+    """Write `info` to `path` with no window where the path exists but is
+    empty or partially written. os.open(O_CREAT|O_EXCL) alone has one: it
+    creates a zero-byte file, THEN the content gets written -- a second
+    waiter's read_lock in that gap sees empty text, fails to parse it in
+    EITHER format, and gets None back, which used to be treated as
+    "vanished" and stolen even though a live writer was mid-create. Write
+    the full content to a private temp file first, then os.link it into
+    place: link() is atomic and fails with FileExistsError if the
+    destination exists already -- the same exclusivity os.O_EXCL gives,
+    but only reachable once the content is already durable on disk, so
+    nothing can ever observe a half-written file at `path`."""
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}-{os.urandom(6).hex()}")
+    tmp.write_text(json.dumps(info), encoding="utf-8")
+    try:
+        os.link(str(tmp), str(path))
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def acquire_lock(path: Path, *, holder: str, running: str, expected_seconds: float,
+                  db_port: int | None = None) -> None:
     """Exclusively create the lock file -- the loser of a race FAILS TO
-    CREATE (os.O_EXCL) rather than reading stale state and deciding to
-    proceed anyway, which is the whole reason this beats a poll: checking
-    and starting are two separate steps for a poll, racy in the gap
-    between them, and one atomic step here. Raises LockHeld if a live,
-    non-stale session already holds it. A stale lock is announced to
-    stderr and stolen -- never silently -- then acquired the same way;
-    if that second create also loses a race, LockHeld is raised rather
-    than looping.
+    CREATE rather than reading stale state and deciding to proceed
+    anyway, which is the whole reason this beats a poll: checking and
+    starting are two separate steps for a poll, racy in the gap between
+    them, and one atomic step here (see _write_lock_exclusively for how
+    "exclusive" and "never half-written" are both guaranteed at once).
+    Raises LockHeld if a live, non-stale session already holds it.
+
+    STALENESS IS A CONJUNCTION, not the process-and-age check alone: a
+    lock whose recorded process looks gone or aged out is stolen only
+    after also asking the database itself (`db_port`, see
+    _db_activity_present) whether anything is actually connected and
+    active. A process id or an age both only answer "does the holder
+    LOOK alive"; the database probe answers "is the resource the lock
+    protects actually in use", which is the thing that matters. If the
+    probe can't run at all (no `db_port` recorded, `psql` missing, the
+    connection attempt itself fails), this does NOT silently fall back
+    to the process-only check -- it announces, loudly, that it is
+    stealing on evidence that can be structurally meaningless (see the
+    comment on the `pid` field below) before doing so, so a session
+    reading that line can stop it.
+
+    A stale lock is stolen by ATOMIC RENAME, and CAPTURED BEFORE it is
+    JUDGED, never the reverse: reading first and renaming second leaves a
+    gap between the read and the act, and a plain unlink is aimed at
+    whatever sits at the path NOW regardless -- either way, a second
+    thief can act on content that changed underneath the first thief's
+    judgement (a lock that was stale when read can become someone else's
+    fresh, live lock by the time an unlink or a judged-then-rename
+    actually runs). Renaming unconditionally to a uniquely-named
+    tombstone FIRST, then reading and judging the CAPTURED copy, closes
+    that gap: nothing else can be racing for a tombstone only this call
+    named, so there is no read-then-act window left to fall into. If the
+    captured copy turns out to be live after all, it is renamed straight
+    back and refused, exactly as it was. The loser of the capture-rename
+    gets a plain FileNotFoundError, turned into the same LockHeld a live
+    holder would have given, naming the lost race -- not a retry loop.
 
     The lock's contents answer what a count never could: which session
-    (`holder`), which process (`os.getpid()`), what it's running in
-    recognisable terms (`running`), when it started, and how long it
-    expects to take (`expected_seconds`) -- enough for a peer to decide
-    between waiting ten minutes and doing something else for two hours."""
+    (`holder`), which process, what it's running in recognisable terms
+    (`running`), when it started, and how long it expects to take
+    (`expected_seconds`, floored to `_MIN_EXPECTED_SECONDS` so a live
+    chain can't go instantly stale under its own budget) -- enough for a
+    peer to decide between waiting ten minutes and doing something else
+    for two hours."""
     info = {
         "holder": holder,
+        # This field is meaningful ONLY if the process that writes it is
+        # the same process that holds the lock for the WHOLE run -- its
+        # death has to mean the hold ended, or the field is worse than
+        # useless. In an agent harness, EVERY SHELL CALL IS A SEPARATE
+        # PROCESS: acquiring the lock in one call and running the suite
+        # in a second call cannot ever satisfy this, because the process
+        # that wrote this pid exits the moment its own call returns,
+        # before the run it was supposed to describe even starts -- that
+        # is not a bug in the code below, it is a structural fact about
+        # split-call acquisition, and no amount of care in this function
+        # can fix a pid recorded by a process that was never going to
+        # live that long. This script's own main() satisfies the
+        # requirement because acquire_lock and the entire run to
+        # release_lock happen in the ONE process that calls main() --
+        # verified by reading it, not assumed. THE SPECIFIC WAY TO BREAK
+        # THIS: split acquisition into a separate setup step (e.g. "first
+        # acquire the lock, then run the suite" as two calls) -- that
+        # reintroduces this exact defect without changing a single line
+        # of the locking logic above or below, which is why this note is
+        # here at the write site and not in the module docstring, where
+        # an editor of the call site would not see it.
         "pid": os.getpid(),
         "running": running,
         "started": time.time(),
-        "expected_seconds": expected_seconds,
+        "expected_seconds": max(float(expected_seconds), _MIN_EXPECTED_SECONDS),
     }
-
-    def _create() -> int:
-        return os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    if db_port is not None:
+        info["db_port"] = db_port
 
     try:
-        fd = _create()
+        _write_lock_exclusively(path, info)
+        return
     except FileExistsError:
-        existing = read_lock(path)
-        holder_desc = existing.get("holder", "?") if existing else "?"
-        pid_desc = existing.get("pid", "?") if existing else "?"
-        running_desc = existing.get("running", "?") if existing else "?"
-        expected_s = existing.get("expected_seconds", 0) if existing else 0
-        age_s = (time.time() - existing["started"]) if existing else 0
+        pass
 
-        if existing is not None and not is_stale(existing):
+    # CAPTURE FIRST, JUDGE SECOND -- never the reverse. Judging on a read
+    # taken before an unconditional rename leaves the same gap the
+    # unlink-based steal had: whatever this judged can have already been
+    # replaced by the time the rename actually runs, so a slow thief can
+    # rename away a holder that became live (or freshly-stolen-by-someone-
+    # else) AFTER the read but BEFORE the rename. Renaming unconditionally
+    # first, and judging the CAPTURED copy -- which nothing else can be
+    # racing for any more, since its tombstone name is ours alone -- means
+    # there is no read-then-act gap left for a second thief to fall into.
+    tombstone = path.with_name(f"{path.name}.captured-{os.getpid()}-{os.urandom(4).hex()}")
+    try:
+        os.rename(str(path), str(tombstone))
+    except FileNotFoundError:
+        # Nothing there to capture (released, or someone else's capture
+        # already in flight) -- try a fresh create; if that's also lost,
+        # it's the same refusal a live holder would give.
+        try:
+            _write_lock_exclusively(path, info)
+            return
+        except FileExistsError:
+            raise LockHeld("lost the race to acquire the lock -- retry")
+
+    try:
+        captured = read_lock(tombstone)
+        if captured is not None and not is_stale(captured):
+            # We captured something that turns out to be live, not stale
+            # -- it existed at `path` when we renamed it away, but the
+            # judgement had to happen on OUR copy (see above), not a
+            # pre-rename read. Put it back exactly as it was and refuse.
+            os.rename(str(tombstone), str(path))
+            holder_desc = captured.get("holder", "?")
+            pid_desc = captured.get("pid", "?")
+            running_desc = captured.get("running", "?")
+            try:
+                expected_m = float(captured.get("expected_seconds", 0)) / 60
+            except (TypeError, ValueError):
+                expected_m = 0.0
             raise LockHeld(
                 f"held by {holder_desc!r} (pid {pid_desc}), running "
-                f"{running_desc!r}, expecting {expected_s / 60:.0f}m"
+                f"{running_desc!r}, expecting {expected_m:.0f}m"
             )
+
+        # captured is None (vanished/unparseable in either format) or
+        # is_stale(captured) is True (process gone or aged out). Before
+        # treating the latter as truly stale, ask the database -- the
+        # conjunction.
+        if captured is not None:
+            recorded_port = captured.get("db_port")
+            activity = (
+                # A hand-written (key=value) lock's db_port round-trips
+                # through _parse_keyvalue_lock's numeric coercion as a
+                # float ("5433" -> 5433.0); psql's -p wants an integer.
+                _db_activity_present(int(recorded_port))
+                if isinstance(recorded_port, (int, float)) else None
+            )
+            if activity is True:
+                os.rename(str(tombstone), str(path))
+                raise LockHeld(
+                    f"held by {captured.get('holder', '?')!r} (pid "
+                    f"{captured.get('pid', '?')}) -- process evidence looked gone "
+                    f"or aged out, but port {recorded_port} shows an active "
+                    f"database connection; refusing to steal"
+                )
+            if activity is None:
+                print(
+                    "WARNING: stealing on process evidence alone -- the database "
+                    "probe could not run (no db_port recorded, psql missing, or "
+                    "the connection attempt itself failed), and a recorded "
+                    "process id can be STRUCTURALLY invalid rather than merely "
+                    "stale (see the pid field's own comment in acquire_lock) when "
+                    "acquiring and running were separate calls -- 'process gone' "
+                    "may be meaningless here, not just weak evidence",
+                    file=sys.stderr,
+                )
+            # activity is False (confirmed clear), or None (degraded,
+            # already warned above) -- proceed to steal.
+
+        holder_desc = captured.get("holder", "?") if captured else "?"
+        pid_desc = captured.get("pid", "?") if captured else "?"
+        try:
+            age_s = time.time() - float(captured.get("started", 0)) if captured else 0.0
+        except (TypeError, ValueError):
+            age_s = 0.0
+        try:
+            expected_s = float(captured.get("expected_seconds", 0)) if captured else 0.0
+        except (TypeError, ValueError):
+            expected_s = 0.0
         print(
             f"stealing stale lock: held by {holder_desc!r} (pid {pid_desc}), "
             f"started {age_s:.0f}s ago, expected {expected_s:.0f}s",
             file=sys.stderr,
         )
-        path.unlink(missing_ok=True)
         try:
-            fd = _create()
+            _write_lock_exclusively(path, info)
         except FileExistsError:
-            raise LockHeld("lost the race to steal the stale lock -- retry")
-
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(info, f)
+            raise LockHeld("a fresh lock appeared while stealing -- retry")
+    finally:
+        Path(tombstone).unlink(missing_ok=True)
 
 
 def release_lock(path: Path) -> None:
@@ -501,9 +766,10 @@ def main(argv: list[str]) -> int:
         expect_minutes = 120.0 if mode == "full" else 20.0
     holder = worktree_path.name
     running = f"{mode} ladder: " + " ".join(touched_modules or FULL_MODULES)
+    db_port = urlparse(db_url).port  # for the staleness conjunction's db probe
     try:
         acquire_lock(LOCK_PATH, holder=holder, running=running,
-                     expected_seconds=expect_minutes * 60)
+                     expected_seconds=expect_minutes * 60, db_port=db_port)
     except LockHeld as exc:
         print(f"ladder: machine locked -- {exc}", file=sys.stderr)
         return 2
