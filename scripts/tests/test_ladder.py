@@ -65,6 +65,7 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -390,20 +391,51 @@ def test_two_simultaneous_stealers_cannot_both_win_the_same_stale_lock():
         lock_path.parent.rmdir()
 
 
-def test_read_lock_parses_the_plain_key_value_format_too():
-    # F2: the format four sessions adopted by hand before this script had
-    # a lock at all -- one "key=value" pair per line, same field names.
+def test_read_lock_parses_the_verbatim_fleet_lock_line():
+    # F1 (round-four review): the earlier version of this test used this
+    # script's OWN schema (holder/running/expected_seconds) transliterated
+    # into key=value form -- a fixture built from the same misunderstanding
+    # as the code, which cannot catch that misunderstanding. This is the
+    # ACTUAL byte-for-byte line off a live lock on the review machine,
+    # copied, not reconstructed:
+    #     session=farabunker-2b pid=4520 purpose=deletion-semantics-fix-wave-5-dirty-tree-gate-flag2 started=2026-09-26T14:46:15Z expect_min=15
     lock_path = Path(tempfile.mkdtemp()) / "test.lock"
     try:
         lock_path.write_text(
-            "holder=hand-session\npid=12345\nrunning=full ladder tools\n"
-            "started=1000000.0\nexpected_seconds=600\n",
+            "session=farabunker-2b pid=4520 "
+            "purpose=deletion-semantics-fix-wave-5-dirty-tree-gate-flag2 "
+            "started=2026-09-26T14:46:15Z expect_min=15\n",
             encoding="utf-8",
         )
         assert read_lock(lock_path) == {
-            "holder": "hand-session", "pid": 12345, "running": "full ladder tools",
-            "started": 1000000.0, "expected_seconds": 600.0,
+            "holder": "farabunker-2b",
+            "pid": 4520,
+            "running": "deletion-semantics-fix-wave-5-dirty-tree-gate-flag2",
+            "started": 1790433975.0,  # 2026-09-26T14:46:15Z, computed independently
+            "expected_seconds": 900,  # expect_min=15 * 60
         }
+    finally:
+        lock_path.unlink(missing_ok=True)
+        lock_path.parent.rmdir()
+
+
+def test_parse_keyvalue_lock_ignores_unknown_keys_rather_than_failing():
+    # The fleet's own suggestion, deliberate tolerance: a parser that
+    # skips fields it doesn't recognise survives the next field the
+    # fleet adds (the now-gone two-process variant would have been read
+    # correctly by this parser instead of mis-parsed by a stricter one).
+    lock_path = Path(tempfile.mkdtemp()) / "test.lock"
+    try:
+        lock_path.write_text(
+            "session=farabunker-2b pid=4520 supervisor_pid=4519 "
+            "purpose=some-task started=2026-09-26T14:46:15Z expect_min=15 "
+            "future_field=whatever\n",
+            encoding="utf-8",
+        )
+        info = read_lock(lock_path)
+        assert info["holder"] == "farabunker-2b"
+        assert info["pid"] == 4520  # the one process field, not supervisor_pid
+        assert "supervisor_pid" not in info and "future_field" not in info
     finally:
         lock_path.unlink(missing_ok=True)
         lock_path.parent.rmdir()
@@ -412,13 +444,16 @@ def test_read_lock_parses_the_plain_key_value_format_too():
 def test_acquire_lock_refuses_a_live_holder_written_in_the_plain_format():
     # F2's actual danger, closed: read_lock returning None for a foreign
     # format used to route straight into the vanished-lock steal, so this
-    # script would unlink a LIVE holder. Uses this test's own pid --
-    # guaranteed alive -- as the foreign-format holder.
+    # script would unlink a LIVE holder. Same field names/order/spacing as
+    # the verbatim fixture above; only pid and started necessarily vary
+    # here (this test's own live pid, a fresh timestamp), since testing
+    # liveness needs a real live pid rather than the static one on record.
     lock_path = Path(tempfile.mkdtemp()) / "test.lock"
     try:
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         lock_path.write_text(
-            f"holder=hand-session\npid={os.getpid()}\nrunning=full ladder tools\n"
-            f"started={time.time()}\nexpected_seconds=600\n",
+            f"session=hand-session pid={os.getpid()} purpose=some-task "
+            f"started={now_iso} expect_min=10\n",
             encoding="utf-8",
         )
         raised = False
@@ -540,26 +575,27 @@ def test_acquire_lock_steals_quietly_on_confirmed_no_db_activity():
 
 
 def test_acquire_lock_probes_an_int_port_even_from_a_plain_format_lock():
-    # A hand-written (key=value) lock's db_port round-trips through
-    # _parse_keyvalue_lock's numeric coercion as a float ("5433" ->
-    # 5433.0). psql's -p wants an integer -- assert the probe is actually
-    # called with one, not the float, using the same dead-pid-plus-mock
-    # setup as the other conjunction tests.
+    # db_port isn't part of the fleet's own field contract (it's this
+    # script's own conjunction metadata), but a hand-added one on a
+    # plain-format lock must still come back as an int for psql's -p,
+    # not a bare string -- assert the probe is actually called with one.
     lock_path = Path(tempfile.mkdtemp()) / "test.lock"
     try:
         dead = subprocess.Popen([sys.executable, "-c", "pass"])
         dead.wait()
+        started_iso = datetime.fromtimestamp(time.time() - 10, tz=timezone.utc) \
+            .strftime("%Y-%m-%dT%H:%M:%SZ")
         lock_path.write_text(
-            f"holder=dead-session\npid={dead.pid}\nrunning=full ladder tools\n"
-            f"started={time.time() - 10}\nexpected_seconds=600\ndb_port=5433\n",
+            f"session=dead-session pid={dead.pid} purpose=some-task "
+            f"started={started_iso} expect_min=10 db_port=5433\n",
             encoding="utf-8",
         )
-        assert isinstance(read_lock(lock_path)["db_port"], float)  # confirms the setup
+        assert isinstance(read_lock(lock_path)["db_port"], int)  # confirms the setup
 
         with mock.patch.object(ladder, "_db_activity_present", return_value=False) as probe:
             acquire_lock(lock_path, holder="rescuer", running="full ladder: tools",
                          expected_seconds=600)
-        probe.assert_called_once_with(5433)  # int, not 5433.0
+        probe.assert_called_once_with(5433)  # int, not a string
     finally:
         release_lock(lock_path)
         lock_path.parent.rmdir()

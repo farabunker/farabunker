@@ -79,8 +79,8 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -97,12 +97,15 @@ FULL_MODULES = ("scripts", "identity", "agents", "foundation", "models", "tools"
 # file does NOT mean idle -- a pre-lock session can genuinely hold the
 # machine with none written. That's the process check's remaining job.
 #
-# This is the path the four sessions agreed on by hand, not a name this
-# script invented -- landing on their path (rather than asking them to
-# move to ours) is why read_lock also has to understand their plain
-# key=value format below: two tokens for one machine is worse than one
-# token in a format this script had to learn.
-LOCK_PATH = Path(tempfile.gettempdir()) / "farabunker-test-slot"
+# This is the LITERAL path the fleet agreed on by hand, not a name this
+# script invented and not one derived from tempfile.gettempdir() (which
+# resolves somewhere else entirely on this platform, and drops the
+# .lock suffix besides) -- reconciled to the protocol's own string,
+# copied, not reconstructed. Landing on their path is why read_lock also
+# has to understand their plain key=value format below: two tokens for
+# one machine is worse than one token in a format this script had to
+# learn.
+LOCK_PATH = Path("/tmp/farabunker-test-slot.lock")
 
 
 class LockHeld(Exception):
@@ -319,33 +322,87 @@ def _other_pytest_matches() -> list[tuple[int, str]]:
 _MIN_EXPECTED_SECONDS = 60.0
 
 
-def _parse_keyvalue_lock(text: str) -> dict | None:
-    """Fallback for the plain `key=value` (one pair per line) convention
-    the other sessions adopted by hand before this script had a lock at
-    all -- same field names as the structured (JSON) format this script
-    writes, so both normalize to one shape once parsed. Returns None only
-    when NOTHING in the text looks like a key=value line -- a line that
-    parses but is missing a field is a malformed but REAL lock, not an
-    absent one, and must come back as a dict (is_stale's hardened reads
-    judge it stale rather than crash; it is never treated as vanished by
-    virtue of a missing field alone)."""
-    fields: dict[str, object] = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        fields[key.strip()] = value.strip()
-    if not fields:
+def _parse_iso8601_z(text: str) -> float | None:
+    """Parse an ISO-8601 UTC instant to seconds with a trailing "Z" (the
+    fleet's `started` field, e.g. "2026-09-26T14:46:15Z" -- what
+    `date -u +%FT%TZ` prints) into an epoch float. None on anything that
+    doesn't parse, same as every other hardened field read here: judge
+    stale, don't crash."""
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
         return None
-    for numeric_key in ("pid", "started", "expected_seconds", "db_port"):
-        if numeric_key in fields:
-            try:
-                fields[numeric_key] = float(fields[numeric_key])
-            except ValueError:
-                pass  # left as a string; the hardened reads below catch it
-    if isinstance(fields.get("pid"), float):
-        fields["pid"] = int(fields["pid"])
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _parse_keyvalue_lock(text: str) -> dict | None:
+    """Fallback for the plain key=value line the fleet actually writes,
+    copied verbatim from a live lock on this machine (never reconstructed
+    from a description of the schema -- see the skill's note on why that
+    reconstruction is the same mistake as the code it's meant to catch):
+
+        session=<name> pid=$$ purpose=<hyphenated-what> started=<ISO-8601 UTC, trailing Z> expect_min=<int>
+
+    Aliases: `session` -> `holder`, `purpose` -> `running`, `expect_min`
+    (INTEGER MINUTES) * 60 -> `expected_seconds`. `pid` is the ONE
+    process field, deliberately -- it's the shell that acquires, runs and
+    releases in one call, so its death means the hold ended; a
+    two-process variant existed briefly and is gone, and this parser does
+    not look for it. `started` is an ISO-8601 UTC instant with a trailing
+    "Z", not an epoch float (see _parse_iso8601_z).
+
+    UNKNOWN KEYS ARE IGNORED, not a parse failure -- deliberate tolerance,
+    not sloppiness: a parser that skips fields it doesn't recognise
+    survives the NEXT field the fleet adds without this script even
+    noticing, which would by itself have contained the whole class of
+    break this round fixes (the now-gone two-process variant would have
+    been read correctly instead of mis-parsed). `purpose` is tolerated
+    with spaces even though the fleet's own convention hyphenates it
+    instead and never emits them.
+
+    Returns None only when NOTHING in the text looks like a key=value
+    pair at all -- a line that parses but is missing a field is a
+    malformed but REAL lock, not an absent one (is_stale's hardened reads
+    judge it stale rather than crash; F5's rule below is what a lock
+    parsing as NEITHER format gets, which is different and stronger)."""
+    raw: dict[str, str] = {}
+    for line in text.splitlines():
+        for token in line.strip().split():
+            if "=" not in token:
+                continue
+            key, _, value = token.partition("=")
+            raw[key.strip()] = value.strip()
+    if not raw:
+        return None
+
+    fields: dict[str, object] = {}
+    if "session" in raw:
+        fields["holder"] = raw["session"]
+    if "purpose" in raw:
+        fields["running"] = raw["purpose"]
+    if "pid" in raw:
+        try:
+            fields["pid"] = int(raw["pid"])
+        except ValueError:
+            pass
+    if "expect_min" in raw:
+        try:
+            fields["expected_seconds"] = int(raw["expect_min"]) * 60
+        except ValueError:
+            pass
+    if "started" in raw:
+        started = _parse_iso8601_z(raw["started"])
+        if started is not None:
+            fields["started"] = started
+    if "db_port" in raw:
+        try:
+            fields["db_port"] = int(raw["db_port"])
+        except ValueError:
+            pass
     return fields
 
 
@@ -454,6 +511,85 @@ def _db_activity_present(port: int) -> bool | None:
         return None
 
 
+def _sweep_orphaned_tombstones(path: Path) -> None:
+    """A capturer killed between capturing (the rename) and restoring or
+    writing leaves its tombstone behind forever -- not fully fixable
+    (nothing here can safely tell "mid-capture, still in flight" apart
+    from "orphaned" without a liveness check on a bare file, which
+    doesn't exist). Mitigated, not fixed: make it VISIBLE. Announces
+    every stray `{path.name}.captured-*` or `{path.name}.tmp-*` found,
+    with its age, so the wreckage is seen rather than accumulating
+    silently -- it does not remove anything automatically.
+
+    Can false-positive on a genuinely concurrent, still-live acquisition
+    (its tombstone or temp file is indistinguishable from an orphan for
+    the instant before it's cleaned up) -- a real, low-age warning during
+    a race is noise, not a defect; treat a warning whose age is small as
+    a maybe, and one whose age is minutes as real wreckage worth
+    investigating."""
+    try:
+        strays = list(path.parent.glob(f"{path.name}.captured-*")) + \
+            list(path.parent.glob(f"{path.name}.tmp-*"))
+    except OSError:
+        return
+    now = time.time()
+    for stray in strays:
+        try:
+            age = now - stray.stat().st_mtime
+        except OSError:
+            continue
+        print(
+            f"WARNING: orphaned lock artefact {stray} (age {age:.0f}s) -- a "
+            f"capturer or writer may have been killed mid-operation; not removed "
+            f"automatically, inspect by hand",
+            file=sys.stderr,
+        )
+
+
+def _restore_captured_lock(tombstone: Path, path: Path, holder_desc, pid_desc) -> None:
+    """Put a captured lock back by LINKING the tombstone to `path`, then
+    unlinking the tombstone -- never by renaming it back. The path is
+    EMPTY for the whole capture window, so a plain acquirer's exclusive
+    create can legitimately succeed there while this call holds the
+    tombstone; renaming the tombstone back would silently REPLACE that
+    third party's fresh, genuine claim, destroying it while it believes
+    it holds. link() raises FileExistsError instead of overwriting, so
+    that collision is caught rather than clobbered. On it, this
+    announces LOUDLY -- naming both the party being restored and whoever
+    is now at `path` -- and refuses, deliberately leaving the tombstone
+    in place (the orphan sweep will report it) rather than deleting the
+    only forensic trail of what happened."""
+    try:
+        os.link(str(tombstone), str(path))
+    except FileExistsError:
+        dispossessed = read_lock(path)
+        dispossessed_desc = dispossessed.get("holder", "?") if dispossessed else "?"
+        print(
+            f"CRITICAL: restoring a captured lock (holder {holder_desc!r}, pid "
+            f"{pid_desc}) found a LIVE holder ({dispossessed_desc!r}) already at "
+            f"{path} -- that holder was DISPOSSESSED mid-capture; refusing to "
+            f"overwrite either side. Tombstone left at {tombstone} for inspection.",
+            file=sys.stderr,
+        )
+        raise LockHeld(
+            f"a live holder ({dispossessed_desc!r}) was dispossessed mid-capture "
+            f"while restoring {holder_desc!r} -- refusing"
+        )
+    tombstone.unlink(missing_ok=True)
+
+
+def _held_message(info: dict) -> str:
+    holder_desc = info.get("holder", "?")
+    pid_desc = info.get("pid", "?")
+    running_desc = info.get("running", "?")
+    try:
+        expected_m = float(info.get("expected_seconds", 0)) / 60
+    except (TypeError, ValueError):
+        expected_m = 0.0
+    return (f"held by {holder_desc!r} (pid {pid_desc}), running {running_desc!r}, "
+            f"expecting {expected_m:.0f}m")
+
+
 def _write_lock_exclusively(path: Path, info: dict) -> None:
     """Write `info` to `path` with no window where the path exists but is
     empty or partially written. os.open(O_CREAT|O_EXCL) alone has one: it
@@ -505,14 +641,20 @@ def acquire_lock(path: Path, *, holder: str, running: str, expected_seconds: flo
     thief can act on content that changed underneath the first thief's
     judgement (a lock that was stale when read can become someone else's
     fresh, live lock by the time an unlink or a judged-then-rename
-    actually runs). Renaming unconditionally to a uniquely-named
-    tombstone FIRST, then reading and judging the CAPTURED copy, closes
-    that gap: nothing else can be racing for a tombstone only this call
-    named, so there is no read-then-act window left to fall into. If the
-    captured copy turns out to be live after all, it is renamed straight
-    back and refused, exactly as it was. The loser of the capture-rename
-    gets a plain FileNotFoundError, turned into the same LockHeld a live
-    holder would have given, naming the lost race -- not a retry loop.
+    actually runs). A cheap pre-read gate judges first, so an obviously
+    live lock is almost never captured at all; renaming unconditionally
+    to a uniquely-named tombstone, then reading and judging the CAPTURED
+    copy, closes the remaining gap for whatever the gate missed: nothing
+    else can be racing for a tombstone only this call named. If the
+    captured copy turns out to be live after all, it is put back by
+    LINKING the tombstone to `path` (never by renaming it back, which
+    would silently overwrite a third party that legitimately created a
+    fresh lock during the capture window) and refused, exactly as it
+    was -- a collision on that link is a live holder dispossessed
+    mid-capture, announced loudly and refused rather than resolved
+    either way. The loser of the capture-rename gets a plain
+    FileNotFoundError, turned into the same LockHeld a live holder would
+    have given, naming the lost race -- not a retry loop.
 
     The lock's contents answer what a count never could: which session
     (`holder`), which process, what it's running in recognisable terms
@@ -558,15 +700,37 @@ def acquire_lock(path: Path, *, holder: str, running: str, expected_seconds: flo
     except FileExistsError:
         pass
 
-    # CAPTURE FIRST, JUDGE SECOND -- never the reverse. Judging on a read
-    # taken before an unconditional rename leaves the same gap the
-    # unlink-based steal had: whatever this judged can have already been
-    # replaced by the time the rename actually runs, so a slow thief can
-    # rename away a holder that became live (or freshly-stolen-by-someone-
-    # else) AFTER the read but BEFORE the rename. Renaming unconditionally
-    # first, and judging the CAPTURED copy -- which nothing else can be
-    # racing for any more, since its tombstone name is ours alone -- means
-    # there is no read-then-act gap left for a second thief to fall into.
+    # Surface any wreckage from a previous capturer killed mid-operation
+    # before doing anything else (F4) -- visible, not auto-cleaned.
+    _sweep_orphaned_tombstones(path)
+
+    # PRE-READ GATE (cheap, NOT authoritative): judge on a read taken
+    # BEFORE ever capturing, so an obviously-live lock is (almost) never
+    # captured in the first place -- this shrinks the window in which
+    # capturing a live lock (and then having to restore it, see below)
+    # can happen at all, down to the gap between this read and the
+    # capture immediately below. It does not replace the authoritative
+    # judgement on the CAPTURED copy further down: this read can itself
+    # be stale by the time the capture runs.
+    pre_read = read_lock(path)
+    if pre_read is None:
+        # F5: a lock unparseable in EITHER format is HELD by fleet rule
+        # -- "we can't tell" is not "nobody's there". Never captured.
+        raise LockHeld(
+            "existing lock is unparseable in either known format -- "
+            "treating as held (unknown state), refusing to steal"
+        )
+    if not is_stale(pre_read):
+        raise LockHeld(_held_message(pre_read))
+
+    # CAPTURE FIRST, JUDGE SECOND -- never the reverse, even though the
+    # pre-read gate just did a read-then-act itself: judging on a read
+    # taken before an unconditional rename leaves a gap where the
+    # content can change underneath the judgement, and a second thief
+    # can act on a live lock it never actually judged. Renaming
+    # unconditionally to a uniquely-named tombstone FIRST, then reading
+    # and judging the CAPTURED copy -- which nothing else can be racing
+    # for any more -- closes that gap entirely rather than narrowing it.
     tombstone = path.with_name(f"{path.name}.captured-{os.getpid()}-{os.urandom(4).hex()}")
     try:
         os.rename(str(path), str(tombstone))
@@ -580,82 +744,82 @@ def acquire_lock(path: Path, *, holder: str, running: str, expected_seconds: flo
         except FileExistsError:
             raise LockHeld("lost the race to acquire the lock -- retry")
 
-    try:
-        captured = read_lock(tombstone)
-        if captured is not None and not is_stale(captured):
-            # We captured something that turns out to be live, not stale
-            # -- it existed at `path` when we renamed it away, but the
-            # judgement had to happen on OUR copy (see above), not a
-            # pre-rename read. Put it back exactly as it was and refuse.
-            os.rename(str(tombstone), str(path))
-            holder_desc = captured.get("holder", "?")
-            pid_desc = captured.get("pid", "?")
-            running_desc = captured.get("running", "?")
-            try:
-                expected_m = float(captured.get("expected_seconds", 0)) / 60
-            except (TypeError, ValueError):
-                expected_m = 0.0
-            raise LockHeld(
-                f"held by {holder_desc!r} (pid {pid_desc}), running "
-                f"{running_desc!r}, expecting {expected_m:.0f}m"
-            )
+    captured = read_lock(tombstone)
 
-        # captured is None (vanished/unparseable in either format) or
-        # is_stale(captured) is True (process gone or aged out). Before
-        # treating the latter as truly stale, ask the database -- the
-        # conjunction.
-        if captured is not None:
-            recorded_port = captured.get("db_port")
-            activity = (
-                # A hand-written (key=value) lock's db_port round-trips
-                # through _parse_keyvalue_lock's numeric coercion as a
-                # float ("5433" -> 5433.0); psql's -p wants an integer.
-                _db_activity_present(int(recorded_port))
-                if isinstance(recorded_port, (int, float)) else None
-            )
-            if activity is True:
-                os.rename(str(tombstone), str(path))
-                raise LockHeld(
-                    f"held by {captured.get('holder', '?')!r} (pid "
-                    f"{captured.get('pid', '?')}) -- process evidence looked gone "
-                    f"or aged out, but port {recorded_port} shows an active "
-                    f"database connection; refusing to steal"
-                )
-            if activity is None:
-                print(
-                    "WARNING: stealing on process evidence alone -- the database "
-                    "probe could not run (no db_port recorded, psql missing, or "
-                    "the connection attempt itself failed), and a recorded "
-                    "process id can be STRUCTURALLY invalid rather than merely "
-                    "stale (see the pid field's own comment in acquire_lock) when "
-                    "acquiring and running were separate calls -- 'process gone' "
-                    "may be meaningless here, not just weak evidence",
-                    file=sys.stderr,
-                )
-            # activity is False (confirmed clear), or None (degraded,
-            # already warned above) -- proceed to steal.
+    if captured is None:
+        # F5, on the captured copy too: content changed between the
+        # pre-read and the capture into something unparseable in either
+        # format -- still HELD by fleet rule, not vanished. Restore
+        # (there is nothing sensible to write back INTO other than what
+        # we captured) and refuse.
+        _restore_captured_lock(tombstone, path, "unknown (unparseable)", "unknown")
+        raise LockHeld(
+            "captured lock is unparseable in either known format -- "
+            "treating as held (unknown state), refusing to steal"
+        )
 
-        holder_desc = captured.get("holder", "?") if captured else "?"
-        pid_desc = captured.get("pid", "?") if captured else "?"
-        try:
-            age_s = time.time() - float(captured.get("started", 0)) if captured else 0.0
-        except (TypeError, ValueError):
-            age_s = 0.0
-        try:
-            expected_s = float(captured.get("expected_seconds", 0)) if captured else 0.0
-        except (TypeError, ValueError):
-            expected_s = 0.0
+    if not is_stale(captured):
+        # Captured something that turns out to be live after all -- the
+        # pre-read gate makes this rare, but the authoritative judgement
+        # still has to happen here, on OUR copy, not the pre-rename read.
+        _restore_captured_lock(tombstone, path, captured.get("holder", "?"),
+                                captured.get("pid", "?"))
+        raise LockHeld(_held_message(captured))
+
+    # captured is real and is_stale(captured) is True (process gone or
+    # aged out). Before treating that as truly stale, ask the database
+    # -- the conjunction.
+    recorded_port = captured.get("db_port")
+    activity = (
+        # A hand-written (key=value) lock's db_port round-trips through
+        # _parse_keyvalue_lock's numeric coercion as an int already now,
+        # but a JSON lock's could still be a float from an older write.
+        _db_activity_present(int(recorded_port))
+        if isinstance(recorded_port, (int, float)) else None
+    )
+    if activity is True:
+        _restore_captured_lock(tombstone, path, captured.get("holder", "?"),
+                                captured.get("pid", "?"))
+        raise LockHeld(
+            f"held by {captured.get('holder', '?')!r} (pid "
+            f"{captured.get('pid', '?')}) -- process evidence looked gone "
+            f"or aged out, but port {recorded_port} shows an active "
+            f"database connection; refusing to steal"
+        )
+    if activity is None:
         print(
-            f"stealing stale lock: held by {holder_desc!r} (pid {pid_desc}), "
-            f"started {age_s:.0f}s ago, expected {expected_s:.0f}s",
+            "WARNING: stealing on process evidence alone -- the database "
+            "probe could not run (no db_port recorded, psql missing, or "
+            "the connection attempt itself failed), and a recorded "
+            "process id can be STRUCTURALLY invalid rather than merely "
+            "stale (see the pid field's own comment in acquire_lock) when "
+            "acquiring and running were separate calls -- 'process gone' "
+            "may be meaningless here, not just weak evidence",
             file=sys.stderr,
         )
-        try:
-            _write_lock_exclusively(path, info)
-        except FileExistsError:
-            raise LockHeld("a fresh lock appeared while stealing -- retry")
-    finally:
-        Path(tombstone).unlink(missing_ok=True)
+    # activity is False (confirmed clear), or None (degraded, already
+    # warned above) -- proceed to steal.
+
+    try:
+        age_s = time.time() - float(captured.get("started", 0))
+    except (TypeError, ValueError):
+        age_s = 0.0
+    try:
+        expected_s = float(captured.get("expected_seconds", 0))
+    except (TypeError, ValueError):
+        expected_s = 0.0
+    print(
+        f"stealing stale lock: held by {captured.get('holder', '?')!r} (pid "
+        f"{captured.get('pid', '?')}), started {age_s:.0f}s ago, expected "
+        f"{expected_s:.0f}s",
+        file=sys.stderr,
+    )
+    try:
+        _write_lock_exclusively(path, info)
+    except FileExistsError:
+        tombstone.unlink(missing_ok=True)  # stale content, safe to discard
+        raise LockHeld("a fresh lock appeared while stealing -- retry")
+    tombstone.unlink(missing_ok=True)
 
 
 def release_lock(path: Path) -> None:

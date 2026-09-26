@@ -96,13 +96,34 @@ exclusively (the loser of a race FAILS TO CREATE rather than reading stale state
 anyway). AUTHORITATIVE for a session that acquires it; the process check above stays a
 SECONDARY ADVISORY, for a run started by a session that has not adopted the lock.
 
-`LOCK_PATH` is the path four sessions agreed on BY HAND, not a name this script invented --
-landing on their path rather than asking them to move to ours means `read_lock` has to
-understand their plain `key=value` convention too, not just the structured (JSON) format this
-script writes. A lock that parses in EITHER format is a live holder and must never be treated as
-vanished merely because this script doesn't natively write that shape -- naive unification (read
-JSON, return None on anything else) is DANGEROUS, not just incomplete, because None routes
-straight into the vanished-lock steal and would unlink a live holder in the other format.
+`LOCK_PATH` is `/tmp/farabunker-test-slot.lock`, LITERAL -- the fleet's own path, byte for byte,
+not a name this script invented and not one derived from `tempfile.gettempdir()` (which resolves
+somewhere else entirely on this platform, and drops the `.lock` suffix). Landing on their path
+rather than asking them to move to ours means `read_lock` has to understand their plain
+`key=value` line too, not just the structured (JSON) format this script writes. A lock that
+parses in EITHER format is a live holder and must never be treated as vanished merely because
+this script doesn't natively write that shape -- naive unification (read JSON, return None on
+anything else) is DANGEROUS, not just incomplete, because None routes straight into the
+vanished-lock steal and would unlink a live holder in the other format.
+
+THE FLEET'S FIELD CONTRACT, copied from a live lock on the review machine rather than
+reconstructed from a description of it (see "Trusting the matcher" below for why that distinction
+is the whole point):
+
+```
+session=<name> pid=$$ purpose=<hyphenated-what> started=<ISO-8601 UTC, trailing Z> expect_min=<N>
+```
+
+`session` aliases to `holder`, `purpose` to `running`, `expect_min` (INTEGER MINUTES, not seconds)
+times sixty to `expected_seconds`, and `started` is an ISO-8601 UTC instant with a trailing `Z`
+(`date -u +%FT%TZ`), not an epoch float. `pid` is the ONE process field, deliberately: it's the
+shell that acquires, runs and releases in a single call, so its death means the hold ended. A
+two-process variant (a supervisor pid alongside the suite's own) existed for about half an hour
+while a peer repaired a dead identifier mid-run and is gone from the current line -- this parser
+does not look for it, and does not need to, because it IGNORES UNKNOWN KEYS rather than failing
+on them. That's deliberate tolerance, not sloppiness: a parser that skips fields it doesn't
+recognise would have read the now-gone two-process variant correctly by itself, containing that
+entire class of break without a code change.
 
 ROLLOUT RULE, both halves, because a lock introduced mid-flight is a failure mode that looks
 exactly like the protocol working: while some sessions still run without the lock, its ABSENCE
@@ -133,7 +154,30 @@ UNCONDITIONALLY to a uniquely-named tombstone first, and only then reads and jud
 copy -- nothing else can be racing for a tombstone only one call named, so the gap closes
 entirely rather than narrowing. A version that only fixed "unlink after judging" to "rename after
 judging" still had this bug one level up, and a single green test run did not catch it -- it took
-a stress loop (dozens of repeated real-thread runs) to surface on iteration 33 of one attempt.
+a stress loop (dozens of repeated real-thread runs) to surface on iteration 33 of one attempt. A
+cheap PRE-READ GATE runs before the capture too (judging, and refusing, on an ordinary read) so an
+obviously-live lock is almost never captured in the first place -- it is an optimization on top of
+capture-then-judge, not a replacement for it, since the pre-read can itself go stale before the
+capture actually runs.
+
+RESTORING a captured lock that turns out to be live uses LINK-then-unlink, never rename: the path
+sits EMPTY for the whole capture window, so a plain acquirer's exclusive create can legitimately
+succeed there while this call still holds the tombstone -- renaming the tombstone back would
+silently REPLACE that third party's fresh, genuine claim. `link()` raises `FileExistsError`
+instead of overwriting, so that collision is caught (announced LOUDLY, naming both parties,
+refused) rather than clobbered. A capturer killed between capturing and restoring dispossesses a
+live holder silently and orphans its tombstone forever -- not fully fixable, only mitigated: the
+pre-read gate above shrinks how often it can happen, and `acquire_lock` sweeps for orphaned
+`.captured-*`/`.tmp-*` artifacts (announcing each one's age, never auto-removing) so the wreckage
+stays visible instead of accumulating unseen. That sweep can false-positive on a genuinely
+concurrent, still-live acquisition -- a warning at a few seconds' age during a real race is noise;
+one at minutes' age is real.
+
+A lock UNPARSEABLE IN BOTH FORMATS is HELD, never vanished -- "we can't tell" is not "nobody's
+there". This applies at the pre-read gate (refused before ever capturing) and again on the
+captured copy, in case the content changed into garbage between the two reads; either way it is
+restored/left alone and refused, never stolen with just the generic line the way an earlier
+version silently did.
 
 Expected duration is FLOORED, not trusted as given: `expected_seconds` below
 `_MIN_EXPECTED_SECONDS` (60s) would make a lock's own 3x budget tiny too, so a live chain could
@@ -171,7 +215,12 @@ Degradation is RULED, not improvised: if the probe can't run at all (`psql` miss
 silently fall back to the process-only check and does not wedge the machine either -- it steals
 on the process evidence alone, but ANNOUNCES that it is doing so on evidence that can be
 STRUCTURALLY invalid, not merely weak, before doing it. A session reading that line can stop it;
-a silent fallback cannot be stopped by anyone.
+a silent fallback cannot be stopped by anyone. The probe authenticates with the documented local
+development password (`docs/DEV.md`'s `farabunker`/`farabunker`) as its default -- on a
+password-secured box where that default is wrong, every probe auth-fails and the conjunction
+degrades PERMANENTLY, always taking the warned-and-proceed path rather than ever confirming
+clear. `PGPASSWORD` in the environment overrides it; nothing here detects the permanently-degraded
+state itself.
 
 THE PID FIELD'S OWN DANGER, pinned as a comment at the exact line it's written in
 `acquire_lock` (not here, and not in the module docstring, because an editor of the call site
@@ -194,6 +243,12 @@ Two general lessons this saga produced, worth stating outside this file's own ca
   field only a machine reads, because the parts a human checks are exactly the parts that were
   correct. MACHINE-CONSUMED FIELDS NEED MACHINE-EXECUTED CHECKS -- the same negative-control
   discipline the documentation gate already applies, aimed at lock files instead of prose.
+- **A fixture for a foreign format must be COPIED from the foreign artefact, never reconstructed
+  from its description.** This file's own dual-format tests failed to catch F1 for exactly this
+  reason: their fixtures wrote this script's OWN schema transliterated into key=value form,
+  which is a test built from the same misunderstanding as the code, and a machine-executed check
+  running the wrong thing cannot fail -- the one way the remedy just above can itself go wrong.
+  Copy the bytes.
 - **A lock's evidence must have the same lifetime as the thing it claims.** Every safety property
   added this round was defeated by something outliving or predating what it measured -- a
   watcher outliving its purpose, a lock predating its protocol, a process dying before its run
