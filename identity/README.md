@@ -608,9 +608,13 @@ treats a blank pair specially — the columns themselves stay blank on
 disk.
 
 Three things follow from the parent link, unchanged by any of the
-above: restoring the parent removes the children it wrote (ownership is
-not asked there — putting content back is harmless regardless of whose
-it is); permanently deleting the parent destroys the children the
+above: restoring the parent removes every ORDINARY child it wrote
+(ownership is not asked there); a child a failed purge already marked
+(`content_unrecoverable`) is the one exception — its bytes are already
+partly gone, so it is skipped and detached rather than restored,
+keeping its own ticket and the one column that records the loss,
+exactly like a held child (`identity.retention.may_restore`'s own
+docstring says why); permanently deleting the parent destroys the children the
 clicker owns after the parent's own rows finish, and detaches the rest;
 and the sweep counts every ticket a due purge addressed, a parent's
 children included, not one per due ticket it started from. Two things a

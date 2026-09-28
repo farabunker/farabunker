@@ -330,8 +330,12 @@ def delete_content(actor, *, kind: str, key, owner, label: str = "",
     let them post and generate; an administrator's duplicate). Those
     columns answer "whose deletion is this", which is what
     `visible_tickets` and `may_purge` read for THAT ticket specifically
-    -- restoring the parent still brings every child back regardless of
-    whose it is (putting content back is harmless), but `purge_ticket`
+    -- restoring the parent brings every ORDINARY child back regardless
+    of whose it is, but a child `record_failed_purge` already marked is
+    the one exception: its bytes are already partly gone, so restoring
+    it would hand back damaged content as if it were whole and delete
+    the one column that says otherwise (`restore_content`'s own
+    docstring says why it is skipped and detached instead). `purge_ticket`
     below reads a child's own owner to decide whether an explicit click
     may destroy it. AN ITEM ALREADY TICKETED KEEPS ITS OWN DATE AND ITS
     OWN STANDING: `get_or_create` on the unique `(kind, key)` returns the
@@ -441,6 +445,22 @@ def restore_content(actor, ticket, *, source: str = SOURCE_WEB,
     the held ticket anyway, with no event and no trace. Nothing in this
     delivery writes a hold, so this is latent until the deferred
     enterprise slice (spec section 10.10) can set one.
+
+    A CHILD `record_failed_purge` HAS MARKED (`content_unrecoverable`)
+    IS NOT RESTORED EITHER, the SAME shape as a held child and for a
+    related reason: a purge destroyed some of this child's content and
+    then failed, so `may_restore` already refuses Restore on the
+    ticket directly -- restoring the PARENT must not be a second door
+    to the same outcome `may_restore` exists to prevent (identity/
+    retention.py's own docstring for it). Before this clause, the only
+    filter here was `hold_by_kind=""`, so a marked child that was still
+    parent-linked (detach only happens on a SUCCESSFUL purge) came back
+    as ordinary live content and the one column recording its bytes
+    were gone was deleted with the row -- exactly what `may_restore`
+    was written to stop, reached through the door it did not guard.
+    Skipped here, it is DETACHED the same way and for the same CASCADE
+    reason as a held child, and keeps its own ticket, its own
+    `content_unrecoverable` mark, and its own eventual purge.
     """
     row = settings_row if settings_row is not None else IdentitySettings.get_solo()
     with transaction.atomic():
@@ -457,23 +477,30 @@ def restore_content(actor, ticket, *, source: str = SOURCE_WEB,
         # item that was in fact destroyed. Deleting by queryset per
         # child answers that question the same way the parent's own
         # lock read above answers it for the whole ticket.
-        # `hold_by_kind=""` EXCLUDES A HELD CHILD, matching
-        # `purge_ticket`'s own read below: this restore reaches every
-        # ordinary child that arrived with the parent, never one
-        # somebody has since put a hold on.
+        # `hold_by_kind=""` EXCLUDES A HELD CHILD and
+        # `content_unrecoverable=False` EXCLUDES A CHILD `record_failed_
+        # purge` ALREADY MARKED, matching `purge_ticket`'s own read
+        # below: this restore reaches every ordinary child that arrived
+        # with the parent, never one somebody has since put a hold on,
+        # and never one whose bytes are already partly gone.
         # NO RESOLVER HERE -- the link is what this restore follows, so
         # an item somebody deleted on its own, or one that went with a
         # different parent, is not this restore's business and is left
         # deleted with the date it was shown.
         restored_children = []
-        for child in current.children.filter(hold_by_kind="").order_by("pk"):
+        for child in current.children.filter(
+                hold_by_kind="", content_unrecoverable=False).order_by("pk"):
             removed_child, _ = DeletionTicket.objects.filter(
                 pk=child.pk).delete()
             if removed_child:
                 restored_children.append(child)
-        # A HELD CHILD IS DETACHED, NOT MERELY SKIPPED ABOVE -- see
-        # `purge_ticket`'s own matching comment below for why.
-        current.children.exclude(hold_by_kind="").update(parent=None)
+        # A HELD OR MARKED CHILD IS DETACHED, NOT MERELY SKIPPED ABOVE --
+        # see `purge_ticket`'s own matching comment below for why. One
+        # `exclude()` call negates the SAME compound condition the loop
+        # above filtered on, so exactly the children the loop did not
+        # already remove are the ones detached here.
+        current.children.exclude(
+            hold_by_kind="", content_unrecoverable=False).update(parent=None)
         current.delete()
         audit.record(actor, CONTENT_RESTORED, target_type=kind, target_key=key,
                      target_label=label if row.audit_detail else "",

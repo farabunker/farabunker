@@ -1279,6 +1279,44 @@ class TestChildTickets:
             action=CONTENT_RESTORED, target_type=KIND_DOCUMENT,
             target_key="doc-2").count() == 0
 
+    def test_restoring_the_parent_skips_and_detaches_a_marked_child(self):
+        """The `content_unrecoverable` sibling of `test_restoring_the_
+        parent_skips_and_detaches_a_held_child` above, and the pin for
+        the sequence `may_restore` exists to prevent: B's child ticket
+        (`doc-2`) is marked the way a failed purge marks one --
+        `record_failed_purge` -- while it is still linked to A's
+        conversation, because that detach only happens on a SUCCESSFUL
+        purge. A then restores the parent. Before this fix, restoring
+        the parent deleted `doc-2`'s ticket along with every other
+        child -- resurrecting half-destroyed content as ordinary live
+        content and destroying the one column that recorded the bytes
+        were gone. If `restore_content`'s child loop still filtered on
+        `hold_by_kind` alone, this assertion would fail: `doc-2`'s
+        ticket would be gone, not surviving."""
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        marked = DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-2")
+        DeletionTicket.objects.filter(pk=marked.pk).update(
+            content_unrecoverable=True)
+
+        service.restore_content(user_principal(user), parent)
+
+        assert not DeletionTicket.objects.filter(pk=parent.pk).exists()
+        assert not DeletionTicket.objects.filter(kind=KIND_DOCUMENT,
+                                                  key="doc-1").exists()
+        marked.refresh_from_db()
+        assert marked.parent_id is None
+        assert marked.content_unrecoverable is True
+        assert service.may_restore(marked) is False
+        assert AuditEvent.objects.filter(
+            action=CONTENT_RESTORED, target_type=KIND_DOCUMENT,
+            target_key="doc-1").count() == 1
+        assert AuditEvent.objects.filter(
+            action=CONTENT_RESTORED, target_type=KIND_DOCUMENT,
+            target_key="doc-2").count() == 0
+
     def test_the_sweep_excludes_a_held_child_from_its_own_count(self):
         """The held-sibling variant of `test_the_sweep_counts_every_
         ticket_it_addressed` above: a parent and TWO children are three
