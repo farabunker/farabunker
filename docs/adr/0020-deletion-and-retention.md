@@ -440,6 +440,73 @@ THIS decision's own stamping fix. One duplicate-path fix and one ownership fix, 
 both the same-owner and the cross-owner shapes of the same underlying defect — the resolver answering
 a question ("what does this conversation's own turns still name") that a copy makes ambiguous.
 
+### 12. The check-then-act trap in a managed-store directory removal, and the shape to write instead
+
+Three authors wrote `if directory.exists(): shutil.rmtree(directory)` in this branch independently —
+two wrote it (`tools/rag/store.py::remove_document_files` and, in the vision column,
+`tools/vision/store.py::remove_job_files` and `remove_staged_input`), one found and fixed it — and
+the vision column's own implementer added its second site on the same reasoning, on their own,
+before word of the first fix reached them. That convergence is the evidence that this is the
+OBVIOUS way to write "remove this directory if it is there," not a lapse by anyone in particular,
+which is why the lesson belongs here rather than only in a fix's own commit message.
+
+**The trap.** An existence check before a removal is a check-then-act race: the directory can
+vanish — another retry sweep reaching the same item, an operator, a sibling handler — in the gap
+between the check answering true and the removal actually running, and the unguarded removal then
+raises on a directory the check just said was there. A fixture that deletes the directory BEFORE
+calling the function never finds this: the check honestly sees nothing and skips the removal, which
+is the branch that already worked. The race is reachable only when the check succeeds and the
+removal then fails against nothing — a different test from "already gone," and one that is easy to
+skip writing because it reads, at a glance, as redundant with it.
+
+**The shape to write instead — the SHAPE, not the site.** A reader who learns "this construction is
+dangerous at `store.py` line 207" learns to be careful at one line. The rule that generalises is:
+byte removal tolerates absence AT THE REMOVAL ITSELF, never at a check beforehand.
+
+```
+    try:
+        shutil.rmtree(dest_dir)
+    except FileNotFoundError:
+        logger.info("... nothing to remove at %s", dest_dir)
+```
+
+No existence check first — the check is what creates the window, so removing it removes the race
+rather than narrowing it. `FileNotFoundError` covers both "never existed" and "vanished between the
+look and the call," which are the same outcome to a retrying caller. `shutil.rmtree(dest_dir,
+ignore_errors=True)` is NOT this idiom, even though it also avoids raising on a missing directory:
+it swallows every `OSError`, so a permission error, a busy mount or a genuine I/O failure becomes
+silence too, and a purge whose caller depends on "success means the bytes are gone" (the retry
+contract `identity/contracts/cascades.py::RetentionHandler` states) reports success while the bytes
+remain on disk. The rule under the idiom: **absence is not an error; everything else still is.**
+
+**This branch did not create the defect; it created the first caller for which it matters.** The
+tolerant, swallow-everything form (`ignore_errors=True`) was already present twice in the same
+package before this branch (`tools/rag/ingest.py` and `tools/rag/media.py`), for best-effort disk
+hygiene after an already-failed attempt, where a leaked directory is the only cost of swallowing an
+error. So the check-then-act shape at the three sites below is not ignorance of the tolerant idiom —
+it is the idiom the author had in mind for a DIFFERENT caller: best-effort cleanup after a failed
+ingest got the tolerant form; the purge path, whose caller retries, got the fragile one. The same
+construction that is merely imprecise for a best-effort cleanup is actively wrong for a path whose
+caller retries on failure — decided by the caller, not the call. Three sites carry the shape:
+`tools/rag/store.py` ~207, `tools/vision/store.py` ~174 and ~198. The distinction the investigation
+found: **tolerance of ABSENCE and tolerance of a RACE are different properties**, and a clearance
+can assert the first (a fixture proving "safe when it never existed") while the second goes
+unexamined for months, because the vacuous fixture and the real pin look identical from a test name
+alone.
+
+**One check in the same family is a guard, not this race, and stays.** `tools/vision/store.py::
+remove_staged_input`'s containment check — that a staged path named by a database row really lives
+inside the staging directory before anything is removed — is deliberately left as check-then-act,
+with its own docstring saying why: it protects against a row naming a path OUTSIDE the staging area
+so a job's own input can never be deletable through this function, not against the directory
+disappearing, and it stays a check because nothing about the race this decision fixes applies to it.
+That sentence exists precisely because a later wave removing existence checks on sight is exactly
+when someone deletes the line above it for looking similar.
+
+**What closed it.** `tools/rag/store.py::remove_document_files`, this branch, `e4ab908`. The vision
+column's own fix for `remove_job_files` and `remove_staged_input` landed on a local branch, unpushed
+as of this writing — cited here by file:line rather than by SHA until it merges.
+
 ## Where the landed tree differs from the spec
 
 - **The queue half — `models/queue/retention.py`, the `_prune_finished_jobs` age condition and
