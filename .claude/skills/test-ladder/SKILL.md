@@ -296,6 +296,35 @@ not just running the suite -- takes the slot lock too, even though nothing force
 `.claude/skills/subagent-brief/SKILL.md` for the structural form this takes when briefing that
 kind of verification, so the gap closes by how the work is shaped rather than by asking nicely.
 
+THE SEQUENCE GOES IN A SCRIPT FILE, because the invariant above says WHAT must hold and never
+says HOW, and for a worktree-isolated agent the obvious HOW does not execute at all: the natural
+inline form -- a single call combining a `trap`, an atomic acquire and the run -- gets refused
+before it reaches a shell, because a trap inside a construct that complex cannot be shown not to
+run git. That refusal does not relax the invariant; it removes one way of satisfying it. Put the
+same three steps in a script file and invoke the script as its own call instead: a script is one
+process, so `$$` inside it names the same process throughout -- the one that holds the lock, does
+the work, and fires the release -- exactly what "one command sequence in one process" asks for,
+with no trap-in-a-one-liner for the sandbox to refuse.
+
+SPLITTING ACROSS SEPARATE CALLS IS NOT A LESSER VERSION OF THIS, IT IS THE FAILURE THE RULE ABOVE
+ALREADY NAMES: each call is its own process, so the acquiring shell writes its own `$$` to the
+lock and then exits before the run even starts. "Break the acquire end (background between
+acquiring and running) and the lock records a dead process from the start," above, is this exact
+shape, not a new one -- a session that answers the inline refusal with three plain calls (acquire,
+run, release) has not found a workaround, it has walked into the acquire-end hole the rule's own
+text already warned was there.
+
+THIS HAS NOT YET BURNED ANYONE ONLY BECAUSE STALENESS IS A CONJUNCTION (see "Staleness is a
+conjunction, not a proxy" below), not because the split form is safe. A split-acquire lock looks
+stale on the PID test alone from the first second it is written -- a peer checking only that
+signal would take it immediately, correctly by that signal's own logic, out from under a suite
+that is actually still running. What stops the steal is the second clause: the database probe
+still finds real activity on the recorded port, so the AND refuses it. Read this as the reason
+the staleness rule has two conditions instead of one, not as a reason to trust the split form --
+collapsing staleness to "is the PID alive" to make it simpler would delete the exact clause that
+is currently the only thing standing between a forgotten script-file requirement and a live suite
+getting stolen out from under itself.
+
 Two general lessons this saga produced, worth stating outside this file's own case:
 
 - **A record can be simultaneously informative and unsafe.** The peer lock this defect was found
