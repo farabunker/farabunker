@@ -732,6 +732,17 @@ def deleted_purge(request, pk: int):
         # reaching this branch at all (no standing over it) cannot be
         # restored either way, and the unmarked sentence would say the
         # opposite of both facts at once.
+        #
+        # `marked=True` HERE HAS NO TEST AT THIS LAYER. It needs a ticket
+        # `record_failed_purge` already marked AND a principal `may_purge`
+        # still refuses on standing alone at once, on a ticket this view
+        # still renders a row for. Each half is pinned on its own --
+        # `identity.tests.test_retention_service` marks a ticket this way,
+        # `identity.tests.test_retention_contracts` pins `purge_refused_
+        # line(marked=True)`'s own words -- but the CONJUNCTION this
+        # branch needs is close enough to unreachable in practice that a
+        # dedicated test would mostly pin the scaffolding needed to
+        # construct the scenario, not this one line of copy selection.
         messages.error(request, retention_copy.purge_refused_line(
             ticket.purge_on, marked=ticket.content_unrecoverable))
         return settings_redirect(request, "identity-deleted")

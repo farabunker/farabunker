@@ -91,10 +91,13 @@ test and preview databases).
 link; `RetentionHandler.children` is the mechanism that decides who gets one — a resolver, not a
 purge, because each generation gets a deletion of its own rather than a silent destruction on the
 chat's own date. It is one OPTIONAL dotted-path resolver, `(key: str) ->
-list[tuple[str, str]]`, asked exactly ONCE, inside `delete_content`'s own transaction, before a
-single row is touched — it only reads, because by the time a purge runs, the answer has already
-become rows. Each pair it returns is written as an ordinary ticket, linked back to the parent via
-`parent`, with the same `purge_on` date. When the parent's own ticket is the one purged,
+list[tuple[str, str, str, str]]`, answering `(child_kind, child_key, owner_kind, owner_key)` per
+child — wrapped as a `ChildTicket` (decision 16, below) at the one point every answer passes
+through on its way to `delete_content` — asked exactly ONCE, inside `delete_content`'s own
+transaction, before a single row is touched — it only reads, because by the time a purge runs, the
+answer has already become rows. Each child it names is written as an ordinary ticket, linked back
+to the parent via `parent`, with the same `purge_on` date and the OWNER THE RESOLVER NAMED, never
+the parent's own. When the parent's own ticket is the one purged,
 `purge_ticket` runs the parent's own registered handlers first and destroys each child afterward,
 so a child's bytes are never removed before the item that named it has finished its own row work —
 the filesystem-last rule, one level deeper. (A child the unconditional sweep reaches on its own,
@@ -354,6 +357,31 @@ reach and purge that SAME child independently, on its own due pass — destroyin
 for real and deleting its ticket, while the parent's ticket (unmarked, if the parent's own failure
 came before its files band) still offers Restore for a family whose pieces are, by then, partly
 gone. This wave does not close that window either.
+
+**The sweep's own breadth is wider than a click's, and every argument above was made from the
+narrower case.** Each paragraph in this decision that accepts the over-inclusive mark as a
+reasonable trade reasons about ONE family, under ONE failed attempt — a person's own "Delete
+permanently" click, or one due ticket the sweep happened to fail on. `_purge_due` runs as
+`SERVICE_PRINCIPAL` for every due ticket `sweep`'s own query returns in a single pass, up to
+`limit`, and `identity.retention.purge_ticket` hands that principal `children = candidate_children`
+— every non-held child, regardless of who owns it (decision 13's own `_may_destroy_child` narrowing
+does not apply to the service principal at all, by design: see decision 11's reasoning for why the
+sweep must reach every child on the box). A failure in one ticket's own pass does not stop the loop
+`_purge_due` runs the rest of `due` in: each failing ticket marks its OWN family independently, and
+there is no shared state, and no limit, on how many DIFFERENT families one unattended run can mark
+this way. A transient condition that outlasts a single ticket's own attempt — a busy mount overnight,
+a database blip wider than one savepoint — fails every ticket the pass reaches while it lasts and
+marks every one of their families, each marked child losing Restore for the rest of its own
+retention period, with the identical "no clearing path" already accepted above for a single family.
+A person's own click bounds the blast radius to what that one click touches; the sweep has no such
+bound, and it runs unattended, with nobody reading the warning line each failure writes as it
+happens — precisely the condition under which this residue reaches furthest. Stated here honestly,
+rather than left implied by a decision whose own worked examples all argue from the single-family
+case: no clearing mechanism is attempted for this either, for the reason already given above — the
+only cheap trigger available clears nothing a person can observe, and a trigger that tried to clear
+independently could not tell a stale false alarm from a fresh, real one without either instrumenting
+every handler's own partial progress or accepting a real chance of silently un-marking a ticket that
+does have bytes missing.
 
 ### 10. A duplicate or a branch must not ticket a job another live conversation still shows
 
@@ -638,22 +666,38 @@ risky — three concrete confusions were found VERIFIED IN THE TREE, not hypothe
    str) -> list[tuple[str, str]]` returning `(kind, key)` pairs, decision 11's own widening never
    having reached it.
 
-**What closes it.** A frozen `identity.contracts.cascades.ChildTicket(kind, key, owner_kind,
-owner_key)` `NamedTuple`, beside `RetentionHandler` in the same pure module — a DROP-IN for the
-shape it replaces (a resolver still returns a plain 4-tuple; `ChildTicket(*that_tuple)` is the same
-call the shape already supported), so every existing resolver keeps working unchanged. `identity.
-cascades.run_children` wraps each resolver answer in one at the one point every answer passes
-through on its way to `delete_content`, which now reads `child.kind`/`child.key`/`child.owner_kind`/
-`child.owner_key` by name instead of four positional loop variables. Beside it, `delete_content`
-gained `_validate_child_owner`: `owner_kind` must be one of `identity.contracts.principals.
-PRINCIPAL_KINDS`, or the pair must be the blank exception decision 14 already carries (`("", "")`)
-— anything else raises `ValueError` immediately, before a single child ticket is written, naming
-the transposition rather than minting an invisible row. `docs/EXTENDING.md` is corrected to the
-4-tuple contract, including what the owner columns mean and why a transposed pair now fails loudly.
+**What closes (1) and (3).** A frozen `identity.contracts.cascades.ChildTicket(kind, key,
+owner_kind, owner_key)` `NamedTuple`, beside `RetentionHandler` in the same pure module — a DROP-IN
+for the shape it replaces (a resolver still returns a plain 4-tuple; `ChildTicket(*that_tuple)` is
+the same call the shape already supported), so every existing resolver keeps working unchanged.
+`identity.cascades.run_children` wraps each resolver answer in one at the one point every answer
+passes through on its way to `delete_content`, which now reads `child.kind`/`child.key`/
+`child.owner_kind`/`child.owner_key` by name instead of four positional loop variables. Beside it,
+`delete_content` gained `_validate_child_owner`: `owner_kind` must be one of `identity.contracts.
+principals.PRINCIPAL_KINDS`, or the pair must be the blank exception decision 14 already carries
+(`("", "")`) — anything else raises `ValueError` immediately, before a single child ticket is
+written, naming the transposition rather than minting an invisible row. That closes confusion 1.
+`docs/EXTENDING.md` is corrected to the 4-tuple contract, including what the owner columns mean and
+why a transposed pair now fails loudly — that closes confusion 3.
+
+**Confusion (2) stands.** `identity.cascades.run_children` still unpacks a resolver's answer into
+four positional loop variables (`for child_kind, child_key, owner_kind, owner_key in
+import_string(spec.children)(key):`), and `RetentionHandler.__post_init__` still gives `children`
+nothing but a dottedness check on the STRING naming the resolver — never on what it returns. A
+resolver that answers a 2-tuple still raises "not enough values to unpack" at the same line, the
+same moment, the same message, as before this decision. Closing it properly would mean calling the
+resolver at IMPORT TIME, from inside `__post_init__`, with some fake key, purely to count the
+returned tuples' length before any real delete ever runs — a far larger and stranger change than
+validating a value already in hand at the write, and not attempted here; left to a later decision if
+the residue is ever judged worth it. This decision closes what a wrong-arity resolver's answer can
+silently BECOME once caught (1) and what a future implementer is TOLD (3); it does not move WHEN a
+wrong-arity resolver is first caught (2) at all.
+
 This was weighed against validating `owner_kind` alone on the existing bare tuple, without a named
-type: that would have closed confusion 1 but left 2 and 3 exactly as they were — the NamedTuple is
-what makes the contract self-documenting at every site that reads it, not only at the one site that
-validates it.
+type: that would have closed confusion 1 exactly as this does, closed nothing else, and left the
+contract just as invisible at every OTHER site that reads a plain 4-tuple — the NamedTuple's real
+value is closing 3 and making the contract self-documenting at every read site, not only the one
+site that validates it. Either way, confusion 2 was never on the table.
 
 ## Where the landed tree differs from the spec
 
