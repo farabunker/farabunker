@@ -51,6 +51,7 @@ from ladder import (  # noqa: E402
     other_pytest_matches,
     read_lock,
     release_lock,
+    run_ask,
 )
 import ladder  # noqa: E402  -- needed to mock ladder._db_activity_present in place
 
@@ -921,3 +922,109 @@ def test_acquire_lock_when_database_clear_names_which_ports_when_partly_unavaila
     assert "could not run on port(s) [5432]" in output
     assert "probed clear" in output and "[5433]" in output
     assert "on any shared port" not in output  # the overstated phrasing
+
+
+# `ask` mode -- wraps an arbitrary command in the same acquire/probe/release
+# chain exercised above, for a small question rather than a declared run.
+# Every test here mocks only `_shared_db_presence` (clear machine), the same
+# boundary the acquire-lock-when-clear tests above mock at, so the real
+# acquire/release/exclusive-create machinery runs for real against `lock_path`.
+
+
+def test_run_ask_propagates_the_wrapped_commands_exit_status_both_directions(lock_path):
+    with mock.patch.object(ladder, "_shared_db_presence", return_value=None):
+        ok = run_ask([sys.executable, "-c", "import sys; sys.exit(0)"],
+                      holder="session", expected_seconds=600, path=lock_path)
+        failing = run_ask([sys.executable, "-c", "import sys; sys.exit(5)"],
+                           holder="session", expected_seconds=600, path=lock_path)
+    assert ok == 0
+    assert failing == 5  # the command's own code, not a generic nonzero
+
+
+def test_run_ask_releases_the_lock_when_the_command_fails(lock_path):
+    with mock.patch.object(ladder, "_shared_db_presence", return_value=None):
+        run_ask([sys.executable, "-c", "import sys; sys.exit(3)"],
+                 holder="session", expected_seconds=600, path=lock_path)
+    assert not lock_path.exists()  # released even though the command failed
+
+
+def test_run_ask_writes_the_commands_purpose_into_the_lock(lock_path, tmp_path):
+    # The command itself reads the lock file WHILE it is held (its own
+    # subprocess, mid-run) and copies out the "running" field -- an
+    # observed outcome, not a mocked call site.
+    captured = tmp_path / "captured-running.txt"
+    command = [
+        sys.executable, "-c",
+        "import json, sys; d = json.load(open(sys.argv[1])); "
+        "open(sys.argv[2], 'w').write(d['running'])",
+        str(lock_path), str(captured),
+    ]
+    with mock.patch.object(ladder, "_shared_db_presence", return_value=None):
+        rc = run_ask(command, holder="session", expected_seconds=600, path=lock_path)
+    assert rc == 0
+    assert captured.read_text(encoding="utf-8") == ladder._command_purpose(command)
+    assert not lock_path.exists()
+
+
+def test_run_ask_maps_a_missing_executable_to_the_command_not_found_exit(lock_path):
+    with mock.patch.object(ladder, "_shared_db_presence", return_value=None):
+        rc = run_ask(["/definitely/not/a/real/executable-xyz"], holder="session",
+                      expected_seconds=600, path=lock_path)
+    assert rc == ladder._ASK_COMMAND_NOT_FOUND_EXIT
+    assert not lock_path.exists()  # release still fires on a missing executable
+
+
+def test_main_ask_distinguishes_a_locked_machine_from_the_commands_own_exit_status(
+        lock_path, monkeypatch):
+    # F1: a failed acquisition must not share a code with anything a real
+    # command could exit with. Plant a genuinely live lock (this test's
+    # own pid, definitely alive) so acquisition fails for real, then run
+    # the SAME command -- one that would itself exit 2 -- once locked and
+    # once clear, and check the two outcomes are distinguishable.
+    monkeypatch.setattr(ladder, "LOCK_PATH", lock_path)
+    command = [sys.executable, "-c", "import sys; sys.exit(2)"]
+
+    live_lock = {"holder": "other-session", "pid": os.getpid(), "running": "something",
+                 "started": time.time(), "expected_seconds": 600}
+    lock_path.write_text(json.dumps(live_lock), encoding="utf-8")
+    locked_rc = ladder._main_ask(list(command))
+    assert locked_rc == ladder._ASK_LOCK_BUSY_EXIT  # 75, never 2
+
+    lock_path.unlink()
+    with mock.patch.object(ladder, "_shared_db_presence", return_value=None):
+        clear_rc = ladder._main_ask(list(command))
+    assert clear_rc == 2  # the command's own exit status, unchanged by the wrapper
+
+
+def test_main_ask_recognises_expect_minutes_only_before_the_command_begins(monkeypatch):
+    # F2: the wrapped command may carry a flag spelled the same as the
+    # wrapper's own option -- it must reach run_ask untouched rather than
+    # being silently stripped, unlike the chain modes' anywhere-in-argv
+    # scan (safe there only because their trailing arguments are module
+    # names, never true here).
+    captured = {}
+
+    def fake_run_ask(command, **kwargs):
+        captured["command"] = command
+        return 0
+
+    monkeypatch.setattr(ladder, "run_ask", fake_run_ask)
+    rc = ladder._main_ask(["mytool", "--expect-minutes", "3"])
+    assert rc == 0
+    assert captured["command"] == ["mytool", "--expect-minutes", "3"]
+
+
+def test_main_ask_double_dash_separates_wrapper_options_from_the_command(monkeypatch):
+    # F2, the other half: an explicit `--` lets a command whose own FIRST
+    # argument is "--expect-minutes" through without it being mistaken for
+    # the wrapper's option.
+    captured = {}
+
+    def fake_run_ask(command, **kwargs):
+        captured["command"] = command
+        return 0
+
+    monkeypatch.setattr(ladder, "run_ask", fake_run_ask)
+    rc = ladder._main_ask(["--", "--expect-minutes", "3"])
+    assert rc == 0
+    assert captured["command"] == ["--expect-minutes", "3"]
