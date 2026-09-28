@@ -311,6 +311,60 @@ class TestADuplicateDoesNotTicketTheOriginalsImages:
             assert may_read_job(principal, job) is True
 
 
+class TestTheChildTicketCarriesTheRealOwnerEndToEnd:
+    """Every cross-owner assertion elsewhere in this feature runs
+    against an IDENTITY-LEVEL FAKE resolver (`identity/tests/
+    test_retention_service.py::cross_owner_children`, `identity/tests/
+    test_deleted_page.py::_cross_owner_image_child`); every test that
+    runs the REAL vision pipeline
+    (`test_branching_and_deleting_the_branch_leaves_the_originals_image_
+    untouched` above) is same-owner. So the one seam this feature widens
+    across three columns -- `existing_job_ids` -> `resolve_artifact_jobs`
+    (`tools/vision/retention.py`) -> `conversation_children`
+    (`agents/retention.py`) -> `identity.retention.delete_content` -- is
+    proved a leg at a time and never as a whole: a tuple-order slip
+    anywhere in that chain (`(owner_key, owner_kind)` transposed, say)
+    would be caught by each leg's own fixture and by nothing that runs
+    them together. This drives the whole chain, with two real users and
+    the real, app-registered handlers."""
+
+    def test_a_real_cross_owner_image_is_ticketed_under_its_own_owner(
+        self, real_registration,
+    ):
+        from agents.visibility import delete_conversation
+        from identity.contracts.retention import KIND_VISION_JOB
+        from identity.tests._helpers import make_generation, make_output
+
+        a, b = make_user(), make_user()
+        principal = user_principal(a)
+        with posture("personal"):
+            conversation = make_conversation(owner_kind="user", owner_key=str(a.pk))
+            # THE IMAGE BELONGS TO B, NOT TO A -- a workstream share or
+            # an administrator's duplicate that let a second principal's
+            # content sit inside A's own conversation. If stamping ever
+            # regressed to reading the PARENT's owner columns instead of
+            # the content's own, `child.owner_key` below would read
+            # `str(a.pk)`, not `str(b.pk)`, and the final `!=` against
+            # the parent ticket's own owner would fail too.
+            job = make_generation(owner_kind="user", owner_key=str(b.pk))
+            output = make_output(job=job)
+            make_turn(conversation=conversation, role="user", index=0,
+                      text="draw me a lighthouse")
+            make_turn(conversation=conversation, role="tool", index=1,
+                      artifacts=[f"output:{output.pk}"],
+                      data={"id": str(job.pk), "status": "succeeded"})
+
+            parent = delete_conversation(principal, conversation)
+            assert parent is not None
+
+            if "vision" in settings.FARABUNKER_FEATURES:
+                child = DeletionTicket.objects.get(
+                    kind=KIND_VISION_JOB, key=str(job.pk))
+                assert (child.owner_kind, child.owner_key) == ("user", str(b.pk))
+                assert (child.owner_kind, child.owner_key) != (
+                    parent.owner_kind, parent.owner_key)
+
+
 # `TestAttachmentRowsGoAtPurge`, `_raising_db_cleanup` / `TestTheCleanupSavepoint`
 # and `TestConversationPurgeCascadesChatScopedDocuments` below are MOVED from
 # `agents/chat/tests/test_delete.py`, rewritten against `purge_conversation` directly rather than the
