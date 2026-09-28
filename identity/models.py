@@ -212,13 +212,20 @@ class AuditEvent(models.Model):
 class DeletionTicket(models.Model):
     """One deleted item, and the date its content will be destroyed.
 
-    A TICKET EXISTS EXACTLY WHILE THE ITEM IS RESTORABLE. There is no
-    purged-but-pending state, no second cliff and no ticket that outlives
-    its content: `identity.retention.purge_ticket` destroys the row in
-    the same transaction that destroys the content, so the two can never
-    disagree. That single invariant is what lets restore be "delete the
-    ticket" and nothing else -- the item was never modified, so there is
-    nothing to put back.
+    A TICKET EXISTS EXACTLY WHILE THE ITEM IS RESTORABLE -- WITH ONE NAMED
+    EXCEPTION, `content_unrecoverable` below. There is no purged-but-pending
+    state, no second cliff and no ticket that outlives its content:
+    `identity.retention.purge_ticket` destroys the row in the same
+    transaction that destroys the content, so the two can never disagree.
+    That single invariant is what lets restore be "delete the ticket" and
+    nothing else -- the item was never modified, so there is nothing to put
+    back. THE EXCEPTION IS A TICKET WHOSE PURGE GOT FAR ENOUGH TO DESTROY
+    SOME OF THAT CONTENT AND THEN FAILED: the row comes back (the
+    transaction rolled back), the ticket still exists, but the bytes a
+    filesystem delete already removed do not come back with it, so
+    existing and being safely restorable have stopped being the same
+    question for that one row. `identity.retention.may_restore` is where
+    the two questions are told apart.
 
     ONE TABLE RATHER THAN A `deleted_at` COLUMN ON FOUR MODELS IN THREE
     COLUMNS, for three reasons. (a) Four tables means four migrations and
@@ -296,6 +303,21 @@ class DeletionTicket(models.Model):
     parent = models.ForeignKey("self", null=True, blank=True,
                                on_delete=models.CASCADE,
                                related_name="children")
+    # SET ONLY FROM OUTSIDE `purge_ticket`'s OWN TRANSACTION, after it has
+    # already rolled back: `identity.retention.record_failed_purge`, called
+    # from the two places a failed purge is caught
+    # (`identity.retention._purge_due`, `identity.views.deleted_purge`),
+    # writes this with a plain queryset `.update()` -- the one fact a
+    # failed purge leaves behind survives precisely because it is written
+    # outside the transaction that lost everything else. TRUE MEANS A
+    # FILES-BAND HANDLER RAN FOR THIS TICKET AND SOMETHING AFTER IT THEN
+    # FAILED: the row changes came back, the bytes a filesystem delete
+    # already removed did not, and `identity.retention.may_restore`
+    # refuses Restore for exactly this reason. A purge that failed before
+    # any files-band handler ran leaves this `False` -- that rollback is
+    # clean, nothing on disk was ever touched, and Restore still means
+    # what it always meant.
+    content_unrecoverable = models.BooleanField(default=False)
 
     class Meta:
         ordering = ["-deleted_at"]

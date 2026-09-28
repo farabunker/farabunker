@@ -13,7 +13,7 @@ from identity.contracts import cascades as cascades_module
 from identity.contracts.actions import (
     CONTENT_DELETED, CONTENT_PURGED, CONTENT_RESTORED,
 )
-from identity.contracts.cascades import RetentionHandler, register_retention_handler
+from identity.contracts.cascades import ORDER_FILES, RetentionHandler, register_retention_handler
 from identity.contracts.retention import KIND_ASK, KIND_CONVERSATION, KIND_DOCUMENT, RetentionRefused
 from identity.models import AuditEvent, DeletionTicket, IdentitySettings
 from identity.tests._helpers import (
@@ -34,6 +34,13 @@ def ask_handler(key: str) -> int:
 
 def boom(key: str) -> int:
     raise RuntimeError("not finished")
+
+
+def files_boom(key: str) -> int:
+    """A FILES-band handler that raises. Registered at `order=ORDER_FILES`
+    by the tests that use it -- what matters to those tests is the band,
+    not that this stub actually touches a filesystem."""
+    raise RuntimeError("disk is unavailable after removing bytes")
 
 
 def refused(key: str) -> int:
@@ -236,6 +243,72 @@ class TestPurge:
         events = [e for e in audit_module.by_action([CONTENT_PURGED])
                   if e.target_key == "5"]
         assert len(events) == 1
+
+
+class TestTheFailedPurgeMark:
+    """`identity.retention.record_failed_purge`, called from the sweep's
+    own `except Exception` (`_purge_due` below `sweep` in this module),
+    the same site `test_a_refusal_is_a_warning_not_an_error_and_does_not_
+    stop_the_batch` already drives through `service.sweep()`."""
+
+    def test_a_files_band_failure_marks_the_ticket(self):
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION, key="t.filesboom", label="FilesBoom",
+            handler=f"{__name__}.files_boom", order=ORDER_FILES))
+        user = make_user()
+        item = _owner(user)
+        ticket = service.delete_content(user_principal(user),
+                                        kind=KIND_CONVERSATION,
+                                        key=str(item.pk), owner=item)
+        DeletionTicket.objects.filter(pk=ticket.pk).update(
+            purge_on=timezone.localdate() - datetime.timedelta(days=1))
+
+        assert service.sweep() == 0
+
+        ticket.refresh_from_db()
+        assert ticket.content_unrecoverable is True
+
+    def test_a_rows_band_failure_before_any_files_band_handler_does_not_mark(self):
+        """The contrast case, over the SAME `boom` handler
+        `test_a_purge_that_rolled_back_leaves_a_ticket_restore_still_
+        accepts` above already pins as rows-band (no `order=` given, so
+        it defaults to `ORDER_ROWS`): that rollback is clean, nothing on
+        disk was ever touched, and this must not mark it."""
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION, key="t.boom", label="Boom",
+            handler=f"{__name__}.boom"))
+        user = make_user()
+        item = _owner(user)
+        ticket = service.delete_content(user_principal(user),
+                                        kind=KIND_CONVERSATION,
+                                        key=str(item.pk), owner=item)
+        DeletionTicket.objects.filter(pk=ticket.pk).update(
+            purge_on=timezone.localdate() - datetime.timedelta(days=1))
+
+        assert service.sweep() == 0
+
+        ticket.refresh_from_db()
+        assert ticket.content_unrecoverable is False
+
+    def test_a_refusal_never_marks(self):
+        """`RetentionRefused` means nothing was attempted -- caught
+        separately, before the bare `except Exception`, and never
+        reaching `record_failed_purge`."""
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION, key="t.refused", label="Refused",
+            handler=f"{__name__}.refused"))
+        user = make_user()
+        item = _owner(user)
+        ticket = service.delete_content(user_principal(user),
+                                        kind=KIND_CONVERSATION,
+                                        key=str(item.pk), owner=item)
+        DeletionTicket.objects.filter(pk=ticket.pk).update(
+            purge_on=timezone.localdate() - datetime.timedelta(days=1))
+
+        assert service.sweep() == 0
+
+        ticket.refresh_from_db()
+        assert ticket.content_unrecoverable is False
 
 
 class TestTicketedKeys:

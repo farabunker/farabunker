@@ -81,6 +81,42 @@ def visible_tickets(principal, *, settings_row=None):
     return qs.filter(owned_rows_q(principal, settings_row=settings_row))
 
 
+def record_failed_purge(ticket) -> None:
+    """After `purge_ticket` has raised and its own `transaction.atomic()`
+    has already rolled back everything else, persist the one fact that
+    can still survive: whether THIS attempt got as far as a files-band
+    handler before it failed.
+
+    A WRITE OUTSIDE ANY TRANSACTION, ON PURPOSE. Called only from the two
+    places that already run after `purge_ticket`'s rollback has finished
+    -- `_purge_due`'s own `except Exception` below, and
+    `identity.views.deleted_purge`'s matching one -- a plain queryset
+    `.update()` here is a fresh, ordinary write, not a continuation of
+    the transaction that just failed. Nothing else about a failed purge
+    survives that rollback; this is deliberately the one write site that
+    does not try to survive it by staying inside the same transaction.
+
+    READS AN ATTRIBUTE `purge_ticket` SETS ON THIS SAME OBJECT, never a
+    database column: `ticket` here is the exact instance the caller
+    passed into `purge_ticket`, which `run_retention`'s `on_files_band`
+    callback marks with a plain Python attribute the moment a files-band
+    handler is about to run. Setting a Python attribute is not a database
+    write, so it is not rolled back with everything else -- it is the one
+    piece of this call's own memory that outlives the failed transaction,
+    and this function is the only place that reads it.
+
+    A PURGE THAT NEVER REACHED A FILES-BAND HANDLER LEAVES THE ATTRIBUTE
+    UNSET, and this is then a no-op: that rollback is clean, nothing on
+    disk was ever touched, and marking it would refuse Restore for a
+    ticket that broke no promise -- exactly the case
+    `test_a_purge_that_rolled_back_leaves_a_ticket_restore_still_accepts`
+    pins, unmarked, unchanged by this function existing.
+    """
+    if getattr(ticket, "_files_band_reached", False):
+        DeletionTicket.objects.filter(pk=ticket.pk).update(
+            content_unrecoverable=True)
+
+
 def may_purge(principal, ticket, *, settings_row=None) -> bool:
     """Whether `principal` may destroy this item's content now.
 
@@ -341,12 +377,19 @@ def restore_content(actor, ticket, *, source: str = SOURCE_WEB,
                          source=source, kind=child.kind)
 
 
-def _purge_child(actor, ticket, *, source: str, row) -> dict[str, int]:
+def _purge_child(actor, ticket, *, source: str, row, on_files_band=None) -> dict[str, int]:
     """Run ONE child ticket's handlers, delete it, record its own
     content-free event. NO CASCADE OF ITS OWN -- a child is never asked
     for children, so a link that somehow pointed back at its own parent
-    could not recurse."""
-    removed = run_retention(ticket.kind, ticket.key)
+    could not recurse.
+
+    `on_files_band`, forwarded straight to `run_retention`: `purge_ticket`
+    passes the SAME closure here it passes for this item's own handlers,
+    so a child's bytes being destroyed marks the same ticket a failure
+    later in the click gets caught against -- the parent's, since that is
+    the one `_purge_due`/`deleted_purge` are holding.
+    """
+    removed = run_retention(ticket.kind, ticket.key, on_files_band=on_files_band)
     kind, key, label = ticket.kind, ticket.key, ticket.label
     ticket.delete()
     audit.record(actor, CONTENT_PURGED, target_type=kind, target_key=key,
@@ -370,7 +413,13 @@ def purge_ticket(actor, ticket, *, source: str = SOURCE_WEB,
     FILES ALREADY REMOVED BY AN EARLIER FILES-BAND HANDLER STAY REMOVED.
     Named, not hidden: a filesystem delete has no rollback. That is why
     every handler must be idempotent and why the next sweep completes
-    the purge rather than re-raising on the half it already did.
+    the purge rather than re-raising on the half it already did. IF THE
+    RAISE HAPPENS AFTER A FILES-BAND HANDLER ALREADY RAN, this function
+    itself writes nothing about it -- it only rolls back and re-raises,
+    exactly as before -- but the `ticket` argument now carries a plain
+    attribute (`run_retention`'s `on_files_band` callback sets it) that
+    survives the raise, and `record_failed_purge` below reads it from the
+    two places this call's own exception is caught.
 
     A TICKET ALREADY GONE IS A SILENT NO-OP, NOT A SECOND EVENT: two
     sweeps can overlap by design (prune-on-write on every delete, the
@@ -458,9 +507,23 @@ def purge_ticket(actor, ticket, *, source: str = SOURCE_WEB,
         children = list(
             current.children.filter(hold_by_kind="")
             .select_for_update().order_by("pk"))
-        removed = run_retention(current.kind, current.key)
+        # A PLAIN PYTHON ATTRIBUTE ON `ticket` -- THE CALLER'S OWN
+        # REFERENCE, NOT `current` -- so it survives a raise that rolls
+        # back everything in the transaction above: setting it is not a
+        # database write, so there is nothing here for a rollback to
+        # undo. `_purge_due`/`identity.views.deleted_purge` hold this
+        # exact object and read the attribute back, in their own
+        # `except Exception` blocks, after this whole call has already
+        # unwound. One flag for the whole click, a child's own bytes
+        # included: restoring the parent restores the family, so a
+        # child's destroyed bytes break the same promise this item's own
+        # would.
+        mark_files_band_reached = lambda: setattr(ticket, "_files_band_reached", True)  # noqa: E731
+        removed = run_retention(current.kind, current.key,
+                                on_files_band=mark_files_band_reached)
         for child in children:
-            child_removed = _purge_child(actor, child, source=source, row=row)
+            child_removed = _purge_child(actor, child, source=source, row=row,
+                                         on_files_band=mark_files_band_reached)
             for child_label, count in child_removed.items():
                 removed[child_label] = removed.get(child_label, 0) + count
         kind, key, label = current.kind, current.key, current.label
@@ -518,7 +581,10 @@ def sweep(*, limit: int = SWEEP_LIMIT, source: str = SOURCE_WEB) -> int:
     the conversation's jobs -- so it is logged at `logger.warning` --
     one line, no traceback -- and every other exception keeps
     `logger.exception`, which is the failure this batch actually needs
-    to be noisy about.
+    to be noisy about. THAT OTHER BRANCH ALSO CALLS `record_failed_purge`,
+    a `RetentionRefused` never does: a refusal means nothing was
+    attempted, while any other exception may have followed a files-band
+    handler that already ran.
     """
     due = list(
         DeletionTicket.objects
@@ -577,6 +643,7 @@ def _purge_due(due, *, source: str = SOURCE_WEB) -> int:
             logger.exception(
                 "identity.retention: purge failed for %s:%s; it stays due",
                 ticket.kind, ticket.key)
+            record_failed_purge(ticket)
             continue
         purged += addressed
     return purged

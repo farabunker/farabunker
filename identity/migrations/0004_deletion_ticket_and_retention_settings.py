@@ -43,6 +43,7 @@ class Migration(migrations.Migration):
                 ('hold_by_key', models.CharField(blank=True, default='', max_length=200)),
                 ('hold_note', models.TextField(blank=True, default='')),
                 ('parent', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, related_name='children', to='identity.deletionticket')),
+                ('content_unrecoverable', models.BooleanField(default=False)),
             ],
             options={
                 'ordering': ['-deleted_at'],

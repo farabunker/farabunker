@@ -108,6 +108,67 @@ class TestTheRunner:
         with pytest.raises(ImportError):
             run_retention(KIND_ASK, "1")
 
+
+class TestOnFilesBand:
+    """`identity.retention.purge_ticket` passes `on_files_band` to know,
+    after the fact, whether THIS run got as far as a handler that can
+    destroy bytes -- the one thing `identity.retention.record_failed_purge`
+    needs to tell a broken rollback (bytes gone, rows back) from a clean
+    one (nothing ever touched)."""
+
+    def test_it_fires_once_before_the_files_band_handler_and_never_for_rows(self):
+        calls: list[str] = []
+        register_retention_handler(RetentionHandler(
+            kind=KIND_ASK, key="t.rows", label="Rows",
+            handler=f"{__name__}.rows_handler"))
+        register_retention_handler(RetentionHandler(
+            kind=KIND_ASK, key="t.files", label="Files",
+            handler=f"{__name__}.files_handler", order=ORDER_FILES))
+
+        run_retention(KIND_ASK, "77", on_files_band=lambda: calls.append("marked"))
+
+        assert calls == ["marked"]
+
+    def test_it_never_fires_when_nothing_is_registered_in_the_files_band(self):
+        calls: list[str] = []
+        register_retention_handler(RetentionHandler(
+            kind=KIND_ASK, key="t.rows", label="Rows",
+            handler=f"{__name__}.rows_handler"))
+
+        run_retention(KIND_ASK, "77", on_files_band=lambda: calls.append("marked"))
+
+        assert calls == []
+
+    def test_it_fires_before_a_files_band_handler_that_itself_raises(self):
+        """The exact shape `agents.retention.purge_conversation` has: a
+        files-band handler that destroys bytes and THEN raises, in the
+        same call, before it returns. The callback must still have fired,
+        because the bytes are already gone by the time this handler's own
+        raise is seen."""
+        calls: list[str] = []
+        register_retention_handler(RetentionHandler(
+            kind=KIND_ASK, key="t.raising_files", label="Boom",
+            handler=f"{__name__}.raising_handler", order=ORDER_FILES))
+
+        with pytest.raises(RuntimeError, match="cannot finish"):
+            run_retention(KIND_ASK, "1", on_files_band=lambda: calls.append("marked"))
+
+        assert calls == ["marked"]
+
+    def test_it_does_not_fire_when_a_rows_band_handler_raises_first(self):
+        calls: list[str] = []
+        register_retention_handler(RetentionHandler(
+            kind=KIND_ASK, key="t.raise", label="Boom",
+            handler=f"{__name__}.raising_handler"))
+        register_retention_handler(RetentionHandler(
+            kind=KIND_ASK, key="t.files", label="Files",
+            handler=f"{__name__}.files_handler", order=ORDER_FILES))
+
+        with pytest.raises(RuntimeError, match="cannot finish"):
+            run_retention(KIND_ASK, "1", on_files_band=lambda: calls.append("marked"))
+
+        assert calls == []
+
     def test_the_savepoint_leaves_the_connection_usable_after_a_db_error(self):
         """THE ONLY WAY THIS SAVEPOINT'S PURPOSE IS ACTUALLY TESTED: a
         real query after the failure. Without the nested atomic block the

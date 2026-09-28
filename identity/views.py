@@ -676,12 +676,16 @@ def deleted_purge(request, pk: int):
     own `ServiceRefused`, or the `RetentionRefused` a retention handler
     in a column that may not import `identity.services` raises instead
     -- carries its own operator-readable sentence, flashed verbatim; the
-    ticket stays and the item stays invisible. ANY OTHER EXCEPTION a
-    handler leaves behind is logged with `logger.exception`, keyed on
-    ids only -- never this item's label or content -- and answered with
-    a fixed, contentless sentence; the ticket stays for the next sweep
-    or the next click either way. And a clean run flashes success. A
-    caller with no standing to SEE the row (`_own_ticket_or_404`) is a
+    ticket stays and the item stays invisible, UNMARKED -- a refusal
+    means nothing was attempted, not that something broke partway
+    through. ANY OTHER EXCEPTION a handler leaves behind is logged with
+    `logger.exception`, keyed on ids only -- never this item's label or
+    content -- and answered with a fixed, contentless sentence; the
+    ticket stays for the next sweep or the next click either way,
+    marked by `retention.record_failed_purge` when this attempt reached
+    a files-band handler first, so `may_restore` refuses it from here on.
+    And a clean run flashes success. A caller with no standing to SEE
+    the row (`_own_ticket_or_404`) is a
     404; a caller who sees it but may not purge it yet -- the
     organisation posture, for everybody, before its date -- gets a
     flashed sentence and a redirect instead: the row is right there on
@@ -704,6 +708,7 @@ def deleted_purge(request, pk: int):
     except Exception:  # noqa: BLE001 -- never-500; the traceback goes to the log
         logger.exception(
             "identity.views: purge failed for ticket %s", ticket.pk)
+        retention.record_failed_purge(ticket)
         messages.error(request, _PURGE_FAILED_MESSAGE)
     else:
         messages.info(request, "Deleted permanently.")

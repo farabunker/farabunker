@@ -22,10 +22,12 @@ one function instead of a `commit`-flagged pair: see `run_retention`.
 """
 from __future__ import annotations
 
+from typing import Callable
+
 from django.db import transaction
 from django.utils.module_loading import import_string
 
-from identity.contracts.cascades import all_entitlement_cascades, retention_handlers
+from identity.contracts.cascades import ORDER_FILES, all_entitlement_cascades, retention_handlers
 
 
 def _run(entitlement_id: int, *, commit: bool) -> dict[str, int]:
@@ -48,7 +50,8 @@ def run_cascades(entitlement_id: int) -> dict[str, int]:
     return _run(entitlement_id, commit=True)
 
 
-def run_retention(kind: str, key: str) -> dict[str, int]:
+def run_retention(kind: str, key: str, *,
+                  on_files_band: Callable[[], None] | None = None) -> dict[str, int]:
     """`{label: count}` -- what each column removed for this deleted
     item. Call inside `identity.retention.purge_ticket`'s transaction.
 
@@ -62,10 +65,28 @@ def run_retention(kind: str, key: str) -> dict[str, int]:
     imported, or that raises, takes the whole purge down with it, so
     nothing is half-purged at the row level and the ticket survives to
     be retried.
+
+    `on_files_band`, OPTIONAL, IS CALLED ONCE PER FILES-BAND HANDLER,
+    IMMEDIATELY BEFORE THAT HANDLER RUNS -- `identity.retention.
+    purge_ticket` is the one caller that passes it, to know afterwards
+    whether THIS run got as far as a handler that can destroy bytes, even
+    when that same handler is the one that goes on to raise (the
+    `agents.retention.purge_conversation` shape: it deletes a chat-scoped
+    document's files and then, a few lines later in the same call,
+    scrubs tool records -- a failure in the second half must still count
+    as "bytes were at risk", because the first half already ran). Called
+    BEFORE, not after, so a files-band handler that raises without
+    finishing still reports the risk; a run that never reaches a
+    files-band handler at all -- every registered handler is ROWS band,
+    or the raise happens earlier in the loop -- never calls this, which
+    is what keeps a purely-clean rollback (nothing on disk ever touched)
+    from being mistaken for a broken one.
     """
     counts: dict[str, int] = {}
     for spec in retention_handlers(kind):
         handler = import_string(spec.handler)
+        if spec.order == ORDER_FILES and on_files_band is not None:
+            on_files_band()
         # A NESTED `transaction.atomic()` -- a SAVEPOINT -- around each
         # handler, the `agents.attachments.delete_attachments_for`
         # discipline: NEITHER SWALLOWS, and the savepoint is what makes

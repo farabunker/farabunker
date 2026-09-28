@@ -50,6 +50,15 @@ class TestTheHoldColumnsShipEmpty:
         assert ticket.hold_note == ""
 
 
+class TestTheFailureMarkShipsFalse:
+    def test_an_ordinary_ticket_is_not_marked(self):
+        """`content_unrecoverable` is written by exactly one path
+        (`identity.retention.record_failed_purge`, only after a purge
+        destroyed content and then failed) -- an ordinary ticket, created
+        the normal way, never carries it."""
+        assert _ticket().content_unrecoverable is False
+
+
 class TestTheShippedPolicyNeedsNoConfiguration:
     def test_a_freshly_migrated_row_carries_the_documented_defaults(self):
         row = IdentitySettings.get_solo()
