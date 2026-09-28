@@ -105,6 +105,20 @@ def cross_owner_children(key: str) -> list[tuple[str, str, str, str]]:
     return [(KIND_DOCUMENT, "doc-1", *_OTHER_OWNER)]
 
 
+def blank_owner_children(key: str) -> list[tuple[str, str, str, str]]:
+    """ONE child with GENUINELY BLANK owner columns -- the shape every
+    `GenerationJob` written before `tools/vision/migrations/
+    0006_generationjob_owner.py` carries to this day, since that
+    migration's bare `AddField` backfilled nothing. No principal can
+    own `("", "")` (`Principal.__post_init__` forbids a blank key
+    outright), which is the fixture the owner ruling (2026-09-28)
+    exists for: a permanent delete must still destroy this child
+    through the conversation's own owner, not silently skip it
+    forever."""
+    CALLED.append(key)
+    return [(KIND_DOCUMENT, "doc-1", "", "")]
+
+
 @pytest.fixture(autouse=True)
 def _isolated_registry():
     """Save, clear, register, restore -- the shape
@@ -1288,6 +1302,73 @@ class TestChildTickets:
         assert DeletionTicket.objects.filter(pk=held.pk).exists()
         assert "document:doc-1" in REMOVED
         assert "document:doc-2" not in REMOVED
+
+
+class TestTheBlankOwnerRuling:
+    """Owner ruling (2026-09-28): a child ticket with GENUINELY BLANK
+    owner columns is treated as belonging to the conversation's own
+    owner, so an explicit permanent delete destroys it exactly as it
+    always did before ownership was tracked at all. This is deliberately
+    NOT `may_purge`'s own `sees_all_content or may_read_owned_row`
+    mirror -- that would hand a content-reading administrator power over
+    other people's genuinely OWNED content, the shape this ruling exists
+    to deny -- so the second test below pins that a REAL, DIFFERENT
+    owner is still skipped even for an administrator who reads content."""
+
+    def test_a_blank_owner_child_is_destroyed_by_the_conversations_owner(self):
+        """If the blank-owner allowance were missing (the gate reading
+        `may_read_owned_row(actor, child)` alone), no principal could
+        ever match `("", "")` and this permanent delete would silently
+        skip `doc-1` on every posture -- `"document:doc-1"` would never
+        reach `REMOVED` and the ticket would survive, detached, forever."""
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION, key="t.conversation",
+            label="Conversation and turns",
+            handler=f"{__name__}.conversation_handler",
+            children=f"{__name__}.blank_owner_children"))
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(
+            user_principal(user), kind=KIND_CONVERSATION, key=item.pk, owner=item)
+        child = DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-1")
+        assert (child.owner_kind, child.owner_key) == ("", "")
+
+        service.purge_ticket(user_principal(user), parent)
+
+        assert "document:doc-1" in REMOVED
+        assert not DeletionTicket.objects.filter(pk=child.pk).exists()
+
+    def test_a_child_owned_by_someone_else_is_still_skipped_by_a_content_reading_admin(self):
+        """The ruling's other half, restated for the case it exists to
+        deny: an administrator with `admin_sees_content` on may READ
+        another member's content but must not gain the power to DESTROY
+        it through somebody else's conversation. If the blank-owner
+        check above had been implemented as `sees_all_content or may_
+        read_owned_row` instead of its own narrow condition, this admin
+        would destroy `_OTHER_OWNER`'s real, non-blank-owned child and
+        both assertions below would fail."""
+        with posture("personal"):
+            register_retention_handler(RetentionHandler(
+                kind=KIND_CONVERSATION, key="t.conversation",
+                label="Conversation and turns",
+                handler=f"{__name__}.conversation_handler",
+                children=f"{__name__}.cross_owner_children"))
+            admin = make_admin()
+            row = IdentitySettings.get_solo()
+            row.admin_sees_content = True
+            row.save()
+            item = _owner(admin)
+            parent = service.delete_content(
+                user_principal(admin), kind=KIND_CONVERSATION, key=item.pk, owner=item)
+            child = DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-1")
+
+            service.purge_ticket(user_principal(admin), parent)
+
+            assert not DeletionTicket.objects.filter(pk=parent.pk).exists()
+            child.refresh_from_db()
+            assert child.parent_id is None
+            assert (child.owner_kind, child.owner_key) == _OTHER_OWNER
+            assert "document:doc-1" not in REMOVED
 
 
 class TestTheOrganisationPostureRefusesAnEarlyDestroy:

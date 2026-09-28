@@ -484,6 +484,37 @@ def restore_content(actor, ticket, *, source: str = SOURCE_WEB,
                          source=source, kind=child.kind)
 
 
+def _may_destroy_child(actor, current, child) -> bool:
+    """Whether `actor`'s permanent delete of `current` (the parent) may
+    also destroy `child`'s content -- `may_read_owned_row(actor, child)`,
+    with ONE ADDITION for a child whose owner columns are GENUINELY
+    BLANK (`("", "")`): every `GenerationJob` written before `tools/
+    vision/migrations/0006_generationjob_owner.py` added the two
+    columns, which backfilled nothing, so such a row is un-ownable --
+    `Principal.__post_init__` forbids a blank key outright, so no
+    principal can ever match one and `may_read_owned_row` alone always
+    answers `False` for it. Left there, an explicit "Delete permanently"
+    would silently skip such a child on every posture, forever (owner
+    ruling, 2026-09-28).
+
+    A GENUINELY BLANK CHILD IS TREATED AS BELONGING TO THE CONVERSATION'S
+    OWN OWNER -- `current`'s own owner columns, the ones its own ticket
+    carries -- so the permanent delete destroys a pre-tracking image
+    exactly as it always did before ownership was stamped at all. THIS
+    IS DELIBERATELY NOT `may_purge`'s OWN `sees_all_content or may_read_
+    owned_row` MIRROR: it never asks whether `actor` reads OTHER
+    PEOPLE'S content, only whether `actor` owns THIS CONVERSATION -- a
+    content-reading administrator who is not that conversation's owner
+    is still refused, exactly as for a child with a real, different
+    owner. A child with real (non-blank) owner columns is unaffected:
+    `may_read_owned_row(actor, child)` alone decides it, same as before
+    this function existed.
+    """
+    if child.owner_kind == "" and child.owner_key == "":
+        return may_read_owned_row(actor, current)
+    return may_read_owned_row(actor, child)
+
+
 def _purge_child(actor, ticket, *, source: str, row, on_files_band=None) -> dict[str, int]:
     """Run ONE child ticket's handlers, delete it, record its own
     content-free event. NO CASCADE OF ITS OWN -- a child is never asked
@@ -579,13 +610,22 @@ def purge_ticket(actor, ticket, *, source: str = SOURCE_WEB,
     CONTENT it describes, which can differ from this item's own owner,
     and a permanent delete of the parent must not be how a stranger to
     that child cuts its own retention window short. It keeps its own
-    ticket, date and Restore, exactly as a held child does. THE ONE
-    CALLER THIS NEVER APPLIES TO IS THE SWEEP: `sweep` always purges as
-    `SERVICE_PRINCIPAL`, so this check is keyed on the acting principal
-    BEING that constant, never on an ownership predicate alone -- such a
-    predicate answers False for `SERVICE_PRINCIPAL` on every user-owned
-    row, and would make the sweep skip every child on the box rather than
-    take everything on the date it promised.
+    ticket, date and Restore, exactly as a held child does. `_may_
+    destroy_child` BELOW IS WHAT ANSWERS "OWN" HERE, not `may_read_
+    owned_row` directly: a child whose owner columns are GENUINELY
+    BLANK -- every `GenerationJob` written before ownership tracking
+    added its two columns, with no backfill -- is un-ownable by any
+    principal, so `may_read_owned_row` alone would skip it on every
+    posture forever; `_may_destroy_child` treats that one case as
+    belonging to THIS conversation's own owner instead (a second owner
+    ruling, 2026-09-28), so the click that always destroyed it before
+    ownership existed still does. THE ONE CALLER THIS NEVER APPLIES TO
+    IS THE SWEEP: `sweep` always purges as `SERVICE_PRINCIPAL`, so this
+    check is keyed on the acting principal BEING that constant, never on
+    an ownership predicate alone -- such a predicate answers False for
+    `SERVICE_PRINCIPAL` on every user-owned row, and would make the
+    sweep skip every child on the box rather than take everything on the
+    date it promised.
 
     A CHILD'S OWN `RetentionRefused` IS NOT CAUGHT HERE, unlike the
     sweep's: it propagates out of `_purge_child` exactly like any other
@@ -664,10 +704,15 @@ def purge_ticket(actor, ticket, *, source: str = SOURCE_WEB,
             children = candidate_children
             children_not_owned = []
         else:
-            children = [child for child in candidate_children
-                       if may_read_owned_row(actor, child)]
-            children_not_owned = [child for child in candidate_children
-                                  if not may_read_owned_row(actor, child)]
+            # ONE PASS, ONE PREDICATE EVALUATION PER CHILD -- two
+            # comprehensions over the same list asking the opposite of
+            # the same question would cost `_may_destroy_child` twice
+            # per child and, if it ever stopped being pure, could
+            # disagree with itself about which list a child belongs in.
+            children, children_not_owned = [], []
+            for child in candidate_children:
+                (children if _may_destroy_child(actor, current, child)
+                 else children_not_owned).append(child)
         # A THIRD PLAIN PYTHON ATTRIBUTE ON `ticket`, alongside `_files_
         # band_reached` below and set for the identical rollback-survival
         # reason: `record_failed_purge` runs AFTER this whole call has
