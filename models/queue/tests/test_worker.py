@@ -1221,7 +1221,7 @@ class TestHeartbeat:
             worker._stopping.set()
             worker._heartbeat_thread.join(timeout=5)
 
-        assert calls
+        assert calls, "close_old_connections was never called from the loop"
 
     def test_a_transient_write_error_does_not_kill_the_thread(self, worker, monkeypatch, caplog):
         """What is under test is survival, not throughput: the thread must
@@ -1260,7 +1260,7 @@ class TestHeartbeat:
             "the thread never logged a warning for the failures"
         )
 
-    def test_the_thread_says_so_loudly_if_it_ever_exits(self, worker, monkeypatch, caplog):
+    def test_the_thread_says_so_loudly_if_it_ever_exits(self, worker, caplog):
         """The start message is logged once, at the top of the thread's
         own function, before it ever waits on anything -- so what this
         test needs is for the thread to have been SCHEDULED at all, not
@@ -1278,8 +1278,6 @@ class TestHeartbeat:
         only appear once the thread has been told to stop, so waiting on it
         with nothing signalling that stop would just burn the whole
         deadline every run."""
-        monkeypatch.setattr(worker_module, "HEARTBEAT_SECONDS", 0.05)
-
         with caplog.at_level("INFO", logger="models.queue.worker"):
             worker._start_heartbeat_thread()
             worker._stopping.set()
@@ -1293,7 +1291,9 @@ class TestHeartbeat:
             finally:
                 worker._heartbeat_thread.join(timeout=5)
 
-        assert any("heartbeat thread exiting" in r.getMessage() for r in caplog.records)
+        assert any(
+            "heartbeat thread exiting" in r.getMessage() for r in caplog.records
+        ), "the thread never logged its exit"
 
     @pytest.mark.django_db(transaction=True)
     def test_the_throttle_is_read_and_written_under_the_lock(self, worker):
