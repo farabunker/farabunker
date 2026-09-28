@@ -368,6 +368,110 @@ class TestTheFailedPurgeMark:
         assert ticket.content_unrecoverable is True
 
 
+class TestTheFailedPurgeMarkAndChildOwnership:
+    """A failed purge's mark must cover only the children THIS ATTEMPT
+    could actually have reached -- `_purge_child` is only ever called
+    for `children` (`identity.retention.purge_ticket`'s own loop), never
+    for `children_not_owned` or a held child, so marking either of those
+    because a SIBLING's files-band handler failed would refuse Restore
+    for an item this attempt was structurally incapable of touching.
+    Every test here overrides key `"t.conversation"` with a files-band
+    handler that raises, so `_files_band_reached` is set before the
+    children loop is ever reached, and drives the failure through
+    `service.purge_ticket` directly -- the user's own click, not the
+    sweep -- calling `service.record_failed_purge` the same way both
+    real callers (`identity.views.deleted_purge`, `_purge_due`) do, from
+    outside the rolled-back transaction."""
+
+    def test_a_failed_purge_does_not_mark_a_child_the_clicker_does_not_own(self):
+        """If `record_failed_purge` still filtered on `parent_id=ticket.
+        pk` alone, `child` would still be linked to `parent` at rollback
+        time (the detach only happens on a SUCCESSFUL purge, which this
+        is not) and `child.content_unrecoverable` below would read
+        `True` -- stripping Restore from an item this click never
+        reached."""
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION, key="t.conversation",
+            label="Conversation and turns",
+            handler=f"{__name__}.files_boom", order=ORDER_FILES,
+            children=f"{__name__}.cross_owner_children"))
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(
+            user_principal(user), kind=KIND_CONVERSATION, key=item.pk, owner=item)
+        child = DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-1")
+
+        with pytest.raises(RuntimeError):
+            service.purge_ticket(user_principal(user), parent)
+        service.record_failed_purge(parent)
+
+        parent.refresh_from_db()
+        child.refresh_from_db()
+        assert parent.content_unrecoverable is True
+        assert child.content_unrecoverable is False
+        assert service.may_restore(child) is True
+
+    def test_a_failed_purge_does_not_mark_a_held_child(self):
+        """The held case beside the not-owned one above: a held child
+        is excluded from `candidate_children` before either partition
+        even runs, so it must never enter the attempted set either --
+        the same stale-link reasoning applies, since the detach that
+        would otherwise unlink it only happens on success."""
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION, key="t.conversation",
+            label="Conversation and turns",
+            handler=f"{__name__}.files_boom", order=ORDER_FILES,
+            children=f"{__name__}.fake_children"))
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(
+            user_principal(user), kind=KIND_CONVERSATION, key=item.pk, owner=item)
+        held = DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-2")
+        DeletionTicket.objects.filter(pk=held.pk).update(
+            hold_by_kind="user", hold_by_key="1")
+
+        with pytest.raises(RuntimeError):
+            service.purge_ticket(user_principal(user), parent)
+        service.record_failed_purge(parent)
+
+        parent.refresh_from_db()
+        held.refresh_from_db()
+        assert parent.content_unrecoverable is True
+        assert held.content_unrecoverable is False
+        assert service.may_restore(held) is True
+
+    def test_a_failed_purge_still_marks_a_child_the_clicker_does_own(self):
+        """C1's neighbour, keeping the fix honest: an owned child's mark
+        is unchanged by the new filter -- both of the clicker's own
+        children are still marked when the family's files band was
+        entered, exactly as `test_a_second_childs_files_band_failure_
+        marks_the_whole_family` already pins for the sweep's own call
+        path. If the fix over-corrected to "never mark a child", both
+        assertions below would read `False`."""
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION, key="t.conversation",
+            label="Conversation and turns",
+            handler=f"{__name__}.files_boom", order=ORDER_FILES,
+            children=f"{__name__}.fake_children"))
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(
+            user_principal(user), kind=KIND_CONVERSATION, key=item.pk, owner=item)
+        first_child = DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-1")
+        second_child = DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-2")
+
+        with pytest.raises(RuntimeError):
+            service.purge_ticket(user_principal(user), parent)
+        service.record_failed_purge(parent)
+
+        parent.refresh_from_db()
+        first_child.refresh_from_db()
+        second_child.refresh_from_db()
+        assert parent.content_unrecoverable is True
+        assert first_child.content_unrecoverable is True
+        assert second_child.content_unrecoverable is True
+
+
 class TestTheMarkOutsideAnyAmbientTransaction:
     """Every test in `TestTheFailedPurgeMark` above runs under the
     module's own `pytestmark = pytest.mark.django_db` -- the

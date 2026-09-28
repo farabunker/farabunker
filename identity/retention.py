@@ -139,35 +139,50 @@ def record_failed_purge(ticket) -> None:
     `test_a_purge_that_rolled_back_leaves_a_ticket_restore_still_accepts`
     pins, unmarked, unchanged by this function existing.
 
-    MARKS THE WHOLE FAMILY THIS ATTEMPT TOUCHED, NOT ONLY `ticket`
-    ITSELF: `_files_band_reached` is one Python attribute on the object
+    MARKS THE WHOLE FAMILY THIS ATTEMPT ACTUALLY ATTEMPTED, NOT ONLY
+    `ticket` ITSELF, AND NOT EVERY TICKET STILL LINKED TO IT EITHER:
+    `_files_band_reached` is one Python attribute on the object
     `purge_ticket` was called with, set the instant ANY files-band
-    handler in the family -- this item's own, or any child's --  is
-    about to run (`identity.cascades.run_retention`'s `on_files_band`),
-    and `purge_ticket` passes the SAME closure into every `_purge_child`
-    call. So the flag cannot say WHICH member of the family entered its
-    band, only that the family did -- and a child whose OWN files-band
-    handler already destroyed real bytes rolls back to an ordinary,
-    undestroyed-looking ROW exactly like its parent does, on the very
-    same failed transaction. `Q(pk=ticket.pk) | Q(parent_id=ticket.pk)`
-    marks `ticket` and every ticket presently linked to it as a child, in
-    one write: a child a family member's own bytes truly destroyed is
-    never missed, at the cost of also marking a sibling whose own handler
-    never ran at all -- the SAME direction `run_retention`'s "before, not
-    after" placement already accepts for a single ticket (a files-band
-    handler that raises before touching anything still marks). Consistent
-    with the rest of this feature's own rule: a false refusal to restore
-    costs a person an early click; a false restore hands back an item
-    that is not the one they remember, and this trades toward the
-    cheaper mistake on both counts. `parent_id=ticket.pk` reaches nothing
-    when `ticket` is itself a child (a child is never asked for
-    children), so a direct purge of one child's own row marks only that
-    row, exactly as before this widening.
+    handler in the family -- this item's own, or any ATTEMPTED child's
+    -- is about to run (`identity.cascades.run_retention`'s
+    `on_files_band`), and `purge_ticket` passes the SAME closure into
+    every `_purge_child` call. So the flag cannot say WHICH member of
+    the family entered its band, only that the family did -- and a
+    child whose OWN files-band handler already destroyed real bytes
+    rolls back to an ordinary, undestroyed-looking ROW exactly like its
+    parent does, on the very same failed transaction. Marking `ticket`
+    and every ticket its own `_attempted_child_pks` names (a second
+    plain attribute, set below the point in `purge_ticket` where the
+    owned/held partition happens, in one write: a child a family
+    member's own bytes truly destroyed is never missed, at the cost of
+    also marking a sibling whose own handler never ran at all -- the
+    SAME direction `run_retention`'s "before, not after" placement
+    already accepts for a single ticket (a files-band handler that
+    raises before touching anything still marks). Consistent with the
+    rest of this feature's own rule: a false refusal to restore costs a
+    person an early click; a false restore hands back an item that is
+    not the one they remember, and this trades toward the cheaper
+    mistake on both counts -- BUT ONLY FOR A CHILD THIS ATTEMPT COULD
+    HAVE REACHED. `parent_id=ticket.pk` ALONE would ALSO catch a child
+    the clicker was never allowed to purge (owner ruling, 2026-09-28)
+    and a held child (spec section 10.10) -- both are still linked by
+    `parent_id` at rollback time, since the detach that unlinks them
+    only happens on a SUCCESSFUL purge, and `_purge_child` is never
+    called for either, so their own rollback is always clean. Marking
+    one of those would strip Restore from an item nobody clicked and
+    nothing here ever touched; the whole point of the owner ruling was
+    that a stranger to a child cannot affect its retention window, and
+    a false mark is exactly such an effect. `_attempted_child_pks`
+    reaches nothing when `ticket` is itself a child (a child is never
+    asked for children, so the set purge_ticket stashes on it is
+    always empty), so a direct purge of one child's own row still marks
+    only that row, exactly as before this widening.
     """
     if not getattr(ticket, "_files_band_reached", False):
         return
+    attempted = getattr(ticket, "_attempted_child_pks", frozenset())
     DeletionTicket.objects.filter(
-        Q(pk=ticket.pk) | Q(parent_id=ticket.pk)).update(
+        Q(pk=ticket.pk) | Q(pk__in=attempted)).update(
         content_unrecoverable=True)
 
 
@@ -653,6 +668,21 @@ def purge_ticket(actor, ticket, *, source: str = SOURCE_WEB,
                        if may_read_owned_row(actor, child)]
             children_not_owned = [child for child in candidate_children
                                   if not may_read_owned_row(actor, child)]
+        # A THIRD PLAIN PYTHON ATTRIBUTE ON `ticket`, alongside `_files_
+        # band_reached` below and set for the identical rollback-survival
+        # reason: `record_failed_purge` runs AFTER this whole call has
+        # already unwound, so it cannot ask the database which children
+        # this attempt actually reached -- `children_not_owned` and a
+        # held child (excluded from `candidate_children` above) are both
+        # still linked by `parent_id` at that point, exactly like every
+        # child this attempt DID hand to `_purge_child`, because the
+        # detach that unlinks either of them only happens on a
+        # SUCCESSFUL purge. Recording the pks THIS ATTEMPT ACTUALLY
+        # ATTEMPTED, here, before either loop below can raise, is what
+        # lets `record_failed_purge` mark only the family a failed
+        # attempt could have touched -- never a child the click was
+        # forbidden to reach, and never a held one.
+        ticket._attempted_child_pks = frozenset(child.pk for child in children)
         # A PLAIN PYTHON ATTRIBUTE ON `ticket` -- THE CALLER'S OWN
         # REFERENCE, NOT `current` -- so it survives a raise that rolls
         # back everything in the transaction above: setting it is not a
