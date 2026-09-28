@@ -57,7 +57,7 @@ on this spectrum; only the profile changes.
 | **`isolated-lan`** | Own subnet/VLAN, **default-deny egress** to WAN, trusted LAN for devices & UI | Airlock or a gated pull | Home automation, multi-device homes/offices |
 | **`gated-sync`** | Normally offline; a deliberate, operator-initiated, time-boxed WAN window | Verified pull during the open window, then re-sealed | Users who want periodic knowledge/model refresh |
 
-Rules that hold in **every** profile:
+Rules that are meant to hold in **every** profile:
 
 - **Default-deny egress.** Nothing reaches the public internet unless a posture profile
   explicitly opens a gated window, and even then only the airlock manager may use it.
@@ -69,6 +69,12 @@ Rules that hold in **every** profile:
 - **The subnet is a security boundary.** In `isolated-lan`, farabunker runs its own
   VLAN/subnet with no route to the WAN gateway — devices join *its* network, it does not
   join theirs.
+
+That is the design, not yet the delivered state: the ISOLATION layer that would enforce
+these is **not built yet** — `posture/` is a stub — and today the property rests on
+policy and review, not on something the box enforces for you. No shipped runtime path
+reaches a public host today, but nothing below the application stops one from trying.
+See [posture/README.md](../posture/README.md) for the planned enforcement.
 
 > Design note: because home automation needs a LAN to reach Zigbee/Z-Wave/Wi-Fi devices,
 > `isolated-lan` (not true air-gap) is the expected default for most installs. Air-gap
