@@ -1230,6 +1230,24 @@ applied to the budget on your behalf**: the console renders in the `web` contain
 budget governs the `worker` container, and a container sees the VM's allocation rather than
 the host's, so a silently derived budget would be authoritative and wrong.
 
+### One image engine, shared by every stack on this machine
+
+The live box and every preview stack are separate applications, each with its own database,
+but they all point at the same host image engine process. A release made by one stack's queue
+is a release at that shared engine — and the engine's release has no per-model form, so it
+frees **everything** registered at that endpoint, for every stack pointing there. The visible
+symptom on a stack that did nothing itself: a generation that suddenly takes minutes longer
+than usual, from a cold model reload, with nothing in that stack's own queue to explain it.
+This is a property of running several stacks against one engine on one machine, not a fault to
+fix in the platform.
+
+The diagnosis behind the cold reload is worth stating honestly, because it changes what to
+conclude from a "freed" figure: on this platform a release does not promptly return the memory
+at all — it moves the weights from the accelerator to the host, which on unified memory is the
+same physical memory, and what sits on the host cannot be freed through this interface. That
+much the diagnostic established; its confirming experiment has not run. So read the cold
+reload as real, and the memory saving as possibly much smaller than it appears.
+
 ### `manage.py reconcile_turns` — a chat turn whose job row vanished
 
 A chat turn is backed by a queued job row. If that row disappears under it — a database
