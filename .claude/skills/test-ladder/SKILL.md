@@ -297,18 +297,30 @@ not just running the suite -- takes the slot lock too, even though nothing force
 kind of verification, so the gap closes by how the work is shaped rather than by asking nicely.
 
 THE SEQUENCE GOES IN A SCRIPT FILE, because the invariant above says WHAT must hold and never
-says HOW, and for a worktree-isolated agent the obvious HOW does not execute at all: the natural
-inline form -- a single call combining a `trap`, an atomic acquire and the run -- gets refused
-before it reaches a shell, because a trap inside a construct that complex cannot be shown not to
-run git. That refusal does not relax the invariant; it removes one way of satisfying it. Put the
-same three steps in a script file and invoke the script as its own call instead: a script is one
-process, so `$$` inside it names the same process throughout -- the one that holds the lock, does
-the work, and fires the release -- exactly what "one command sequence in one process" asks for,
-with no trap-in-a-one-liner for the sandbox to refuse. CREATE THAT FILE WITH A FILE-WRITING TOOL,
-NOT AN INLINE HEREDOC -- the heredoc form is refused by the same sandbox rule as the inline trap,
-for the same reason, and the refusal fires on AUTHORING the script inline, never on INVOKING a
-script that already exists, so a plain call to an existing script is fine and there is no
-shell-level workaround to go looking for.
+says HOW, and the obvious inline HOW has been refused for at least one seat under conditions
+nobody has isolated: a single call combining a `trap`, an atomic acquire and the run was refused
+verbatim, before it reached a shell, and that session split into three separate calls as a result.
+That is not the only observation on record: a peer session reports its own implementer ran the
+identical inline shape -- trap, atomic acquire, and the run, in one call -- repeatedly and
+successfully, with no dead-PID lock, in this same repository on this same machine. Both
+observations are real; neither cancels the other, and the honest conclusion is narrower than
+either alone suggests: the inline form is refused for SOME agents under conditions this file
+cannot characterise. Do not read that as worktree isolation, agent type, or any other specific
+cause -- a heredoc has been observed both succeeding and being refused in the same session on the
+same evening, which says whatever is tripping the refusal is heuristic about construct complexity,
+not a fixed rule keyed to any property named here, and nobody should build a rule on an
+uncharacterised boundary. What IS on solid ground: the script-file form has never been refused for
+anyone. That is the reason to prefer it -- not a prohibition on the inline form, which may work
+fine where you are running it, but the only shape that does not depend on a characterisation this
+file cannot support. Put the same three steps in a script file and invoke the script as its own
+call instead: a script is one process, so `$$` inside it names the same process throughout -- the
+one that holds the lock, does the work, and fires the release -- exactly what "one command sequence
+in one process" asks for, with no trap-in-a-one-liner for anything to refuse. CREATE THAT FILE WITH
+A FILE-WRITING TOOL, NOT AN INLINE HEREDOC -- the heredoc form was refused for at least one seat by
+the same mechanism as the inline trap, and the refusal, where it happens, fires on AUTHORING the
+script inline, never on INVOKING a script that already exists, so a plain call to an existing
+script is fine and there is no shell-level workaround to go looking for. A reader who IS refused
+should reach for the script file, not for three plain calls.
 
 SPLITTING ACROSS SEPARATE CALLS IS NOT A LESSER VERSION OF THIS, IT IS THE FAILURE THE RULE ABOVE
 ALREADY NAMES: each call is its own process, so the acquiring shell writes its own `$$` to the
