@@ -253,24 +253,45 @@ while destroying the purpose -- the acquiring shell reaches its own end and exit
 leaving a live suite behind a lock that already names a dead process. This is exactly what makes
 a rule dangerous: it is easy to write while genuinely believing it is being followed. RULE 0,
 stated with BOTH ends, because fixing only the acquire end left the release end free to fail the
-same way in reverse: acquire, run AND RELEASE in ONE SHELL, and the run must be in the FOREGROUND
-of that shell the whole time, from acquire to release. Break the acquire end (background between
-acquiring and running) and the lock records a dead process from the start. Break the release end
-(the releasing shell exits, or is triggered, before the suite it's supposed to guard actually
-finishes) and the lock frees itself at exactly the wrong moment -- not stale, not stolen, just
-released early, so the NEXT session's exclusive create succeeds completely legitimately into a
-machine that is still busy. That happened on this machine: a session's gate released while its
-suite kept running, a second session's create correctly succeeded on a lock that was genuinely
-gone, and two full suites ran at once at load twelve to fifteen -- the same load that took the
-container daemon down the night before. Same defect, both ends: not backgrounded (`&`), not
-detached, not handed to a supervisor that returns before the run it's guarding actually ends.
+same way in reverse: acquire, run AND RELEASE must be ONE COMMAND SEQUENCE IN ONE PROCESS, so the
+process holding the lock is the process doing the work. The TEST that follows from that: CAN
+ANYTHING BETWEEN THE ACQUIRE AND THE RELEASE RETURN BEFORE THE WORK ENDS? If nothing can, the
+release cannot fire before the work is actually done, whatever the sequence looks like from
+outside. Foreground or background is IRRELEVANT to that test. What fails it: a trailing `&` with
+no matching `wait`, a supervisor or scheduler that returns once it has ACCEPTED the job rather
+than once the job finishes, `nohup`/`disown`/`setsid`, a wrapper whose own command
+self-daemonises -- every one of these lets the sequence return while the work keeps running
+unsupervised. What does NOT fail it: the harness auto-backgrounding the whole sequence for
+display, because that backgrounds the process that holds the lock along with the work it is
+doing -- the same process, still running, still going to hit its own release statement when and
+only when the work ends. This wording used to require the run to stay in the FOREGROUND the whole
+time; that clause was wrong, not the rule it was guarding. A peer session proved it empirically:
+this harness auto-backgrounds a long-running call at its own cap, and their eight-run ladder was
+auto-backgrounded mid-chain at roughly 76% complete -- no amount of discipline prevents that.
+Their lock still released correctly, because acquire, run and release stayed one command sequence
+in one process throughout; the harness moving a call out of view changes nothing about when that
+process's own release statement fires. For weeks the PRACTICE was correct while the STATED REASON
+was not: sessions complied with "one foreground call", the harness overrode it anyway, and the
+lock held regardless -- A RULE THAT WORKS FOR A REASON OTHER THAN THE ONE IT GIVES IS A RULE
+NOBODY CAN APPLY TO A CASE IT DOES NOT ALREADY COVER, which is exactly why this is a correction
+and not a polish. Break the acquire end (background between acquiring and running) and the lock
+records a dead process from the start. Break the release end (the releasing shell exits, or is
+triggered, before the suite it's supposed to guard actually finishes) and the lock frees itself at
+exactly the wrong moment -- not stale, not stolen, just released early, so the NEXT session's
+exclusive create succeeds completely legitimately into a machine that is still busy. That happened
+on this machine: a session's gate released while its suite kept running, a second session's create
+correctly succeeded on a lock that was genuinely gone, and two full suites ran at once at load
+twelve to fifteen -- the same load that took the container daemon down the night before. Same
+defect, both ends: not backgrounded (`&`), not detached, not handed to a supervisor that returns
+before the run it's guarding actually ends.
 
 THE LOCK PROTECTS THE RESOURCE, NOT THE CEREMONY OF RUNNING A SUITE, which is the same shape of
 hole as the one just above: a constraint written about the USUAL way of doing a thing, evaded by
-an unusual way of doing the same thing. Backgrounding evades "acquire, run and release in one
-foreground shell" without touching a word of it; calling this file's functions directly rather
-than invoking the suite evades the lock the same way, without touching a word of the lock's own
-code. So: any real-state verification that touches a shared port -- exercising a probe directly,
+an unusual way of doing the same thing. A trailing `&` with no matching `wait`, or a supervisor
+that returns once it has accepted the job rather than once the job finishes, evades "acquire, run
+and release in one process" without touching a word of it; calling this file's functions directly
+rather than invoking the suite evades the lock the same way, without touching a word of the lock's
+own code. So: any real-state verification that touches a shared port -- exercising a probe directly,
 not just running the suite -- takes the slot lock too, even though nothing forces it to. See
 `.claude/skills/subagent-brief/SKILL.md` for the structural form this takes when briefing that
 kind of verification, so the gap closes by how the work is shaped rather than by asking nicely.
@@ -459,8 +480,8 @@ acquisition exits 75, never 2, so a caller scripting on exit status can always t
 machine from the wrapped command's own exit status (2 included); a command that doesn't exist
 exits 127, the shell's convention. This mode cannot see work a command hands to something
 self-daemonising -- a process that detaches and outlives the command that started it runs
-unlocked the instant that command returns and the release fires, exactly as backgrounding a
-chain run defeats the rule above, without needing a shell to do it.
+unlocked the instant that command returns and the release fires, exactly as detaching a run from
+its own acquire/release sequence defeats the rule above, without needing a shell to do it.
 
 ## Failure modes
 
