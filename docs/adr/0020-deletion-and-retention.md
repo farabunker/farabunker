@@ -174,7 +174,7 @@ records this in full under "Deleted content and your backups".
 
 ### 7. The named residue
 
-Five things a deletion on this box does not reach today, each accepted rather than hidden:
+Four things a deletion on this box does not reach today, each accepted rather than hidden:
 
 - **`rag.ask` queue rows keyed to no Ask record.** The queue payload carries the question text
   and the actor, never the id of the record `record_ask` writes on success — there is nothing
@@ -201,17 +201,6 @@ Five things a deletion on this box does not reach today, each accepted rather th
   `test_the_generations_queue_row_survives_until_the_queue_half_lands`, assert this state
   against real rows rather than leaving it ambiguous, and are the two tests the queue half
   flips.
-- **A purge interrupted after its byte removal, but before its transaction commits.** A
-  handler's own registered order can put a byte-destroying step ahead of a later step in the
-  *same* purge (its band rule only orders handlers within one `run_retention` call, not across
-  a failure that comes after); if that later step then fails for any reason, `purge_ticket`'s
-  transaction rolls the rows back while the files a `shutil.rmtree` already removed stay
-  removed. The tree does not detect this: the ticket carries no failure state, so the item sits
-  on the Deleted page still offering Restore, and Restore hands back an item whose content is
-  gone. Closing it needs a failure mark on `DeletionTicket` and a refused Restore — a new
-  column, and a product trade the owner has not made. Pinned as a strict `xfail`,
-  `agents/tests/test_retention.py::TestThePromiseAPurgeCannotYetKeep::
-  test_restore_after_a_purge_that_fails_once_its_files_are_gone_still_opens_the_document`.
 
 ### 8. The owner's cost/benefit principle, what it cut, and the one thing it added
 
@@ -250,6 +239,50 @@ stores content somewhere new must wire it into deletion, or say in one line why 
 reaches it, or the build fails. That is the one piece of complexity the ruling added, and it is
 the kind the principle favours — a cost paid once, by whoever adds the model, that no maintainer
 ever configures.
+
+### 9. The failed-purge mark: a fifth residue closed, not deferred
+
+A handler's own registered order can put a byte-destroying step ahead of a later step in the
+*same* purge (the band rule only orders handlers within one `run_retention` call, not across a
+failure that comes after); if that later step then fails for any reason, `purge_ticket`'s
+transaction rolls the rows back while the files a `shutil.rmtree` already removed stay removed.
+This was a fifth named residue for one fix wave of this branch, pinned as a strict `xfail` while
+the owner decided between three ways to close it — pin it and close it in the next slice, close it
+now in this branch, or close it in a follow-up PR — and never deferred past that decision: the
+owner ruled to close it now, in this branch, at the acknowledged cost of the more expensive path.
+
+**What closes it.** `DeletionTicket.content_unrecoverable`, a boolean folded into the same
+migration that created the table (decision 2's own table is not yet on `origin/dev`, so the field
+joins it rather than opening a second migration). It is written from exactly the two places a
+failed purge is already caught — `identity.retention._purge_due`'s sweep-level catch and
+`identity.views.deleted_purge`'s POST-level one — both of which already run after `purge_ticket`'s
+own transaction has rolled everything else back, so a plain queryset `.update()` there is the one
+write that survives. Knowing WHETHER to write it needed one more seam:
+`identity.cascades.run_retention` takes an optional `on_files_band` callback, fired the instant a
+files-band handler is about to run, before it runs — not after, because a files-band handler that
+destroys bytes and then raises later IN THE SAME CALL (the shape `agents.retention.
+purge_conversation` has: delete a document's files, then scrub tool records, both inside one
+handler function) must still count as "bytes were at risk" even though the handler itself never
+returns cleanly. `purge_ticket` sets a plain Python attribute on the ticket object its own caller
+already holds a reference to — not a database write, so nothing rolls it back — and the two catch
+sites read it back.
+
+**What the mark does.** `identity.retention.may_restore(ticket)` refuses a marked ticket, beside
+`may_purge` rather than inside `restore_content` — the same layer the organisation posture's
+early-destroy refusal already lives at. The Deleted page renders no Restore control for a marked
+row and prints a sentence instead (`copy.RESTORE_REFUSED_LINE`); the restore POST refuses even
+called directly, flashing and redirecting rather than 404ing, because the row is still visible on
+the page the click came from. `may_purge` and "Delete permanently" take no notice of the mark at
+all: the point of marking a ticket is that its content is already gone, so finishing the job — the
+one thing left to do about it — must stay possible.
+
+**Why this, and not the cheaper reading.** A marked ticket still EXISTS; it is not restorable. The
+invariant decision 2 states — no purged-but-pending state, a ticket exists exactly while the item
+is restorable — gets its one named exception here, in `identity/models.py`'s own docstring, rather
+than being quietly falsified. The promise this closes is stated in full where the gap was found:
+`agents/tests/test_retention.py::TestTheFailedPurgeMarkRefusesRestore::
+test_restore_after_a_purge_that_fails_once_its_files_are_gone_is_refused` — no longer an `xfail`
+pinning a gap, now a passing assertion of the invariant the box keeps.
 
 ## Where the landed tree differs from the spec
 

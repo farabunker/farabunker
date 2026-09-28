@@ -639,7 +639,7 @@ class TestOrderingAgainstRag:
         assert doc_dir.exists()
 
 
-class TestThePromiseAPurgeCannotYetKeep:
+class TestTheFailedPurgeMarkRefusesRestore:
     """`TestOrderingAgainstRag` above closes the most likely way a purge
     breaks its promise to the person who deleted something: a handler
     that raises BEFORE any byte moves. It cannot close every way, because
@@ -653,25 +653,17 @@ class TestThePromiseAPurgeCannotYetKeep:
     document's files (`agents/retention.py:220,225`), so a failure there
     rolls `identity.retention.purge_ticket`'s transaction back -- the
     conversation and the document ROW both reappear -- while the file a
-    `shutil.rmtree` already removed does not. What that leaves behind: a
-    Deleted page that still offers Restore for the conversation, and a
-    Restore that hands back a conversation whose attached document will
-    not open. Nothing on the ticket says a purge was ever attempted."""
+    `shutil.rmtree` already removed does not. What used to happen next: a
+    Deleted page that still offered Restore for the conversation, and a
+    Restore that handed back a conversation whose attached document would
+    not open. Now the ticket itself remembers a files-band handler ran
+    before the failure (`identity.cascades.run_retention`'s `on_files_band`
+    callback, read back by `identity.retention.record_failed_purge` in
+    `_purge_due`'s own `except Exception`), and `identity.retention.
+    may_restore` refuses Restore for it -- the promise holds because
+    Restore is no longer offered, not because the document came back."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "DeletionTicket carries no failure state, so a purge that "
-            "destroys a document's files and then fails on a later step "
-            "in the same run still leaves the ticket offering Restore, "
-            "and Restore hands back a conversation whose document is "
-            "gone -- closing this needs a new column on the ticket and a "
-            "refused Restore, which is a product trade for the owner, "
-            "not this test (see docs/adr/0020-deletion-and-retention.md, "
-            "decision 7)"
-        ),
-    )
-    def test_restore_after_a_purge_that_fails_once_its_files_are_gone_still_opens_the_document(
+    def test_restore_after_a_purge_that_fails_once_its_files_are_gone_is_refused(
         self, real_registration, monkeypatch, tmp_path, settings,
     ):
         import agents.retention as agents_retention_module
@@ -679,7 +671,7 @@ class TestThePromiseAPurgeCannotYetKeep:
 
         from agents.tests._helpers import make_document
         from identity.contracts.retention import KIND_CONVERSATION
-        from identity.retention import delete_content, restore_content
+        from identity.retention import delete_content, may_restore
         from tools.rag.models import DocumentAttachment
 
         settings.DOCUMENTS_DIR = tmp_path
@@ -725,13 +717,16 @@ class TestThePromiseAPurgeCannotYetKeep:
         # of the whole scenario.
         assert not doc_dir.exists()
 
-        still_offers_restore = DeletionTicket.objects.filter(pk=ticket.pk).exists()
-        if not still_offers_restore:
-            return  # the promise holds trivially: nothing left to restore
+        still_stands = DeletionTicket.objects.filter(pk=ticket.pk).exists()
+        if not still_stands:
+            return  # the promise holds trivially: nothing left to offer
 
-        restore_content(actor, ticket)
-        assert doc_dir.exists(), (
-            "the ticket offered Restore and Restore put the conversation "
-            "back, but the document it was attached to has no file left "
-            "on disk"
+        ticket.refresh_from_db()
+        assert ticket.content_unrecoverable is True, (
+            "the purge destroyed the document's bytes and then failed, "
+            "but left no mark behind"
+        )
+        assert may_restore(ticket) is False, (
+            "the ticket stands, its document's bytes are gone, and "
+            "Restore is still offered for it"
         )

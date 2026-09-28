@@ -671,7 +671,10 @@ CARDS: tuple[HelpCard, ...] = (
                     "Restore puts the item back immediately, exactly as it was; nothing about "
                     "it was ever changed by being deleted. Delete permanently, offered only to "
                     "somebody who may act on that item, destroys it right now instead of "
-                    "waiting for its date, and cannot be undone."
+                    "waiting for its date, and cannot be undone. On rare occasions removing the "
+                    "content of an item fails partway through; when that happens Restore is no "
+                    "longer offered for it, because part of what would come back is already "
+                    "gone -- Delete permanently still works, and finishes the job."
                 ),
             ),
             HelpField(

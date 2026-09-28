@@ -461,16 +461,23 @@ keys of my kind are deleted", never "which conversations" — identity
 still cannot build that queryset (rule 4). Each column turns the answer
 into an exclusion on its own base queryset.
 
-**`DeletionTicket` exists exactly while the item is restorable.** One
-table, not a `deleted_at` column on four models in three columns: a
-cliff, an actor, a label and a hold are facts about the DELETION, not
-about the conversation, and the Deleted page is one query over one table
-rather than a union over four querysets in three columns identity may
-not import. There is no purged-but-pending state and no ticket that
-outlives its content — `purge_ticket` destroys the ticket in the same
-transaction that destroys the content, so the two can never disagree.
-That single invariant is what lets restore be "delete the ticket" and
-nothing else.
+**`DeletionTicket` exists exactly while the item is restorable — with one
+named exception.** One table, not a `deleted_at` column on four models in
+three columns: a cliff, an actor, a label and a hold are facts about the
+DELETION, not about the conversation, and the Deleted page is one query
+over one table rather than a union over four querysets in three columns
+identity may not import. There is no purged-but-pending state and no
+ticket that outlives its content — `purge_ticket` destroys the ticket in
+the same transaction that destroys the content, so the two can never
+disagree. That single invariant is what lets restore be "delete the
+ticket" and nothing else. THE EXCEPTION is `content_unrecoverable`: a
+purge that gets as far as a files-band handler and then fails leaves the
+row rolled back and the ticket standing, but the bytes a filesystem
+delete already removed do not come back with it. `identity.retention.
+may_restore` refuses Restore for a ticket in that state — existing and
+being restorable have stopped being the same question for that one row —
+while "Delete permanently" keeps working, because the point of the mark
+is that finishing the job must stay possible.
 
 **Three retention fields on `IdentitySettings`, one "Retention" section,
 zero required setup**: `retention_days` (`LABEL_RETENTION_DAYS`, "Keep
@@ -579,6 +586,19 @@ included — so the control is simply absent, and a POST reaching the
 URL directly gets a flashed sentence and a redirect rather than a 404:
 the row is still there on the page, still restorable, just not
 destroyable before its date.
+
+**The Restore action is gated the same way, on a different predicate.**
+`{% if row.may_restore %}` and `deleted_restore`'s own
+`retention.may_restore(ticket)` check answer False for exactly one
+reason, unrelated to posture or standing: a purge already destroyed some
+of this ticket's content and then failed
+(`identity.retention.record_failed_purge` marked it). The page prints
+`copy.RESTORE_REFUSED_LINE` in the control's place — unlike the
+permanent-delete control's silent omission, a person who expects to see
+Restore on an item they just deleted needs the one sentence saying why it
+is not there — and the POST answers the same flash-and-redirect shape a
+forged request gets for `may_purge`, never a 404, since the row is still
+visible on the page the click came from.
 
 ## Tests
 
