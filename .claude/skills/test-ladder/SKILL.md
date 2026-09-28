@@ -304,7 +304,11 @@ run git. That refusal does not relax the invariant; it removes one way of satisf
 same three steps in a script file and invoke the script as its own call instead: a script is one
 process, so `$$` inside it names the same process throughout -- the one that holds the lock, does
 the work, and fires the release -- exactly what "one command sequence in one process" asks for,
-with no trap-in-a-one-liner for the sandbox to refuse.
+with no trap-in-a-one-liner for the sandbox to refuse. CREATE THAT FILE WITH A FILE-WRITING TOOL,
+NOT AN INLINE HEREDOC -- the heredoc form is refused by the same sandbox rule as the inline trap,
+for the same reason, and the refusal fires on AUTHORING the script inline, never on INVOKING a
+script that already exists, so a plain call to an existing script is fine and there is no
+shell-level workaround to go looking for.
 
 SPLITTING ACROSS SEPARATE CALLS IS NOT A LESSER VERSION OF THIS, IT IS THE FAILURE THE RULE ABOVE
 ALREADY NAMES: each call is its own process, so the acquiring shell writes its own `$$` to the
