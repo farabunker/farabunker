@@ -920,12 +920,15 @@ side lands, registered under `agents.apps.AgentsConfig.ready()` as a
 `RetentionHandler(kind=KIND_CONVERSATION, key="agents.conversation",
 handler="agents.retention.purge_conversation", order=ORDER_FILES,
 children="agents.retention.conversation_children")` —
-the FILES band, deliberately: this handler must READ a conversation's
-turns before it deletes them, so it collects everything it needs first,
-then writes. `identity.cascades.run_retention` calls it, inside the one
-`transaction.atomic()` `identity.retention.purge_ticket` already opens
-(a nested savepoint per handler), so a conversation's ticket and its
-content can never disagree about whether the item still exists.
+the FILES band, deliberately: this handler is in that band because it
+removes bytes through the attachment seam (a conversation's chat-scoped
+documents die with it, files and pgvector chunks both), and it must also
+READ a conversation's turns before it deletes them, so it collects
+everything it needs first, then writes. `identity.cascades.run_retention`
+calls it, inside the one `transaction.atomic()` `identity.retention.
+purge_ticket` already opens (a nested savepoint per handler), so a
+conversation's ticket and its content can never disagree about whether
+the item still exists.
 
 The collect step (`agents/retention.py::_collect`) reads three things off
 every one of the conversation's turns before any row is touched:

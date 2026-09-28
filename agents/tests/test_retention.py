@@ -629,6 +629,13 @@ class TestOrderingAgainstRag:
         assert Turn.objects.filter(conversation_id=conversation.pk).exists()
         assert DocumentAttachment.objects.filter(
             document=document, conversation_id=conversation.id).exists()
+        # SURVIVAL ONLY, NOT SELF-GUARDING: this line alone would still
+        # pass if the fixture ever stopped being at risk (a renamed
+        # scope value, a filter change, an unregistered provider). What
+        # guards it today is a sibling in this file that pins the same
+        # fixture shape against the cascade actually firing --
+        # `test_a_chat_scoped_documents_delete_document_is_called`
+        # (`agents/tests/test_retention.py:416`).
         assert doc_dir.exists()
 
 

@@ -223,6 +223,10 @@ def delete_content(actor, *, kind: str, key, owner, label: str = "",
                          target_key=str(key),
                          target_label=label if row.audit_detail else "",
                          source=source, kind=kind)
+            # `parent=ticket` links each child back to this click's own
+            # ticket -- how `restore_content` and `purge_ticket` below
+            # find exactly the tickets one delete created, and no
+            # others (`identity.models.DeletionTicket.parent`).
             for child_kind, child_key in run_children(kind, str(key)):
                 _child, child_created = DeletionTicket.objects.get_or_create(
                     kind=child_kind, key=child_key,
