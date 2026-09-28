@@ -1256,7 +1256,9 @@ class TestHeartbeat:
                 worker._heartbeat_thread.join(timeout=5)
 
         assert failures["count"] > 2, "the thread stopped at the first error"
-        assert any("heartbeat" in r.getMessage() for r in caplog.records)
+        assert any("heartbeat" in r.getMessage() for r in caplog.records), (
+            "the thread never logged a warning for the failures"
+        )
 
     def test_the_thread_says_so_loudly_if_it_ever_exits(self, worker, monkeypatch, caplog):
         """The start message is logged once, at the top of the thread's
@@ -1265,23 +1267,33 @@ class TestHeartbeat:
         for a fixed sleep to have given it enough of the machine. Waiting
         for the log line (with a timeout) rather than sleeping a fixed
         amount and then checking for it keeps this test out of the same
-        contended-machine trap as its heartbeat-thread siblings."""
+        contended-machine trap as its heartbeat-thread siblings.
+
+        Keyed on the EXIT message specifically, not a substring ("heartbeat
+        thread") shared with the start message -- that shared substring let
+        a thread that logged its start and then hung forever still pass,
+        because the wait resolved on the start line and the timed `join`
+        below forced the thread to finish before the assertion ever ran.
+        `_stopping` is set BEFORE the wait, not after: the exit message can
+        only appear once the thread has been told to stop, so waiting on it
+        with nothing signalling that stop would just burn the whole
+        deadline every run."""
         monkeypatch.setattr(worker_module, "HEARTBEAT_SECONDS", 0.05)
 
         with caplog.at_level("INFO", logger="models.queue.worker"):
             worker._start_heartbeat_thread()
+            worker._stopping.set()
             try:
                 deadline = time.monotonic() + 2
                 while (
-                    not any("heartbeat thread" in r.getMessage() for r in caplog.records)
+                    not any("heartbeat thread exiting" in r.getMessage() for r in caplog.records)
                     and time.monotonic() < deadline
                 ):
                     time.sleep(0.01)
             finally:
-                worker._stopping.set()
                 worker._heartbeat_thread.join(timeout=5)
 
-        assert any("heartbeat thread" in r.getMessage() for r in caplog.records)
+        assert any("heartbeat thread exiting" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.django_db(transaction=True)
     def test_the_throttle_is_read_and_written_under_the_lock(self, worker):
