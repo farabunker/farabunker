@@ -23,10 +23,21 @@ pytestmark = pytest.mark.django_db
 
 SEEN: list[tuple[tuple, tuple]] = []
 
+# THE RESOLVER'S OWNER, DELIBERATELY DISTINCT FROM ANY CONVERSATION'S OWN
+# `owner_kind`/`owner_key` a test below sets up. `conversation_children`
+# passes a resolver's answer straight through without ever reading the
+# conversation's own owner columns for a CHILD's ticket -- a blank-equals-
+# blank pair here and on the conversation would let a regression that read
+# the conversation's owner instead pass unnoticed (both blank), so the two
+# stay unmistakably different values, never both blank and never sharing a
+# key.
+_RESOLVER_OWNER_KIND, _RESOLVER_OWNER_KEY = "resident_agent", "resolver-owner"
+
 
 def fake_artifact_children(refs, generation_ids) -> list[tuple[str, str, str]]:
     SEEN.append((tuple(refs), tuple(generation_ids)))
-    return [(key, "", "") for key in sorted(set(refs) | set(generation_ids))]
+    return [(key, _RESOLVER_OWNER_KIND, _RESOLVER_OWNER_KEY)
+            for key in sorted(set(refs) | set(generation_ids))]
 
 
 @pytest.fixture
@@ -161,10 +172,18 @@ class TestFindingTheGeneratedImages:
         assert list(refs) == ["output:3"]
 
     def test_an_unparseable_reference_is_dropped_and_never_raises(self):
-        conversation = make_conversation()
+        # `owner_kind`/`owner_key` set here to a value DIFFERENT from
+        # `_RESOLVER_OWNER_KIND`/`_RESOLVER_OWNER_KEY` above, on purpose:
+        # the assertion below names the RESOLVER's owner specifically, so
+        # a regression that stamped the child with the conversation's own
+        # owner instead of the resolver's would read "user"/"conversation-
+        # owner" here and fail loudly rather than matching by coincidence.
+        conversation = make_conversation(
+            owner_kind="user", owner_key="conversation-owner")
         make_turn(conversation=conversation, role="tool",
                   artifacts=["output:12:extra", "", "output:4"])
-        assert conversation_children(str(conversation.pk)) == [("vision_job", "output:4", "", "")]
+        assert conversation_children(str(conversation.pk)) == [
+            ("vision_job", "output:4", _RESOLVER_OWNER_KIND, _RESOLVER_OWNER_KEY)]
         refs, _ids = SEEN[0]
         assert list(refs) == ["output:4"]
 
@@ -248,28 +267,42 @@ class TestADuplicateDoesNotTicketTheOriginalsImages:
         """THE FIX MUST NOT OVER-EXCLUDE: a reference only THIS
         conversation's turns carry is unaffected, so an ordinary,
         un-shared delete still tickets its own images exactly as
-        before."""
-        conversation = make_conversation()
+        before.
+
+        `owner_kind`/`owner_key` set to a value distinct from the
+        resolver's own (`_RESOLVER_OWNER_KIND`/`_RESOLVER_OWNER_KEY`
+        above) so the assertion below can only pass on genuine pass-
+        through, never on a regression that read the conversation's own
+        owner instead."""
+        conversation = make_conversation(
+            owner_kind="user", owner_key="conversation-owner")
         make_turn(conversation=conversation, role="tool", artifacts=["output:9"])
-        assert conversation_children(str(conversation.pk)) == [("vision_job", "output:9", "", "")]
+        assert conversation_children(str(conversation.pk)) == [
+            ("vision_job", "output:9", _RESOLVER_OWNER_KIND, _RESOLVER_OWNER_KEY)]
 
     def test_once_the_other_conversation_is_itself_deleted_the_reference_tickets(self):
         """EVENTUALLY CONSISTENT, NOT PERMANENTLY SUPPRESSED: a
         conversation already ticketed (on its own way out) does not
         count as "another live conversation" -- once the original is
         itself deleted, the duplicate's own delete finally reaches the
-        job nothing else is still showing."""
+        job nothing else is still showing.
+
+        `duplicate`'s `owner_kind`/`owner_key` set to a value distinct
+        from the resolver's own, same reason as the sibling test above:
+        the assertion names the resolver's owner specifically."""
         agent = make_agent()
         original = make_conversation(agent=agent)
         make_turn(conversation=original, role="tool", artifacts=["output:5"])
-        duplicate = make_conversation(agent=agent)
+        duplicate = make_conversation(
+            agent=agent, owner_kind="user", owner_key="conversation-owner")
         make_turn(conversation=duplicate, role="tool", artifacts=["output:5"])
 
         DeletionTicket.objects.create(
             kind="conversation", key=str(original.pk),
             purge_on=timezone.localdate() + datetime.timedelta(days=30))
 
-        assert conversation_children(str(duplicate.pk)) == [("vision_job", "output:5", "", "")]
+        assert conversation_children(str(duplicate.pk)) == [
+            ("vision_job", "output:5", _RESOLVER_OWNER_KIND, _RESOLVER_OWNER_KEY)]
 
     def test_branching_and_deleting_the_branch_leaves_the_originals_image_untouched(
         self, real_registration,
@@ -545,11 +578,17 @@ class TestThePurgeTouchesNoImages:
 
 class TestTheChildrenArePairs:
     def test_each_job_key_becomes_a_vision_job_pair(self):
-        conversation = make_conversation()
+        # `owner_kind`/`owner_key` set to a value distinct from the
+        # resolver's own, same reason as `TestADuplicateDoesNotTicketThe
+        # OriginalsImages` above: the assertion names the resolver's
+        # owner specifically, so it can only pass on genuine pass-through.
+        conversation = make_conversation(
+            owner_kind="user", owner_key="conversation-owner")
         job_id = str(uuid.uuid4())
         make_turn(conversation=conversation, role="tool", artifacts=[],
                   data={"id": job_id, "status": "succeeded"})
-        assert conversation_children(str(conversation.pk)) == [("vision_job", job_id, "", "")]
+        assert conversation_children(str(conversation.pk)) == [
+            ("vision_job", job_id, _RESOLVER_OWNER_KIND, _RESOLVER_OWNER_KEY)]
 
     def test_a_key_that_is_not_a_uuid_answers_empty(self):
         assert conversation_children("not-a-uuid") == []
@@ -877,9 +916,13 @@ class TestTheFailedPurgeMarkRefusesRestore:
         # of the whole scenario.
         assert not doc_dir.exists()
 
-        still_stands = DeletionTicket.objects.filter(pk=ticket.pk).exists()
-        if not still_stands:
-            return  # the promise holds trivially: nothing left to offer
+        assert DeletionTicket.objects.filter(pk=ticket.pk).exists(), (
+            "the sweep's own except Exception is expected to swallow the "
+            "raise and leave the ticket standing -- if a future change "
+            "let the raise propagate and the ticket got deleted anyway, "
+            "that is the exact silent-no-op this test exists to catch, "
+            "not a trivially-held promise"
+        )
 
         ticket.refresh_from_db()
         assert ticket.content_unrecoverable is True, (

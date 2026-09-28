@@ -57,6 +57,22 @@ def _output(**overrides) -> GeneratedOutput:
     return GeneratedOutput.objects.create(**fields)
 
 
+# A REAL, non-blank owner for `TestMappingReferencesToJobs`'s and
+# `TestOnlyJobsThatExistComeBack`'s fixtures below, rather than the blank
+# pair `GenerationJob.owner_kind`/`owner_key` default to: a resolver that
+# stopped reading those columns at all -- hardcoded or defaulted the
+# triple's last two slots to `""` -- would still satisfy every assertion in
+# either class if the fixture's own owner were also left blank (blank
+# hardcode meets blank real value, indistinguishable). Naming this exact
+# pair in each assertion means it fails on a hardcode the same way it
+# passes on a genuine read. `_OTHER_OWNER_KIND`/`_OTHER_OWNER_KEY` is a
+# SECOND, DIFFERENT pair for the tests below that resolve two jobs in one
+# call, so an owner mixed up between the two entries fails too, not only a
+# blank-everywhere hardcode.
+_OWNER_KIND, _OWNER_KEY = "user", "9"
+_OTHER_OWNER_KIND, _OTHER_OWNER_KEY = "user", "11"
+
+
 class TestMappingReferencesToJobs:
     """`resolve_artifact_jobs` -- RESOLVES and deletes nothing. Its
     answer is what `agents.retention.conversation_children` turns into
@@ -64,31 +80,32 @@ class TestMappingReferencesToJobs:
     (see `retention.py`'s `resolve_artifact_jobs` docstring for why)."""
 
     def test_an_output_reference_resolves_its_whole_job(self):
-        job = _generation()
+        job = _generation(owner_kind=_OWNER_KIND, owner_key=_OWNER_KEY)
         output = _output(job=job)
         assert resolve_artifact_jobs([f"output:{output.pk}"], []) == [
-            (str(job.pk), "", "")]
+            (str(job.pk), _OWNER_KIND, _OWNER_KEY)]
 
     def test_two_outputs_of_one_job_resolve_to_one_key(self):
         """Each reference is one FK hop from its job and several outputs
         share one job, so the mapping dedupes BY JOB."""
-        job = _generation()
+        job = _generation(owner_kind=_OWNER_KIND, owner_key=_OWNER_KEY)
         first, second = _output(job=job, index=0), _output(job=job, index=1)
         assert resolve_artifact_jobs(
             [f"output:{first.pk}", f"output:{second.pk}"], []) == [
-            (str(job.pk), "", "")]
+            (str(job.pk), _OWNER_KIND, _OWNER_KEY)]
 
     def test_an_input_reference_resolves_through_its_own_table(self):
-        job = _generation()
+        job = _generation(owner_kind=_OWNER_KIND, owner_key=_OWNER_KEY)
         job_input = JobInput.objects.create(job=job, param_key="image",
                                             path="/dev/null",
                                             media_type="image/png")
         assert resolve_artifact_jobs([f"input:{job_input.pk}"], []) == [
-            (str(job.pk), "", "")]
+            (str(job.pk), _OWNER_KIND, _OWNER_KEY)]
 
     def test_a_bare_generation_id_is_accepted(self):
-        job = _generation()
-        assert resolve_artifact_jobs([], [str(job.pk)]) == [(str(job.pk), "", "")]
+        job = _generation(owner_kind=_OWNER_KIND, owner_key=_OWNER_KEY)
+        assert resolve_artifact_jobs([], [str(job.pk)]) == [
+            (str(job.pk), _OWNER_KIND, _OWNER_KEY)]
 
     def test_a_failed_job_with_no_output_is_reached_only_through_its_generation_id(self):
         """The docstring's own claim: a job that reached the engine and
@@ -96,28 +113,27 @@ class TestMappingReferencesToJobs:
         finds nothing for it -- the generation-id channel is the only
         way this column's purge reaches it."""
         job = _generation(status=GenerationJob.Status.FAILED,
-                          error="the engine could not be reached")
+                          error="the engine could not be reached",
+                          owner_kind=_OWNER_KIND, owner_key=_OWNER_KEY)
         assert not GeneratedOutput.objects.filter(job=job).exists()
-        assert resolve_artifact_jobs([], [str(job.pk)]) == [(str(job.pk), "", "")]
+        assert resolve_artifact_jobs([], [str(job.pk)]) == [
+            (str(job.pk), _OWNER_KIND, _OWNER_KEY)]
 
     def test_a_reference_and_an_id_naming_one_job_are_one_key(self):
-        job = _generation()
+        job = _generation(owner_kind=_OWNER_KIND, owner_key=_OWNER_KEY)
         output = _output(job=job)
         assert resolve_artifact_jobs(
-            [f"output:{output.pk}"], [str(job.pk)]) == [(str(job.pk), "", "")]
+            [f"output:{output.pk}"], [str(job.pk)]) == [
+            (str(job.pk), _OWNER_KIND, _OWNER_KEY)]
 
-    def test_the_jobs_own_owner_rides_along(self):
-        """THE ASSERTION THAT WOULD FLIP if `existing_job_ids` stopped
-        reading the owner columns: a job owned by a REAL principal, not
-        the default blank ("written before accounts existed") every
-        other fixture in this class leaves alone. `agents.retention.
-        conversation_children` passes this straight through so `identity.
-        retention.delete_content` can stamp the child ticket from THIS,
-        not from the conversation's own owner."""
-        job = _generation(owner_kind="user", owner_key="42")
+    def test_it_is_idempotent(self):
+        """RESOLVING twice is not DESTROYING twice: a second call answers
+        the SAME list, not a second, smaller one."""
+        job = _generation(owner_kind=_OWNER_KIND, owner_key=_OWNER_KEY)
         output = _output(job=job)
-        assert resolve_artifact_jobs([f"output:{output.pk}"], []) == [
-            (str(job.pk), "user", "42")]
+        first = resolve_artifact_jobs([f"output:{output.pk}"], [])
+        assert first == resolve_artifact_jobs([f"output:{output.pk}"], []) == [
+            (str(job.pk), _OWNER_KIND, _OWNER_KEY)]
 
     def test_a_uuid_that_matches_no_job_is_ignored(self):
         """The whole point of the existence check `resolve_artifact_jobs`
@@ -138,15 +154,6 @@ class TestMappingReferencesToJobs:
         caller who did anyway would not raise or count it."""
         assert resolve_artifact_jobs(["document:451"], []) == []
 
-    def test_it_is_idempotent(self):
-        """RESOLVING twice is not DESTROYING twice: a second call answers
-        the SAME list, not a second, smaller one."""
-        job = _generation()
-        output = _output(job=job)
-        first = resolve_artifact_jobs([f"output:{output.pk}"], [])
-        assert first == resolve_artifact_jobs([f"output:{output.pk}"], []) == [
-            (str(job.pk), "", "")]
-
     def test_it_goes_through_delete_job_so_the_files_and_the_sweep_run(self, monkeypatch):
         """Moved onto `purge_job`: the resolver above destroys nothing,
         so the delete-job-and-sweep contract now belongs to the handler
@@ -158,6 +165,20 @@ class TestMappingReferencesToJobs:
         job = _generation()
         purge_job(str(job.pk))
         assert calls == [job.pk]
+
+    def test_the_jobs_own_owner_rides_along(self):
+        """THE ASSERTION THAT WOULD FLIP if `existing_job_ids` stopped
+        reading the owner columns: a job owned by a REAL principal.
+        Kept as its own test, with its own owner pair distinct from
+        `_OWNER_KIND`/`_OWNER_KEY` above, so this class does not read as
+        pinned to one single fixed value everywhere -- `agents.retention.
+        conversation_children` passes this straight through so `identity.
+        retention.delete_content` can stamp the child ticket from THIS,
+        not from the conversation's own owner."""
+        job = _generation(owner_kind="user", owner_key="42")
+        output = _output(job=job)
+        assert resolve_artifact_jobs([f"output:{output.pk}"], []) == [
+            (str(job.pk), "user", "42")]
 
 
 class TestAFailedParseIsLoggedWithoutWhatItFailedToParse:
@@ -245,31 +266,32 @@ class TestOnlyJobsThatExistComeBack:
         assert resolve_artifact_jobs([], [str(job.pk)]) == []
 
     def test_a_live_job_and_a_gone_one_answer_only_the_live_one(self):
-        live = _generation()
+        live = _generation(owner_kind=_OWNER_KIND, owner_key=_OWNER_KEY)
         gone = _generation()
         services.delete_jobs([gone.pk])
         assert resolve_artifact_jobs([], [str(live.pk), str(gone.pk)]) == [
-            (str(live.pk), "", "")]
+            (str(live.pk), _OWNER_KIND, _OWNER_KEY)]
 
     def test_the_check_is_one_query_for_the_whole_batch(
             self, django_assert_num_queries):
         """Two ids, one existence query -- never one per id. The
         reference channel pays its own FK hop on top; this pins the
         check itself."""
-        first = _generation()
-        second = _generation()
+        first = _generation(owner_kind=_OWNER_KIND, owner_key=_OWNER_KEY)
+        second = _generation(owner_kind=_OTHER_OWNER_KIND, owner_key=_OTHER_OWNER_KEY)
         with django_assert_num_queries(1):
             assert resolve_artifact_jobs(
                 [], [str(first.pk), str(second.pk)]) == sorted(
-                    [(str(first.pk), "", ""), (str(second.pk), "", "")])
+                    [(str(first.pk), _OWNER_KIND, _OWNER_KEY),
+                     (str(second.pk), _OTHER_OWNER_KIND, _OTHER_OWNER_KEY)])
 
     def test_a_reference_costs_its_hop_and_the_check(
             self, django_assert_num_queries):
-        job = _generation()
+        job = _generation(owner_kind=_OWNER_KIND, owner_key=_OWNER_KEY)
         output = _output(job=job)
         with django_assert_num_queries(2):
             assert resolve_artifact_jobs([f"output:{output.pk}"], []) == [
-                (str(job.pk), "", "")]
+                (str(job.pk), _OWNER_KIND, _OWNER_KEY)]
 
     def test_both_channels_pay_one_check_between_them(
             self, django_assert_num_queries):
@@ -278,13 +300,14 @@ class TestOnlyJobsThatExistComeBack:
         existence query for the id channel. A regression that checked
         each channel separately would still pass every other pin here
         (each is single-channel) but would cost 3, not 2."""
-        job = _generation()
+        job = _generation(owner_kind=_OWNER_KIND, owner_key=_OWNER_KEY)
         output = _output(job=job)
-        other = _generation()
+        other = _generation(owner_kind=_OTHER_OWNER_KIND, owner_key=_OTHER_OWNER_KEY)
         with django_assert_num_queries(2):
             assert resolve_artifact_jobs(
                 [f"output:{output.pk}"], [str(other.pk)]) == sorted(
-                    [(str(job.pk), "", ""), (str(other.pk), "", "")])
+                    [(str(job.pk), _OWNER_KIND, _OWNER_KEY),
+                     (str(other.pk), _OTHER_OWNER_KIND, _OTHER_OWNER_KEY)])
 
 
 class TestPurgeJob:
