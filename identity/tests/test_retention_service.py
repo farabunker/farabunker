@@ -613,6 +613,58 @@ class TestTheSweep:
         assert len(warnings) == 1 and warnings[0].exc_info is None
         assert len(errors) == 1 and errors[0].exc_info is not None
 
+    def test_a_refused_childs_own_ticket_is_named_not_the_parents(self, caplog):
+        """An operator watching this log is diagnosing a FAMILY that will
+        not purge; the ticket that actually refused is `doc-1` (`fake_
+        children`'s first pair, and `refused` raises unconditionally, so
+        it is always the one `_purge_child` reaches first), not the
+        conversation the click addressed. Naming the parent here tells
+        the operator the wrong row to go look at."""
+        register_retention_handler(RetentionHandler(
+            kind=KIND_DOCUMENT, key="t.document", label="Document",
+            handler=f"{__name__}.refused"))
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        DeletionTicket.objects.filter(pk=parent.pk).update(
+            purge_on=timezone.localdate() - datetime.timedelta(days=1))
+
+        with caplog.at_level(logging.WARNING):
+            assert service.sweep() == 0
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        message = warnings[0].getMessage()
+        assert "document:doc-1" in message
+        assert f"conversation:{parent.key}" not in message
+
+    def test_a_second_childs_raising_ticket_is_named_not_the_parents(self, caplog):
+        """Same diagnosis for the OTHER exception branch (`logger.
+        exception`, not `logger.warning`): `document_handler_second_
+        child_raises` only raises on `doc-2`, so the name in the log
+        must be `doc-2` -- neither the parent conversation nor `doc-1`,
+        which purged cleanly before the sibling failed."""
+        register_retention_handler(RetentionHandler(
+            kind=KIND_DOCUMENT, key="t.document", label="Document",
+            handler=f"{__name__}.document_handler_second_child_raises"))
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        DeletionTicket.objects.filter(pk=parent.pk).update(
+            purge_on=timezone.localdate() - datetime.timedelta(days=1))
+
+        with caplog.at_level(logging.WARNING):
+            assert service.sweep() == 0
+
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(errors) == 1
+        message = errors[0].getMessage()
+        assert "document:doc-2" in message
+        assert "document:doc-1" not in message
+        assert f"conversation:{parent.key}" not in message
+
 
 class TestStanding:
     def test_an_owner_and_a_sees_all_content_principal_may_purge_and_a_stranger_may_not(self):

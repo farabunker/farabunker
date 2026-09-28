@@ -668,8 +668,21 @@ def purge_ticket(actor, ticket, *, source: str = SOURCE_WEB,
         removed = run_retention(current.kind, current.key,
                                 on_files_band=mark_files_band_reached)
         for child in children:
-            child_removed = _purge_child(actor, child, source=source, row=row,
-                                         on_files_band=mark_files_band_reached)
+            # A SECOND PLAIN PYTHON ATTRIBUTE ON THE SAME `ticket` OBJECT,
+            # the caller's own reference, for the same reason
+            # `_files_band_reached` above is one: a raise here rolls back
+            # the transaction but not this attribute, so `_purge_due`
+            # can still read WHICH ticket actually raised after the
+            # unwind, instead of only knowing which family it was in.
+            # Set right before the re-raise, never cleared on success, so
+            # it always names the child whose own handler failed, not
+            # merely the last one this loop reached.
+            try:
+                child_removed = _purge_child(actor, child, source=source, row=row,
+                                             on_files_band=mark_files_band_reached)
+            except Exception:
+                ticket._failed_ticket = child
+                raise
             for child_label, count in child_removed.items():
                 removed[child_label] = removed.get(child_label, 0) + count
         kind, key, label = current.kind, current.key, current.label
@@ -727,9 +740,15 @@ def sweep(*, limit: int = SWEEP_LIMIT, source: str = SOURCE_WEB) -> int:
     default.
 
     EACH TICKET IN ITS OWN TRANSACTION, so one failing ticket does not
-    block the rest of the batch. The failure is logged with its kind and
-    key -- structural, never content, the shape `tools/rag/jobs.py` uses
-    throughout -- and the ticket stays due for the next pass.
+    block the rest of the batch. The failure is logged with the kind and
+    key of the ticket whose OWN handler actually raised -- a child's,
+    when a child's did, never the parent this pass started from -- so an
+    operator reading the line knows which row to go look at; structural,
+    never content, the shape `tools/rag/jobs.py` uses throughout. The
+    ticket that stays due for the next pass is still the parent this
+    pass started from, regardless of which family member's handler
+    raised: a due ticket names what the next sweep will retry, and
+    retrying starts from the top of the family every time.
 
     A `RetentionRefused` IS NOT AN ERROR AND IS CAUGHT FIRST: it is a
     handler saying "not now" for an operator-readable reason -- a
@@ -800,15 +819,24 @@ def _purge_due(due, *, source: str = SOURCE_WEB) -> int:
         try:
             purge_ticket(SERVICE_PRINCIPAL, ticket, source=source)
         except RetentionRefused as exc:
+            # `purge_ticket` marks `ticket._failed_ticket` with the CHILD
+            # whose own handler actually raised, when that is what
+            # happened -- an operator reading this line is diagnosing a
+            # family that will not purge, and the ticket that refused is
+            # what tells them which row to go look at, not the parent
+            # this pass started from. Unset (this item's own handler
+            # refused, no child involved) falls back to `ticket` itself.
+            failed = getattr(ticket, "_failed_ticket", ticket)
             logger.warning(
                 "identity.retention: purge refused for %s:%s; it stays due -- %s",
-                ticket.kind, ticket.key, exc)
+                failed.kind, failed.key, exc)
             record_failed_purge(ticket)
             continue
         except Exception:  # noqa: BLE001 -- one bad ticket, not a bad batch
+            failed = getattr(ticket, "_failed_ticket", ticket)
             logger.exception(
                 "identity.retention: purge failed for %s:%s; it stays due",
-                ticket.kind, ticket.key)
+                failed.kind, failed.key)
             record_failed_purge(ticket)
             continue
         purged += addressed
