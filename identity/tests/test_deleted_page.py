@@ -10,7 +10,7 @@ from django.utils import timezone
 from identity.contracts import cascades as cascades_module
 from identity.contracts import retention as copy
 from identity.contracts.actions import CONTENT_PURGED, CONTENT_RESTORED
-from identity.contracts.cascades import RetentionHandler, register_retention_handler
+from identity.contracts.cascades import ORDER_FILES, RetentionHandler, register_retention_handler
 from identity.models import AuditEvent, DeletionTicket, IdentitySettings
 from identity.tests._helpers import (
     make_conversation, make_user, posture, sign_in, user_principal,
@@ -22,6 +22,22 @@ pytestmark = pytest.mark.django_db
 
 def noop(key: str) -> int:
     return 0
+
+
+def files_band_refuses(key: str) -> int:
+    """A REAL files-band handler, for the two tests below that prove the
+    view's own `record_failed_purge` calls actually mark a ticket --
+    `identity.contracts.retention.RetentionRefused` propagating from a
+    handler `deleted_purge` never monkeypatches, unlike the refusal
+    tests in `TestRestoreAndPurge` above, which replace `purge_ticket`
+    itself and so never reach either mark."""
+    raise copy.RetentionRefused("a worker still holds this item")
+
+
+def files_band_breaks(key: str) -> int:
+    """The OTHER catch's real counterpart: an ordinary exception from a
+    files-band handler, for `deleted_purge`'s bare `except Exception`."""
+    raise RuntimeError("disk is unavailable after removing bytes")
 
 
 @pytest.fixture(autouse=True)
@@ -388,6 +404,65 @@ class TestRestoreAndPurge:
         assert response.redirect_chain[0][1] == 302
         assert views._RESTORE_FAILED_MESSAGE in response.content.decode()
         assert DeletionTicket.objects.filter(pk=ticket.pk).exists()
+
+
+class TestTheViewsOwnFailedPurgeMarkIsReal:
+    """`identity.views.deleted_purge`'s two `retention.record_failed_
+    purge(ticket)` calls (the refusal-type catch and the bare `except
+    Exception` beside it) had no pin that could see them: both existing
+    refusal tests in `TestRestoreAndPurge` above monkeypatch `views.
+    retention.purge_ticket` itself, so `_files_band_reached` is never
+    set on the ticket they hold and `record_failed_purge` is a
+    guaranteed no-op either way -- deleting either call would not turn
+    those tests red. These drive a REAL files-band handler through the
+    real POST instead, with nothing monkeypatched, so the mark is what
+    is actually asserted. The click path is the one whose false mark is
+    never retried (a ticket purged before its date is not due), which
+    is exactly why an unpinned marking line here matters most."""
+
+    def test_a_refusal_from_a_real_handler_marks_the_ticket_and_removes_restore(
+            self, client):
+        register_retention_handler(RetentionHandler(
+            kind=copy.KIND_ASK, key="t.page", label="Ask records",
+            handler=f"{__name__}.files_band_refuses", order=ORDER_FILES))
+        with posture("personal"):
+            user = make_user()
+            sign_in(client, user)
+            ticket = _ticket_for(user)
+            response = client.post(
+                reverse("identity-deleted-purge", args=[ticket.pk]), follow=True)
+            assert response.status_code == 200
+            assert "a worker still holds this item" in response.content.decode()
+            ticket.refresh_from_db()
+            assert ticket.content_unrecoverable is True
+
+            body = client.get(reverse("identity-deleted")).content.decode()
+        main = body.split("<main>", 1)[1].split("</main>", 1)[0]
+        restore_url = reverse("identity-deleted-restore", args=[ticket.pk])
+        assert restore_url not in main
+        assert copy.RESTORE_REFUSED_LINE in main
+
+    def test_a_broken_handler_marks_the_ticket_and_removes_restore(self, client):
+        register_retention_handler(RetentionHandler(
+            kind=copy.KIND_ASK, key="t.page", label="Ask records",
+            handler=f"{__name__}.files_band_breaks", order=ORDER_FILES))
+        from identity import views
+        with posture("personal"):
+            user = make_user()
+            sign_in(client, user)
+            ticket = _ticket_for(user)
+            response = client.post(
+                reverse("identity-deleted-purge", args=[ticket.pk]), follow=True)
+            assert response.redirect_chain[0][1] == 302
+            assert views._PURGE_FAILED_MESSAGE in response.content.decode()
+            ticket.refresh_from_db()
+            assert ticket.content_unrecoverable is True
+
+            body = client.get(reverse("identity-deleted")).content.decode()
+        main = body.split("<main>", 1)[1].split("</main>", 1)[0]
+        restore_url = reverse("identity-deleted-restore", args=[ticket.pk])
+        assert restore_url not in main
+        assert copy.RESTORE_REFUSED_LINE in main
 
 
 class TestAFailedPurgeMarkRefusesRestore:
