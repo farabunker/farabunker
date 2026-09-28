@@ -71,9 +71,11 @@ Rules that are meant to hold in **every** profile:
   join theirs.
 
 That is the design, not yet the delivered state: the ISOLATION layer that would enforce
-these is **not built yet** — `posture/` is a stub — and today the property rests on
-policy and review, not on something the box enforces for you. No shipped runtime path
-reaches a public host today, but nothing below the application stops one from trying.
+these is **not built yet** — `posture/` is a stub — and today the property rests on policy
+and review, plus a repository test that fails the build if a non-local host literal
+appears in shipped code (it cannot see runtime configuration), not on something the box
+enforces for you. No shipped runtime path reaches a public host today, but nothing below
+the application stops one from trying.
 See [posture/README.md](../posture/README.md) for the planned enforcement.
 
 > Design note: because home automation needs a LAN to reach Zigbee/Z-Wave/Wi-Fi devices,

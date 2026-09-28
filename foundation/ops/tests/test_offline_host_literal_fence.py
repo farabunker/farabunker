@@ -32,6 +32,15 @@ starts -- which is where the real exposure would live if this claim were
 ever false. This gate stops literal drift; it does not enforce the
 offline claim, and nothing here should be read as doing so.
 
+Two more blind spots worth naming plainly: non-Python tracked files --
+templates, JavaScript, compose files -- are not scanned at all (today's
+templates carry only `host.docker.internal` placeholder text, so the
+vector is clean, but it is a gap in this gate, not a closed door). And a
+schemeless host literal -- a bare `"api.example.com"` with no `http(s)://`
+in front -- cannot be scanned without drowning in dotted-path false
+positives (module paths, version strings, anything else with a dot in
+it), so it is documented here rather than chased.
+
 SCOPE. Tracked `.py` files only, and only the STRING LITERALS the program
 actually uses as values -- not comments (those are not source text this
 walk visits at all) and not DOCSTRINGS (the first bare string statement of
@@ -40,7 +49,12 @@ a value the program reads or sends anywhere, so an illustrative address in
 one -- `models/registry/views.py`'s attack-scenario walkthrough quotes
 `box.lan` and the RFC 2606 reserved `gpu-box.example` domain to explain
 `_override_is_permitted`'s allowlist -- is not the hazard this gate exists
-for. Test modules are excluded the same way `test_engine_endpoint_fence.py`
+for. That exclusion is a drift-model judgment, not a claim that a
+docstring cannot carry a live value -- `module.__doc__` plus a split is a
+working fetch target, in principle -- and it does not lower the
+adversarial bar: a plain f-string is a cheaper hiding place than a
+docstring, and is already admitted above as invisible to this gate. Test
+modules are excluded the same way `test_engine_endpoint_fence.py`
 excludes them: this gate polices what SHIPS, not test fixtures.
 
 WHAT COUNTS AS LOCAL. The literal loopback/any-address forms
@@ -65,7 +79,7 @@ import subprocess
 
 from foundation.ops.tests._helpers import REPO_ROOT, _is_test_file
 
-_URL_RE = re.compile(r"https?://([^\s\"'/]+)")
+_URL_RE = re.compile(r"(?:https?|wss?)://([^\s\"'/]+)")
 
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "0.0.0.0", "::1", "host.docker.internal"})
 
@@ -191,7 +205,14 @@ def test_the_gate_is_not_vacuous_it_catches_the_display_urls_it_exempts():
     still find exactly the display hosts these three adapters carry today
     -- so a broken regex, a broken docstring filter, or an
     accidentally-narrowed file list goes red HERE, rather than the main
-    gate quietly passing because it inspects nothing."""
+    gate quietly passing because it inspects nothing.
+
+    One residual this pin does not close: it pins the host SET per exempt
+    file, so a NEW USE of an ALREADY-PINNED host in the same file -- a
+    genuinely fetched `github.com` URL added to the ComfyUI adapter, say
+    -- passes both the main gate (the file is exempt) and this pin (the
+    set is unchanged). No literal scan can tell a fetch from a display
+    string; that case is carried by review, not by this test."""
     found = {
         relative: {host for _lineno, host in _offending_hosts(relative)}
         for relative, _reason in EXEMPT
