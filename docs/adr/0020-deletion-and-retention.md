@@ -306,14 +306,16 @@ that vagueness is what let two real gaps hide behind a green gate.
   arrived with a parent. A conversation with two generated images, whose second image's handler
   raises after the first image's file is already gone, used to leave the first image's ticket
   standing, unmarked, offering Restore for a file that no longer exists. `record_failed_purge` now
-  writes `content_unrecoverable` on the ticket it was called with AND every ticket presently linked
-  to it as a child, in one update — the family's files band was entered, so the whole family is
-  marked, on the same "when in doubt, refuse the restore, never risk handing one back" principle
-  the single-ticket mark already carried. That is wider than "only the ticket whose own bytes are
-  gone" — a sibling whose own handler never even ran can be marked alongside one whose bytes truly
-  are — and that is accepted for the same reason `run_retention`'s next paragraph accepts its own
-  false positive: a wrong refusal costs a click; a wrong restore hands back an item that is not the
-  one the person remembers.
+  writes `content_unrecoverable` on the ticket it was called with and every child THIS ATTEMPT
+  ACTUALLY REACHED, in one update — the family's files band was entered, so the reached part of the
+  family is marked, on the same "when in doubt, refuse the restore, never risk handing one back"
+  principle the single-ticket mark already carried. That is wider than "only the ticket whose own
+  bytes are gone" — a sibling whose own handler never even ran can be marked alongside one whose
+  bytes truly are — and that is accepted for the same reason `run_retention`'s next paragraph
+  accepts its own false positive: a wrong refusal costs a click; a wrong restore hands back an item
+  that is not the one the person remembers. IT STOPS AT "REACHED", THOUGH: once a child ticket could
+  name an owner other than the clicker's own (decision 11), "every ticket presently linked as a
+  child" started catching two children `_purge_child` is never even called for — see decision 13.
 - **A refusal could follow bytes already destroyed, and never marked.** `RetentionRefused` is not
   an error — a handler saying "not now" for an operator-readable reason — so it is caught
   separately from an ordinary exception, before `record_failed_purge` was ever called. But a
@@ -507,6 +509,58 @@ when someone deletes the line above it for looking similar.
 column's own fix for `remove_job_files` and `remove_staged_input` landed on a local branch, unpushed
 as of this writing — cited here by file:line rather than by SHA until it merges.
 
+### 13. A failed purge's mark must never reach a child the click was forbidden to touch
+
+Decision 11 widened `purge_ticket` to skip and detach a child the clicker does not own, and decision
+9's own family-wide mark (`record_failed_purge`'s `Q(pk=ticket.pk) | Q(parent_id=ticket.pk)`) was
+written before that skip existed. After decision 11 landed, the two no longer agreed: at the moment
+`record_failed_purge` runs, `purge_ticket`'s transaction has already rolled back, so EVERY child
+still carries `parent_id` — including a not-owned child and a held child, both of which
+`_purge_child` was never called for, and both of which are detached only on a SUCCESSFUL purge that
+this failed one never reached. A transient error on the conversation's own files-band handler
+therefore marked a child the click was structurally incapable of touching, for a person who clicked
+nothing and owns content that was provably still intact. That inverted decision 11's own promise —
+"their owner keeps the row, the countdown and the ability to restore" — and, for a not-owned child,
+landed on a third party rather than on the clicker whose wrong refusal decision 9 already accepted
+the cost of.
+
+**What closes it.** `purge_ticket` stashes the pks it is actually about to hand to `_purge_child` —
+`ticket._attempted_child_pks`, a second plain Python attribute beside `_files_band_reached`, set
+before either child loop can raise so it survives the rollback the identical way. `record_failed_
+purge` filters to `Q(pk=ticket.pk) | Q(pk__in=attempted)` instead of `parent_id`, so a not-owned or
+held child's own rollback — always clean, since its handler never ran — is never mistaken for a
+bytes-at-risk one. Decision 9's family-wide over-marking is otherwise unchanged: a child the clicker
+DOES own, whose own handler never got to run before a sibling's failed, is still marked alongside
+one whose bytes are truly gone, for the reason decision 9 already gives.
+
+**What this does not change.** Decision 9's own accepted residue — a files-band handler that raises
+before touching a byte still marks the ticket, and nothing un-marks a click-path ticket a false
+alarm like that leaves behind — is untouched; this decision narrows WHO can be marked by a given
+failure, not WHETHER an owned family can still be over-marked by one.
+
+### 14. A child with a genuinely blank owner belongs to the conversation's own owner
+
+Decision 11 stamps a child ticket from the content's own owner columns, read off the row itself. A
+`GenerationJob` written before `tools/vision/migrations/0006_generationjob_owner.py` added those two
+columns carries `("", "")` — that migration is a bare `AddField` pair with no backfill — and a blank
+pair is un-ownable: `Principal.__post_init__` forbids a blank key outright, so no principal can ever
+satisfy `may_read_owned_row(actor, child)`. Decision 11's own permanent-delete gate asked exactly
+that predicate and nothing else, so an explicit "Delete permanently" silently skipped a pre-tracking
+image on every posture, including the open-box case where the clicker is the only principal there
+is — the conversation vanished, the audit event was written, and the picture was not destroyed.
+
+**What closes it.** An owner ruling (2026-09-28): a genuinely blank owner is treated as belonging to
+the conversation's own owner, so the permanent delete destroys a pre-tracking image exactly as it
+always did before ownership was stamped at all. `identity/retention.py::_may_destroy_child(actor,
+current, child)` holds the one extra condition — `child.owner_kind == "" and child.owner_key == ""`
+reads `current`'s (the parent ticket's) own owner columns instead of `child`'s — and nothing wider.
+It is deliberately NOT `may_purge`'s own `sees_all_content or may_read_owned_row` mirror: that would
+hand a content-reading administrator power over another member's genuinely OWNED content, the exact
+shape decision 11 exists to deny. A child with real, non-blank owner columns is unaffected by this
+decision at all. No migration and no backfill for `0006`'s two columns — the owner considered and
+declined one for this branch; a blank pair stays blank on disk, and only the permanent-delete
+predicate treats it specially.
+
 ## Where the landed tree differs from the spec
 
 - **The queue half — `models/queue/retention.py`, the `_prune_finished_jobs` age condition and
@@ -526,6 +580,11 @@ as of this writing — cited here by file:line rather than by SHA until it merge
 - **The Deleted page's URL is `/identity/deleted/`, not `/settings/deleted/`.** The spec's
   §3.13 describes the second; `identity/urls.py` mounts the three routes under the column's own
   `/identity/` prefix, consistent with every other identity settings page in the tree.
+- **`resolve_artifact_jobs`'s signature is no longer `(key: str) -> list[str]`.** The frozen spec
+  document still prints that shape; decision 11's ownership widening changed it to `list[tuple[str,
+  str, str]]` (`(job_id, owner_kind, owner_key)`), and every other resolver `RetentionHandler.
+  children` names widened the same way. The spec is left as written rather than edited in place;
+  this bullet is the landed tree's own record of the divergence.
 
 ## Consequences
 

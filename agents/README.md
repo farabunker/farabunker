@@ -967,13 +967,33 @@ purge, always, with no setting and no second date.**
 function at all** — that is the whole point of `children`. At DELETE
 time (`identity.retention.delete_content`, before any row above is
 touched), `agents.retention.conversation_children` runs the same
-collect step, hands the refs and generation ids to the ONE registered
-artifact-children slot (`agents.contracts.artifacts.
-register_artifact_children` / `artifact_children`, resolved by dotted
-path, never imported — `agents/` may not import `tools/` at all), and
-turns every job key the resolver answers into a `("vision_job",
-<job key>)` pair. `identity.retention.delete_content` writes each pair
-as an ordinary `DeletionTicket`, linked back to the conversation's own
+collect step, EXCLUDES whatever `_still_referenced_elsewhere` finds
+some other, undeleted conversation still carrying (a reference this
+conversation shares with a live thread — a branch, a duplicate — names
+a job that thread is still showing, and must not be ticketed on this
+conversation's date instead of its own; the exclusion is eventually
+consistent, not a permanent one — once every conversation naming a job
+is itself ticketed, the last one's own delete finally reaches it), hands
+what remains to the ONE registered artifact-children slot
+(`agents.contracts.artifacts.register_artifact_children` /
+`artifact_children`, resolved by dotted path, never imported —
+`agents/` may not import `tools/` at all), and turns every `(job_key,
+owner_kind, owner_key)` triple the resolver answers into a
+`("vision_job", <job key>, <owner_kind>, <owner_key>)` quadruple. THE
+OWNER IS THE IMAGE'S OWN, NOT THE CONVERSATION'S — a workstream share
+that let a second principal post and generate inside somebody else's
+conversation, or an administrator's duplicate, means the two can
+differ, and `identity.retention.delete_content` stamps the child
+ticket from that owner directly (owner ruling, 2026-09-28), since
+`identity/` cannot look an owner up itself (rule 4). A permanent
+delete of the parent then destroys only a child the clicker owns
+(a genuinely ownerless child counts as the conversation's own, since
+no principal can ever match a blank pair); one owned by somebody
+else keeps its own ticket, date and Restore, detached rather than
+destroyed — the sweep, which always purges as the service principal,
+still takes everything on the date regardless of whose it is.
+`identity.retention.delete_content` writes each quadruple as an
+ordinary `DeletionTicket`, linked back to the conversation's own
 ticket via `parent`, with the SAME `purge_on` date. With nothing
 registered on the slot (vision uninstalled) `conversation_children`
 answers `[]`, and a chat delete tickets only the chat — the honest

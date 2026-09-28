@@ -476,13 +476,18 @@ row rolled back and the ticket standing, but the bytes a filesystem
 delete already removed do not come back with it. `identity.retention.
 may_restore` refuses Restore for a ticket in that state — existing and
 being restorable have stopped being the same question for that one row.
-THE MARK COVERS THE WHOLE FAMILY A FAILED ATTEMPT TOUCHED, not only the
-ticket `record_failed_purge` was called with: the flag it reads is one
-Python attribute set the instant the family's files band is entered,
-by ANY member's own handler, so a child whose own bytes really were
+THE MARK COVERS THE WHOLE FAMILY A FAILED ATTEMPT COULD HAVE REACHED,
+not only the ticket `record_failed_purge` was called with, and NEVER A
+CHILD IT WAS FORBIDDEN TO TOUCH: the flag it reads is one Python
+attribute set the instant the family's files band is entered, by ANY
+attempted member's own handler, so a child whose own bytes really were
 destroyed rolls back to a row that looks untouched on exactly the same
 failed transaction its parent does, and would otherwise keep a working
-Restore button pointed at a file that is gone.
+Restore button pointed at a file that is gone. `purge_ticket` stashes
+the pks it actually attempted alongside that flag, so a child the
+clicker does not own (below) or a held one — neither ever handed to a
+handler — is never mistaken for one whose bytes were at risk, even
+though both are still linked by `parent_id` at rollback time.
 
 "Delete permanently" keeps working for a marked ticket on every posture
 where standing already admits it — the point of the mark is that
@@ -583,6 +588,24 @@ sweep skip every child on the box and leak the whole feature. `purge_
 ticket` tells the two apart by comparing the acting principal to the
 service principal directly, and only withholds a child from the
 purge loop when the answer is "somebody really clicked this."
+
+**A GENUINELY BLANK OWNER (`("", "")`) IS THE ONE EXCEPTION, and it
+counts as the CONVERSATION'S OWN owner, never as a stranger's** (owner
+ruling, 2026-09-28). Every `GenerationJob` written before `tools/vision/
+migrations/0006_generationjob_owner.py` added its two owner columns
+carries a blank pair to this day — that migration backfilled nothing —
+and no principal can ever own one: `Principal.__post_init__` forbids a
+blank key outright. Left to `may_read_owned_row(actor, child)` alone, a
+blank pair would be un-ownable by anybody, so a permanent delete would
+silently skip a pre-tracking image on every posture, forever. `identity.
+retention._may_destroy_child` reads the PARENT TICKET's own owner
+columns for exactly this one case and nothing wider — it is deliberately
+not `may_purge`'s own `sees_all_content or may_read_owned_row` mirror,
+so a content-reading administrator still cannot destroy a child that is
+really owned by somebody else. No migration and no backfill: the owner
+declined one for this branch, and only the permanent-delete predicate
+treats a blank pair specially — the columns themselves stay blank on
+disk.
 
 Three things follow from the parent link, unchanged by any of the
 above: restoring the parent removes the children it wrote (ownership is

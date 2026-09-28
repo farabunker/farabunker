@@ -974,18 +974,32 @@ names `tools/vision/retention.py::resolve_artifact_jobs`, and a deleted
 conversation hands it the same two things it collects at delete time —
 the `output:<id>`/`input:<id>` artifact references its turns carried, and
 the generation ids sitting in `Turn.data["id"]`. `resolve_artifact_jobs`
-maps both channels to the keys of `GenerationJob`s that still exist — an
-`output`/`input` reference is one FK hop from its job, and several outputs
-share one job, so the mapping dedupes by job — and DESTROYS NOTHING:
-`agents.retention.conversation_children` turns every key it answers into a
-ticket of its own, `vision_job`, linked back to the conversation's own
-ticket as a child. The resolver checks existence, once, for the whole
-batch, because a stored generation id can outlive the job it names — the
-turn keeps the id after the picture was deleted from the gallery — and
-every key it answers is about to become something that must be true: a
-ticket for a job nobody has would be a "Generated image" row on the
-Deleted page with a date and a Restore button, naming a picture nobody
-can restore and nothing will ever destroy.
+maps both channels to `(job_id, owner_kind, owner_key)` triples for the
+`GenerationJob`s that still exist — an `output`/`input` reference is one
+FK hop from its job, and several outputs share one job, so the mapping
+dedupes by job — and DESTROYS NOTHING: `agents.retention.
+conversation_children` turns every triple it answers into a ticket of
+its own, `vision_job`, linked back to the conversation's own ticket as a
+child. THE OWNER RIDES ALONG so `identity.retention.delete_content` can
+stamp that child ticket from the IMAGE's own owner, never the
+conversation's (owner ruling, 2026-09-28) — `identity/` may not import
+this column and so cannot look the owner up itself (rule 4), and a
+workstream share or an administrator's duplicate can leave a generated
+image owned by somebody other than the conversation it sits inside. That
+owner is what a permanent delete of the parent conversation checks
+before destroying this child at all: the clicker's own images go with
+it, one belonging to somebody else keeps its own ticket, date and
+Restore instead (a genuinely ownerless job — every row written before
+this column's owner columns existed — counts as the conversation's own,
+since no principal can ever match a blank pair); the sweep is exempt
+from that check entirely and always takes everything on the date,
+whoever it belongs to. The resolver checks existence, once, for the
+whole batch, because a stored generation id can outlive the job it
+names — the turn keeps the id after the picture was deleted from the
+gallery — and every key it answers is about to become something that
+must be true: a ticket for a job nobody has would be a "Generated
+image" row on the Deleted page with a date and a Restore button, naming
+a picture nobody can restore and nothing will ever destroy.
 
 The second registration is `tools/vision/retention.py::purge_job`, the
 `vision_job` kind's handler (`identity.contracts.cascades.RetentionHandler`,
