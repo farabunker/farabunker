@@ -40,6 +40,7 @@ from django.utils.module_loading import import_string
 
 from agents.contracts.artifacts import artifact_children, parse_artifact
 from agents.models import Conversation, Share, ToolInvocation, Turn
+from identity.contracts.cascades import ChildTicket
 from identity.contracts.retention import KIND_CONVERSATION, KIND_VISION_JOB
 from identity.retention import ticketed_keys
 
@@ -290,7 +291,7 @@ def _still_referenced_elsewhere(conversation_id, refs, generation_ids):
     return still_ref, still_gen
 
 
-def conversation_children(key: str) -> list[tuple[str, str, str, str]]:
+def conversation_children(key: str) -> list[ChildTicket]:
     """The tickets that go with this conversation's own: one per
     generation its turns reached, each carrying the OWNER OF THAT
     GENERATION -- not the conversation's own owner, which can differ
@@ -334,6 +335,6 @@ def conversation_children(key: str) -> list[tuple[str, str, str, str]]:
         conversation_id, refs, generation_ids)
     refs = [reference for reference in refs if reference not in still_ref]
     generation_ids = [gid for gid in generation_ids if gid not in still_gen]
-    return [(KIND_VISION_JOB, str(job_key), str(owner_kind), str(owner_key))
+    return [ChildTicket(KIND_VISION_JOB, str(job_key), str(owner_kind), str(owner_key))
             for job_key, owner_kind, owner_key
             in import_string(dotted)(refs, generation_ids)]

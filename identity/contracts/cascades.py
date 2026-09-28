@@ -20,6 +20,7 @@ Pure: `handler` is a DOTTED-PATH STRING, resolved at delete time by
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import NamedTuple
 
 from identity.contracts.retention import RETENTION_KINDS
 
@@ -99,6 +100,49 @@ ORDER_ROWS = 100
 ORDER_FILES = 200
 
 
+class ChildTicket(NamedTuple):
+    """One entry a `RetentionHandler.children` resolver answers: a single
+    item that goes with the parent's own ticket, and who it belongs to.
+
+    `kind`       -- one of `identity.contracts.retention.RETENTION_KINDS`.
+    `key`        -- the child's own stable identifier, as a string.
+    `owner_kind` -- one of `identity.contracts.principals.PRINCIPAL_KINDS`,
+                    or blank alongside a blank `owner_key` for content
+                    stamped before an owner column existed at all (every
+                    `GenerationJob` row `tools/vision/migrations/
+                    0006_generationjob_owner.py` added the columns to
+                    without backfilling). `identity.retention.
+                    delete_content` REJECTS anything else, loudly, before
+                    a child ticket is ever written -- see its own
+                    validation for why.
+    `owner_key`  -- the owner's own key, as a string; blank only
+                    alongside a blank `owner_kind`.
+
+    A NAMED TUPLE, NOT A DATACLASS, ON PURPOSE, AND A DROP-IN FOR THE
+    SHAPE IT REPLACES: a resolver already returns a plain 4-tuple in
+    this exact order, so `ChildTicket(*that_tuple)` is the same call
+    that shape already supports, and every existing resolver keeps
+    working unchanged. What a frozen NamedTuple adds is at the READING
+    end, not the writing end: `child.owner_kind` cannot be confused with
+    `child.owner_key` the way `child[2]` and `child[3]` -- or four
+    positional loop variables in someone else's order -- can be, with
+    nothing to catch a swap. `DeletionTicket.owner_kind` is a bare
+    `CharField` with no choices, so a transposed pair used to write
+    silently: an un-ownable ticket, invisible on every Deleted page,
+    reachable only by the sweep. This type does not validate the pair
+    itself (a NamedTuple has no `__post_init__` to hook, and validating
+    here would run once per resolver call rather than once per child
+    actually being ticketed) -- `identity.retention.delete_content`
+    validates it at the one point that matters, immediately before the
+    write.
+    """
+
+    kind: str
+    key: str
+    owner_kind: str
+    owner_key: str
+
+
 @dataclass(frozen=True)
 class RetentionHandler:
     """One column's answer to "this deleted item's content is going".
@@ -132,7 +176,9 @@ class RetentionHandler:
     next sweep retries.
 
     `children` -- OPTIONAL, a dotted path to `(key: str) -> list[tuple[str,
-    str, str, str]]` -- `(child_kind, child_key, owner_kind, owner_key)`
+    str, str, str]]` -- a plain 4-tuple `(child_kind, child_key,
+    owner_kind, owner_key)` per child, which `identity.cascades.
+    run_children` wraps as a `ChildTicket` (above) before handing it on
     -- answering "what else is deleted when this item is, and whose is
     it". A conversation's generated images are the case it exists for:
     they are content of their own, on their own table, with their own

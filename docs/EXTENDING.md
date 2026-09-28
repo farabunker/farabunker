@@ -596,11 +596,31 @@ than a default.
 ### When your item's delete should also ticket something else: `children`
 
 `RetentionHandler.children` is OPTIONAL — a second dotted-path string beside `handler`, with the
-signature `(key: str) -> list[tuple[str, str]]`, returning `(kind, key)` pairs for whatever else
-this item's delete should ticket. `agents/apps.py`'s conversation handler is the shipped example:
-a deleted chat's generated images are content of their own, on their own table, with their own
-visibility rule, and a delete that hid the chat while leaving them in the gallery would be a box
-whose "delete" and whose "destroy" disagreed.
+signature `(key: str) -> list[tuple[str, str, str, str]]`, returning one plain 4-tuple `(kind,
+key, owner_kind, owner_key)` per item this item's delete should also ticket. `agents/apps.py`'s
+conversation handler is the shipped example: a deleted chat's generated images are content of
+their own, on their own table, with their own visibility rule, and a delete that hid the chat
+while leaving them in the gallery would be a box whose "delete" and whose "destroy" disagreed.
+
+**The last two elements are an owner, not a label.** `owner_kind` must be one of
+`identity.contracts.principals.PRINCIPAL_KINDS` ("open", "user", "service", "resident_agent",
+"user_agent"), or the pair may be blank together (`("", "")`) for content stamped before an
+owner column existed at all — never one blank and the other not.  Answer the child's OWN owner,
+not the parent item's: a conversation and its generated image are usually owned by the same
+principal, but not the moment a share or an administrator's duplicate lets a second principal's
+content sit inside somebody else's conversation, and a resolver that answered the parent's owner
+for every child would misfile such a child under the wrong person's Deleted page. `identity.
+retention.delete_content` reads this pair to decide who may restore or permanently delete the
+child ticket it writes — get it backwards and the child becomes invisible on every Deleted page,
+skipped by every explicit "Delete permanently" click, and reachable only by the unconditional
+sweep. **That is why `identity.cascades.run_children` wraps every answer in a frozen
+`identity.contracts.cascades.ChildTicket(kind, key, owner_kind, owner_key)` NamedTuple, and
+`delete_content` validates `owner_kind` against `PRINCIPAL_KINDS` (plus the blank pair) before
+writing a single child ticket: a transposed pair now raises loudly, at the delete, instead of
+silently minting a ticket nobody could ever find.** Your resolver still returns a plain 4-tuple
+in this order — `ChildTicket` is a drop-in for that exact shape — but write the tuple in the
+right order the first time; a resolver that swaps the two owner elements fails the very next
+delete it runs against, not some later investigation.
 
 ```python
 register_retention_handler(RetentionHandler(
@@ -619,11 +639,12 @@ must be **side-effect-free**: it only reads, and it must not depend on anything 
 would otherwise delete first, because by the time a purge runs, the answer has already been
 turned into rows.
 
-**What its answer becomes.** Each `(kind, key)` pair the resolver returns is written as an
-ORDINARY `DeletionTicket` — its own row, its own date on the Deleted page (the SAME `purge_on` as
-the parent, stamped once, never recomputed), its own registered handler, its own restore — linked
-back to the ticket this delete just created through `DeletionTicket.parent`. A child ticket is not
-a different kind of row; it is an item that happens to have arrived with another item's delete.
+**What its answer becomes.** Each `ChildTicket` the resolver's answer becomes is written as an
+ORDINARY `DeletionTicket`, stamped with ITS OWN `owner_kind`/`owner_key` (not the parent's) — its
+own row, its own date on the Deleted page (the SAME `purge_on` as the parent, stamped once, never
+recomputed), its own registered handler, its own restore — linked back to the ticket this delete
+just created through `DeletionTicket.parent`. A child ticket is not a different kind of row; it is
+an item that happens to have arrived with another item's delete.
 
 **The order guarantee at purge.** WHEN THE PARENT'S OWN TICKET IS THE ONE PURGED,
 `identity.retention.purge_ticket` runs the parent's OWN registered handlers first, then purges each

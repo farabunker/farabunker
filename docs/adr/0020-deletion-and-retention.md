@@ -561,6 +561,100 @@ decision at all. No migration and no backfill for `0006`'s two columns — the o
 declined one for this branch; a blank pair stays blank on disk, and only the permanent-delete
 predicate treats it specially.
 
+### 15. Restore must not resurrect a marked child, or destroy the one record that its bytes are gone
+
+Decision 9 gave `content_unrecoverable` and `identity.retention.may_restore` the job of refusing
+Restore for a ticket a failed purge already marked. That refusal was asked in exactly one place —
+`identity.views.deleted_restore`, about the ticket the click names — and nowhere else. `restore_
+content`'s own child loop, reached whenever the PARENT is restored, filtered only on `hold_by_kind
+=""`; it never asked `may_restore`'s own question of a child at all. The sequence this missed: B
+owns an image inside A's conversation (decision 11's own cross-owner case); A deletes the
+conversation; B clicks "Delete permanently" on their own row — reachable, `may_purge` allows it
+off the enterprise posture; the files band destroys bytes and something after it raises;
+`record_failed_purge` marks the child, which is still `parent_id`-linked because the detach in
+`purge_ticket` (decision 11, decision 13) only runs on a SUCCESSFUL purge. A then restores the
+PARENT: `may_restore(parent)` is true (the parent was never attempted), and the unfiltered child
+loop deleted the marked ticket along with every ordinary one — handing B's half-destroyed image
+back to the gallery as ordinary live content and deleting `content_unrecoverable`, the one column
+recording that its bytes were gone. That is the exact outcome decision 9 exists to prevent,
+reached through the one door `may_restore` does not guard, because nothing asks it there.
+
+**What closes it.** `restore_content`'s child loop now filters on `hold_by_kind="" AND
+content_unrecoverable=False` — the same compound condition `purge_ticket` already uses to decide
+which children it may destroy — and the single `exclude()` call that detaches skipped children
+negates that exact condition, so a marked child is detached (`parent=None`, before the `CASCADE`)
+rather than restored, the same shape decision 9's own held-child handling already has. It keeps its
+own ticket, its own mark, and its own eventual purge on its own date; `may_restore` still refuses
+Restore on it directly, exactly as before. This is a filter change, not a new predicate: `may_
+restore` itself is unchanged, and is still asked in exactly the one place a click can reach a
+ticket directly. `identity/README.md` and `identity/models.py`'s own field-level documentation of
+`parent` both previously asserted "restoring the parent is harmless regardless of whose [content]
+it is" — true before this mark existed, and false the moment content can be partly destroyed before
+a restore reaches it; both are corrected to name the one exception.
+
+**What this does not change: a race pre-dating this fix, verified still open.** `restore_content`'s
+child read — `current.children.filter(...)` inside the transaction, deleted by queryset per row —
+takes no `select_for_update()`, unlike `purge_ticket`'s own read of the same rows. A child's purge
+running concurrently with a parent's restore can still land `record_failed_purge`'s mark in the
+window between this loop's read and its delete, reviving the exact outcome this decision closes for
+the ordinary case. Locking the read (`select_for_update()`) would not close this, and is not
+attempted here: `record_failed_purge` writes the mark from OUTSIDE any transaction, deliberately,
+after `purge_ticket`'s own transaction has already rolled back and released every lock it held
+(decision 9's own "a write outside any transaction, on purpose") — there is no lock this restore
+could hold that the mark's own write would still be waiting behind. Closing this window would need
+the mark itself to be written differently, inside a transaction restore's own lock could serialise
+against, which is a larger change than this decision makes and is left to a later one. Recorded
+here so this decision is not read as having closed it.
+
+### 16. The child-ticket contract is a named type, not a blind 4-tuple — corrective, not precautionary
+
+Decision 11 widened a resolver's answer from `(kind, key)` pairs to `(kind, key, owner_kind,
+owner_key)` 4-tuples, read positionally at every call site: `identity.cascades.run_children`
+unpacks a resolver's return value by position, and `identity.retention.delete_content` unpacked
+`run_children`'s own answer by position again, two loop-variable lists apart from the resolver that
+first produced the values. This is corrective, not a general hardening of a shape that merely looks
+risky — three concrete confusions were found VERIFIED IN THE TREE, not hypothesised:
+
+1. **Elements 3 and 4 are an authorization key, and nothing validated them.** `DeletionTicket.
+   owner_kind` is a bare `CharField(max_length=32)` with no `choices`, and `delete_content` wrote
+   whatever `run_children` hand it straight through. Transposing the pair at any of the three legs
+   between a real row and the write — inside a resolver, inside `run_children`'s dedupe, or at a
+   future call site that still unpacks positionally — produced `owner_kind="<uuid>"` with no error
+   ever, and the ticket became UN-OWNABLE: invisible on every Deleted page (`visible_tickets`
+   filters by owner), skipped-and-detached by every explicit "Delete permanently" click (decision
+   11's own `_may_destroy_child`), reachable only by the unconditional sweep. Before decision 11,
+   the owner arrived as an OBJECT whose own model guaranteed its shape (`owner` in `delete_content`'s
+   signature, read via `getattr`); decision 11 made it arrive as a bare string a peer column
+   asserted, with nothing checking it.
+2. **A wrong-arity resolver was caught only by accident, at a user's click.** `RetentionHandler.
+   __post_init__` validates `kind`, `key`, `label` and that `handler` is a dotted path; `children`
+   only gets a dottedness check on the STRING naming the resolver, never on what the resolver
+   returns. A resolver that answered a 2-tuple raised "not enough values to unpack" inside `delete_
+   content`'s transaction — a real exception, but one that surfaced far from the mistake, at the
+   first real delete to reach it, rather than at review time.
+3. **The document a future implementer is TOLD to read still described the old contract.**
+   `AGENTS.md` names `docs/EXTENDING.md` as the file to read before adding a retention handler,
+   "do not reverse-engineer an existing one" — and that file still described `children` as `(key:
+   str) -> list[tuple[str, str]]` returning `(kind, key)` pairs, decision 11's own widening never
+   having reached it.
+
+**What closes it.** A frozen `identity.contracts.cascades.ChildTicket(kind, key, owner_kind,
+owner_key)` `NamedTuple`, beside `RetentionHandler` in the same pure module — a DROP-IN for the
+shape it replaces (a resolver still returns a plain 4-tuple; `ChildTicket(*that_tuple)` is the same
+call the shape already supported), so every existing resolver keeps working unchanged. `identity.
+cascades.run_children` wraps each resolver answer in one at the one point every answer passes
+through on its way to `delete_content`, which now reads `child.kind`/`child.key`/`child.owner_kind`/
+`child.owner_key` by name instead of four positional loop variables. Beside it, `delete_content`
+gained `_validate_child_owner`: `owner_kind` must be one of `identity.contracts.principals.
+PRINCIPAL_KINDS`, or the pair must be the blank exception decision 14 already carries (`("", "")`)
+— anything else raises `ValueError` immediately, before a single child ticket is written, naming
+the transposition rather than minting an invisible row. `docs/EXTENDING.md` is corrected to the
+4-tuple contract, including what the owner columns mean and why a transposed pair now fails loudly.
+This was weighed against validating `owner_kind` alone on the existing bare tuple, without a named
+type: that would have closed confusion 1 but left 2 and 3 exactly as they were — the NamedTuple is
+what makes the contract self-documenting at every site that reads it, not only at the one site that
+validates it.
+
 ## Where the landed tree differs from the spec
 
 - **The queue half — `models/queue/retention.py`, the `_prune_finished_jobs` age condition and

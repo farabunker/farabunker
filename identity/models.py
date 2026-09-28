@@ -245,11 +245,19 @@ class DeletionTicket(models.Model):
     this", which is what `visible_tickets` and `may_purge` read, and a
     conversation's generated image can belong to somebody other than the
     conversation's own owner (a workstream share, an administrator's
-    duplicate). Restoring the parent still restores every child that
-    arrived with it regardless of whose it is -- putting content back is
-    harmless whoever it belongs to -- but a permanent delete of the
-    parent destroys only the children the CLICKER owns; one they do not
-    own is detached instead, keeping its own date and its own Restore.
+    duplicate). Restoring the parent restores every ORDINARY child that
+    arrived with it, regardless of whose it is -- but a child
+    `identity.retention.record_failed_purge` already marked
+    (`content_unrecoverable`) is the one exception, and putting it back
+    is NOT harmless: a purge destroyed some of its content and then
+    failed, so restoring it would hand back damaged content as if it
+    were whole and would delete the one column recording that the bytes
+    are gone. That child is skipped and detached instead, keeping its
+    own ticket and its own mark (`identity.retention.restore_content`'s
+    own docstring says why). A permanent delete of the parent, a
+    separate question, destroys only the children the CLICKER owns; one
+    they do not own is detached instead, keeping its own date and its
+    own Restore.
 
     `key` IS THE ITEM'S PRIMARY KEY AS TEXT. The four kinds have three pk
     types (UUID, UUID, int, int); one text column is the

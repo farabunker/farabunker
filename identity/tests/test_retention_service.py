@@ -119,6 +119,17 @@ def blank_owner_children(key: str) -> list[tuple[str, str, str, str]]:
     return [(KIND_DOCUMENT, "doc-1", "", "")]
 
 
+def transposed_owner_children(key: str) -> list[tuple[str, str, str, str]]:
+    """The exact shape a resolver that swapped `owner_kind`/`owner_key`
+    at the last leg would answer: a real key ("42") sitting where a
+    principal kind belongs, and a real principal kind ("user") sitting
+    where a key belongs. Before `delete_content`'s validation existed,
+    this wrote a ticket with `owner_kind="42"` and no error ever --
+    invisible on every Deleted page, reachable only by the sweep."""
+    CALLED.append(key)
+    return [(KIND_DOCUMENT, "doc-1", "42", "user")]
+
+
 @pytest.fixture(autouse=True)
 def _isolated_registry():
     """Save, clear, register, restore -- the shape
@@ -1283,39 +1294,48 @@ class TestChildTickets:
         """The `content_unrecoverable` sibling of `test_restoring_the_
         parent_skips_and_detaches_a_held_child` above, and the pin for
         the sequence `may_restore` exists to prevent: B's child ticket
-        (`doc-2`) is marked the way a failed purge marks one --
-        `record_failed_purge` -- while it is still linked to A's
-        conversation, because that detach only happens on a SUCCESSFUL
-        purge. A then restores the parent. Before this fix, restoring
-        the parent deleted `doc-2`'s ticket along with every other
-        child -- resurrecting half-destroyed content as ordinary live
-        content and destroying the one column that recorded the bytes
-        were gone. If `restore_content`'s child loop still filtered on
-        `hold_by_kind` alone, this assertion would fail: `doc-2`'s
-        ticket would be gone, not surviving."""
+        is marked the way a failed purge marks one -- `record_failed_
+        purge` -- while it is still linked to A's conversation, because
+        that detach only happens on a SUCCESSFUL purge. `cross_owner_
+        children` (used elsewhere in this class) stamps the child with
+        `_OTHER_OWNER`, a REAL principal that is DEFINITELY NOT the
+        conversation's own owner -- the actual two-principal sequence
+        the Critical this test pins describes, not a same-owner stand-in
+        for it. (The restore loop itself asks no ownership question, so
+        a same-owner child would run byte-identical code; this fixture
+        is chosen to MATCH the scenario, not to reach a different code
+        path.) A then restores the parent. Before this fix, restoring
+        the parent deleted the child's ticket along with the rest of the
+        family -- resurrecting B's half-destroyed content, under A's
+        restore, as ordinary live content, and destroying the one
+        column that recorded the bytes were gone. If `restore_content`'s
+        child loop still filtered on `hold_by_kind` alone, this
+        assertion would fail: the child's ticket would be gone, not
+        surviving."""
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION, key="t.conversation",
+            label="Conversation and turns", handler=f"{__name__}.conversation_handler",
+            children=f"{__name__}.cross_owner_children"))
         user = make_user()
         item = _owner(user)
         parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
                                         key=item.pk, owner=item)
-        marked = DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-2")
+        marked = DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-1")
+        assert (marked.owner_kind, marked.owner_key) == _OTHER_OWNER
         DeletionTicket.objects.filter(pk=marked.pk).update(
             content_unrecoverable=True)
 
         service.restore_content(user_principal(user), parent)
 
         assert not DeletionTicket.objects.filter(pk=parent.pk).exists()
-        assert not DeletionTicket.objects.filter(kind=KIND_DOCUMENT,
-                                                  key="doc-1").exists()
         marked.refresh_from_db()
         assert marked.parent_id is None
         assert marked.content_unrecoverable is True
+        assert (marked.owner_kind, marked.owner_key) == _OTHER_OWNER
         assert service.may_restore(marked) is False
         assert AuditEvent.objects.filter(
             action=CONTENT_RESTORED, target_type=KIND_DOCUMENT,
-            target_key="doc-1").count() == 1
-        assert AuditEvent.objects.filter(
-            action=CONTENT_RESTORED, target_type=KIND_DOCUMENT,
-            target_key="doc-2").count() == 0
+            target_key="doc-1").count() == 0
 
     def test_the_sweep_excludes_a_held_child_from_its_own_count(self):
         """The held-sibling variant of `test_the_sweep_counts_every_
@@ -1340,6 +1360,64 @@ class TestChildTickets:
         assert DeletionTicket.objects.filter(pk=held.pk).exists()
         assert "document:doc-1" in REMOVED
         assert "document:doc-2" not in REMOVED
+
+
+class TestTheChildOwnerValidation:
+    """`delete_content` validates a child's `owner_kind` against
+    `PRINCIPAL_KINDS` (plus the blank pair) immediately before writing
+    its ticket -- the minimum fix for a `children` resolver that
+    transposes the owner pair, which used to write silently and mint a
+    ticket nobody could ever see."""
+
+    def test_a_transposed_owner_pair_raises_instead_of_minting_a_ticket(self):
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION, key="t.conversation",
+            label="Conversation and turns", handler=f"{__name__}.conversation_handler",
+            children=f"{__name__}.transposed_owner_children"))
+        user = make_user()
+        item = _owner(user)
+
+        with pytest.raises(ValueError, match="owner_kind"):
+            service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                   key=item.pk, owner=item)
+
+        # NOTHING WAS WRITTEN: the whole delete is one transaction, so
+        # the parent's own ticket the call started to write is rolled
+        # back along with the child that failed validation. If the
+        # validation only warned instead of raising, or ran after the
+        # write, this would find a ticket -- the parent's, the child's,
+        # or both.
+        assert DeletionTicket.objects.count() == 0
+
+    def test_an_ordinary_owner_still_writes_the_child_exactly_as_before(self):
+        """The non-vacuous other half of the assertion above: a VALID
+        owner_kind must NOT be refused. Without this, a validation bug
+        that rejected every pair -- not only a transposed one -- would
+        pass the test above and break every ordinary delete with
+        children, undetected."""
+        user = make_user()
+        item = _owner(user)
+
+        service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                               key=item.pk, owner=item)
+
+        assert DeletionTicket.objects.filter(
+            kind=KIND_DOCUMENT, owner_kind="user",
+            owner_key=str(user.pk)).count() == 2
+
+    def test_a_genuinely_blank_owner_pair_is_still_the_one_exception(self):
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION, key="t.conversation",
+            label="Conversation and turns", handler=f"{__name__}.conversation_handler",
+            children=f"{__name__}.blank_owner_children"))
+        user = make_user()
+        item = _owner(user)
+
+        service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                               key=item.pk, owner=item)
+
+        assert DeletionTicket.objects.filter(
+            kind=KIND_DOCUMENT, key="doc-1", owner_kind="", owner_key="").exists()
 
 
 class TestTheBlankOwnerRuling:

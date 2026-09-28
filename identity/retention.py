@@ -41,8 +41,9 @@ from identity.cascades import run_children, run_retention
 from identity.contracts.actions import (
     CONTENT_DELETED, CONTENT_PURGED, CONTENT_RESTORED, SOURCE_WEB,
 )
+from identity.contracts.cascades import ChildTicket
 from identity.contracts.postures import POSTURE_ENTERPRISE
-from identity.contracts.principals import SERVICE_PRINCIPAL
+from identity.contracts.principals import PRINCIPAL_KINDS, SERVICE_PRINCIPAL
 from identity.contracts.retention import RetentionRefused
 from identity.models import DeletionTicket, IdentitySettings
 
@@ -249,6 +250,50 @@ def may_purge(principal, ticket, *, settings_row=None) -> bool:
     return may_read_owned_row(principal, ticket)
 
 
+def _validate_child_owner(child: ChildTicket) -> None:
+    """Refuse a child whose owner pair could not name a real principal,
+    LOUDLY, before `delete_content` below ever writes it as a ticket.
+
+    `DeletionTicket.owner_kind` IS A BARE `CharField(max_length=32)` WITH
+    NO CHOICES, and `identity.cascades.run_children` only `str()`-coerces
+    whatever a resolver answers -- nothing between a resolver's
+    `(child_kind, child_key, owner_kind, owner_key)` 4-tuple and the
+    column write checks that the THIRD element is actually a principal
+    kind. Transpose the pair at any of the three legs between a real row
+    and this call -- inside the resolver, inside `run_children`'s dedupe,
+    or at a future call site that still unpacks positionally -- and
+    nothing raised before this check existed: the ticket wrote as
+    `owner_kind="<uuid>"`, and became UN-OWNABLE, forever -- invisible on
+    every Deleted page (`visible_tickets` filters by owner),
+    skipped-and-detached by every explicit permanent-delete click
+    (`_may_destroy_child` above), reachable only by the sweep, which acts
+    as `SERVICE_PRINCIPAL` and does not ask ownership at all. THAT SILENT
+    FAILURE MODE IS WHAT THIS FUNCTION CLOSES, not a general validation
+    principle -- a transposition that used to mint a ticket nobody could
+    ever see now raises here, at the one call site that stamps the pair,
+    which is a user's click, exactly where the wrong-arity resolver
+    failure already surfaced before this change.
+
+    A GENUINELY BLANK PAIR (`("", "")`) IS THE ONE EXCEPTION, not a
+    violation: it is the shape every `GenerationJob` written before
+    `tools/vision/migrations/0006_generationjob_owner.py` added the two
+    owner columns still carries (that migration backfilled nothing), and
+    `_may_destroy_child` above already treats it as belonging to the
+    parent conversation's own owner rather than as un-ownable. Checked as
+    a PAIR, both blank together -- a resolver that answers a blank kind
+    with a real key, or a real kind with a blank key, is not that shape
+    and is not exempted.
+    """
+    if child.owner_kind == "" and child.owner_key == "":
+        return
+    if child.owner_kind not in PRINCIPAL_KINDS:
+        raise ValueError(
+            f"child ticket {child.kind}:{child.key} has owner_kind "
+            f"{child.owner_kind!r}, not one of {PRINCIPAL_KINDS!r} and not "
+            f"the blank pair -- the resolver's (kind, key, owner_kind, "
+            f"owner_key) quadruple looks transposed")
+
+
 def delete_content(actor, *, kind: str, key, owner, label: str = "",
                    source: str = SOURCE_WEB) -> DeletionTicket:
     """Soft-delete one item: write its ticket, record the event, and run
@@ -368,24 +413,24 @@ def delete_content(actor, *, kind: str, key, owner, label: str = "",
             # ticket -- how `restore_content` and `purge_ticket` below
             # find exactly the tickets one delete created, and no
             # others (`identity.models.DeletionTicket.parent`).
-            for child_kind, child_key, child_owner_kind, child_owner_key in (
-                    run_children(kind, str(key))):
+            for child in run_children(kind, str(key)):
+                _validate_child_owner(child)
                 _child, child_created = DeletionTicket.objects.get_or_create(
-                    kind=child_kind, key=child_key,
+                    kind=child.kind, key=child.key,
                     defaults=dict(
                         label="",
                         parent=ticket,
                         purge_on=purge_on,
                         deleted_by_kind=getattr(actor, "kind", ""),
                         deleted_by_key=getattr(actor, "key", ""),
-                        owner_kind=child_owner_kind,
-                        owner_key=child_owner_key,
+                        owner_kind=child.owner_kind,
+                        owner_key=child.owner_key,
                     ),
                 )
                 if child_created:
-                    audit.record(actor, CONTENT_DELETED, target_type=child_kind,
-                                 target_key=child_key, target_label="",
-                                 source=source, kind=child_kind)
+                    audit.record(actor, CONTENT_DELETED, target_type=child.kind,
+                                 target_key=child.key, target_label="",
+                                 source=source, kind=child.kind)
     if created:
         sweep()
     return ticket

@@ -27,7 +27,9 @@ from typing import Callable
 from django.db import transaction
 from django.utils.module_loading import import_string
 
-from identity.contracts.cascades import ORDER_FILES, all_entitlement_cascades, retention_handlers
+from identity.contracts.cascades import (
+    ChildTicket, ORDER_FILES, all_entitlement_cascades, retention_handlers,
+)
 
 
 def _run(entitlement_id: int, *, commit: bool) -> dict[str, int]:
@@ -105,9 +107,8 @@ def run_retention(kind: str, key: str, *,
     return counts
 
 
-def run_children(kind: str, key: str) -> list[tuple[str, str, str, str]]:
-    """The `(kind, key, owner_kind, owner_key)` quadruples that follow
-    this item's own ticket.
+def run_children(kind: str, key: str) -> list[ChildTicket]:
+    """The `ChildTicket`s that follow this item's own ticket.
 
     ASKED AT DELETE TIME ONLY -- `identity.retention.delete_content` is
     the one caller. What it answers is written as tickets linked to the
@@ -127,8 +128,15 @@ def run_children(kind: str, key: str) -> list[tuple[str, str, str, str]]:
     to answer it is the one whose owner is kept. A kind with no
     resolver -- every kind but one, today -- answers `[]`, which is not
     an error.
+
+    EACH ANSWER IS WRAPPED AS A `ChildTicket` HERE, at the one point
+    every resolver's plain 4-tuple output passes through on its way to
+    `delete_content` -- a resolver keeps returning `(child_kind,
+    child_key, owner_kind, owner_key)` tuples (`ChildTicket` is a
+    drop-in for that shape), and this is where the positional answer
+    becomes the named one a caller reads by attribute instead of index.
     """
-    quads: list[tuple[str, str, str, str]] = []
+    tickets: list[ChildTicket] = []
     seen: set[tuple[str, str]] = set()
     for spec in retention_handlers(kind):
         if spec.children is None:
@@ -138,5 +146,5 @@ def run_children(kind: str, key: str) -> list[tuple[str, str, str, str]]:
             pair = (str(child_kind), str(child_key))
             if pair not in seen:
                 seen.add(pair)
-                quads.append((pair[0], pair[1], str(owner_kind), str(owner_key)))
-    return quads
+                tickets.append(ChildTicket(pair[0], pair[1], str(owner_kind), str(owner_key)))
+    return tickets

@@ -9,8 +9,8 @@ import pytest
 from identity.contracts import cascades as cascades_module
 from identity.contracts import retention
 from identity.contracts.cascades import (
-    ORDER_FILES, ORDER_ROWS, RetentionHandler, register_retention_handler,
-    retention_handlers,
+    ChildTicket, ORDER_FILES, ORDER_ROWS, RetentionHandler,
+    register_retention_handler, retention_handlers,
 )
 
 
@@ -173,6 +173,44 @@ class TestTheRegistry:
 
     def test_an_unregistered_kind_answers_an_empty_list_not_an_error(self):
         assert retention_handlers("not-a-kind") == []
+
+
+class TestChildTicket:
+    def test_it_is_read_by_name_not_by_position(self):
+        """The whole reason this type exists: `owner_kind` and
+        `owner_key` are elements 3 and 4 of a plain tuple, and nothing
+        stopped them being swapped at a call site with no error ever. If
+        `ChildTicket` fields were still read positionally here (`[2]`
+        and `[3]`) rather than by `.owner_kind`/`.owner_key`, a transposed
+        construction like the one below would pass this assertion
+        instead of failing it."""
+        child = ChildTicket(kind="document", key="d-1",
+                            owner_kind="user", owner_key="7")
+        assert child.owner_kind == "user"
+        assert child.owner_key == "7"
+        # transposed on purpose, to show the two are genuinely distinct
+        # fields, not one that merely mirrors the other's value:
+        swapped = ChildTicket(kind="document", key="d-1",
+                              owner_kind="7", owner_key="user")
+        assert swapped.owner_kind != child.owner_kind
+        assert swapped.owner_key != child.owner_key
+
+    def test_it_is_frozen(self):
+        child = ChildTicket(kind="document", key="d-1",
+                            owner_kind="user", owner_key="7")
+        with pytest.raises(AttributeError):
+            child.owner_kind = "service"
+
+    def test_it_is_a_drop_in_for_the_plain_tuple_a_resolver_returns(self):
+        """A resolver's own return value is still `(kind, key, owner_kind,
+        owner_key)` -- `ChildTicket(*that_tuple)` must build the exact
+        same fields a caller who read it positionally would have seen,
+        and the two must compare equal, or existing resolvers would need
+        rewriting to keep working."""
+        plain = ("document", "d-1", "user", "7")
+        wrapped = ChildTicket(*plain)
+        assert wrapped == plain
+        assert tuple(wrapped) == plain
 
 
 class TestTheChildrenField:
