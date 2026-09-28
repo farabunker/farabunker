@@ -137,7 +137,7 @@ def record_failed_purge(ticket) -> None:
     UNSET, and this is then a no-op: that rollback is clean, nothing on
     disk was ever touched, and marking it would refuse Restore for a
     ticket that broke no promise -- exactly the case
-    `test_a_purge_that_rolled_back_leaves_a_ticket_restore_still_accepts`
+    `test_a_rows_band_failure_before_any_files_band_handler_does_not_mark`
     pins, unmarked, unchanged by this function existing.
 
     MARKS THE WHOLE FAMILY THIS ATTEMPT ACTUALLY ATTEMPTED, NOT ONLY
