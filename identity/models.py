@@ -240,11 +240,16 @@ class DeletionTicket(models.Model):
     one written for an item that went with another item's delete, a
     conversation's generated images being the case it exists for -- is an
     ordinary deleted item that happens to have arrived with another. A
-    CHILD TICKET CARRIES THE PARENT ITEM'S OWNER COLUMNS, NOT ITS OWN
-    ITEM'S -- a recorded choice, not an accident: those columns answer
-    "whose deletion is this", which is what `visible_tickets` and
-    `may_purge` read, and whoever may restore or permanently delete the
-    chat may do so for everything that went with it.
+    CHILD TICKET CARRIES THE OWNER COLUMNS OF THE CONTENT IT DESCRIBES,
+    NOT THE PARENT ITEM'S -- those columns answer "whose deletion is
+    this", which is what `visible_tickets` and `may_purge` read, and a
+    conversation's generated image can belong to somebody other than the
+    conversation's own owner (a workstream share, an administrator's
+    duplicate). Restoring the parent still restores every child that
+    arrived with it regardless of whose it is -- putting content back is
+    harmless whoever it belongs to -- but a permanent delete of the
+    parent destroys only the children the CLICKER owns; one they do not
+    own is detached instead, keeping its own date and its own Restore.
 
     `key` IS THE ITEM'S PRIMARY KEY AS TEXT. The four kinds have three pk
     types (UUID, UUID, int, int); one text column is the

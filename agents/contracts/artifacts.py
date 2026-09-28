@@ -277,10 +277,17 @@ _ARTIFACT_CHILDREN: str | None = None
 
 def register_artifact_children(dotted_path: str) -> None:
     """Register the function that says WHICH GENERATIONS a
-    conversation's artifact references and generation ids name.
+    conversation's artifact references and generation ids name, and who
+    owns each one.
 
     Signature `(refs: Sequence[str], generation_ids: Sequence[str]) ->
-    list[str]` -- job keys, destroying nothing.
+    list[tuple[str, str, str]]` -- `(job_id, owner_kind, owner_key)`
+    triples, destroying nothing. The owner rides along so `agents.
+    retention.conversation_children` can hand it on to `identity.
+    retention.delete_content`, which stamps a child ticket from the
+    CONTENT's own owner rather than the conversation's -- the two can
+    differ the moment a share or an administrator's duplicate lets a
+    second principal's content sit inside somebody else's conversation.
 
     ONE SLOT, NOT A PER-KIND DICT: the agents column COMPUTES the values
     and exactly one tool column knows what they mean.

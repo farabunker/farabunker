@@ -648,9 +648,10 @@ CARDS: tuple[HelpCard, ...] = (
         gate=EVERYONE,
         purpose=(
             "A person's own deleted items -- today, conversations and the generated images "
-            "that were part of them -- each with the date it will be destroyed, and the one "
-            "place to put one back before that date. A document deleted from the library or "
-            "an Ask record is not on this page yet and still happens at once, on every "
+            "that were part of them, whichever member made the image and whoever deleted the "
+            "conversation it was made in -- each with the date it will be destroyed, and the "
+            "one place to put one back before that date. A document deleted from the library "
+            "or an Ask record is not on this page yet and still happens at once, on every "
             "posture."
         ),
         fields=(
@@ -658,23 +659,37 @@ CARDS: tuple[HelpCard, ...] = (
                 name="Deleted items",
                 anchor="deleted-items",
                 meaning=(
-                    "Every item this viewer has deleted and can still see: what kind it is, "
-                    "and the date it will be permanently destroyed. The removal date is fixed "
+                    "Every item this viewer owns that is now deleted, and can still see: what "
+                    "kind it is, and the date it will be permanently destroyed. Usually that "
+                    "is an item the viewer deleted themselves -- but a generated image can "
+                    "appear here because somebody ELSE deleted the conversation it was made "
+                    "in, not because the viewer clicked anything: the image is theirs, so its "
+                    "row, its date and its Restore are theirs too. The removal date is fixed "
                     "at the moment something is deleted, so changing \"Keep deleted items for\" "
                     "on Identity & security governs future deletions only -- an item already "
                     "here keeps the date it was given. Backups are a separate layer the date "
                     "does not reach: a deleted item can still exist in an earlier backup after "
-                    "that date has passed. On the organisation posture there is no Delete "
-                    "permanently control: an item waits for its date."
+                    "that date has passed. On the organisation posture there is usually no "
+                    "Delete permanently control: an item waits for its date, unless removing "
+                    "its content already failed partway through (see Restore, below), in which "
+                    "case finishing the removal is offered early since the waiting period no "
+                    "longer has anything left to protect."
                 ),
                 effects=(
                     "Restore puts the item back immediately, exactly as it was; nothing about "
                     "it was ever changed by being deleted. Delete permanently, offered only to "
                     "somebody who may act on that item, destroys it right now instead of "
-                    "waiting for its date, and cannot be undone. On rare occasions removing the "
+                    "waiting for its date, and cannot be undone -- for a generated image inside "
+                    "a deleted conversation, permanently deleting the CONVERSATION reaches only "
+                    "the images its clicker owns; one belonging to somebody else is left "
+                    "standing with its own date and its own Restore, and the ordinary date "
+                    "still removes it for everyone in the end. On rare occasions removing the "
                     "content of an item fails partway through; when that happens Restore is no "
                     "longer offered for it, because part of what would come back is already "
-                    "gone -- Delete permanently still works, and finishes the job."
+                    "gone -- Delete permanently still works wherever the viewer could already "
+                    "act on the item, including, from that point on, before the item's own "
+                    "date on the organisation posture, because there is no longer a complete "
+                    "item left for that waiting period to protect."
                 ),
             ),
             HelpField(

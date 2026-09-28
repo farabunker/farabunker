@@ -111,15 +111,30 @@ def purge_on_line(day: datetime.date) -> str:
     return f"Purge on {_date_words(day)}"
 
 
-def purge_refused_line(day: datetime.date) -> str:
+def purge_refused_line(day: datetime.date, *, marked: bool = False) -> str:
     """"This item is kept until 21 October 2026. It can be restored,
-    not destroyed early."
+    not destroyed early." -- or, for a MARKED ticket, `RESTORE_REFUSED_
+    LINE` verbatim.
 
     WHAT THE ORGANISATION POSTURE SAYS INSTEAD OF DESTROYING SOMETHING.
     It names the date the page already printed and the door that is
     still open, and it claims nothing about records obligations, legal
     holds or who could override it -- none of which this box builds.
+
+    `marked`, KEYWORD-ONLY: whether the ticket this sentence is about is
+    one `identity.retention.may_restore` already refuses -- a purge
+    destroyed some of its content and then failed. THE UNMARKED SENTENCE
+    IS BACKWARDS FOR THAT TICKET, in both of its own claims at once: the
+    item cannot in fact be restored, and (an owner ruling, 2026-09-28) it
+    CAN now be destroyed early on this posture too, because the enforced
+    period exists to protect content this item no longer fully has. So a
+    marked ticket gets the SAME words `RESTORE_REFUSED_LINE` already
+    says -- content partly gone, restoring no longer possible, finishing
+    the removal is -- rather than a second sentence claiming the same
+    thing in different words.
     """
+    if marked:
+        return RESTORE_REFUSED_LINE
     return (f"This item is kept until {_date_words(day)}. "
             f"It can be restored, not destroyed early.")
 

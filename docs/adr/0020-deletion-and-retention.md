@@ -272,9 +272,20 @@ sites read it back.
 early-destroy refusal already lives at. The Deleted page renders no Restore control for a marked
 row and prints a sentence instead (`copy.RESTORE_REFUSED_LINE`); the restore POST refuses even
 called directly, flashing and redirecting rather than 404ing, because the row is still visible on
-the page the click came from. `may_purge` and "Delete permanently" take no notice of the mark at
-all: the point of marking a ticket is that its content is already gone, so finishing the job — the
-one thing left to do about it — must stay possible.
+the page the click came from. On every posture but one, "Delete permanently" already took no
+notice of the mark, because ownership already admitted it; the organisation posture's blanket
+early-destroy refusal did not carry the same exception, and a marked ticket there was a dead end —
+unrestorable and unpurgeable at once, with the page's own copy promising a button it did not
+render. An owner ruling (2026-09-28) closed that: `may_purge` gains one named exception, a marked
+ticket, on that posture only — the enforced period exists to protect content the item still has,
+and a marked item no longer fully has it, so refusing the button protects nothing and strands the
+person instead. An UNMARKED ticket on that posture is unchanged, still refused before its date, and
+the sweep still takes every ticket on the date regardless of the mark, which `sweep` never asks
+about. `purge_refused_line` carries the matching split: an unmarked ticket keeps its original
+sentence ("it can be restored, not destroyed early"), and a marked one — reachable only when a
+principal has standing over it but the posture still refuses, which after this ruling is nowhere on
+the organisation posture and remains true on no other posture either — gets `RESTORE_REFUSED_LINE`
+verbatim instead, since the unmarked sentence is backwards for it in both of its own claims.
 
 **Why this, and not the cheaper reading.** A marked ticket still EXISTS; it is not restorable. The
 invariant decision 2 states — no purged-but-pending state, a ticket exists exactly while the item
@@ -283,6 +294,151 @@ than being quietly falsified. The promise this closes is stated in full where th
 `agents/tests/test_retention.py::TestTheFailedPurgeMarkRefusesRestore::
 test_restore_after_a_purge_that_fails_once_its_files_are_gone_is_refused` — no longer an `xfail`
 pinning a gap, now a passing assertion of the invariant the box keeps.
+
+**Two shapes of the gap a later review found, and what closed each.** The mark is one Python
+attribute (`_files_band_reached`) set on the ticket object `purge_ticket`'s caller holds, and it
+answers only "did the FAMILY'S files band get entered", never "whose bytes are actually gone" —
+that vagueness is what let two real gaps hide behind a green gate.
+
+- **A child's own destroyed bytes left the child's OWN ticket unmarked.** `record_failed_purge`
+  wrote only the one ticket its caller passed it — the family's top item — while a child ticket is
+  an ORDINARY row on the Deleted page, with its own Restore control, no less real for having
+  arrived with a parent. A conversation with two generated images, whose second image's handler
+  raises after the first image's file is already gone, used to leave the first image's ticket
+  standing, unmarked, offering Restore for a file that no longer exists. `record_failed_purge` now
+  writes `content_unrecoverable` on the ticket it was called with AND every ticket presently linked
+  to it as a child, in one update — the family's files band was entered, so the whole family is
+  marked, on the same "when in doubt, refuse the restore, never risk handing one back" principle
+  the single-ticket mark already carried. That is wider than "only the ticket whose own bytes are
+  gone" — a sibling whose own handler never even ran can be marked alongside one whose bytes truly
+  are — and that is accepted for the same reason `run_retention`'s next paragraph accepts its own
+  false positive: a wrong refusal costs a click; a wrong restore hands back an item that is not the
+  one the person remembers.
+- **A refusal could follow bytes already destroyed, and never marked.** `RetentionRefused` is not
+  an error — a handler saying "not now" for an operator-readable reason — so it is caught
+  separately from an ordinary exception, before `record_failed_purge` was ever called. But a
+  child's `RetentionRefused` propagates out of `_purge_child` exactly like any other exception a
+  handler raises, so it can arrive after this item's own files-band handler, or an earlier child's,
+  already ran; and a single files-band handler can destroy bytes and then refuse in the same call,
+  the identical shape the ordinary-exception branch already existed to mark for. Both catch sites
+  now call `record_failed_purge` from the refusal branch too — it is self-guarding on whether a
+  files-band handler actually ran, so a refusal that never reached one still marks nothing.
+
+**What is still accepted residue, not closed by either fix above.** A files-band handler that
+raises BEFORE touching a single byte still marks the ticket, because the callback fires before the
+handler runs, not after — deliberately, since "after" cannot see a handler that destroys bytes and
+then raises in the same call, which is the shape this whole mechanism exists for. Nothing un-marks
+a ticket a false alarm like that leaves behind: on the sweep's own retry path the ticket stays due
+and the next attempt, succeeding, deletes the ticket row and the question stops mattering: on the
+"Delete permanently" click path a ticket purged before its date is not due, so nothing retries it,
+and a transient failure with zero bytes actually touched converts a fully intact conversation into
+a delete-only row for the rest of its retention period. A clearing path was considered and set
+aside: the only cheap trigger available — "the next purge attempt reaches the files band cleanly"
+— is, for the tickets where it would fire at all, the SAME event that deletes the ticket row
+anyway, so it clears nothing a person can observe; a trigger that clears the flag independently of
+that would have to tell "this retry's own rows-band failure, unrelated to the earlier mark" apart
+from "the earlier mark was right and this retry failed the same way", which the current per-attempt
+design — each purge restarts from its kind's first handler, with no memory of an earlier attempt —
+cannot do without either instrumenting every handler's own partial progress or accepting a real,
+if narrow, chance of silently un-marking a ticket that IS missing bytes. Given the choice between a
+false refusal and a false restore that this whole feature already resolves the same way everywhere
+else, the flag stays over-inclusive and undocumented-until-now, rather than gaining a clearing path
+whose failure mode is the one this mechanism exists to prevent.
+
+Separately, and pre-existing rather than introduced by either fix above: `sweep`'s own due query
+filters on `purge_on` and `hold_by_kind` only, with no `parent__isnull` clause, so a child ticket is
+due IN ITS OWN RIGHT. When a parent's purge fails, the sweep's per-ticket pass continues and can
+reach and purge that SAME child independently, on its own due pass — destroying that child's content
+for real and deleting its ticket, while the parent's ticket (unmarked, if the parent's own failure
+came before its files band) still offers Restore for a family whose pieces are, by then, partly
+gone. This wave does not close that window either.
+
+### 10. A duplicate or a branch must not ticket a job another live conversation still shows
+
+`agents.visibility.duplicate_conversation`/`branch_conversation` copy a source conversation's
+`artifacts` and `data` VERBATIM onto the new row (`_copy_turns_into`) — a deliberate design choice
+(the copy's tool cards render exactly as the original's did), but it means a copy's tool turn names
+the EXACT SAME `output:<id>` reference and the exact same generation id the original's own turn
+does. `agents.retention.conversation_children` walked only the conversation being deleted, so
+deleting a COPY found that shared reference on the copy's own turns and ticketed the job it names —
+hiding, and on the copy's own date destroying, a picture a DIFFERENT, live, undeleted conversation
+still displays. This needed no sharing and no second principal at all: A duplicating and deleting
+A's own conversation reproduced it, discovered only because the investigation asked the resolver's
+question literally ("what does THIS conversation's turns name") rather than assuming a copy could
+not exist.
+
+**What closes it.** `conversation_children` now excludes, before asking the image column to resolve
+anything, any artifact reference or generation id some OTHER conversation's own turns still carry —
+querying `Turn` directly (bounded: it runs only when this conversation actually names something, and
+the containment clauses narrow before the Python loop) rather than the image column, because the
+protecting fact ("another thread still shows this") is visible entirely from the `Turn` table
+`agents/` already owns, with no need to resolve a reference to a job at all just to answer it. A
+conversation already ticketed does not count as "another live conversation" protecting the job —
+its own delete either already ticketed the same job (harmless; tickets are idempotent on `(kind,
+key)`) or will, the next time its own `conversation_children` runs — so the exclusion is eventually
+consistent, not a permanent leak: once every conversation naming a job is itself deleted, whichever
+delete runs last is the one that finally reaches it. Landed on this branch, pre-merge: none of this
+machinery is on `origin/dev`, so the defect was real in this branch only, never in production.
+
+### 11. Child tickets are stamped with the owner of the content they describe, not the parent's
+
+Decision 2 above describes the `parent` link and says a resolver names what else is deleted; it does
+not say, and this correction says now, whose the resulting ticket is. The code did answer that
+question, just wrongly: `delete_content` stamped every child ticket it wrote from the PARENT ITEM's
+own `owner_kind`/`owner_key` — the same two columns as the parent's ticket — on the reasoning that
+"whoever may restore or purge the parent may do so for the whole cascade." That reasoning holds only
+while a conversation's owner and its generated images' owner are always the same principal, which
+this platform never actually guaranteed: a workstream share admits a `use`-level recipient to post
+into somebody else's conversation and generate an image there, and an administrator with
+`admin_sees_content` on may duplicate a member's conversation and delete the copy. In either shape a
+second principal's `GenerationJob` sits inside a conversation that is not theirs, and the wrong stamp
+followed from that: the actual owner's picture could vanish from their own gallery with no row
+anywhere on their own Deleted page saying so, unrestorable by them, and destroyable early by whoever
+happened to click delete on the chat — the mirror of "delete means delete" (decision 1), now applied
+to somebody who deleted nothing.
+
+**What closes it.** `RetentionHandler.children`'s dotted path widens from `(key: str) -> list[tuple[
+str, str]]` to `(key: str) -> list[tuple[str, str, str, str]]` — the owner rides alongside each
+`(child_kind, child_key)` pair, because `identity/` cannot look one up itself (rule 4 forbids
+importing the column that would know). `identity.cascades.run_children` carries the widened tuple
+through its dedupe (which still keys on `(kind, key)` only — a `(kind, key)` pair names one item, so
+its owner cannot honestly differ between two resolvers that both name it); `identity.retention.
+delete_content` stamps the child ticket's owner columns from the tuple instead of from the parent
+item's row; `agents.retention.conversation_children` and `tools.vision.retention.
+resolve_artifact_jobs` pass the owner through; and `tools.vision.services.existing_job_ids` — the one
+unscoped read of `GenerationJob.objects` a deletion needs to know a candidate id still exists at all
+— answers the owner columns alongside each id, a widened read in a file IA-1 already lets touch that
+table, not a new site. About six files, no migration: the two owner columns already exist on every
+ticket.
+
+**The sub-choice, asked of the owner and answered (2026-09-28): a permanent delete of the parent
+skips a child the clicker does not own.** Two ways to close the remaining asymmetry were on the
+table once the ticket is correctly stamped — leave "Delete permanently" reaching every child
+regardless of whose it is (cheapest, but a row with a Restore button somebody else can destroy first
+is a promise with a race in it), or have the clicker's own permanent delete detach a child they do
+not own, exactly as a held child is already detached, rather than destroy it. The owner chose the
+second: `purge_ticket` compares each candidate child's owner against the ACTING principal — never
+against a fixed predicate alone, because `sweep` always purges as `SERVICE_PRINCIPAL`, for whom an
+ownership check answers False on every user-owned row, and applying it there would make the sweep
+leak every child on the box rather than take everything on its date. So the check is keyed on WHO IS
+ACTING: `SERVICE_PRINCIPAL` skips nothing (the sweep still takes everything, on the date, regardless
+of ownership — nothing outlives the promise it printed), and any other principal — an explicit click
+— skips and detaches a child they do not own, leaving it standing with its own ticket, its own date
+and its own Restore, exactly like a held child.
+
+**A related question the investigation asked, and the answer this fix gives by construction, not by
+a second rule.** An administrator with `admin_sees_content` on can duplicate a member's conversation
+and delete the copy, ticketing the member's images under the admin — the cross-owner shape of
+decision 10 above, `duplicate_conversation`'s copy problem restated for a second principal instead of
+the same one. Decision 10's own fix already closes it: at the moment the admin deletes the copy, the
+ORIGINAL conversation (the member's, untouched) is still live and still names the same job, so the
+live-elsewhere exclusion drops it before any owner is even consulted — no ticket is written under
+anybody. Tracing the other order (the member's original deleted first, admin's copy still live) is
+symmetric: the exclusion protects the job until both conversations naming it are gone, at which point
+whichever delete runs last reaches it, correctly stamped with the member's own owner columns by
+THIS decision's own stamping fix. One duplicate-path fix and one ownership fix, applied together, close
+both the same-owner and the cross-owner shapes of the same underlying defect — the resolver answering
+a question ("what does this conversation's own turns still name") that a copy makes ambiguous.
 
 ## Where the landed tree differs from the spec
 

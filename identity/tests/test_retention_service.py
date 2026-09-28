@@ -25,6 +25,12 @@ pytestmark = pytest.mark.django_db
 REMOVED: list[str] = []
 CHILDREN: list[tuple[str, str]] = [(KIND_DOCUMENT, "doc-1"), (KIND_DOCUMENT, "doc-2")]
 CALLED: list[str] = []
+# A DELIBERATELY UNREAL OWNER: no test in this module ever creates a
+# `user` whose primary key is this value, so a child stamped with it
+# can never coincide with a real deleting principal's own owner columns
+# by accident -- the two-owner tests below need that guarantee to be a
+# real test, not a coin flip.
+_OTHER_OWNER = ("user", "999999999")
 
 
 def ask_handler(key: str) -> int:
@@ -69,12 +75,34 @@ def document_handler_second_child_raises(key: str) -> int:
     return 1
 
 
-def fake_children(key: str) -> list[tuple[str, str]]:
-    """Recomputed from the parent's own rows in production; a constant
-    here, because what this module tests is what the SERVICE does with
-    the pairs, not how a column finds them."""
+def fake_children(key: str) -> list[tuple[str, str, str, str]]:
+    """Recomputed from the parent's own rows in production; here, the
+    KEYS are a constant (`CHILDREN`) because what this module tests is
+    what the SERVICE does with the pairs, not how a column finds them --
+    but the OWNER is read off the real conversation row `key` names, the
+    same conversation `_owner(user)` built for this delete, so the
+    ordinary, same-owner case every OTHER test in this module exercises
+    keeps behaving exactly as it did before the resolver contract
+    carried an owner at all. The cross-owner tests below register their
+    OWN resolver (`cross_owner_children`) instead, naming a REAL, DIFFERENT
+    owner explicitly -- this default could not do that generically
+    without knowing, at import time, which user a given test will
+    create."""
     CALLED.append(key)
-    return list(CHILDREN)
+    from django.apps import apps
+    conversation = apps.get_model("agents.Conversation").objects.get(pk=key)
+    return [(kind, doc_key, conversation.owner_kind, conversation.owner_key)
+            for kind, doc_key in CHILDREN]
+
+
+def cross_owner_children(key: str) -> list[tuple[str, str, str, str]]:
+    """ONE child whose owner is `_OTHER_OWNER` -- REAL, and DEFINITELY
+    NOT the deleting conversation's own owner (see that constant's own
+    comment) -- for the tests that need a child key carrying a REAL
+    owner that DIFFERS from the parent's, so the assertion would fail if
+    stamping ever regressed to copying the parent item's owner again."""
+    CALLED.append(key)
+    return [(KIND_DOCUMENT, "doc-1", *_OTHER_OWNER)]
 
 
 @pytest.fixture(autouse=True)
@@ -290,10 +318,12 @@ class TestTheFailedPurgeMark:
         ticket.refresh_from_db()
         assert ticket.content_unrecoverable is False
 
-    def test_a_refusal_never_marks(self):
-        """`RetentionRefused` means nothing was attempted -- caught
-        separately, before the bare `except Exception`, and never
-        reaching `record_failed_purge`."""
+    def test_a_rows_band_refusal_does_not_mark(self):
+        """A `RetentionRefused` from a ROWS-band handler reaches no
+        files band at all, so `record_failed_purge` -- called here too
+        now, the same as the exception branch beside it -- is a no-op:
+        it is self-guarding on `_files_band_reached`, never on which
+        exception ended the call."""
         register_retention_handler(RetentionHandler(
             kind=KIND_CONVERSATION, key="t.refused", label="Refused",
             handler=f"{__name__}.refused"))
@@ -309,6 +339,80 @@ class TestTheFailedPurgeMark:
 
         ticket.refresh_from_db()
         assert ticket.content_unrecoverable is False
+
+    def test_a_files_band_refusal_marks_the_ticket(self):
+        """THE CASE `test_a_rows_band_refusal_does_not_mark` ABOVE DOES
+        NOT COVER: a files-band handler that refuses INSTEAD of raising
+        an ordinary exception. `purge_ticket`'s own docstring already
+        says a child's `RetentionRefused` propagates uncaught exactly
+        like any other exception, and a single files-band handler can
+        destroy bytes and then refuse in the same call -- so the
+        refusal branch must mark exactly when the exception branch
+        beside it would, and this is the flip of the previous test: if
+        the refusal branch stopped calling `record_failed_purge`, this
+        assertion would read `False` again."""
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION, key="t.refused_files", label="RefusedFiles",
+            handler=f"{__name__}.refused", order=ORDER_FILES))
+        user = make_user()
+        item = _owner(user)
+        ticket = service.delete_content(user_principal(user),
+                                        kind=KIND_CONVERSATION,
+                                        key=str(item.pk), owner=item)
+        DeletionTicket.objects.filter(pk=ticket.pk).update(
+            purge_on=timezone.localdate() - datetime.timedelta(days=1))
+
+        assert service.sweep() == 0
+
+        ticket.refresh_from_db()
+        assert ticket.content_unrecoverable is True
+
+
+class TestTheMarkOutsideAnyAmbientTransaction:
+    """Every test in `TestTheFailedPurgeMark` above runs under the
+    module's own `pytestmark = pytest.mark.django_db` -- the
+    NON-transactional fixture, which wraps the whole test body in one
+    outer atomic block. Inside that block, `purge_ticket`'s own `with
+    transaction.atomic():` is a SAVEPOINT, not the outermost transaction
+    -- `record_failed_purge`'s `.update()` still lands there, but by
+    savepoint-rollback semantics, a DIFFERENT mechanism than the one
+    production actually runs: no view or management command in this
+    codebase opens a transaction of its own (no `ATOMIC_REQUESTS`, no
+    `@transaction.atomic` on `deleted_purge`/`sweep`'s three call sites),
+    so `purge_ticket`'s block is the OUTERMOST transaction there, and its
+    rollback is a real `connection.rollback()` followed by an ordinary,
+    separately-committed write. `@pytest.mark.django_db(transaction=True)`
+    on this one test removes the ambient block so the same assertion
+    proves the topology the box actually ships into, not only the one
+    every other test in this module happens to run under.
+
+    THE CONSTRAINT THIS RELIES ON: nothing between this write and the
+    view or command that triggers it may open a further `transaction.
+    atomic(savepoint=False)` around the purge -- doing so would turn
+    `record_failed_purge`'s `.update()` into a write inside a block
+    Django has already marked for rollback, raising
+    `TransactionManagementError` from inside a never-500 handler. Named
+    here, and at `purge_ticket`'s own `with transaction.atomic():` line,
+    so a future wrapper does not add one without reading this first.
+    """
+
+    @pytest.mark.django_db(transaction=True)
+    def test_a_files_band_failure_marks_the_ticket_with_no_ambient_transaction(self):
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION, key="t.filesboom", label="FilesBoom",
+            handler=f"{__name__}.files_boom", order=ORDER_FILES))
+        user = make_user()
+        item = _owner(user)
+        ticket = service.delete_content(user_principal(user),
+                                        kind=KIND_CONVERSATION,
+                                        key=str(item.pk), owner=item)
+        DeletionTicket.objects.filter(pk=ticket.pk).update(
+            purge_on=timezone.localdate() - datetime.timedelta(days=1))
+
+        assert service.sweep() == 0
+
+        ticket.refresh_from_db()
+        assert ticket.content_unrecoverable is True
 
 
 class TestMayRestore:
@@ -539,7 +643,15 @@ class TestStanding:
 
 
 class TestChildTickets:
-    def test_a_delete_tickets_the_children_with_the_same_date_and_owner(self):
+    def test_a_delete_tickets_the_children_with_the_same_date(self):
+        """THE SAME-OWNER CASE -- the ordinary one, where the content a
+        conversation's images name belongs to the same principal as the
+        conversation itself. This does NOT prove ownership is read from
+        the CONTENT rather than copied from the parent: the two happen
+        to coincide here by construction (`fake_children` reads the real
+        conversation row's own owner). `test_a_child_owned_by_another_
+        principal_is_ticketed_under_that_principal` below is the test
+        that tells the two stamping strategies apart."""
         user = make_user()
         item = _owner(user)
         parent = service.delete_content(
@@ -551,13 +663,91 @@ class TestChildTickets:
         for child in children:
             assert child.parent_id == parent.pk
             assert child.purge_on == parent.purge_on
-            assert child.owner_kind == parent.owner_kind
-            assert child.owner_key == parent.owner_key
             assert child.deleted_by_key == str(user.pk)
             # THE PARENT'S NAME IS NOT THE CHILD'S: a child ticket
             # carries no label at all, so the page shows its kind.
             assert child.label == ""
         assert REMOVED == []
+
+    def test_a_child_owned_by_another_principal_is_ticketed_under_that_principal(self):
+        """THE REAL TEST OF THE STAMPING RULE: `cross_owner_children`
+        names ONE child whose owner (`_OTHER_OWNER`) is REAL and is
+        DEFINITELY NOT `item`'s own owner. If `delete_content` still
+        stamped a child from the PARENT's owner columns -- the bug this
+        wave fixes -- `child.owner_key` here would read `str(user.pk)`,
+        not `_OTHER_OWNER[1]`, and the final `!=` assertion against the
+        parent's own owner would fail too."""
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION, key="t.conversation",
+            label="Conversation and turns",
+            handler=f"{__name__}.conversation_handler",
+            children=f"{__name__}.cross_owner_children"))
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(
+            user_principal(user), kind=KIND_CONVERSATION, key=item.pk,
+            owner=item, label="A thread")
+
+        child = DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-1")
+        assert child.parent_id == parent.pk
+        assert child.purge_on == parent.purge_on
+        assert (child.owner_kind, child.owner_key) == _OTHER_OWNER
+        assert (child.owner_kind, child.owner_key) != (
+            parent.owner_kind, parent.owner_key)
+
+    def test_the_clickers_permanent_delete_skips_and_detaches_a_child_they_do_not_own(self):
+        """Owner ruling (2026-09-28): a permanent delete of the PARENT
+        skips a child the clicker does not own, detaching it rather than
+        destroying it. `_OTHER_OWNER` is REAL and definitely not
+        `user`'s own -- if this skip ever regressed to "purge everyone's
+        children regardless", `child`'s row and its file would both be
+        gone afterwards, and both assertions below would fail."""
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION, key="t.conversation",
+            label="Conversation and turns",
+            handler=f"{__name__}.conversation_handler",
+            children=f"{__name__}.cross_owner_children"))
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(
+            user_principal(user), kind=KIND_CONVERSATION, key=item.pk,
+            owner=item, label="A thread")
+        child = DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-1")
+
+        service.purge_ticket(user_principal(user), parent)
+
+        assert not DeletionTicket.objects.filter(pk=parent.pk).exists()
+        child.refresh_from_db()
+        assert child.parent_id is None
+        assert (child.owner_kind, child.owner_key) == _OTHER_OWNER
+        assert service.may_restore(child) is True
+        assert "document:doc-1" not in REMOVED
+
+    def test_the_sweep_still_takes_a_child_the_clicker_did_not_own(self):
+        """THE OTHER HALF OF THE SAME RULING: nothing outlives the date
+        it was promised. The sweep always acts as `SERVICE_PRINCIPAL`,
+        so the same family the click above leaves standing is fully
+        destroyed once it falls due -- if the skip in `purge_ticket`
+        were ever keyed on ownership alone rather than on WHO is acting,
+        the sweep would leak this child forever, and `sweep()` would
+        answer `1`, not `2`."""
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION, key="t.conversation",
+            label="Conversation and turns",
+            handler=f"{__name__}.conversation_handler",
+            children=f"{__name__}.cross_owner_children"))
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(
+            user_principal(user), kind=KIND_CONVERSATION, key=item.pk,
+            owner=item, label="A thread")
+        DeletionTicket.objects.filter(kind__in=[KIND_CONVERSATION, KIND_DOCUMENT]).update(
+            purge_on=timezone.localdate() - datetime.timedelta(days=1))
+
+        assert service.sweep() == 2
+
+        assert DeletionTicket.objects.count() == 0
+        assert "document:doc-1" in REMOVED
 
     def test_each_child_gets_its_own_content_free_event(self):
         user = make_user()
@@ -800,6 +990,48 @@ class TestChildTickets:
                                              key="doc-2").exists()
         assert DeletionTicket.objects.count() == 3
         assert not AuditEvent.objects.filter(action=CONTENT_PURGED).exists()
+
+    def test_a_second_childs_files_band_failure_marks_the_whole_family(self):
+        """`record_failed_purge`'s own attribute (`_files_band_reached`)
+        is ONE PYTHON FLAG on the object the caller holds, set the
+        instant ANY files-band handler in the family is about to run --
+        it cannot say WHICH member's own bytes are actually gone, only
+        that the family's files band was entered. `doc-1`'s own
+        FILES-band handler destroys real bytes and returns; `doc-2`'s
+        then raises, in the SAME transaction, rolling every ROW back --
+        `doc-1`'s ticket comes back looking untouched even though its
+        file is truly gone. THE ASSERTION THAT WOULD FLIP if this still
+        marked only the ticket `record_failed_purge` was called with (the
+        parent): `doc-1`'s own `content_unrecoverable` would read `False`
+        here, and `may_restore` would still offer Restore for an item
+        whose file no longer exists -- exactly the harm this fix
+        closes."""
+        register_retention_handler(RetentionHandler(
+            kind=KIND_DOCUMENT, key="t.document", label="Document",
+            handler=f"{__name__}.document_handler_second_child_raises",
+            order=ORDER_FILES))
+        user = make_user()
+        item = _owner(user)
+        parent = service.delete_content(user_principal(user), kind=KIND_CONVERSATION,
+                                        key=item.pk, owner=item)
+        DeletionTicket.objects.filter(pk=parent.pk).update(
+            purge_on=timezone.localdate() - datetime.timedelta(days=1))
+
+        assert service.sweep() == 0
+
+        parent.refresh_from_db()
+        first_child = DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-1")
+        second_child = DeletionTicket.objects.get(kind=KIND_DOCUMENT, key="doc-2")
+        assert parent.content_unrecoverable is True
+        assert first_child.content_unrecoverable is True
+        assert second_child.content_unrecoverable is True
+        assert service.may_restore(parent) is False
+        assert service.may_restore(first_child) is False
+        assert service.may_restore(second_child) is False
+        # THE ROLLBACK IS REAL: `doc-1`'s row is still there, standing,
+        # even though its own handler already ran and "removed" it (the
+        # fake handler's own bookkeeping) before the sibling raised.
+        assert "document:doc-1" in REMOVED
 
     def test_a_childs_refusal_also_propagates_to_the_caller(self):
         """`purge_ticket`'s docstring says a child's `RetentionRefused`

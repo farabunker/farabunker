@@ -66,7 +66,8 @@ class TestMappingReferencesToJobs:
     def test_an_output_reference_resolves_its_whole_job(self):
         job = _generation()
         output = _output(job=job)
-        assert resolve_artifact_jobs([f"output:{output.pk}"], []) == [str(job.pk)]
+        assert resolve_artifact_jobs([f"output:{output.pk}"], []) == [
+            (str(job.pk), "", "")]
 
     def test_two_outputs_of_one_job_resolve_to_one_key(self):
         """Each reference is one FK hop from its job and several outputs
@@ -74,18 +75,20 @@ class TestMappingReferencesToJobs:
         job = _generation()
         first, second = _output(job=job, index=0), _output(job=job, index=1)
         assert resolve_artifact_jobs(
-            [f"output:{first.pk}", f"output:{second.pk}"], []) == [str(job.pk)]
+            [f"output:{first.pk}", f"output:{second.pk}"], []) == [
+            (str(job.pk), "", "")]
 
     def test_an_input_reference_resolves_through_its_own_table(self):
         job = _generation()
         job_input = JobInput.objects.create(job=job, param_key="image",
                                             path="/dev/null",
                                             media_type="image/png")
-        assert resolve_artifact_jobs([f"input:{job_input.pk}"], []) == [str(job.pk)]
+        assert resolve_artifact_jobs([f"input:{job_input.pk}"], []) == [
+            (str(job.pk), "", "")]
 
     def test_a_bare_generation_id_is_accepted(self):
         job = _generation()
-        assert resolve_artifact_jobs([], [str(job.pk)]) == [str(job.pk)]
+        assert resolve_artifact_jobs([], [str(job.pk)]) == [(str(job.pk), "", "")]
 
     def test_a_failed_job_with_no_output_is_reached_only_through_its_generation_id(self):
         """The docstring's own claim: a job that reached the engine and
@@ -95,13 +98,26 @@ class TestMappingReferencesToJobs:
         job = _generation(status=GenerationJob.Status.FAILED,
                           error="the engine could not be reached")
         assert not GeneratedOutput.objects.filter(job=job).exists()
-        assert resolve_artifact_jobs([], [str(job.pk)]) == [str(job.pk)]
+        assert resolve_artifact_jobs([], [str(job.pk)]) == [(str(job.pk), "", "")]
 
     def test_a_reference_and_an_id_naming_one_job_are_one_key(self):
         job = _generation()
         output = _output(job=job)
         assert resolve_artifact_jobs(
-            [f"output:{output.pk}"], [str(job.pk)]) == [str(job.pk)]
+            [f"output:{output.pk}"], [str(job.pk)]) == [(str(job.pk), "", "")]
+
+    def test_the_jobs_own_owner_rides_along(self):
+        """THE ASSERTION THAT WOULD FLIP if `existing_job_ids` stopped
+        reading the owner columns: a job owned by a REAL principal, not
+        the default blank ("written before accounts existed") every
+        other fixture in this class leaves alone. `agents.retention.
+        conversation_children` passes this straight through so `identity.
+        retention.delete_content` can stamp the child ticket from THIS,
+        not from the conversation's own owner."""
+        job = _generation(owner_kind="user", owner_key="42")
+        output = _output(job=job)
+        assert resolve_artifact_jobs([f"output:{output.pk}"], []) == [
+            (str(job.pk), "user", "42")]
 
     def test_a_uuid_that_matches_no_job_is_ignored(self):
         """The whole point of the existence check `resolve_artifact_jobs`
@@ -128,7 +144,8 @@ class TestMappingReferencesToJobs:
         job = _generation()
         output = _output(job=job)
         first = resolve_artifact_jobs([f"output:{output.pk}"], [])
-        assert first == resolve_artifact_jobs([f"output:{output.pk}"], []) == [str(job.pk)]
+        assert first == resolve_artifact_jobs([f"output:{output.pk}"], []) == [
+            (str(job.pk), "", "")]
 
     def test_it_goes_through_delete_job_so_the_files_and_the_sweep_run(self, monkeypatch):
         """Moved onto `purge_job`: the resolver above destroys nothing,
@@ -232,7 +249,7 @@ class TestOnlyJobsThatExistComeBack:
         gone = _generation()
         services.delete_jobs([gone.pk])
         assert resolve_artifact_jobs([], [str(live.pk), str(gone.pk)]) == [
-            str(live.pk)]
+            (str(live.pk), "", "")]
 
     def test_the_check_is_one_query_for_the_whole_batch(
             self, django_assert_num_queries):
@@ -244,7 +261,7 @@ class TestOnlyJobsThatExistComeBack:
         with django_assert_num_queries(1):
             assert resolve_artifact_jobs(
                 [], [str(first.pk), str(second.pk)]) == sorted(
-                    [str(first.pk), str(second.pk)])
+                    [(str(first.pk), "", ""), (str(second.pk), "", "")])
 
     def test_a_reference_costs_its_hop_and_the_check(
             self, django_assert_num_queries):
@@ -252,7 +269,7 @@ class TestOnlyJobsThatExistComeBack:
         output = _output(job=job)
         with django_assert_num_queries(2):
             assert resolve_artifact_jobs([f"output:{output.pk}"], []) == [
-                str(job.pk)]
+                (str(job.pk), "", "")]
 
     def test_both_channels_pay_one_check_between_them(
             self, django_assert_num_queries):
@@ -267,7 +284,7 @@ class TestOnlyJobsThatExistComeBack:
         with django_assert_num_queries(2):
             assert resolve_artifact_jobs(
                 [f"output:{output.pk}"], [str(other.pk)]) == sorted(
-                    [str(job.pk), str(other.pk)])
+                    [(str(job.pk), "", ""), (str(other.pk), "", "")])
 
 
 class TestPurgeJob:

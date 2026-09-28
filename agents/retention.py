@@ -290,9 +290,12 @@ def _still_referenced_elsewhere(conversation_id, refs, generation_ids):
     return still_ref, still_gen
 
 
-def conversation_children(key: str) -> list[tuple[str, str]]:
+def conversation_children(key: str) -> list[tuple[str, str, str, str]]:
     """The tickets that go with this conversation's own: one per
-    generation its turns reached.
+    generation its turns reached, each carrying the OWNER OF THAT
+    GENERATION -- not the conversation's own owner, which can differ
+    (a workstream share that let a second principal post and generate;
+    an administrator's duplicate).
 
     THE SAME COLLECT STEP THE PURGE USES, not a second copy of it --
     both channels, the `output:`/`input:` artifact references and the
@@ -307,6 +310,13 @@ def conversation_children(key: str) -> list[tuple[str, str]]:
     on this conversation's date instead of its own. Nothing here writes
     anything; the tickets the answer becomes are what restore and
     permanent delete follow afterwards.
+
+    THE OWNER COMES FROM THE RESOLVER, NOT FROM THIS CONVERSATION: the
+    registered slot (`tools.vision.retention.resolve_artifact_jobs` in
+    production) answers `(job_id, owner_kind, owner_key)` triples, and
+    this function passes the owner straight through -- `identity/`
+    cannot look one up itself (rule 4), so the column that actually owns
+    the `GenerationJob` table is the only one that can answer it.
 
     WITH NOTHING REGISTERED ON THE SLOT -- a box with the image column
     uninstalled -- this answers `[]`, and a chat delete tickets only the
@@ -324,5 +334,6 @@ def conversation_children(key: str) -> list[tuple[str, str]]:
         conversation_id, refs, generation_ids)
     refs = [reference for reference in refs if reference not in still_ref]
     generation_ids = [gid for gid in generation_ids if gid not in still_gen]
-    return [(KIND_VISION_JOB, str(job_key))
-            for job_key in import_string(dotted)(refs, generation_ids)]
+    return [(KIND_VISION_JOB, str(job_key), str(owner_kind), str(owner_key))
+            for job_key, owner_kind, owner_key
+            in import_string(dotted)(refs, generation_ids)]

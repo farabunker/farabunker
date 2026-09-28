@@ -24,9 +24,9 @@ pytestmark = pytest.mark.django_db
 SEEN: list[tuple[tuple, tuple]] = []
 
 
-def fake_artifact_children(refs, generation_ids) -> list[str]:
+def fake_artifact_children(refs, generation_ids) -> list[tuple[str, str, str]]:
     SEEN.append((tuple(refs), tuple(generation_ids)))
-    return sorted(set(refs) | set(generation_ids))
+    return [(key, "", "") for key in sorted(set(refs) | set(generation_ids))]
 
 
 @pytest.fixture
@@ -164,7 +164,7 @@ class TestFindingTheGeneratedImages:
         conversation = make_conversation()
         make_turn(conversation=conversation, role="tool",
                   artifacts=["output:12:extra", "", "output:4"])
-        assert conversation_children(str(conversation.pk)) == [("vision_job", "output:4")]
+        assert conversation_children(str(conversation.pk)) == [("vision_job", "output:4", "", "")]
         refs, _ids = SEEN[0]
         assert list(refs) == ["output:4"]
 
@@ -251,7 +251,7 @@ class TestADuplicateDoesNotTicketTheOriginalsImages:
         before."""
         conversation = make_conversation()
         make_turn(conversation=conversation, role="tool", artifacts=["output:9"])
-        assert conversation_children(str(conversation.pk)) == [("vision_job", "output:9")]
+        assert conversation_children(str(conversation.pk)) == [("vision_job", "output:9", "", "")]
 
     def test_once_the_other_conversation_is_itself_deleted_the_reference_tickets(self):
         """EVENTUALLY CONSISTENT, NOT PERMANENTLY SUPPRESSED: a
@@ -269,7 +269,7 @@ class TestADuplicateDoesNotTicketTheOriginalsImages:
             kind="conversation", key=str(original.pk),
             purge_on=timezone.localdate() + datetime.timedelta(days=30))
 
-        assert conversation_children(str(duplicate.pk)) == [("vision_job", "output:5")]
+        assert conversation_children(str(duplicate.pk)) == [("vision_job", "output:5", "", "")]
 
     def test_branching_and_deleting_the_branch_leaves_the_originals_image_untouched(
         self, real_registration,
@@ -495,7 +495,7 @@ class TestTheChildrenArePairs:
         job_id = str(uuid.uuid4())
         make_turn(conversation=conversation, role="tool", artifacts=[],
                   data={"id": job_id, "status": "succeeded"})
-        assert conversation_children(str(conversation.pk)) == [("vision_job", job_id)]
+        assert conversation_children(str(conversation.pk)) == [("vision_job", job_id, "", "")]
 
     def test_a_key_that_is_not_a_uuid_answers_empty(self):
         assert conversation_children("not-a-uuid") == []

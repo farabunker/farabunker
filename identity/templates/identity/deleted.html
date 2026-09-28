@@ -13,10 +13,16 @@ obligation: the hold control and the operator-set cliff floor are
 deferred (spec section 10.10) and this page must not imply a guarantee
 that is not built. THE PERMANENT-DELETE CONTROL, THOUGH, IS ALREADY
 GATED ON `row.may_purge` -- no markup change was needed here to keep
-the organisation posture from offering it: `may_purge` answers False
-for everybody on that posture, so `{% if row.may_purge %}` below simply
-omits the `<details>` block for every row, and the page says nothing
-about why beyond the date it already prints.
+the organisation posture from offering it on an ORDINARY row: `may_purge`
+answers False there before a ticket's date, so `{% if row.may_purge %}`
+below omits the `<details>` block, and the page says nothing about why
+beyond the date it already prints. ONE NAMED EXCEPTION, an owner ruling
+(2026-09-28): a ticket whose content a failed purge already partly
+destroyed (`content_unrecoverable`) passes `may_purge` on that posture
+too, before its date -- the waiting period protects content the item
+still fully has, and this one no longer does -- so the SAME
+`{% if row.may_purge %}` renders the control for exactly that row,
+with no separate markup for the exception.
 
 THE RESTORE BUTTON IS GATED ON `row.may_restore`, THE SAME SHAPE: a
 ticket a failed purge already marked answers False, and `{% else %}`

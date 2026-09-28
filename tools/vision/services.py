@@ -1384,8 +1384,9 @@ def delete_job(job: GenerationJob) -> None:
     store.remove_engine_files(job_id)
 
 
-def existing_job_ids(candidates) -> list[str]:
-    """Which of these job ids still name a job, as strings.
+def existing_job_ids(candidates) -> list[tuple[str, str, str]]:
+    """Which of these job ids still name a job, as `(id, owner_kind,
+    owner_key)` triples.
 
     ONE QUERY FOR THE WHOLE BATCH, never one per id, and NO QUERY AT
     ALL for an empty input -- most conversations reach the retention
@@ -1405,6 +1406,12 @@ def existing_job_ids(candidates) -> list[str]:
     Restore button. This box does not print promises about pictures it
     does not have.
 
+    THE OWNER COLUMNS RIDE ALONG, not a second query: `identity.
+    retention.delete_content` stamps a child ticket from the CONTENT's
+    own owner rather than the conversation's, and this is the one place
+    that reads a job's owner unscoped -- `visibility.py`'s own reads are
+    already principal-filtered, which is not what a deletion needs.
+
     CANDIDATES MUST ALREADY BE UUIDS (or UUID-shaped strings): this
     does no parsing, and a non-UUID in the batch raises inside the
     queryset -- `resolve_artifact_jobs` parses before it ever asks.
@@ -1412,8 +1419,9 @@ def existing_job_ids(candidates) -> list[str]:
     ids = list(candidates or ())
     if not ids:
         return []
-    return [str(job_id) for job_id in
-            GenerationJob.objects.filter(pk__in=ids).values_list("pk", flat=True)]
+    return [(str(job_id), owner_kind, owner_key) for job_id, owner_kind, owner_key in
+            GenerationJob.objects.filter(pk__in=ids)
+            .values_list("pk", "owner_kind", "owner_key")]
 
 
 def delete_jobs(job_ids) -> int:

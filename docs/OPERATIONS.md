@@ -94,8 +94,12 @@ not leave its pictures sitting in the gallery, unnamed, until a later date nobod
 
 An operator choosing the organisation posture gets one more guarantee about that date: a
 deleted conversation and the images that went with it always wait it out there, restorable but
-not destroyable early by anybody — an image deleted straight from the gallery, or a document
-deleted from the library, is not on this page yet and is unaffected, on every posture.
+not destroyable early by anybody — with one named exception: an item whose content a failed
+purge already partly destroyed can no longer be restored either way, so finishing its removal
+is offered early there too, since the waiting period has nothing further of that item's content
+left to protect. An ordinary, intact item is unaffected by that exception and still waits for its
+date. An image deleted straight from the gallery, or a document deleted from the library, is not
+on this page yet and is unaffected, on every posture.
 
 **Preview stacks are not a backup layer** and are not covered either. A preview stack is a full
 parallel copy with its own database; deleting something on the live box does not touch it. Tear

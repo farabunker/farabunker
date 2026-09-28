@@ -105,8 +105,9 @@ def run_retention(kind: str, key: str, *,
     return counts
 
 
-def run_children(kind: str, key: str) -> list[tuple[str, str]]:
-    """The `(kind, key)` pairs that follow this item's own ticket.
+def run_children(kind: str, key: str) -> list[tuple[str, str, str, str]]:
+    """The `(kind, key, owner_kind, owner_key)` quadruples that follow
+    this item's own ticket.
 
     ASKED AT DELETE TIME ONLY -- `identity.retention.delete_content` is
     the one caller. What it answers is written as tickets linked to the
@@ -119,19 +120,23 @@ def run_children(kind: str, key: str) -> list[tuple[str, str]]:
     that cannot be imported, or that raises, takes the delete down with
     it rather than silently leaving a child undeleted.
 
-    Deduped, in handler order -- ROWS band before FILES band, stable
-    within a band, whatever `retention_handlers` returns. A kind with no
+    DEDUPED ON `(kind, key)` ONLY, in handler order -- ROWS band before
+    FILES band, stable within a band, whatever `retention_handlers`
+    returns. A `(kind, key)` pair names one item, so its owner cannot
+    differ between two resolvers that both name it; the first resolver
+    to answer it is the one whose owner is kept. A kind with no
     resolver -- every kind but one, today -- answers `[]`, which is not
     an error.
     """
-    pairs: list[tuple[str, str]] = []
+    quads: list[tuple[str, str, str, str]] = []
     seen: set[tuple[str, str]] = set()
     for spec in retention_handlers(kind):
         if spec.children is None:
             continue
-        for child_kind, child_key in import_string(spec.children)(key):
+        for child_kind, child_key, owner_kind, owner_key in import_string(
+                spec.children)(key):
             pair = (str(child_kind), str(child_key))
             if pair not in seen:
                 seen.add(pair)
-                pairs.append(pair)
-    return pairs
+                quads.append((pair[0], pair[1], str(owner_kind), str(owner_key)))
+    return quads

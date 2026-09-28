@@ -75,9 +75,9 @@ from tools.vision.models import GeneratedOutput, JobInput
 logger = logging.getLogger(__name__)
 
 
-def resolve_artifact_jobs(refs, generation_ids) -> list[str]:
-    """The generation jobs these references and ids name, as primary
-    keys in string form, deduped.
+def resolve_artifact_jobs(refs, generation_ids) -> list[tuple[str, str, str]]:
+    """The generation jobs these references and ids name, as `(job_id,
+    owner_kind, owner_key)` triples, deduped by job.
 
     RESOLVES; DESTROYS NOTHING. The conversation that owns these
     references hands them over so each job can be given a DELETION OF
@@ -86,8 +86,15 @@ def resolve_artifact_jobs(refs, generation_ids) -> list[str]:
     else's date. `purge_job` below is what finally removes one, on the
     date that job's own ticket printed.
 
-    Strings, not UUIDs: a ticket key is text, and the caller is
-    building `(kind, key)` pairs for a registry, not a queryset.
+    `job_id` A STRING, NOT A UUID: a ticket key is text, and the caller
+    is building `(kind, key, owner_kind, owner_key)` quadruples for a
+    registry, not a queryset. THE OWNER RIDES ALONG SO `identity.
+    retention.delete_content` CAN STAMP THE CHILD TICKET FROM THE
+    IMAGE'S OWN OWNER, never the conversation's -- a share that let a
+    second principal post and generate inside somebody else's
+    conversation, or an administrator's duplicate, means the two can
+    differ, and the ticket's owner columns are what every downstream
+    surface (`visible_tickets`, `may_purge`) keys off.
 
     ONLY JOBS THAT STILL EXIST. A conversation's stored generation ids
     outlive the jobs they name -- the turn keeps the id after the

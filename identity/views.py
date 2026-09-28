@@ -690,9 +690,18 @@ def deleted_purge(request, pk: int):
     own `ServiceRefused`, or the `RetentionRefused` a retention handler
     in a column that may not import `identity.services` raises instead
     -- carries its own operator-readable sentence, flashed verbatim; the
-    ticket stays and the item stays invisible, UNMARKED -- a refusal
-    means nothing was attempted, not that something broke partway
-    through. ANY OTHER EXCEPTION a handler leaves behind is logged with
+    ticket stays and the item stays invisible. USUALLY UNMARKED -- a
+    refusal usually means nothing was attempted -- but not always: a
+    child's own refusal can propagate here after this item's own
+    files-band handler, or an earlier child's, already destroyed real
+    bytes (`retention.purge_ticket`'s own docstring says a child's
+    `RetentionRefused` is never caught inside it), and a single
+    files-band handler can destroy bytes and then refuse in the same
+    call, the identical shape the OTHER branch below already marks for.
+    So `retention.record_failed_purge` is called here too -- it is
+    self-guarding on whether a files-band handler actually ran, so a
+    refusal that reached no band at all still leaves the ticket unmarked.
+    ANY OTHER EXCEPTION a handler leaves behind is logged with
     `logger.exception`, keyed on ids only -- never this item's label or
     content -- and answered with a fixed, contentless sentence; the
     ticket stays for the next sweep or the next click either way,
@@ -701,10 +710,14 @@ def deleted_purge(request, pk: int):
     And a clean run flashes success. A caller with no standing to SEE
     the row (`_own_ticket_or_404`) is a
     404; a caller who sees it but may not purge it yet -- the
-    organisation posture, for everybody, before its date -- gets a
-    flashed sentence and a redirect instead: the row is right there on
+    organisation posture, for an UNMARKED ticket, before its date -- gets
+    a flashed sentence and a redirect instead: the row is right there on
     the page this click came from, so pretending it does not exist would
-    be a refusal that lies.
+    be a refusal that lies. A MARKED ticket on that same posture is no
+    longer refused here at all (`retention.may_purge`'s one named
+    exception) -- its content is already partly gone, so the date has
+    nothing further to protect, and this view runs the purge exactly as
+    it would on any other posture.
     """
     row = settings_row_for(request)
     principal, ticket = _own_ticket_or_404(request, pk, settings_row=row)
@@ -712,12 +725,20 @@ def deleted_purge(request, pk: int):
         # A SENTENCE, NOT A 404: the row is listed on the page this
         # click came from, so pretending it does not exist would be a
         # refusal that lies. 404 stays the answer for a ticket this
-        # principal may not SEE -- `_own_ticket_or_404` above.
-        messages.error(request, retention_copy.purge_refused_line(ticket.purge_on))
+        # principal may not SEE -- `_own_ticket_or_404` above. `marked=`
+        # picks the sentence that is actually true for THIS ticket: an
+        # unmarked ticket here can still be restored, and this is the
+        # organisation posture's own early-destroy refusal; a marked one
+        # reaching this branch at all (no standing over it) cannot be
+        # restored either way, and the unmarked sentence would say the
+        # opposite of both facts at once.
+        messages.error(request, retention_copy.purge_refused_line(
+            ticket.purge_on, marked=ticket.content_unrecoverable))
         return settings_redirect(request, "identity-deleted")
     try:
         retention.purge_ticket(principal, ticket, settings_row=row)
     except (services.ServiceRefused, RetentionRefused) as exc:
+        retention.record_failed_purge(ticket)
         messages.error(request, str(exc))
     except Exception:  # noqa: BLE001 -- never-500; the traceback goes to the log
         logger.exception(

@@ -87,6 +87,20 @@ class TestTheCopyIsDeclaredOnceInPython:
             "This item is kept until 21 October 2026. "
             "It can be restored, not destroyed early.")
 
+    def test_the_marked_refusal_says_restoring_is_no_longer_possible(self):
+        """THE UNMARKED SENTENCE IS BACKWARDS for a ticket a failed purge
+        already marked -- it cannot be restored, and it now can be
+        destroyed early on this posture -- so `marked=True` answers
+        `RESTORE_REFUSED_LINE` verbatim rather than the date-based
+        sentence above. If this still returned the unmarked words, this
+        assertion is exactly what would catch it."""
+        assert retention.purge_refused_line(
+            datetime.date(2026, 10, 21), marked=True) == retention.RESTORE_REFUSED_LINE
+        assert retention.purge_refused_line(
+            datetime.date(2026, 10, 21), marked=False) == (
+            "This item is kept until 21 October 2026. "
+            "It can be restored, not destroyed early.")
+
     def test_the_copy_never_says_ticket_cliff_or_sweep(self):
         words = " ".join([
             retention.PAGE_TITLE, retention.TAB_LOG, retention.ACTION_RESTORE,

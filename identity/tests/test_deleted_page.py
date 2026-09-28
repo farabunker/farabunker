@@ -47,14 +47,37 @@ def _ticket_for(user, *, key="1", label="A question"):
                                   key=key, owner=item, label=label)
 
 
-def _one_image_child(key: str) -> list[tuple[str, str]]:
+def _one_image_child(key: str) -> list[tuple[str, str, str, str]]:
     """A CONVERSATION'S ONE CHILD, for the test below that proves the
     refusal reaches a child ticket -- an identity-level stand-in for
     `agents.visibility`'s own resolver, with no dependency on
-    `tools.vision`: this module needs a `(kind, key)` pair that resolves
-    to `KIND_VISION_JOB`, not the real generation row that kind names in
-    production."""
-    return [(copy.KIND_VISION_JOB, f"{key}-image")]
+    `tools.vision`: this module needs a `(kind, key, owner_kind,
+    owner_key)` quadruple that resolves to `KIND_VISION_JOB`, not the
+    real generation row that kind names in production. Owned by the
+    SAME principal as the conversation `key` names -- this fixture is
+    about the refusal reaching a child at all, not about whose it is,
+    so it reads the real row's own owner rather than inventing one."""
+    from django.apps import apps
+    conversation = apps.get_model("agents.Conversation").objects.get(pk=key)
+    return [(copy.KIND_VISION_JOB, f"{key}-image",
+            conversation.owner_kind, conversation.owner_key)]
+
+
+# A MODULE-LEVEL SLOT, NOT A CLOSURE: `_cross_owner_image_child` is
+# resolved by DOTTED PATH (`import_string`), so it cannot close over a
+# test's own local `other` user -- this is how the test hands it the
+# second principal's owner columns before calling `delete_content`.
+_CROSS_OWNER_SLOT: dict[str, tuple[str, str]] = {}
+
+
+def _cross_owner_image_child(key: str) -> list[tuple[str, str, str, str]]:
+    """A CONVERSATION'S ONE CHILD, owned by a REAL, DIFFERENT principal
+    -- `_CROSS_OWNER_SLOT["owner"]`, set by the test immediately before
+    the delete this resolver is asked from. Two real users, not a
+    synthetic key with no owner: the fixture the brief for this wave
+    calls out as the one the old stamping pin could never fail against."""
+    owner_kind, owner_key = _CROSS_OWNER_SLOT["owner"]
+    return [(copy.KIND_VISION_JOB, f"{key}-image", owner_kind, owner_key)]
 
 
 class TestTheDeletedTab:
@@ -414,9 +437,11 @@ class TestAFailedPurgeMarkRefusesRestore:
 
     def test_permanent_delete_still_works_for_a_marked_ticket(self, client):
         """The point of the mark is that the content is gone, so
-        finishing the job must remain possible -- `may_purge` and
-        `deleted_purge` take no notice of `content_unrecoverable` at
-        all."""
+        finishing the job must remain possible. On this posture
+        (`personal`) the owner already passes `may_purge`'s ordinary
+        standing check regardless of the mark; `TestTheOrganisationPost
+        ureAdmitsAMarkedTicket` below is the posture where the mark
+        itself is what lets this succeed at all."""
         with posture("personal"):
             user = make_user()
             sign_in(client, user)
@@ -424,6 +449,61 @@ class TestAFailedPurgeMarkRefusesRestore:
             client.post(reverse("identity-deleted-purge", args=[ticket.pk]))
         assert not DeletionTicket.objects.filter(pk=ticket.pk).exists()
         assert AuditEvent.objects.filter(action=CONTENT_PURGED).count() == 1
+
+
+class TestTheOrganisationPostureAdmitsAMarkedTicket:
+    """Owner ruling (2026-09-28): a ticket whose content is already
+    partly gone has nothing left for the enforced period to protect, so
+    `may_purge`'s one named exception lets that ticket be destroyed
+    early on this posture too -- and ONLY that ticket. Read beside
+    `TestRestoreAndPurge::test_the_enterprise_posture_keeps_an_item_
+    until_its_date` above (an ordinary, unmarked ticket, still refused),
+    the two together are what make the exception legible: remove it and
+    the marked case below would refuse instead of succeeding; widen it
+    to every ticket and the unmarked case up above would stop refusing."""
+
+    def _marked_ticket_for(self, user):
+        ticket = _ticket_for(user)
+        DeletionTicket.objects.filter(pk=ticket.pk).update(
+            content_unrecoverable=True)
+        ticket.refresh_from_db()
+        return ticket
+
+    def test_a_marked_ticket_renders_and_accepts_permanent_delete_before_its_date(
+            self, client):
+        with posture("enterprise"):
+            user = make_user()
+            sign_in(client, user)
+            ticket = self._marked_ticket_for(user)
+
+            body = client.get(reverse("identity-deleted")).content.decode()
+            main = body.split("<main>", 1)[1].split("</main>", 1)[0]
+            assert reverse("identity-deleted-purge", args=[ticket.pk]) in main
+
+            response = client.post(
+                reverse("identity-deleted-purge", args=[ticket.pk]), follow=True)
+        assert response.redirect_chain[0][1] == 302
+        assert not DeletionTicket.objects.filter(pk=ticket.pk).exists()
+        assert AuditEvent.objects.filter(action=CONTENT_PURGED).count() == 1
+
+    def test_an_unmarked_ticket_on_the_same_posture_still_refuses(self, client):
+        """THE NEIGHBOUR THE EXCEPTION NEEDS TO STAY LEGIBLE -- without
+        it, `may_purge` could admit every ticket on this posture and the
+        test above would not notice."""
+        with posture("enterprise"):
+            user = make_user()
+            sign_in(client, user)
+            ticket = _ticket_for(user)
+
+            body = client.get(reverse("identity-deleted")).content.decode()
+            main = body.split("<main>", 1)[1].split("</main>", 1)[0]
+            assert reverse("identity-deleted-purge", args=[ticket.pk]) not in main
+
+            response = client.post(
+                reverse("identity-deleted-purge", args=[ticket.pk]), follow=True)
+        assert response.redirect_chain[0][1] == 302
+        assert DeletionTicket.objects.filter(pk=ticket.pk).exists()
+        assert copy.purge_refused_line(ticket.purge_on) in response.content.decode()
 
 
 class TestTheQueryCost:
@@ -568,3 +648,105 @@ class TestChildTicketsInheritTheRefusal:
             assert response.redirect_chain[0][1] == 302
             assert DeletionTicket.objects.filter(pk=child.pk).exists()
             assert copy.purge_refused_line(child.purge_on) in response.content.decode()
+
+
+class TestTheOtherOwnerSeesTheirOwnChild:
+    """The cross-owner half of the same wave: A's conversation holds a
+    generated image that belongs to B, not to A (a workstream share that
+    let B post and generate inside it; an administrator's duplicate).
+    TWO REAL USERS, a REAL child key carrying B's REAL owner columns --
+    the shape the old stamping pin's synthetic keys could never
+    exercise, because they had no owner of their own to differ FROM the
+    parent's."""
+
+    def _delete_as_a_with_bs_image(self, client, a, b):
+        register_retention_handler(RetentionHandler(
+            kind=copy.KIND_CONVERSATION, key="t.page.conversation",
+            label="Conversation", handler=f"{__name__}.noop",
+            children=f"{__name__}._cross_owner_image_child"))
+        _CROSS_OWNER_SLOT["owner"] = ("user", str(b.pk))
+        item = make_conversation(owner_kind="user", owner_key=str(a.pk))
+        sign_in(client, a)
+        parent = service.delete_content(
+            user_principal(a), kind=copy.KIND_CONVERSATION,
+            key=str(item.pk), owner=item)
+        child = DeletionTicket.objects.get(
+            kind=copy.KIND_VISION_JOB, parent=parent)
+        assert (child.owner_kind, child.owner_key) == ("user", str(b.pk))
+        return parent, child
+
+    def test_b_sees_the_row_on_bs_own_deleted_page_and_can_restore_it(self, client):
+        """THE ASSERTION THAT WOULD FLIP if the stamping regressed to
+        the parent's owner: with `admin_sees_content` off (the shipped
+        default), `visible_tickets` narrows to the viewer's own rows, so
+        a child stamped as A's would be invisible to B here -- and the
+        restore POST, gated through the identical `_own_ticket_or_404`,
+        would 404 instead of succeeding."""
+        with posture("personal"):
+            a, b = make_user(), make_user()
+            _parent, child = self._delete_as_a_with_bs_image(client, a, b)
+
+            sign_in(client, b)
+            body = client.get(reverse("identity-deleted")).content.decode()
+            main = body.split("<main>", 1)[1].split("</main>", 1)[0]
+            assert reverse("identity-deleted-restore", args=[child.pk]) in main
+
+            response = client.post(
+                reverse("identity-deleted-restore", args=[child.pk]), follow=True)
+        assert response.redirect_chain[0][1] == 302
+        assert not DeletionTicket.objects.filter(pk=child.pk).exists()
+        assert AuditEvent.objects.filter(
+            action=CONTENT_RESTORED, target_type=copy.KIND_VISION_JOB).count() == 1
+
+    def test_the_deleting_principal_does_not_see_a_child_they_do_not_own(self, client):
+        """THE MIRROR: A clicked delete, but the image was never A's --
+        A's own Deleted page must not claim it, and a direct POST to
+        its row is a 404 for A, exactly as it would be for a stranger."""
+        with posture("personal"):
+            a, b = make_user(), make_user()
+            _parent, child = self._delete_as_a_with_bs_image(client, a, b)
+
+            body = client.get(reverse("identity-deleted")).content.decode()
+            main = body.split("<main>", 1)[1].split("</main>", 1)[0]
+            assert reverse("identity-deleted-restore", args=[child.pk]) not in main
+
+            response = client.post(
+                reverse("identity-deleted-restore", args=[child.pk]))
+        assert response.status_code == 404
+        assert DeletionTicket.objects.filter(pk=child.pk).exists()
+
+    def test_as_permanent_delete_destroys_as_content_and_leaves_bs_ticket_and_date_standing(
+            self, client):
+        """Owner ruling (2026-09-28), end to end through the real view:
+        A permanently deleting the conversation reaches only what A
+        owns. B's child ticket survives, detached, with its own date --
+        `test_the_sweep_on_the_date_takes_both` below is its other half,
+        proving the date is still a promise kept, not a promise
+        forgotten."""
+        with posture("personal"):
+            a, b = make_user(), make_user()
+            parent, child = self._delete_as_a_with_bs_image(client, a, b)
+
+            client.post(reverse("identity-deleted-purge", args=[parent.pk]))
+
+        assert not DeletionTicket.objects.filter(pk=parent.pk).exists()
+        child.refresh_from_db()
+        assert child.parent_id is None
+        assert DeletionTicket.objects.filter(pk=child.pk).exists()
+        assert service.may_restore(child) is True
+
+    def test_the_sweep_on_the_date_takes_both(self, client):
+        """Nothing outlives the date it was promised, ownership aside:
+        the sweep always acts as `SERVICE_PRINCIPAL`, so once both
+        tickets fall due the family is destroyed in full regardless of
+        who owns which piece of it."""
+        with posture("personal"):
+            a, b = make_user(), make_user()
+            parent, child = self._delete_as_a_with_bs_image(client, a, b)
+            DeletionTicket.objects.filter(
+                pk__in=[parent.pk, child.pk]).update(
+                purge_on=timezone.localdate() - datetime.timedelta(days=1))
+
+            assert service.sweep() == 2
+
+        assert DeletionTicket.objects.count() == 0

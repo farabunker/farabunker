@@ -32,6 +32,7 @@ import datetime
 import logging
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from identity import audit
@@ -137,10 +138,37 @@ def record_failed_purge(ticket) -> None:
     ticket that broke no promise -- exactly the case
     `test_a_purge_that_rolled_back_leaves_a_ticket_restore_still_accepts`
     pins, unmarked, unchanged by this function existing.
+
+    MARKS THE WHOLE FAMILY THIS ATTEMPT TOUCHED, NOT ONLY `ticket`
+    ITSELF: `_files_band_reached` is one Python attribute on the object
+    `purge_ticket` was called with, set the instant ANY files-band
+    handler in the family -- this item's own, or any child's --  is
+    about to run (`identity.cascades.run_retention`'s `on_files_band`),
+    and `purge_ticket` passes the SAME closure into every `_purge_child`
+    call. So the flag cannot say WHICH member of the family entered its
+    band, only that the family did -- and a child whose OWN files-band
+    handler already destroyed real bytes rolls back to an ordinary,
+    undestroyed-looking ROW exactly like its parent does, on the very
+    same failed transaction. `Q(pk=ticket.pk) | Q(parent_id=ticket.pk)`
+    marks `ticket` and every ticket presently linked to it as a child, in
+    one write: a child a family member's own bytes truly destroyed is
+    never missed, at the cost of also marking a sibling whose own handler
+    never ran at all -- the SAME direction `run_retention`'s "before, not
+    after" placement already accepts for a single ticket (a files-band
+    handler that raises before touching anything still marks). Consistent
+    with the rest of this feature's own rule: a false refusal to restore
+    costs a person an early click; a false restore hands back an item
+    that is not the one they remember, and this trades toward the
+    cheaper mistake on both counts. `parent_id=ticket.pk` reaches nothing
+    when `ticket` is itself a child (a child is never asked for
+    children), so a direct purge of one child's own row marks only that
+    row, exactly as before this widening.
     """
-    if getattr(ticket, "_files_band_reached", False):
-        DeletionTicket.objects.filter(pk=ticket.pk).update(
-            content_unrecoverable=True)
+    if not getattr(ticket, "_files_band_reached", False):
+        return
+    DeletionTicket.objects.filter(
+        Q(pk=ticket.pk) | Q(parent_id=ticket.pk)).update(
+        content_unrecoverable=True)
 
 
 def may_purge(principal, ticket, *, settings_row=None) -> bool:
@@ -167,17 +195,39 @@ def may_purge(principal, ticket, *, settings_row=None) -> bool:
     (it is still on the page, still restorable) while this refuses. The
     deferred enterprise hold behaviour (spec section 10.10) is a further
     refusal on top of this one, once a held ticket exists to refuse.
+
+    ONE NAMED EXCEPTION TO THE ORGANISATION POSTURE'S REFUSAL, an owner
+    ruling (2026-09-28): a ticket `may_restore` already refuses
+    (`ticket.content_unrecoverable` -- a purge destroyed some of its
+    content and then failed) may be purged early on that posture too.
+    The enforced period exists to protect CONTENT that is still there to
+    protect; this item's is already partly gone, so the period guarantees
+    nothing further for it and refusing the button only strands a person
+    with a row they can neither restore nor finish. The audit trail is
+    unaffected either way -- every `content.deleted`/`content.purged`
+    event this ticket's family writes stands regardless of which button
+    is clicked, so nothing about that record is at stake in this
+    exception. THE EXCEPTION IS TO THE POSTURE LINE ONLY, never to
+    standing: a marked ticket still falls through to the same owner-or-
+    `sees_all_content` check every other ticket on every other posture
+    already passes through here, so a principal with no standing over the
+    ticket is refused exactly as before, marked or not. AN UNMARKED
+    TICKET ON THIS POSTURE IS UNCHANGED -- still refused before its date,
+    for everybody -- and the sweep still takes every ticket, marked or
+    not, on the date regardless of this function, which the sweep never
+    asks.
     """
     row = settings_row if settings_row is not None else IdentitySettings.get_solo()
-    # THE ORGANISATION POSTURE DESTROYS NOTHING EARLY, for anybody. Not
-    # a standing question and not a hold: the promised date is the whole
-    # policy on that posture, and a box that let one person shorten it
-    # would be a box whose printed date was advice. ONE PREDICATE, HERE,
-    # so every surface agrees by construction -- the page hides the
-    # control because it asks this, the POST refuses because it asks
-    # this -- and WHICH postures enforce it is a policy choice made on
-    # this line and nowhere else.
-    if row.posture == POSTURE_ENTERPRISE:
+    # THE ORGANISATION POSTURE DESTROYS NOTHING EARLY, for anybody, WITH
+    # ONE EXCEPTION: a ticket already marked `content_unrecoverable`
+    # (see the docstring above). Not a standing question and not a hold
+    # for an UNMARKED ticket: the promised date is the whole policy for
+    # it, and a box that let one person shorten it would be a box whose
+    # printed date was advice. WHICH postures enforce it, and which one
+    # ticket state is exempt from it, are both policy choices made on
+    # this line and nowhere else -- the page hides the control because
+    # it asks this, the POST refuses because it asks this.
+    if row.posture == POSTURE_ENTERPRISE and not ticket.content_unrecoverable:
         return False
     if sees_all_content(principal, settings_row=row):
         return True
@@ -255,16 +305,26 @@ def delete_content(actor, *, kind: str, key, owner, label: str = "",
 
     A CHILD TICKET CARRIES NO LABEL: the parent's title is not the
     child's name, and the child's own content is not copied into
-    bookkeeping the purge is meant to leave behind. It is stamped with
-    the PARENT ITEM's owner columns, deliberately -- those columns
-    answer "whose deletion is this", and whoever may restore or purge
-    the parent may do so for the whole cascade. AN ITEM ALREADY
-    TICKETED KEEPS ITS OWN DATE AND ITS OWN STANDING: `get_or_create` on
-    the unique `(kind, key)` returns the existing ticket unchanged,
-    neither re-dated nor adopted. NO SEPARATE ZERO-DAY PATH for the
-    children either: they are written with the SAME `purge_on` as the
-    parent, so they are due exactly when it is, and the unconditional
-    prune-on-write sweep below purges them in the same call.
+    bookkeeping the purge is meant to leave behind. IT IS STAMPED WITH
+    THE OWNER OF THE CONTENT IT DESCRIBES, not the parent item's:
+    `run_children` answers an owner alongside each `(kind, key)` pair
+    precisely so this can copy the CHILD's own owner columns rather than
+    `owner`'s -- the parameter above is the PARENT item's row, and using
+    it for a child would file that child under whoever owns the parent
+    even when a second principal's content sits inside it (a share that
+    let them post and generate; an administrator's duplicate). Those
+    columns answer "whose deletion is this", which is what
+    `visible_tickets` and `may_purge` read for THAT ticket specifically
+    -- restoring the parent still brings every child back regardless of
+    whose it is (putting content back is harmless), but `purge_ticket`
+    below reads a child's own owner to decide whether an explicit click
+    may destroy it. AN ITEM ALREADY TICKETED KEEPS ITS OWN DATE AND ITS
+    OWN STANDING: `get_or_create` on the unique `(kind, key)` returns the
+    existing ticket unchanged, neither re-dated nor adopted. NO SEPARATE
+    ZERO-DAY PATH for the children either: they are written with the
+    SAME `purge_on` as the parent, so they are due exactly when it is,
+    and the unconditional prune-on-write sweep below purges them in the
+    same call.
     """
     row = IdentitySettings.get_solo()
     purge_on = timezone.localdate() + datetime.timedelta(days=row.retention_days)
@@ -289,7 +349,8 @@ def delete_content(actor, *, kind: str, key, owner, label: str = "",
             # ticket -- how `restore_content` and `purge_ticket` below
             # find exactly the tickets one delete created, and no
             # others (`identity.models.DeletionTicket.parent`).
-            for child_kind, child_key in run_children(kind, str(key)):
+            for child_kind, child_key, child_owner_kind, child_owner_key in (
+                    run_children(kind, str(key))):
                 _child, child_created = DeletionTicket.objects.get_or_create(
                     kind=child_kind, key=child_key,
                     defaults=dict(
@@ -298,8 +359,8 @@ def delete_content(actor, *, kind: str, key, owner, label: str = "",
                         purge_on=purge_on,
                         deleted_by_kind=getattr(actor, "kind", ""),
                         deleted_by_key=getattr(actor, "key", ""),
-                        owner_kind=getattr(owner, "owner_kind", ""),
-                        owner_key=str(getattr(owner, "owner_key", "")),
+                        owner_kind=child_owner_kind,
+                        owner_key=child_owner_key,
                     ),
                 )
                 if child_created:
@@ -497,6 +558,20 @@ def purge_ticket(actor, ticket, *, source: str = SOURCE_WEB,
     this delivery writes a hold, so this is latent until the deferred
     enterprise slice (spec section 10.10) can set one.
 
+    A CHILD THE ACTING PRINCIPAL DOES NOT OWN IS ALSO SKIPPED AND
+    DETACHED, the SAME shape as a held child, for an unrelated reason
+    (owner ruling, 2026-09-28): a child ticket now names the owner of the
+    CONTENT it describes, which can differ from this item's own owner,
+    and a permanent delete of the parent must not be how a stranger to
+    that child cuts its own retention window short. It keeps its own
+    ticket, date and Restore, exactly as a held child does. THE ONE
+    CALLER THIS NEVER APPLIES TO IS THE SWEEP: `sweep` always purges as
+    `SERVICE_PRINCIPAL`, so this check is keyed on the acting principal
+    BEING that constant, never on an ownership predicate alone -- such a
+    predicate answers False for `SERVICE_PRINCIPAL` on every user-owned
+    row, and would make the sweep skip every child on the box rather than
+    take everything on the date it promised.
+
     A CHILD'S OWN `RetentionRefused` IS NOT CAUGHT HERE, unlike the
     sweep's: it propagates out of `_purge_child` exactly like any other
     exception a handler raises, taking the whole click down with it --
@@ -507,6 +582,19 @@ def purge_ticket(actor, ticket, *, source: str = SOURCE_WEB,
     watching; a direct click surfaces it.
     """
     row = settings_row if settings_row is not None else IdentitySettings.get_solo()
+    # THIS IS THE OUTERMOST TRANSACTION ON EVERY PRODUCTION CALL PATH --
+    # no view or command in this codebase opens one of its own around a
+    # purge (no `ATOMIC_REQUESTS`, no `@transaction.atomic` on
+    # `deleted_purge`/`sweep`'s three call sites), so a raise here rolls
+    # back through a real `connection.rollback()`, and `record_failed_
+    # purge`'s later `.update()` is an ordinary, separately-committed
+    # write, not a write inside a block Django has already marked for
+    # rollback. A FUTURE WRAPPER THAT NESTS THIS IN A FURTHER
+    # `transaction.atomic(savepoint=False)` WOULD SILENTLY BREAK THAT:
+    # `identity/tests/test_retention_service.py::
+    # TestTheMarkOutsideAnyAmbientTransaction` is the one test that
+    # removes the ambient block pytest-django's own fixture otherwise
+    # supplies and would catch it.
     with transaction.atomic():
         current = DeletionTicket.objects.select_for_update().filter(pk=ticket.pk).first()
         if current is None:
@@ -535,9 +623,36 @@ def purge_ticket(actor, ticket, *, source: str = SOURCE_WEB,
         # due condition below: this item's purge reaches every ordinary
         # child that arrived with it, never one somebody has since put a
         # hold on.
-        children = list(
+        candidate_children = list(
             current.children.filter(hold_by_kind="")
             .select_for_update().order_by("pk"))
+        # AN EXPLICIT CLICK DESTROYS ONLY THE CHILDREN THE CLICKER OWNS;
+        # THE SWEEP TAKES EVERYTHING (owner ruling, 2026-09-28). A child
+        # ticket now carries the OWNER OF THE CONTENT IT DESCRIBES
+        # (`delete_content`'s own comment says why), which can differ
+        # from the parent's -- and "whoever may restore or purge the
+        # parent may do so for the whole cascade" stopped being true the
+        # moment that became possible: a stranger to the CHILD should not
+        # be able to cut that child's own retention window short merely
+        # by owning the PARENT. `SERVICE_PRINCIPAL` IS THE ONE CALLER
+        # THIS MUST NOT APPLY TO: `sweep` always purges as that principal
+        # (`_purge_due` below), for whom `may_read_owned_row` answers
+        # False on every user-owned row -- a check keyed on ownership
+        # alone would make the sweep skip every child on the box and
+        # leak the whole feature on its own promised date. So the gate is
+        # keyed on WHO IS ACTING, not on a purge predicate: `actor ==
+        # SERVICE_PRINCIPAL` is true on exactly the one call path where
+        # nobody actually clicked anything, and PRINCIPAL_KINDS' own
+        # vocabulary backs the distinction -- "service" names a machine
+        # caller, never a person at a keyboard.
+        if actor == SERVICE_PRINCIPAL:
+            children = candidate_children
+            children_not_owned = []
+        else:
+            children = [child for child in candidate_children
+                       if may_read_owned_row(actor, child)]
+            children_not_owned = [child for child in candidate_children
+                                  if not may_read_owned_row(actor, child)]
         # A PLAIN PYTHON ATTRIBUTE ON `ticket` -- THE CALLER'S OWN
         # REFERENCE, NOT `current` -- so it survives a raise that rolls
         # back everything in the transaction above: setting it is not a
@@ -566,6 +681,16 @@ def purge_ticket(actor, ticket, *, source: str = SOURCE_WEB,
         # left this way keeps its own ticket, still restorable and still
         # purgeable on its own, the same as any other un-linked ticket.
         current.children.exclude(hold_by_kind="").update(parent=None)
+        # A CHILD THE CLICKER DOES NOT OWN IS DETACHED THE SAME WAY, for
+        # the identical database-level reason: `parent=None` before the
+        # row delete below, or the CASCADE would destroy a child this
+        # click was never allowed to reach. It keeps its own ticket, its
+        # own date and its own Restore -- standing on its own from here,
+        # exactly like a held child, though for a different reason and
+        # with no hold columns written.
+        if children_not_owned:
+            DeletionTicket.objects.filter(
+                pk__in=[child.pk for child in children_not_owned]).update(parent=None)
         current.delete()
         audit.record(actor, CONTENT_PURGED, target_type=kind, target_key=key,
                      target_label=label if row.audit_detail else "",
@@ -612,10 +737,19 @@ def sweep(*, limit: int = SWEEP_LIMIT, source: str = SOURCE_WEB) -> int:
     the conversation's jobs -- so it is logged at `logger.warning` --
     one line, no traceback -- and every other exception keeps
     `logger.exception`, which is the failure this batch actually needs
-    to be noisy about. THAT OTHER BRANCH ALSO CALLS `record_failed_purge`,
-    a `RetentionRefused` never does: a refusal means nothing was
-    attempted, while any other exception may have followed a files-band
-    handler that already ran.
+    to be noisy about. BOTH BRANCHES CALL `record_failed_purge`, though:
+    a refusal USUALLY means nothing was attempted, but not always -- a
+    child's `RetentionRefused` propagates out of `_purge_child` exactly
+    like any other exception a handler raises (`purge_ticket`'s own
+    docstring says so), so it can arrive after THIS item's own files-band
+    handler, or an earlier child's, already destroyed real bytes. A
+    single files-band handler can also destroy bytes and refuse in the
+    SAME call, the identical shape that already justifies calling this
+    function from the exception branch below. `record_failed_purge` is
+    self-guarding on whether a files-band handler actually ran, so
+    calling it from BOTH branches marks nothing that a refusal reached
+    before any band began -- it is never wrong to call, only sometimes a
+    no-op.
     """
     due = list(
         DeletionTicket.objects
@@ -669,6 +803,7 @@ def _purge_due(due, *, source: str = SOURCE_WEB) -> int:
             logger.warning(
                 "identity.retention: purge refused for %s:%s; it stays due -- %s",
                 ticket.kind, ticket.key, exc)
+            record_failed_purge(ticket)
             continue
         except Exception:  # noqa: BLE001 -- one bad ticket, not a bad batch
             logger.exception(

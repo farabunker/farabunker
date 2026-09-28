@@ -475,9 +475,25 @@ purge that gets as far as a files-band handler and then fails leaves the
 row rolled back and the ticket standing, but the bytes a filesystem
 delete already removed do not come back with it. `identity.retention.
 may_restore` refuses Restore for a ticket in that state — existing and
-being restorable have stopped being the same question for that one row —
-while "Delete permanently" keeps working, because the point of the mark
-is that finishing the job must stay possible.
+being restorable have stopped being the same question for that one row.
+THE MARK COVERS THE WHOLE FAMILY A FAILED ATTEMPT TOUCHED, not only the
+ticket `record_failed_purge` was called with: the flag it reads is one
+Python attribute set the instant the family's files band is entered,
+by ANY member's own handler, so a child whose own bytes really were
+destroyed rolls back to a row that looks untouched on exactly the same
+failed transaction its parent does, and would otherwise keep a working
+Restore button pointed at a file that is gone.
+
+"Delete permanently" keeps working for a marked ticket on every posture
+where standing already admits it — the point of the mark is that
+finishing the job must stay possible for whoever may act on the row —
+and, since an owner ruling (2026-09-28), on the organisation posture too:
+that posture's blanket early-destroy refusal gains one named exception,
+a marked ticket, because the enforced period protects content the item
+still has, and a marked item no longer fully has it. AN UNMARKED TICKET
+ON THAT POSTURE IS UNCHANGED, still refused before its date — the
+exception is to the mark, never to the posture in general, and the sweep
+still takes every ticket, marked or not, on the date regardless.
 
 **Three retention fields on `IdentitySettings`, one "Retention" section,
 zero required setup**: `retention_days` (`LABEL_RETENTION_DAYS`, "Keep
@@ -518,28 +534,101 @@ handler that raises (logged, never content) leaves that ticket standing
 for the next pass instead of blocking the rest of the batch.
 
 **A registered handler may also name its item's children.**
-`RetentionHandler.children`, OPTIONAL, is a dotted path to `(key: str)
--> list[tuple[str, str]]` — the case it exists for is a conversation's
-generated images: content of their own, on their own table, with their
-own visibility rule, that would otherwise stay in the gallery while the
-chat that made them was hidden. It is asked ONCE, at `delete_content`
-time only, and what it answers is written as ORDINARY tickets — their
-own row, their own date on the Deleted page, their own handler, their
-own restore — each linked back to the ticket this delete created via
+`RetentionHandler.children`, OPTIONAL, is a dotted path to `(key: str) ->
+list[tuple[str, str, str, str]]` — `(child_kind, child_key, owner_kind,
+owner_key)` — the case it exists for is a conversation's generated
+images: content of their own, on their own table, with their own
+visibility rule, that would otherwise stay in the gallery while the chat
+that made them was hidden. It is asked ONCE, at `delete_content` time
+only, and what it answers is written as ORDINARY tickets — their own
+row, their own date on the Deleted page, their own handler, their own
+restore — each linked back to the ticket this delete created via
 `DeletionTicket.parent`. Restore and permanent delete follow that link
-rather than asking the resolver again, so a column whose rows have
-since changed can never make either of them reach a ticket a different
-delete created. Three things follow from the link: restoring the
-parent removes the children it wrote; permanently deleting the parent
-destroys the children's content after the parent's own rows (the
-filesystem-last rule, since a child here is a generated image); and the
-sweep counts every ticket a due purge addressed, a parent's children
-included, not one per due ticket it started from. Two things a person
-can observe: a child restored on its own survives its parent's later
-permanent delete (the link is followed forward only, never backward),
-and an item already deleted on its own keeps its own date and its own
-standing — it is never re-dated or adopted by a later delete that
-happens to reach it too.
+rather than asking the resolver again, so a column whose rows have since
+changed can never make either of them reach a ticket a different delete
+created.
+
+**EACH CHILD TICKET IS STAMPED WITH THE OWNER OF THE CONTENT IT
+DESCRIBES, NOT THE PARENT ITEM'S.** This changed (2026-09-28): the
+resolver contract used to answer only `(child_kind, child_key)`, so
+`delete_content` had no owner to stamp a child with but the parent
+item's own — correct only when the two happen to coincide, and false
+whenever a second principal's content sits inside somebody else's
+conversation (a workstream share that let them post into it and
+generate an image; an administrator, `admin_sees_content` on, who
+duplicated the conversation and deleted the copy). Every downstream
+surface keys off a ticket's OWN owner columns — `visible_tickets` for
+listing, `may_purge` and `_own_ticket_or_404` for standing — so the
+wrong stamp meant the actual owner's picture could vanish from their own
+gallery with no row anywhere telling them, unrestorable by them, and
+destroyable early by whoever happened to click delete on the chat. The
+resolver now carries the owner because `identity/` cannot look one up
+itself (rule 4 forbids importing `agents/`/`tools/` to ask); the two
+columns still `identity.retention.owned_rows_q`/`may_read_owned_row`
+already read are simply supplied by the resolver instead of copied from
+the parent's own row.
+
+**A PERMANENT DELETE OF THE PARENT SKIPS A CHILD THE CLICKER DOES NOT
+OWN**, detaching it (`parent=None`, exactly as a held child already is)
+rather than destroying it: it keeps its own ticket, its own date and its
+own Restore, standing on its own from that point on. The scheduled sweep
+is unaffected and still takes everything on the date regardless of who
+owns what — nothing outlives the promise its date printed, and what a
+non-owner's early click cannot do is cut a stranger's window short.
+THE CHECK IS KEYED ON THE ACTOR BEING A REAL PRINCIPAL, never on
+`may_read_owned_row(actor, child)` alone: `sweep` always purges as
+`SERVICE_PRINCIPAL`, for whom that predicate is false on every
+user-owned row, so a naive ownership check applied there would make the
+sweep skip every child on the box and leak the whole feature. `purge_
+ticket` tells the two apart by comparing the acting principal to the
+service principal directly, and only withholds a child from the
+purge loop when the answer is "somebody really clicked this."
+
+Three things follow from the parent link, unchanged by any of the
+above: restoring the parent removes the children it wrote (ownership is
+not asked there — putting content back is harmless regardless of whose
+it is); permanently deleting the parent destroys the children the
+clicker owns after the parent's own rows finish, and detaches the rest;
+and the sweep counts every ticket a due purge addressed, a parent's
+children included, not one per due ticket it started from. Two things a
+person can observe: a child restored on its own survives its parent's
+later permanent delete (the link is followed forward only, never
+backward), and an item already deleted on its own keeps its own date
+and its own standing — it is never re-dated or adopted by a later
+delete that happens to reach it too.
+
+**A DUPLICATE OR A BRANCH MUST NOT TICKET A JOB ANOTHER LIVE
+CONVERSATION STILL SHOWS.** `agents.visibility.duplicate_conversation`/
+`branch_conversation` copy `artifacts` and `data` VERBATIM
+(`_copy_turns_into`), so a copy's tool turn names the exact same
+`output:<id>` reference and the exact same generation id the original's
+own turn does. Before a fix (2026-09-28), deleting the COPY walked only
+the copy's own turns, found that same reference, and ticketed the job
+it names — hiding, and on the copy's own date destroying, a picture a
+DIFFERENT, live, undeleted conversation still displayed; this needed no
+sharing and no second principal, since duplicating and deleting one's
+OWN conversation reproduced it. `agents.retention.conversation_children`
+now excludes any reference or generation id some OTHER, undeleted
+conversation's own turns still carry before asking the image column to
+resolve jobs at all — a conversation already ticketed (on its own way
+out) does not count as "another live conversation", so the exclusion is
+eventually consistent rather than permanent: once every conversation
+naming a job is itself deleted, whichever delete runs last is the one
+that finally reaches it.
+
+**"Filesystem-last" describes ordering WITHIN a call, never ACROSS the
+cascade — one sentence worth stating precisely, since the plain reading
+overclaims.** Permanently deleting the parent does not destroy the
+children's content "after the parent's own rows" in the sense that
+every row this click touches is gone before the first byte is: this
+item's OWN registered handlers can themselves destroy bytes (a
+conversation's do, today), so a child's rows can be deleted after this
+item's own bytes are already gone. What holds is narrower and still
+real: children go after the parent's own handlers have finished — the
+`ORDER_ROWS`-before-`ORDER_FILES` rule holds WITHIN each handler run,
+this item's own and independently each child's own, not across the
+whole family (`identity/retention.py::purge_ticket` states this in
+full).
 
 Every audit write for this feature goes through `identity/audit.py::
 record` (`CONTENT_DELETED`, `CONTENT_RESTORED`, `CONTENT_PURGED`), and

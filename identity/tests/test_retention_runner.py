@@ -34,14 +34,24 @@ def raising_handler(key: str) -> int:
     raise RuntimeError("this column cannot finish")
 
 
-def first_children(key: str) -> list[tuple[str, str]]:
+def first_children(key: str) -> list[tuple[str, str, str, str]]:
     CALLED.append(f"first:{key}")
-    return [(KIND_DOCUMENT, "d-1"), (KIND_DOCUMENT, "d-2")]
+    return [(KIND_DOCUMENT, "d-1", "user", "1"), (KIND_DOCUMENT, "d-2", "user", "2")]
 
 
-def second_children(key: str) -> list[tuple[str, str]]:
+def second_children(key: str) -> list[tuple[str, str, str, str]]:
     CALLED.append(f"second:{key}")
-    return [(KIND_DOCUMENT, "d-2")]
+    return [(KIND_DOCUMENT, "d-2", "user", "2")]
+
+
+def conflicting_second_children(key: str) -> list[tuple[str, str, str, str]]:
+    """Names the SAME pair `first_children` already answered, "d-2", but
+    with a DIFFERENT owner -- a fixture that could never exist for one
+    real kind (a `(kind, key)` names one item, so it has one owner), used
+    only to prove `run_children` keeps the FIRST resolver's answer for a
+    pair two resolvers both name."""
+    CALLED.append(f"second:{key}")
+    return [(KIND_DOCUMENT, "d-2", "user", "999")]
 
 
 def db_error_handler(key: str) -> int:
@@ -191,8 +201,8 @@ class TestRunChildren:
             handler=f"{__name__}.rows_handler",
             children=f"{__name__}.first_children"))
 
-        assert run_children(KIND_ASK, "77") == [("document", "d-1"),
-                                                ("document", "d-2")]
+        assert run_children(KIND_ASK, "77") == [("document", "d-1", "user", "1"),
+                                                ("document", "d-2", "user", "2")]
         assert CALLED == ["first:77"]
 
     def test_a_kind_with_no_resolver_answers_an_empty_list(self):
@@ -213,9 +223,28 @@ class TestRunChildren:
             handler=f"{__name__}.files_handler", order=ORDER_FILES,
             children=f"{__name__}.second_children"))
 
-        assert run_children(KIND_ASK, "77") == [("document", "d-1"),
-                                                ("document", "d-2")]
+        assert run_children(KIND_ASK, "77") == [("document", "d-1", "user", "1"),
+                                                ("document", "d-2", "user", "2")]
         assert CALLED == ["first:77", "second:77"]
+
+    def test_the_first_resolver_to_name_a_pair_is_the_owner_kept(self):
+        """THE ASSERTION THAT WOULD FLIP if the dedupe ever started
+        preferring a LATER resolver's owner: `first_children` (ROWS band,
+        runs first) answers "d-2" owned by `user/2`;
+        `conflicting_second_children` (FILES band, runs second) answers
+        the SAME pair owned by `user/999`. The pair appears once, with
+        the first owner."""
+        register_retention_handler(RetentionHandler(
+            kind=KIND_ASK, key="t.rows", label="Rows",
+            handler=f"{__name__}.rows_handler",
+            children=f"{__name__}.first_children"))
+        register_retention_handler(RetentionHandler(
+            kind=KIND_ASK, key="t.files", label="Files",
+            handler=f"{__name__}.files_handler", order=ORDER_FILES,
+            children=f"{__name__}.conflicting_second_children"))
+
+        assert run_children(KIND_ASK, "77") == [("document", "d-1", "user", "1"),
+                                                ("document", "d-2", "user", "2")]
 
     def test_a_resolver_that_cannot_be_imported_takes_the_delete_down(self):
         """NEVER SWALLOWS, the same contract `run_retention` has."""

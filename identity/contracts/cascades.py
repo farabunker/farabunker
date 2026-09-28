@@ -132,18 +132,30 @@ class RetentionHandler:
     next sweep retries.
 
     `children` -- OPTIONAL, a dotted path to `(key: str) -> list[tuple[str,
-    str]]`, answering "what else is deleted when this item is". A
-    conversation's generated images are the case it exists for: they are
-    content of their own, on their own table, with their own visibility
-    rule, and a delete that hid the chat while leaving them in the
-    gallery would be a box whose "delete" and whose "destroy" disagreed.
-    **It is asked ONCE, at delete time**, and what it answers becomes
-    ordinary tickets -- their own row, their own date on the Deleted
-    page, their own handler, their own restore -- each one linked back
-    to the ticket whose delete created it. Restore and permanent delete
-    follow that link rather than asking again, so this resolver is never
-    the reason a ticket somebody else's delete wrote is put back or
+    str, str, str]]` -- `(child_kind, child_key, owner_kind, owner_key)`
+    -- answering "what else is deleted when this item is, and whose is
+    it". A conversation's generated images are the case it exists for:
+    they are content of their own, on their own table, with their own
+    visibility rule, and a delete that hid the chat while leaving them in
+    the gallery would be a box whose "delete" and whose "destroy"
+    disagreed. **It is asked ONCE, at delete time**, and what it answers
+    becomes ordinary tickets -- their own row, their own date on the
+    Deleted page, their own handler, their own restore -- each one linked
+    back to the ticket whose delete created it. Restore and permanent
+    delete follow that link rather than asking again, so this resolver is
+    never the reason a ticket somebody else's delete wrote is put back or
     destroyed early.
+
+    THE OWNER COLUMNS NAME THE CONTENT'S OWN OWNER, NOT THE PARENT
+    ITEM'S -- `identity.retention.delete_content` stamps the child ticket
+    from them directly, because `identity/` cannot look an owner up
+    itself (rule 4 forbids importing the column that would know). A
+    conversation's owner and its generated image's owner are usually the
+    same principal and were once assumed to always be; they are not the
+    moment a share or an administrator's duplicate lets a second
+    principal's content sit inside somebody else's conversation, and a
+    resolver that answered the parent's owner instead would misfile every
+    such child under the wrong person's Deleted page.
     """
 
     kind: str
