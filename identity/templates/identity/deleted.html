@@ -18,6 +18,14 @@ for everybody on that posture, so `{% if row.may_purge %}` below simply
 omits the `<details>` block for every row, and the page says nothing
 about why beyond the date it already prints.
 
+THE RESTORE BUTTON IS GATED ON `row.may_restore`, THE SAME SHAPE: a
+ticket a failed purge already marked answers False, and `{% else %}`
+prints `copy.RESTORE_REFUSED_LINE` in its place -- the one row on this
+page where the button's absence needs its own sentence, because unlike
+the permanent-delete control's silent omission, a person looking for
+Restore on an item they just saw would otherwise have no idea why it is
+gone.
+
 HEADINGS, BUTTONS AND THE DATE LINE COME FROM
 `identity/contracts/retention.py` through the `copy` context key --
 declared once in Python, never typed twice. The page's OWN sentences
@@ -61,10 +69,14 @@ The delete confirm is a native `<details>`, modelled on
         {% if row.ticket.label %}&mdash; {{ row.ticket.label }}{% endif %}
       </span>
       <span class="muted">{{ row.purge_on_line }}</span>
+      {% if row.may_restore %}
       <form method="post" action="{% url 'identity-deleted-restore' row.ticket.pk %}{{ assistant.open_query }}">
         {% csrf_token %}
         <button type="submit" class="secondary">{{ copy.ACTION_RESTORE }}</button>
       </form>
+      {% else %}
+      <span class="muted">{{ copy.RESTORE_REFUSED_LINE }}</span>
+      {% endif %}
       {% if row.may_purge %}
       <details>
         <summary>{{ copy.ACTION_PURGE }}</summary>

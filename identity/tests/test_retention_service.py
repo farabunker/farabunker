@@ -311,6 +311,23 @@ class TestTheFailedPurgeMark:
         assert ticket.content_unrecoverable is False
 
 
+class TestMayRestore:
+    def test_an_ordinary_ticket_may_be_restored(self):
+        user = make_user()
+        ticket = service.delete_content(user_principal(user), kind=KIND_ASK,
+                                        key="5", owner=_owner(user))
+        assert service.may_restore(ticket) is True
+
+    def test_a_marked_ticket_may_not(self):
+        user = make_user()
+        ticket = service.delete_content(user_principal(user), kind=KIND_ASK,
+                                        key="5", owner=_owner(user))
+        DeletionTicket.objects.filter(pk=ticket.pk).update(
+            content_unrecoverable=True)
+        ticket.refresh_from_db()
+        assert service.may_restore(ticket) is False
+
+
 class TestTicketedKeys:
     def test_it_costs_one_query_and_answers_a_list(self, django_assert_num_queries):
         user = make_user()

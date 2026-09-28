@@ -77,6 +77,20 @@ PAGE_TITLE = "Deleted"
 TAB_LOG = "Deletion log"
 ACTION_RESTORE = "Restore"
 ACTION_PURGE = "Delete permanently"
+# WHAT THE PAGE SAYS INSTEAD OF THE RESTORE BUTTON, for a ticket
+# `identity.retention.may_restore` refuses: a purge already destroyed
+# some of this item's content before it failed, so the words say what
+# happened and the one thing left to do about it, in the same plain
+# register as `purge_refused_line` below -- no "ticket", no "purge",
+# no mechanism, just what a person can act on. NO APOSTROPHE, ON
+# PURPOSE: Django's autoescape turns one into `&#x27;` in rendered
+# HTML, which breaks a plain substring check against the raw response
+# body -- the same reason every other sentence in this module already
+# avoids contractions.
+RESTORE_REFUSED_LINE = (
+    "The content of this item could not be fully removed, so it cannot "
+    "be restored. Delete permanently to finish removing what is left."
+)
 LABEL_RETENTION_DAYS = "Keep deleted items for"
 LABEL_QUEUE_RETENTION_DAYS = "Keep finished queue jobs for"
 LABEL_AUDIT_DETAIL = "Show item names in the deletion log"

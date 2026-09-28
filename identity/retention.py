@@ -81,6 +81,32 @@ def visible_tickets(principal, *, settings_row=None):
     return qs.filter(owned_rows_q(principal, settings_row=settings_row))
 
 
+def may_restore(ticket) -> bool:
+    """Whether Restore may run for this ticket at all.
+
+    NO PRINCIPAL ARGUMENT, unlike `may_purge` beside it -- deliberately:
+    every other question about who may act on a ticket is answered
+    before a caller reaches this one (`visible_tickets`'s ownership
+    filter, `_own_ticket_or_404`'s standing check), and this predicate
+    answers a different kind of question, about the ITEM'S CONTENT, not
+    about the asker. A ticket `record_failed_purge` marked destroyed some
+    of its content before it failed, so Restore would hand back an item
+    that is not the one the person remembers deleting -- true for
+    whoever is asking, not only for some principals.
+
+    EVERY TICKET WAS RESTORABLE before this mark existed (`restore_content`'s
+    own docstring said so). This is the one refusal that changes that,
+    and it lives here, beside `may_purge`, rather than inside
+    `restore_content` itself -- the same layer the organisation posture's
+    early-destroy refusal already lives at: `deleted_purge` asks
+    `may_purge` before calling `purge_ticket`, never inside it, and
+    `deleted_restore` now asks this before calling `restore_content`, on
+    the same principle: WHETHER to act is decided by the view, HOW to act
+    stays a plain mutation.
+    """
+    return not ticket.content_unrecoverable
+
+
 def record_failed_purge(ticket) -> None:
     """After `purge_ticket` has raised and its own `transaction.atomic()`
     has already rolled back everything else, persist the one fact that
@@ -291,10 +317,15 @@ def restore_content(actor, ticket, *, source: str = SOURCE_WEB,
 
     NOTHING ELSE. The item was never modified, so there is nothing to
     put back -- which is the whole return on not adding per-model
-    soft-delete columns. Every ticket that exists is restorable (a
-    completed purge leaves none), so this has exactly one refusal to
-    make and it is not made in this delivery: a held ticket, once the
-    deferred enterprise slice can set a hold.
+    soft-delete columns. THIS FUNCTION MAKES NO REFUSAL OF ITS OWN.
+    `may_purge`'s early-destroy refusal has never been asked in here --
+    it is asked by its caller, `deleted_purge`, before `purge_ticket` is
+    even called -- and `may_restore` is asked by ITS caller,
+    `deleted_restore`, the same way, before this function is called.
+    Two refusals exist at that layer today: a held ticket, once the
+    deferred enterprise slice can set a hold, and a ticket
+    `record_failed_purge` marked -- a purge that destroyed some of this
+    item's content and then failed. Neither is made here.
 
     A TICKET ALREADY GONE (a raced sweep, a double-click) MUST NOT LOG A
     RESTORE THAT DID NOT HAPPEN. THE PARENT IS RE-READ UNDER A LOCK

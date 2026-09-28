@@ -367,6 +367,65 @@ class TestRestoreAndPurge:
         assert DeletionTicket.objects.filter(pk=ticket.pk).exists()
 
 
+class TestAFailedPurgeMarkRefusesRestore:
+    """`identity.retention.may_restore` is the predicate; this proves
+    both surfaces honour it -- the page renders no Restore control for a
+    marked ticket, and the POST refuses even when called directly, the
+    same shape `TestChildTicketsInheritTheRefusal` above proves for
+    `may_purge`. The mark is written elsewhere (a failed purge, covered
+    in `identity/tests/test_retention_service.py`); here it is set
+    directly, because what this module tests is what the PAGE AND POST do
+    with a marked ticket, not how one comes to be marked."""
+
+    def _marked_ticket_for(self, user):
+        ticket = _ticket_for(user)
+        DeletionTicket.objects.filter(pk=ticket.pk).update(
+            content_unrecoverable=True)
+        ticket.refresh_from_db()
+        return ticket
+
+    def test_the_page_renders_no_restore_control_for_it(self, client):
+        """Checked by the FORM'S OWN URL, not by the word "restore":
+        `copy.RESTORE_REFUSED_LINE` itself contains "restored", so a
+        plain substring check for the word would pass by accident even
+        if the button were still there. The URL is the one thing that
+        can only appear if the form itself is rendered."""
+        with posture("personal"):
+            user = make_user()
+            sign_in(client, user)
+            ticket = self._marked_ticket_for(user)
+            body = client.get(reverse("identity-deleted")).content.decode()
+            main = body.split("<main>", 1)[1].split("</main>", 1)[0]
+            restore_url = reverse("identity-deleted-restore", args=[ticket.pk])
+            assert restore_url not in main
+            assert copy.RESTORE_REFUSED_LINE in main
+
+    def test_the_post_refuses_even_called_directly(self, client):
+        with posture("personal"):
+            user = make_user()
+            sign_in(client, user)
+            ticket = self._marked_ticket_for(user)
+            response = client.post(
+                reverse("identity-deleted-restore", args=[ticket.pk]),
+                follow=True)
+        assert response.redirect_chain[0][1] == 302
+        assert DeletionTicket.objects.filter(pk=ticket.pk).exists()
+        assert copy.RESTORE_REFUSED_LINE in response.content.decode()
+
+    def test_permanent_delete_still_works_for_a_marked_ticket(self, client):
+        """The point of the mark is that the content is gone, so
+        finishing the job must remain possible -- `may_purge` and
+        `deleted_purge` take no notice of `content_unrecoverable` at
+        all."""
+        with posture("personal"):
+            user = make_user()
+            sign_in(client, user)
+            ticket = self._marked_ticket_for(user)
+            client.post(reverse("identity-deleted-purge", args=[ticket.pk]))
+        assert not DeletionTicket.objects.filter(pk=ticket.pk).exists()
+        assert AuditEvent.objects.filter(action=CONTENT_PURGED).count() == 1
+
+
 class TestTheQueryCost:
     def test_the_page_costs_the_same_queries_at_one_ticket_and_at_many(self, client):
         """THE FLAT-QUERY PIN. `deleted_page` reads `IdentitySettings`

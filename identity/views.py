@@ -553,7 +553,10 @@ def deleted_page(request):
     `may_purge` call -- the same per-request-reuse norm `entitlement_edit`
     already follows -- so a row-per-ticket loop costs no per-row settings
     query, and this GET costs no settings read of its own beyond the
-    middleware's; a sweep that actually purges pays one per ticket it
+    middleware's. `may_restore`, beside `may_purge` in the same row dict,
+    takes no settings row at all and costs no query of its own either --
+    it reads a column already sitting on the fetched `ticket`; a sweep
+    that actually purges pays one per ticket it
     purges.
 
     THE LOG IS THE VIEWER'S OWN ACTIVITY, UNLESS THEY SEE ALL CONTENT.
@@ -585,6 +588,7 @@ def deleted_page(request):
             "kind_label": retention_copy.KIND_LABELS.get(ticket.kind, ticket.kind),
             "purge_on_line": retention_copy.purge_on_line(ticket.purge_on),
             "may_purge": retention.may_purge(principal, ticket, settings_row=row),
+            "may_restore": retention.may_restore(ticket),
         }
         for ticket in retention.visible_tickets(principal, settings_row=row)
     ]
@@ -642,8 +646,15 @@ def _own_ticket_or_404(request, pk: int, *, settings_row):
 def deleted_restore(request, pk: int):
     """POST /identity/deleted/<pk>/restore/ -- put the item back.
 
-    NEVER-500: `restore_content` is a plain delete-and-audit and has
-    nothing of its own to refuse, but a caller here still catches
+    A REFUSAL FIRST, THE SAME SHAPE `deleted_purge` BELOW USES FOR
+    `may_purge`: `may_restore` is asked here, before `restore_content` is
+    ever called, never inside it -- a ticket a failed purge marked is
+    right there on the page this click came from (`deleted_page` already
+    rendered no Restore control for it), so a sentence and a redirect,
+    never a 404, matches `deleted_purge`'s own early-destroy refusal.
+
+    NEVER-500: `restore_content` itself is a plain delete-and-audit and
+    has nothing of its own to refuse, but a caller here still catches
     anything it might raise rather than let a database hiccup turn a
     settings-area click into a traceback. The ticket survives either
     way -- restore never removes content, so there is nothing to retry
@@ -651,6 +662,9 @@ def deleted_restore(request, pk: int):
     """
     row = settings_row_for(request)
     principal, ticket = _own_ticket_or_404(request, pk, settings_row=row)
+    if not retention.may_restore(ticket):
+        messages.error(request, retention_copy.RESTORE_REFUSED_LINE)
+        return settings_redirect(request, "identity-deleted")
     try:
         retention.restore_content(principal, ticket, settings_row=row)
     except Exception:  # noqa: BLE001 -- never-500; the traceback goes to the log
