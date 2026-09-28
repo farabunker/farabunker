@@ -2,10 +2,12 @@
 plus the two channels that find a conversation's generated images."""
 from __future__ import annotations
 
+import datetime
 import uuid
 
 import pytest
 from django.conf import settings
+from django.utils import timezone
 
 from agents.contracts import artifacts as artifacts_module
 from agents.contracts.artifacts import register_artifact_children
@@ -203,6 +205,110 @@ class TestFindingTheGeneratedImages:
         conversation = make_conversation()
         make_turn(conversation=conversation, role="tool", artifacts=["output:1"])
         assert conversation_children(str(conversation.pk)) == []
+
+
+class TestADuplicateDoesNotTicketTheOriginalsImages:
+    """PATH C (cross-owner investigation §2, "the same-owner correctness
+    bug inside Path B"): `duplicate_conversation`/`branch_conversation`
+    copy `artifacts` and `data` VERBATIM (`agents/visibility.py::
+    _copy_turns_into`), so a copy's tool turn names the exact SAME
+    `output:<id>` reference and the exact same `data["id"]` the
+    original's own turn does. IF THIS FIXTURE WERE FED TO THE UNFIXED
+    RESOLVER, it would find that reference on the copy's own turns and
+    ticket the job -- exactly the same job a DIFFERENT, live,
+    undeleted conversation still shows. This needs no second principal
+    and no sharing: one person, one conversation, one copy of it."""
+
+    def test_a_reference_shared_with_a_still_live_conversation_is_dropped(self):
+        # ONE SHARED AGENT: `make_conversation()` defaults to a fresh
+        # `make_agent()` per call, which collides on that helper's own
+        # fixed "test-agent" slug when called twice in one test.
+        agent = make_agent()
+        original = make_conversation(agent=agent)
+        make_turn(conversation=original, role="tool", index=0,
+                  artifacts=["output:1"], data={"id": "job-1", "status": "succeeded"})
+        # THE COPY: same artifact reference, same generation id, on a
+        # SEPARATE conversation row -- exactly what `_copy_turns_into`
+        # produces, without going through the whole `duplicate_
+        # conversation` gate for this unit-level pin.
+        duplicate = make_conversation(agent=agent)
+        make_turn(conversation=duplicate, role="tool", index=0,
+                  artifacts=["output:1"], data={"id": "job-1", "status": "succeeded"})
+
+        assert conversation_children(str(duplicate.pk)) == []
+        # THE ASSERTION THAT WOULD FLIP IF THE BEHAVIOUR REGRESSED: an
+        # unfixed resolver hands the resolver BOTH the reference and the
+        # generation id, and `fake_artifact_children` would answer
+        # `["job-1", "output:1"]`, not the empty pair this fixture must
+        # see for the ticket count above to hold.
+        refs, ids = SEEN[0]
+        assert refs == () and ids == ()
+
+    def test_a_reference_named_by_no_other_conversation_still_tickets(self):
+        """THE FIX MUST NOT OVER-EXCLUDE: a reference only THIS
+        conversation's turns carry is unaffected, so an ordinary,
+        un-shared delete still tickets its own images exactly as
+        before."""
+        conversation = make_conversation()
+        make_turn(conversation=conversation, role="tool", artifacts=["output:9"])
+        assert conversation_children(str(conversation.pk)) == [("vision_job", "output:9")]
+
+    def test_once_the_other_conversation_is_itself_deleted_the_reference_tickets(self):
+        """EVENTUALLY CONSISTENT, NOT PERMANENTLY SUPPRESSED: a
+        conversation already ticketed (on its own way out) does not
+        count as "another live conversation" -- once the original is
+        itself deleted, the duplicate's own delete finally reaches the
+        job nothing else is still showing."""
+        agent = make_agent()
+        original = make_conversation(agent=agent)
+        make_turn(conversation=original, role="tool", artifacts=["output:5"])
+        duplicate = make_conversation(agent=agent)
+        make_turn(conversation=duplicate, role="tool", artifacts=["output:5"])
+
+        DeletionTicket.objects.create(
+            kind="conversation", key=str(original.pk),
+            purge_on=timezone.localdate() + datetime.timedelta(days=30))
+
+        assert conversation_children(str(duplicate.pk)) == [("vision_job", "output:5")]
+
+    def test_branching_and_deleting_the_branch_leaves_the_originals_image_untouched(
+        self, real_registration,
+    ):
+        """END TO END, through the REAL registrations `agents/apps.py::
+        ready()` and `tools/vision/apps.py::ready()` make at Django
+        startup -- the brief's own named pin: branch a conversation,
+        delete the branch, and the original's image is untouched and
+        still fetchable."""
+        from agents.visibility import branch_conversation, delete_conversation
+        from identity.contracts.retention import KIND_VISION_JOB
+        from identity.tests._helpers import make_generation, make_output
+        from tools.vision.visibility import may_read_job
+
+        user = make_user()
+        principal = user_principal(user)
+        with posture("personal"):
+            original = make_conversation(owner_kind="user", owner_key=str(user.pk))
+            job = make_generation(owner_kind="user", owner_key=str(user.pk))
+            output = make_output(job=job)
+            make_turn(conversation=original, role="user", index=0,
+                      text="draw me a lighthouse")
+            make_turn(conversation=original, role="tool", index=1,
+                      artifacts=[f"output:{output.pk}"],
+                      data={"id": str(job.pk), "status": "succeeded"})
+            branch_point = make_turn(conversation=original, role="user", index=2,
+                                     text="thanks")
+
+            branch = branch_conversation(principal, original, branch_point,
+                                         title="A branch")
+            assert branch is not None
+
+            deleted = delete_conversation(principal, branch)
+            assert deleted is not None
+
+            if "vision" in settings.FARABUNKER_FEATURES:
+                assert not DeletionTicket.objects.filter(
+                    kind=KIND_VISION_JOB, key=str(job.pk)).exists()
+            assert may_read_job(principal, job) is True
 
 
 # `TestAttachmentRowsGoAtPurge`, `_raising_db_cleanup` / `TestTheCleanupSavepoint`

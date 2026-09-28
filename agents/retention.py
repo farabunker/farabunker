@@ -35,11 +35,13 @@ from __future__ import annotations
 import logging
 import uuid
 
+from django.db.models import Q
 from django.utils.module_loading import import_string
 
 from agents.contracts.artifacts import artifact_children, parse_artifact
 from agents.models import Conversation, Share, ToolInvocation, Turn
-from identity.contracts.retention import KIND_VISION_JOB
+from identity.contracts.retention import KIND_CONVERSATION, KIND_VISION_JOB
+from identity.retention import ticketed_keys
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +229,67 @@ def purge_conversation(key: str) -> int:
     return removed
 
 
+def _still_referenced_elsewhere(conversation_id, refs, generation_ids):
+    """Which of `refs`/`generation_ids` some OTHER, undeleted
+    conversation's own turns still carry -- a job named by one of those
+    must not be ticketed by THIS conversation's delete, because a second
+    thread is still showing it.
+
+    THE BUG THIS CLOSES: `duplicate_conversation`/`branch_conversation`
+    copy `artifacts`/`data` VERBATIM (`agents/visibility.py::
+    _copy_turns_into`), never a fresh reference -- a duplicate's tool
+    turn names the exact SAME `output:<id>` string and the exact same
+    `data["id"]` the original's turn does. Before this check, deleting
+    the copy walked ONLY the copy's own turns
+    (`conversation_children`'s `_collect` call), found that same
+    reference, and ticketed the job it names -- hiding and, on the
+    copy's date, destroying a picture a DIFFERENT, live, undeleted
+    conversation still displays. Nobody deleted that thread; its image
+    broke anyway. This needs no second principal and no sharing: A
+    duplicating and deleting A's OWN conversation reproduces it.
+
+    ONE BOUNDED QUERY, never a whole-table scan: it runs only when this
+    conversation actually names something (an empty `refs`/
+    `generation_ids` pair -- most conversations -- costs nothing), and
+    the `artifacts`/`data__id` containment clauses narrow to rows that
+    could possibly match before the Python loop below ever runs.
+
+    A CONVERSATION ALREADY TICKETED (`ticketed_keys(KIND_CONVERSATION)`)
+    DOES NOT COUNT AS "ELSEWHERE": its own delete either already
+    ticketed this same job (harmless -- `get_or_create` on `(kind, key)`
+    is idempotent) or will, the next time ITS `conversation_children` is
+    asked. A reference surviving only inside a conversation on its way
+    out must not protect the job forever; it is EVENTUALLY consistent --
+    once every conversation naming a job is itself deleted, whichever
+    delete runs last is the one that finally tickets it.
+    """
+    if not refs and not generation_ids:
+        return set(), set()
+    match = Q()
+    for reference in refs:
+        match |= Q(artifacts__contains=[reference])
+    if generation_ids:
+        match |= Q(data__id__in=list(generation_ids))
+    deleted_conversations = set(ticketed_keys(KIND_CONVERSATION))
+    rows = (
+        Turn.objects.exclude(conversation_id=conversation_id)
+        .filter(match)
+        .values_list("conversation_id", "artifacts", "data"))
+    still_ref: set[str] = set()
+    still_gen: set[str] = set()
+    for other_conversation_id, artifacts, data in rows:
+        if str(other_conversation_id) in deleted_conversations:
+            continue
+        for reference in artifacts or ():
+            if reference in refs:
+                still_ref.add(reference)
+        if isinstance(data, dict):
+            raw = data.get("id")
+            if isinstance(raw, str) and raw in generation_ids:
+                still_gen.add(raw)
+    return still_ref, still_gen
+
+
 def conversation_children(key: str) -> list[tuple[str, str]]:
     """The tickets that go with this conversation's own: one per
     generation its turns reached.
@@ -237,9 +300,13 @@ def conversation_children(key: str) -> list[tuple[str, str]]:
     no output at all.
 
     ASKED AT DELETE TIME, and the conversation's turns are the only
-    truth about what it reached. Nothing here writes anything; the
-    tickets the answer becomes are what restore and permanent delete
-    follow afterwards.
+    truth about what it reached -- MINUS whatever `_still_referenced_
+    elsewhere` above finds some other, undeleted conversation still
+    carrying: a reference this conversation shares with a live thread
+    names a job that thread is still showing, and must not be ticketed
+    on this conversation's date instead of its own. Nothing here writes
+    anything; the tickets the answer becomes are what restore and
+    permanent delete follow afterwards.
 
     WITH NOTHING REGISTERED ON THE SLOT -- a box with the image column
     uninstalled -- this answers `[]`, and a chat delete tickets only the
@@ -253,5 +320,9 @@ def conversation_children(key: str) -> list[tuple[str, str]]:
     if dotted is None:
         return []
     refs, generation_ids, _invocation_ids = _collect(conversation_id)
+    still_ref, still_gen = _still_referenced_elsewhere(
+        conversation_id, refs, generation_ids)
+    refs = [reference for reference in refs if reference not in still_ref]
+    generation_ids = [gid for gid in generation_ids if gid not in still_gen]
     return [(KIND_VISION_JOB, str(job_key))
             for job_key in import_string(dotted)(refs, generation_ids)]
