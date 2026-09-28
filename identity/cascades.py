@@ -146,5 +146,7 @@ def run_children(kind: str, key: str) -> list[ChildTicket]:
             pair = (str(child_kind), str(child_key))
             if pair not in seen:
                 seen.add(pair)
-                tickets.append(ChildTicket(pair[0], pair[1], str(owner_kind), str(owner_key)))
+                tickets.append(ChildTicket(
+                    kind=pair[0], key=pair[1],
+                    owner_kind=str(owner_kind), owner_key=str(owner_key)))
     return tickets

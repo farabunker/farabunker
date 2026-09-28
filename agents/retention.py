@@ -335,6 +335,7 @@ def conversation_children(key: str) -> list[ChildTicket]:
         conversation_id, refs, generation_ids)
     refs = [reference for reference in refs if reference not in still_ref]
     generation_ids = [gid for gid in generation_ids if gid not in still_gen]
-    return [ChildTicket(KIND_VISION_JOB, str(job_key), str(owner_kind), str(owner_key))
+    return [ChildTicket(kind=KIND_VISION_JOB, key=str(job_key),
+                       owner_kind=str(owner_kind), owner_key=str(owner_key))
             for job_key, owner_kind, owner_key
             in import_string(dotted)(refs, generation_ids)]

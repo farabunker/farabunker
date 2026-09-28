@@ -206,11 +206,25 @@ class TestChildTicket:
         owner_key)` -- `ChildTicket(*that_tuple)` must build the exact
         same fields a caller who read it positionally would have seen,
         and the two must compare equal, or existing resolvers would need
-        rewriting to keep working."""
+        rewriting to keep working.
+
+        `_fields` PINNED IN ORDER TOO: the class's OWN keyword-
+        construction tests above pass under a field reorder just as
+        easily as under the current order (`ChildTicket(kind=...,
+        key=..., owner_kind=..., owner_key=...)` reads back correctly
+        either way), so they prove keyword access works, not that this
+        specific order is the one shipped. The two POSITIONAL
+        constructions still in the tree -- `identity.cascades.
+        run_children` and `agents.retention.conversation_children`,
+        both now built with keywords too, but a resolver's own plain
+        4-tuple above is still unpacked by POSITION into this type at
+        exactly this call -- depend on this exact order; this assertion
+        is what fails if it ever drifts."""
         plain = ("document", "d-1", "user", "7")
         wrapped = ChildTicket(*plain)
         assert wrapped == plain
         assert tuple(wrapped) == plain
+        assert ChildTicket._fields == ("kind", "key", "owner_kind", "owner_key")
 
 
 class TestTheChildrenField:
