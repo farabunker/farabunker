@@ -810,6 +810,39 @@ class TestTheOtherOwnerSeesTheirOwnChild:
         assert DeletionTicket.objects.filter(pk=child.pk).exists()
         assert service.may_restore(child) is True
 
+    def test_the_sweep_still_takes_the_detached_child_after_as_permanent_delete(
+            self, client):
+        """`test_the_sweep_on_the_date_takes_both` below, and `identity.
+        tests.test_retention_service.py::TestChildTickets::test_the_
+        sweep_still_takes_a_child_the_clicker_did_not_own`, both sweep a
+        child that is still ATTACHED to its parent -- neither runs the
+        permanent delete first, so neither describes the state the skip
+        actually leaves behind. This runs A's real permanent delete
+        first, which detaches B's ticket exactly as `test_as_permanent_
+        delete_destroys_as_content_and_leaves_bs_ticket_and_date_
+        standing` above proves, and THEN backs the surviving, orphaned
+        ticket's date up and sweeps. `sweep`'s due query has no
+        `parent__isnull` clause today, which is exactly why this wants a
+        pin: the day somebody adds one meaning to make the sweep prefer
+        parents, this is the test that would catch a detached child
+        being silently skipped forever, while the other two pins stay
+        green throughout."""
+        with posture("personal"):
+            a, b = make_user(), make_user()
+            parent, child = self._delete_as_a_with_bs_image(client, a, b)
+            client.post(reverse("identity-deleted-purge", args=[parent.pk]))
+            child.refresh_from_db()
+            assert child.parent_id is None
+            DeletionTicket.objects.filter(pk=child.pk).update(
+                purge_on=timezone.localdate() - datetime.timedelta(days=1))
+
+            assert service.sweep() == 1
+
+        assert not DeletionTicket.objects.filter(pk=child.pk).exists()
+        assert AuditEvent.objects.filter(
+            action=CONTENT_PURGED, target_type=copy.KIND_VISION_JOB,
+            target_key=child.key).exists()
+
     def test_the_sweep_on_the_date_takes_both(self, client):
         """Nothing outlives the date it was promised, ownership aside:
         the sweep always acts as `SERVICE_PRINCIPAL`, so once both
