@@ -138,6 +138,11 @@ def _is_local_host(host: str) -> bool:
     if "." not in host:
         return True
     try:
+        # A bracketed IPv4-mapped literal like "[::ffff:192.168.1.1]" has a
+        # dot, so it reaches here rather than the no-dot shortcut above,
+        # but ip_address() does not accept the brackets -- it raises, and
+        # a private address is flagged NON-local (loudly, as a red build,
+        # never a public host silently slipping through).
         address = ipaddress.ip_address(host)
     except ValueError:
         return False
@@ -222,3 +227,14 @@ def test_the_gate_is_not_vacuous_it_catches_the_display_urls_it_exempts():
         "models/contracts/engines/ollama.py": {"ollama.com"},
         "models/contracts/engines/whisper.py": {"github.com", "huggingface.co"},
     }
+
+
+def test_the_scheme_set_is_pinned_a_narrowing_back_to_https_only_goes_red():
+    """A websocket endpoint (`wss://model-host.example.com/stream`) is a
+    realistic shape for a model API, so `_URL_RE` scans `ws(s)?://` right
+    alongside `http(s)://`. Nothing else in this module exercises that
+    scheme set, so a future "cleanup" narrowing the pattern back to
+    `https?://` would go green everywhere else and quietly stop scanning
+    websocket literals. Pin it here."""
+    assert _URL_RE.search("wss://echo.example.com/socket").group(1) == "echo.example.com"
+    assert _URL_RE.search("ws://echo.example.com/socket").group(1) == "echo.example.com"
