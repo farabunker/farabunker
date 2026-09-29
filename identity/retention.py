@@ -99,6 +99,32 @@ def content_status(kind: str, keys) -> dict[str, bool]:
     cards` gathers every job id a page's own turns resolve to before
     calling this once. `{}` for an empty `keys`, with no query at all --
     most turns carry none.
+
+    UNSCOPED -- NO PRINCIPAL, NO `owned_rows_q`, NO `visible_tickets`.
+    This queries `DeletionTicket.objects` directly, by `kind`/`key__in`
+    alone, exactly like `ticketed_keys` above. That is fine for its one
+    caller today because a chat placeholder is a fact about the PICTURE
+    ("did this deletion finish cleanly"), not a fact about who is asking
+    -- the same reasoning `ticketed_keys`'s own docstring gives, and the
+    turn carrying the reference already passed a real visibility check
+    (the conversation's own) before either function is ever reached.
+
+    DELIBERATELY UNGATED WHERE `identity/views.py::deleted_restore`'s OWN
+    read of this SAME `content_unrecoverable` column IS gated, and a
+    later reader must not take either one as "the" rule: that view reads
+    a MARKED CHILD's existence through `retention.visible_tickets(
+    principal, ...)` before flashing `RESTORE_PARTIAL_LINE`, because that
+    sentence names a SPECIFIC ticket the viewer is about to be sent to a
+    page listing -- on a closed box with content-reading off, naming a
+    ticket the viewer cannot open on that page would be a true sentence
+    about a row they can neither find nor act on (see that view's own
+    docstring, restore-notice-scope). This function's own caller,
+    `agents.chat.rendering._resolve_image_status`, never sends anyone to
+    a ticket listing at all -- it only decides which of two sentences to
+    print over a picture already sitting in a conversation the viewer
+    has permission to open -- so there is no second listing page for an
+    unscoped read to leak into, and gating it the same way would just be
+    a second, needless query answering a question that page never asks.
     """
     if not keys:
         return {}

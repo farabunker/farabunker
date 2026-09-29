@@ -329,7 +329,7 @@ def register_artifact_job_ids(dotted_path: str) -> None:
     reference in `refs` that still names a surviving job, keyed by the
     reference string itself, valued by that job's id. A reference
     absent from the answer names no surviving job -- the same "nothing
-    to read a ticket off" fact `agents.chat.rendering._image_placeholder`
+    to read a ticket off" fact `agents.chat.rendering._placeholder_for`
     already treated as a deleted image before this registry existed.
 
     A DOTTED PATH, resolved at RENDER time by the caller, never

@@ -157,7 +157,7 @@ def resolve_artifact_job_ids(refs) -> dict[str, str]:
     reference name", so `agents.chat.rendering` can resolve every image
     reference a whole PAGE is about to render in one call instead of
     one per turn -- the N+1 the placeholder wave (2026-09-29) left
-    behind: `_image_placeholder` used to call `resolve_artifact_jobs`
+    behind: `_placeholder_for` used to call `resolve_artifact_jobs`
     and then `identity.retention.content_status` once per image-bearing
     turn, and TWICE for a TOOL turn (`agents.chat.rendering.turn_card`'s
     own call and `tool_card`'s second one over the same artifacts).

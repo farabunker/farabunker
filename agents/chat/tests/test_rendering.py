@@ -306,16 +306,22 @@ class TestImageAvailability:
         assert "placeholder" not in files[0]
 
     def test_a_reference_whose_url_is_not_mounted_never_queries_for_a_placeholder(
-        self, monkeypatch
+        self, monkeypatch, django_assert_num_queries
     ):
         """THE VISION-OFF CASE, again: no route means no point asking
         whether the bytes are there -- `_artifact_images.html`'s own
-        `{% else %}` branch already has the honest sentence for this."""
+        `{% else %}` branch already has the honest sentence for this.
+
+        THE NAME MAKES A QUERY-COUNT CLAIM, so this asserts one (tail
+        item, F1 fix report): before this, nothing here proved the
+        function actually skipped the database rather than merely
+        happening to answer `None` for some other reason."""
         def _unmounted(*args, **kwargs):
             raise NoReverseMatch("vision is not mounted")
 
         monkeypatch.setattr("agents.chat.rendering.reverse", _unmounted)
-        images, _files = artifact_links(["output:12"])
+        with django_assert_num_queries(0):
+            images, _files = artifact_links(["output:12"])
         assert images[0]["url"] == ""
         assert images[0]["placeholder"] is None
 
@@ -398,18 +404,35 @@ class TestTheImageStatusBatchDoesNotScale:
         the SAME turn rendered by `turn_card` on its own (which falls
         into `artifact_links`'s own single-turn batch-of-one) must
         produce byte-identical cards -- a divergence here is exactly
-        what a SECOND implementation would eventually grow."""
-        from agents.chat.rendering import _image_refs_of, _resolve_image_status, turn_card
+        what a SECOND implementation would eventually grow.
 
+        KEYED ON A DELETED JOB, NOT A LIVE ONE (tail item, F1 fix
+        report): pinning `placeholder is None` proves nothing on its
+        own -- an implementation that always returns `None` (never
+        actually reading `image_status` at all) would pass that
+        assertion too, batched or not. A ticketed job makes the pinned
+        value `CONTENT_DELETED_LINE`, something a "just return None"
+        stand-in cannot produce, so agreement on THIS value is agreement
+        that actually varies."""
+        from agents.chat.rendering import _image_refs_of, _resolve_image_status, turn_card
+        from identity.contracts.retention import CONTENT_DELETED_LINE, KIND_VISION_JOB
+        from identity.retention import delete_content
+        from identity.testing import make_user, user_principal
+        from identity.tests._helpers import make_output
+
+        output = make_output()
         conversation = make_conversation()
-        turn = self._image_bearing_tool_turn(conversation)
+        turn = _tool_turn(conversation, artifacts=[f"output:{output.pk}"])
+        user = make_user()
+        delete_content(user_principal(user), kind=KIND_VISION_JOB,
+                       key=str(output.job_id), owner=output.job)
 
         self_resolved = turn_card(turn)
         batched = turn_card(turn, image_status=_resolve_image_status(_image_refs_of([turn])))
 
         assert self_resolved == batched
-        assert self_resolved["images"][0]["placeholder"] is None
-        assert self_resolved["tool"]["images"][0]["placeholder"] is None
+        assert self_resolved["images"][0]["placeholder"] == CONTENT_DELETED_LINE
+        assert self_resolved["tool"]["images"][0]["placeholder"] == CONTENT_DELETED_LINE
 
 
 class TestMixedPlaceholdersInOneTurn:
