@@ -310,7 +310,44 @@ class TestTheArtifactJobIdsSlot:
             register_artifact_job_ids("notdotted")
 
     def test_it_is_independent_of_the_artifact_children_slot(self):
+        """STORAGE independence only: the two globals do not shadow or
+        overwrite each other when set. This does NOT prove a real box
+        ever registers both together -- `test_the_real_app_registers_
+        both_slots_together`, below, is what proves that; a box that
+        registered only one slot would pass THIS test just as easily,
+        which is exactly the gap the sibling test closes."""
         register_artifact_children("pkg.children.fn")
         register_artifact_job_ids("pkg.job_ids.fn")
         assert artifact_children() == "pkg.children.fn"
         assert artifact_job_ids_resolver() == "pkg.job_ids.fn"
+
+    def test_the_real_app_registers_both_slots_together(self):
+        """BOTH-OR-NEITHER, pinned against the REAL startup registration
+        (`tools/vision/apps.py::ready()`), not a value this test sets
+        itself -- the same "the running app registers at import time"
+        proof `tools/vision/tests/test_apps.py::
+        test_the_real_startup_registered_them` uses for the role/
+        operation registry. `_isolated_slot` above saves and restores
+        both globals around every test in this module but never clears
+        them, so what this reads IS the real app's own `ready()` call.
+
+        WHY BOTH MATTER, KEEPING BOTH IS RIGHT: `_ARTIFACT_CHILDREN`
+        answers a DELETE's own question (which generations does a
+        conversation's delete reach) and `_ARTIFACT_JOB_IDS` answers a
+        RENDER's (which job does each reference name) -- collapsing them
+        into one call would make every thread-page render pay a second,
+        unscoped query to answer what CASCADE already answers for free.
+        But the two slots are set in two separate calls inside `ready()`,
+        so forgetting one is silent and real: only the children slot
+        registered stops deletes cascading to a conversation's own
+        images; only the job-ids slot registered means every image
+        placeholder silently vanishes and the page reverts to the bare
+        broken image the placeholder wave exists to replace. Neither
+        half raises on its own -- both `artifact_children()` and
+        `artifact_job_ids_resolver()` answer `None`, "not installed",
+        for the one nobody registered -- so nothing short of a test like
+        this one would ever catch a half-registration in CI.
+        """
+        assert artifact_children() == "tools.vision.retention.resolve_artifact_jobs"
+        assert (artifact_job_ids_resolver()
+                == "tools.vision.retention.resolve_artifact_job_ids")
