@@ -13,7 +13,7 @@ from identity.contracts.actions import CONTENT_PURGED, CONTENT_RESTORED
 from identity.contracts.cascades import ORDER_FILES, RetentionHandler, register_retention_handler
 from identity.models import AuditEvent, DeletionTicket, IdentitySettings
 from identity.tests._helpers import (
-    make_conversation, make_user, posture, sign_in, user_principal,
+    make_admin, make_conversation, make_user, posture, sign_in, user_principal,
 )
 from identity import retention as service
 
@@ -454,6 +454,80 @@ class TestTheRestorePartialLine:
         body = response.content.decode()
         assert "Restored." in body
         assert copy.RESTORE_PARTIAL_LINE not in body
+
+    def test_a_non_admin_cannot_see_the_marked_child_and_gets_no_partial_line(
+            self, client):
+        """Owner ruling (restore-notice-scope, 2026-09-29): a non-admin
+        restoring a ticket whose marked child belongs to a DIFFERENT
+        principal, on a closed box with content-reading off, cannot see
+        that child at all -- `identity-deleted` (`retention.
+        visible_tickets`) filters to the viewer's own tickets and would
+        not list it. Telling them "part of this could not be restored"
+        would be a true sentence about an item they can neither find nor
+        act on, so `deleted_restore` says nothing extra here: "Restored."
+        alone, the same plain message an ordinary restore gets. TWO REAL
+        USERS with genuinely different owner columns on the child ticket
+        -- `TestTheOtherOwnerSeesTheirOwnChild`'s own `_cross_owner_
+        image_child` fixture, not a synthetic key that never had an
+        owner of its own to differ from the parent's."""
+        register_retention_handler(RetentionHandler(
+            kind=copy.KIND_CONVERSATION, key="t.page.conversation.scope",
+            label="Conversation", handler=f"{__name__}.noop",
+            children=f"{__name__}._cross_owner_image_child"))
+        with posture("personal", admin_sees_content=False):
+            a, b = make_user(), make_user()
+            _CROSS_OWNER_SLOT["owner"] = ("user", str(b.pk))
+            item = make_conversation(owner_kind="user", owner_key=str(a.pk))
+            sign_in(client, a)
+            parent = service.delete_content(
+                user_principal(a), kind=copy.KIND_CONVERSATION,
+                key=str(item.pk), owner=item)
+            child = DeletionTicket.objects.get(
+                kind=copy.KIND_VISION_JOB, parent=parent)
+            assert (child.owner_kind, child.owner_key) == ("user", str(b.pk))
+            DeletionTicket.objects.filter(pk=child.pk).update(
+                content_unrecoverable=True)
+
+            response = client.post(
+                reverse("identity-deleted-restore", args=[parent.pk]),
+                follow=True)
+        body = response.content.decode()
+        assert "Restored." in body
+        assert copy.RESTORE_PARTIAL_LINE not in body
+
+    def test_an_admin_who_can_see_all_content_still_gets_the_partial_line(
+            self, client):
+        """The other direction of the same ruling, and the explicit
+        confirmation the ruling asks for: an ADMIN with content-reading
+        ON sees every principal's content (`identity.access.
+        sees_all_content`), so the marked child here -- owned by a
+        THIRD, unrelated principal, not the admin -- is one the admin
+        genuinely can open and act on. The sentence stays."""
+        register_retention_handler(RetentionHandler(
+            kind=copy.KIND_CONVERSATION, key="t.page.conversation.scope.admin",
+            label="Conversation", handler=f"{__name__}.noop",
+            children=f"{__name__}._cross_owner_image_child"))
+        with posture("personal", admin_sees_content=True):
+            admin = make_admin()
+            stranger = make_user()
+            _CROSS_OWNER_SLOT["owner"] = ("user", str(stranger.pk))
+            item = make_conversation(owner_kind="user", owner_key=str(admin.pk))
+            sign_in(client, admin)
+            parent = service.delete_content(
+                user_principal(admin), kind=copy.KIND_CONVERSATION,
+                key=str(item.pk), owner=item)
+            child = DeletionTicket.objects.get(
+                kind=copy.KIND_VISION_JOB, parent=parent)
+            assert (child.owner_kind, child.owner_key) == ("user", str(stranger.pk))
+            DeletionTicket.objects.filter(pk=child.pk).update(
+                content_unrecoverable=True)
+
+            response = client.post(
+                reverse("identity-deleted-restore", args=[parent.pk]),
+                follow=True)
+        body = response.content.decode()
+        assert "Restored." in body
+        assert copy.RESTORE_PARTIAL_LINE in body
 
 
 class TestTheViewsOwnFailedPurgeMarkIsReal:

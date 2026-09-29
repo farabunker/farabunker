@@ -660,21 +660,42 @@ def deleted_restore(request, pk: int):
     way -- restore never removes content, so there is nothing to retry
     beyond the click itself.
 
-    A SECOND FLASH LINE, ONLY WHEN ONE IS NEEDED (placeholder wave,
-    2026-09-29; UAT report step 8c: "Restored." said nothing when part
-    of what was restored did not come back). Read BEFORE `restore_
-    content` runs, never after: a marked child is DETACHED by that
-    call, not deleted (`restore_content`'s own docstring), so it is
-    still `ticket.children` right up to the moment the call starts --
-    reading it after would need a second query for the same fact this
-    one already has in hand.
+    A SECOND FLASH LINE, ONLY WHEN ONE IS NEEDED AND ONLY WHEN THE
+    VIEWER CAN SEE IT (placeholder wave, 2026-09-29; UAT report step
+    8c: "Restored." said nothing when part of what was restored did
+    not come back -- then owner ruling, restore-notice-scope,
+    2026-09-29: a non-admin restoring a ticket whose marked child
+    belongs to a DIFFERENT principal, on a closed box with
+    content-reading off, cannot see that child at all -- it is not on
+    the Deleted page this redirect lands on -- so being told "part of
+    this could not be restored" is a true sentence about content they
+    can neither find nor act on. They get the plain "Restored."
+    instead, same as an ordinary restore; the sentence is reserved for
+    a viewer who could actually open the row it refers to.
+
+    GATED WITH `retention.visible_tickets`, NOT A NEW PREDICATE:
+    exactly the same question `identity-deleted` itself answers before
+    listing a row (own tickets, or every ticket for a principal
+    `identity.access.sees_all_content` -- which is every principal on
+    an open box, so this gate is a no-op there and the sentence behaves
+    exactly as before this ruling). A second, bespoke visibility check
+    here would answer a question `visible_tickets` already answers,
+    and could drift from it.
+
+    Read BEFORE `restore_content` runs, never after: a marked child is
+    DETACHED by that call, not deleted (`restore_content`'s own
+    docstring), so it is still `ticket.children` right up to the
+    moment the call starts -- reading it after would need a second
+    query for the same fact this one already has in hand.
     """
     row = settings_row_for(request)
     principal, ticket = _own_ticket_or_404(request, pk, settings_row=row)
     if not retention.may_restore(ticket):
         messages.error(request, retention_copy.RESTORE_REFUSED_LINE)
         return settings_redirect(request, "identity-deleted")
-    left_behind = ticket.children.filter(content_unrecoverable=True).exists()
+    notice_left_behind = retention.visible_tickets(
+        principal, settings_row=row,
+    ).filter(parent=ticket, content_unrecoverable=True).exists()
     try:
         retention.restore_content(principal, ticket, settings_row=row)
     except Exception:  # noqa: BLE001 -- never-500; the traceback goes to the log
@@ -683,7 +704,7 @@ def deleted_restore(request, pk: int):
         messages.error(request, _RESTORE_FAILED_MESSAGE)
     else:
         messages.info(request, "Restored.")
-        if left_behind:
+        if notice_left_behind:
             messages.info(request, retention_copy.RESTORE_PARTIAL_LINE)
     return settings_redirect(request, "identity-deleted")
 

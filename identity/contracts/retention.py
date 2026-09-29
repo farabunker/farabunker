@@ -112,8 +112,11 @@ CONTENT_UNRECOVERABLE_LINE = (
 # WHAT `identity.views.deleted_restore` ADDS TO "Restored." when the
 # ticket it just deleted left a MARKED CHILD detached behind it
 # (`identity.retention.restore_content`'s own docstring: a child
-# `record_failed_purge` marked is skipped, never put back). One
-# sentence, the same "deletion could not be completed" words as
+# `record_failed_purge` marked is skipped, never put back), AND ONLY
+# WHEN THE VIEWER CAN SEE THAT CHILD (`identity.retention.
+# visible_tickets`, the same predicate the Deleted page itself is
+# filtered by -- restore-notice-scope, 2026-09-29). One sentence, the
+# same "deletion could not be completed" words as
 # `CONTENT_UNRECOVERABLE_LINE` above, so a person who restores a
 # conversation and then opens it and finds this sentence's picture are
 # the same fact stated twice, not two different-sounding claims about
