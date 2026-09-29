@@ -7,14 +7,24 @@ reuses it byte-identically to render one finished card into its poll
 body. A template that decided any of this itself would be a second
 copy that drifts the first time one of them is edited.
 
-IT IMPORTS NOTHING FROM `tools.*`. Import-law rule 3 forbids it outright
-(`foundation/ops/tests/test_import_law.py::test_no_agents_module_
-imports_a_tools_package` walks every import node in every file under
-`agents/`), and nothing here needs to: an artifact is a REFERENCE
-STRING, `agents.contracts.artifacts.artifact_url_name` maps its kind to
-a URL NAME, and Django reverses the name. No layer below the view ever
-learns a filesystem path -- the same rule `tools/vision/services.py`'s
-`job_json` already enforces for the vision page.
+IT IMPORTS NOTHING FROM `tools.*` AT MODULE SCOPE. Import-law rule 3
+forbids it outright (`foundation/ops/tests/test_import_law.py::
+test_no_agents_module_imports_a_tools_package` walks every import node
+in every file under `agents/`), and nothing here needs to at that
+level: an artifact is a REFERENCE STRING, `agents.contracts.artifacts.
+artifact_url_name` maps its kind to a URL NAME, and Django reverses the
+name. No layer below the view ever learns a filesystem path -- the same
+rule `tools/vision/services.py`'s `job_json` already enforces for the
+vision page. `_image_placeholder` (placeholder wave, 2026-09-29) is the
+one place this module reaches `tools.vision` at all, and it does so the
+way `agents/retention.py::conversation_children` already does for a
+DIFFERENT question asked at delete time: `agents.contracts.artifacts.
+artifact_children`'s registered DOTTED PATH, resolved by `import_string`
+at call time, never a static import the AST walker above would catch.
+It DOES import `identity.contracts.retention` and `identity.retention`
+at module scope, which the walker does not forbid: identity sits below
+`agents/` (spec's column order), and both are named seams in
+`IDENTITY_PERMITTED`.
 
 FOUR TRUTHS ABOUT AN AUDIT ROW, three of them from P2's ledger:
 
@@ -48,13 +58,20 @@ import uuid
 
 from django.urls import NoReverseMatch, reverse
 from django.utils.html import escape
+from django.utils.module_loading import import_string
 from django.utils.safestring import SafeString, mark_safe
 
-from agents.contracts.artifacts import artifact_title, artifact_url_name, parse_artifact
+from agents.contracts.artifacts import (
+    artifact_children, artifact_title, artifact_url_name, parse_artifact,
+)
 from agents.contracts.tools import VISION_GENERATE_KEY
 from agents.limits import TURN_TIMEOUT_ERROR
 from agents.models import Turn
 from agents.runtime.audit import invocation_message, invocation_state
+from identity.contracts.retention import (
+    CONTENT_DELETED_LINE, CONTENT_UNRECOVERABLE_LINE, KIND_VISION_JOB,
+)
+from identity.retention import content_status
 # THE PER-TURN EDITABILITY RULE, ONE DEFINITION (feature C review, I1).
 # `is_editable_turn_row` needs no principal and runs no query -- it is
 # three facts off a row this module already holds -- so the card asks the
@@ -516,16 +533,26 @@ def artifact_links(references) -> tuple[list[dict], list[dict]]:
     anything that is not `<kind>:<digits>`; this value reached the row
     from a tool runner, and a link that cannot resolve is worse than no
     link at all.
+
+    EVERY IMAGE ENTRY CARRIES A `"placeholder"` KEY (placeholder wave,
+    2026-09-29, UAT report step 8c): `None` for a picture whose bytes
+    are there, or one of `identity.contracts.retention.CONTENT_DELETED_
+    LINE`/`CONTENT_UNRECOVERABLE_LINE` for one that is not --
+    `_image_placeholder`, below, is where that is decided. A `files`
+    entry (a `document:` reference) never gets this key at all: RAG's
+    own resolvers already have a different, pre-existing availability
+    story this wave does not touch.
     """
     images: list[dict] = []
     files: list[dict] = []
+    entries: list[dict] = []
     for reference in references:
         try:
             kind, pk = parse_artifact(reference)
         except ValueError:
             logger.info("chat: dropping unparseable artifact reference %r", reference)
             continue
-        entry = {
+        entries.append({
             "reference": reference, "kind": kind,
             "url": _url_for(artifact_url_name(kind), pk),
             # R5 (chat-polish P3.1, fix round 1): the document's own
@@ -543,9 +570,84 @@ def artifact_links(references) -> tuple[list[dict], list[dict]]:
                 (artifact_title(reference) or f"Document {pk}")
                 if kind == "document" else ""
             ),
-        }
-        (images if kind in _IMAGE_KINDS else files).append(entry)
+        })
+    # ONE PLACEHOLDER LOOKUP FOR THE WHOLE TURN, not one per image --
+    # asked only about the images whose URL actually reversed (a route
+    # that is not even mounted has nothing to ask about; see
+    # `_image_placeholder`'s own guard against querying for those).
+    placeholder = _image_placeholder(
+        [entry["reference"] for entry in entries
+         if entry["kind"] in _IMAGE_KINDS and entry["url"]])
+    for entry in entries:
+        if entry["kind"] in _IMAGE_KINDS:
+            entry["placeholder"] = placeholder if entry["url"] else None
+            images.append(entry)
+        else:
+            files.append(entry)
     return images, files
+
+
+def _image_placeholder(image_refs: list[str]) -> str | None:
+    """`None` when every one of `image_refs` still names a real,
+    unticketed generation job; a plain-copy sentence otherwise.
+
+    THE OWNER'S RULING on UAT report step 8c (placeholder wave,
+    2026-09-29): a conversation must show a placeholder, never the
+    browser's own bare broken-image icon, where a picture's bytes are
+    gone -- and the placeholder's own words must say `CONTENT_
+    UNRECOVERABLE_LINE` rather than `CONTENT_DELETED_LINE` for the one
+    case that is not simply "deleted": a purge that reached a files-band
+    handler and then failed, which `identity.retention.record_failed_
+    purge` marks `content_unrecoverable` on the job's own ticket
+    (`may_restore`'s own docstring is the fuller account). Telling
+    someone their picture "was deleted" when its deletion in fact got
+    stuck halfway is the exact mistake the owner ruled against.
+
+    ONE JOB PER CALL, IN PRACTICE, NOT PER REFERENCE: `image_refs` is
+    the set of image references ONE TURN carries, and every `"output:"`
+    reference a turn's own artifacts ever hold came from the SAME
+    `vision.generate` call that minted them all at once
+    (`tools/vision/tools.py::run_generate`); nothing in this column
+    mints an `"input:"` reference onto a turn's artifacts at all today
+    (`tools.vision.services.stage_upload` is the vision page's own
+    upload flow, never a chat turn's). So the whole batch is judged
+    uniformly, by whichever job(s) it resolves to, rather than tracked
+    reference by reference -- which the registered resolver below does
+    not expose anyway: it answers "which of these JOBS still exist",
+    deduped, never "which reference named which job".
+
+    THE JOB IDS COME FROM `agents.contracts.artifacts.artifact_children`
+    -- the SAME registered dotted-path seam `agents.retention.
+    conversation_children` already uses to reach `tools.vision` at
+    DELETE time, resolved here at RENDER time instead, through the
+    identical `import_string` mechanism. `None` when nothing is
+    registered (the image column is not installed on this box) --
+    `artifact_links`'s own guard means this is only ever called with a
+    non-empty `image_refs` whose URL already reversed, but a box with
+    `"vision"` mounted and no image column installed is not a
+    contradiction worth raising over, so this degrades the same way
+    `conversation_children` does on the same box shape: honestly,
+    to nothing owed.
+    """
+    if not image_refs:
+        return None
+    dotted = artifact_children()
+    if dotted is None:
+        return None
+    triples = import_string(dotted)(image_refs, [])
+    job_ids = [str(job_id) for job_id, _owner_kind, _owner_key in triples]
+    if not job_ids:
+        # ONLY JOBS THAT STILL EXIST come back from the resolver above
+        # (its own docstring) -- none did, so every reference in this
+        # batch names a job the box no longer has any row for at all:
+        # the ordinary, successful-purge case (UAT report Step 4).
+        return CONTENT_DELETED_LINE
+    status = content_status(KIND_VISION_JOB, job_ids)
+    if not status:
+        return None
+    if any(status.values()):
+        return CONTENT_UNRECOVERABLE_LINE
+    return CONTENT_DELETED_LINE
 
 
 def _url_for(url_name: str, pk: int) -> str:

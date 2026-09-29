@@ -221,6 +221,94 @@ class TestArtifacts:
         assert images[0]["reference"] == "output:12"
 
 
+class TestImageAvailability:
+    """Owner ruling on UAT report step 8c (placeholder wave,
+    2026-09-29): a restored conversation whose picture is gone renders
+    a placeholder, never the browser's own bare broken-image icon --
+    and the placeholder's own words say `CONTENT_UNRECOVERABLE_LINE`
+    rather than `CONTENT_DELETED_LINE` exactly when `identity.retention.
+    content_status` reports the underlying job's ticket as
+    `content_unrecoverable`. `images[0]["placeholder"]` is `None` for an
+    ordinary, resolvable image -- the one key every existing
+    `TestArtifacts` case above never had to know about, because `None`
+    renders exactly as those tests already expect.
+    """
+
+    def test_an_image_whose_job_carries_no_ticket_is_available(self):
+        from identity.tests._helpers import make_output
+
+        output = make_output()
+        images, _files = artifact_links([f"output:{output.pk}"])
+        assert images[0]["placeholder"] is None
+
+    def test_an_image_whose_job_no_longer_exists_at_all_is_the_generic_line(self):
+        """THE ORDINARY, SUCCESSFUL-PURGE CASE (Step 4 in the UAT
+        report): the row and its ticket were destroyed together, so
+        there is nothing left to read a `content_unrecoverable` mark
+        off of -- the honest sentence is the plain one."""
+        from identity.contracts.retention import CONTENT_DELETED_LINE
+
+        images, _files = artifact_links(["output:999999"])
+        assert images[0]["placeholder"] == CONTENT_DELETED_LINE
+
+    def test_an_image_whose_job_is_ticketed_and_marked_is_the_specific_line(self):
+        from identity.contracts.retention import CONTENT_UNRECOVERABLE_LINE, KIND_VISION_JOB
+        from identity.models import DeletionTicket
+        from identity.retention import delete_content
+        from identity.testing import make_user, user_principal
+        from identity.tests._helpers import make_output
+
+        output = make_output()
+        user = make_user()
+        ticket = delete_content(user_principal(user), kind=KIND_VISION_JOB,
+                                key=str(output.job_id), owner=output.job)
+        DeletionTicket.objects.filter(pk=ticket.pk).update(content_unrecoverable=True)
+
+        images, _files = artifact_links([f"output:{output.pk}"])
+        assert images[0]["placeholder"] == CONTENT_UNRECOVERABLE_LINE
+
+    def test_an_image_whose_job_is_ticketed_but_not_marked_is_the_generic_line(self):
+        """A JOB DELETED ON ITS OWN, not yet purged: its picture is
+        already hidden from every OTHER surface (`tools.vision.
+        visibility` excludes any ticketed job regardless of the mark),
+        so this turn must not show it either -- but nothing here claims
+        the stronger, more specific fact the marked case does."""
+        from identity.contracts.retention import CONTENT_DELETED_LINE, KIND_VISION_JOB
+        from identity.retention import delete_content
+        from identity.testing import make_user, user_principal
+        from identity.tests._helpers import make_output
+
+        output = make_output()
+        user = make_user()
+        delete_content(user_principal(user), kind=KIND_VISION_JOB,
+                       key=str(output.job_id), owner=output.job)
+
+        images, _files = artifact_links([f"output:{output.pk}"])
+        assert images[0]["placeholder"] == CONTENT_DELETED_LINE
+
+    def test_a_document_artifact_is_never_given_a_placeholder_key(self):
+        """Scoped to images: `document:` files have their own,
+        pre-existing availability story (`tools.rag`'s own resolvers)
+        and this wave does not touch it."""
+        images, files = artifact_links(["document:7"])
+        assert images == []
+        assert "placeholder" not in files[0]
+
+    def test_a_reference_whose_url_is_not_mounted_never_queries_for_a_placeholder(
+        self, monkeypatch
+    ):
+        """THE VISION-OFF CASE, again: no route means no point asking
+        whether the bytes are there -- `_artifact_images.html`'s own
+        `{% else %}` branch already has the honest sentence for this."""
+        def _unmounted(*args, **kwargs):
+            raise NoReverseMatch("vision is not mounted")
+
+        monkeypatch.setattr("agents.chat.rendering.reverse", _unmounted)
+        images, _files = artifact_links(["output:12"])
+        assert images[0]["url"] == ""
+        assert images[0]["placeholder"] is None
+
+
 class TestTheGenerationLink:
     """UI-3c: an image card links to its own submission on the image
     surface, not just to the picture.
