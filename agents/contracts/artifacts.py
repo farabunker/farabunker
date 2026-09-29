@@ -307,3 +307,45 @@ def artifact_children() -> str | None:
     is the common case on a box with the image column uninstalled, and
     is not an error."""
     return _ARTIFACT_CHILDREN
+
+
+# A SEPARATE SLOT FROM `_ARTIFACT_CHILDREN`, not a second contract for
+# the same one question: that resolver answers "which GENERATIONS does
+# a conversation's DELETE reach" (deduped, with owner columns, once per
+# delete). RENDER TIME asks a cheaper, far more frequent question --
+# "which JOB does EACH reference name" -- for potentially many turns on
+# one page, so `agents.chat.rendering.thread_cards` can resolve every
+# image reference the whole render is about to draw in ONE call rather
+# than one per turn (the N+1 the placeholder wave, 2026-09-29, left
+# behind and this closes).
+_ARTIFACT_JOB_IDS: str | None = None
+
+
+def register_artifact_job_ids(dotted_path: str) -> None:
+    """Register the function that maps EACH of a set of artifact
+    references to the id of the job it still names.
+
+    Signature `(refs: Sequence[str]) -> dict[str, str]` -- every
+    reference in `refs` that still names a surviving job, keyed by the
+    reference string itself, valued by that job's id. A reference
+    absent from the answer names no surviving job -- the same "nothing
+    to read a ticket off" fact `agents.chat.rendering._image_placeholder`
+    already treated as a deleted image before this registry existed.
+
+    A DOTTED PATH, resolved at RENDER time by the caller, never
+    imported here -- the same mechanism `register_artifact_children`
+    above already uses, for the same reason: `agents/` may not import
+    `tools/` at all.
+    """
+    if "." not in dotted_path:
+        raise ValueError(
+            f"register_artifact_job_ids needs a dotted path, got {dotted_path!r}")
+    global _ARTIFACT_JOB_IDS
+    _ARTIFACT_JOB_IDS = dotted_path
+
+
+def artifact_job_ids_resolver() -> str | None:
+    """The registered resolver path, or `None` when nothing is -- the
+    common case on a box with the image column uninstalled, and not an
+    error."""
+    return _ARTIFACT_JOB_IDS

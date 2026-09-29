@@ -15,7 +15,7 @@ from identity.contracts.cascades import retention_handlers
 from identity.contracts.retention import KIND_VISION_JOB
 from tools.vision import services, store
 from tools.vision.models import GeneratedOutput, GenerationJob, JobInput
-from tools.vision.retention import purge_job, resolve_artifact_jobs
+from tools.vision.retention import purge_job, resolve_artifact_job_ids, resolve_artifact_jobs
 from tools.vision.tests._helpers import seed_sweep_posture
 
 pytestmark = pytest.mark.django_db
@@ -184,6 +184,98 @@ class TestMappingReferencesToJobs:
         output = _output(job=job)
         assert resolve_artifact_jobs([f"output:{output.pk}"], []) == [
             (str(job.pk), "user", "42")]
+
+
+class TestResolveArtifactJobIds:
+    """`resolve_artifact_job_ids` -- RENDER TIME's own sibling to
+    `resolve_artifact_jobs` above: a reference-to-job-id MAP, not a
+    deduped, owner-carrying triple list, and no `generation_ids`
+    channel at all (the render path never has bare ids, only artifact
+    reference strings). `agents.chat.rendering._resolve_image_status`
+    is the one caller, batching a whole render's images into ONE call
+    instead of one per turn (the N+1 the placeholder wave, 2026-09-29,
+    left behind and this closes)."""
+
+    def test_an_output_reference_resolves_to_its_jobs_id(self):
+        job = _generation()
+        output = _output(job=job)
+        assert resolve_artifact_job_ids([f"output:{output.pk}"]) == {
+            f"output:{output.pk}": str(job.pk)}
+
+    def test_an_input_reference_resolves_through_its_own_table(self):
+        job = _generation()
+        job_input = JobInput.objects.create(job=job, param_key="image",
+                                            path="/dev/null",
+                                            media_type="image/png")
+        assert resolve_artifact_job_ids([f"input:{job_input.pk}"]) == {
+            f"input:{job_input.pk}": str(job.pk)}
+
+    def test_a_staged_input_with_no_job_yet_is_absent(self):
+        """`JobInput.job` is NULLABLE for a staged upload the page
+        recorded before any generation consumed it -- absent, not a
+        job id of `None`, the same "no surviving job" fact every other
+        unresolved reference gets."""
+        job_input = JobInput.objects.create(job=None, param_key="image",
+                                            path="/dev/null",
+                                            media_type="image/png")
+        assert resolve_artifact_job_ids([f"input:{job_input.pk}"]) == {}
+
+    def test_two_outputs_of_different_jobs_each_keep_their_own_reference(self):
+        first_job, second_job = _generation(), _generation()
+        first = _output(job=first_job)
+        second = _output(job=second_job)
+        assert resolve_artifact_job_ids(
+            [f"output:{first.pk}", f"output:{second.pk}"]) == {
+            f"output:{first.pk}": str(first_job.pk),
+            f"output:{second.pk}": str(second_job.pk),
+        }
+
+    def test_two_outputs_of_one_job_both_map_to_it(self):
+        job = _generation()
+        first, second = _output(job=job, index=0), _output(job=job, index=1)
+        assert resolve_artifact_job_ids(
+            [f"output:{first.pk}", f"output:{second.pk}"]) == {
+            f"output:{first.pk}": str(job.pk),
+            f"output:{second.pk}": str(job.pk),
+        }
+
+    def test_a_reference_that_matches_no_row_is_absent(self):
+        assert resolve_artifact_job_ids(["output:999999"]) == {}
+
+    def test_an_unparseable_reference_is_dropped_not_raised(self):
+        assert resolve_artifact_job_ids(["not-a-reference", ""]) == {}
+
+    def test_a_document_reference_is_skipped_silently(self):
+        assert resolve_artifact_job_ids(["document:451"]) == {}
+
+    def test_no_second_query_confirms_the_job_row_survives(self, django_assert_num_queries):
+        """UNLIKE `resolve_artifact_jobs`, no `services.existing_job_ids`
+        call: `GeneratedOutput.job` is `on_delete=CASCADE`, so a row
+        found at all already proves its job exists, and a SECOND query
+        to confirm it would be the exact query this function exists to
+        not pay. One query for the one kind present."""
+        job = _generation()
+        output = _output(job=job)
+        with django_assert_num_queries(1):
+            resolve_artifact_job_ids([f"output:{output.pk}"])
+
+    def test_an_empty_list_costs_zero_queries(self, django_assert_num_queries):
+        with django_assert_num_queries(0):
+            assert resolve_artifact_job_ids([]) == {}
+
+    def test_output_and_input_references_together_cost_two_queries(
+        self, django_assert_num_queries
+    ):
+        """One query per kind ACTUALLY PRESENT, never a query per
+        reference: several of each kind still costs exactly two."""
+        job = _generation()
+        outputs = [_output(job=job, index=i) for i in range(3)]
+        job_input = JobInput.objects.create(job=job, param_key="image",
+                                            path="/dev/null",
+                                            media_type="image/png")
+        refs = [f"output:{o.pk}" for o in outputs] + [f"input:{job_input.pk}"]
+        with django_assert_num_queries(2):
+            resolve_artifact_job_ids(refs)
 
 
 class TestAFailedParseIsLoggedWithoutWhatItFailedToParse:

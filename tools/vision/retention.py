@@ -145,6 +145,67 @@ def resolve_artifact_jobs(refs, generation_ids) -> list[tuple[str, str, str]]:
     return sorted(services.existing_job_ids(job_ids))
 
 
+def resolve_artifact_job_ids(refs) -> dict[str, str]:
+    """EVERY one of `refs` that still names a job, mapped to that job's
+    id -- a string, `identity.retention.content_status`'s own key shape.
+
+    RENDER TIME'S OWN QUESTION, a sibling to `resolve_artifact_jobs`
+    above rather than a replacement for it: that function answers
+    "which GENERATIONS does a conversation's DELETE reach" (deduped,
+    carrying owner columns, one call per delete, for `agents.retention.
+    conversation_children`). This one answers "which job does EACH
+    reference name", so `agents.chat.rendering` can resolve every image
+    reference a whole PAGE is about to render in one call instead of
+    one per turn -- the N+1 the placeholder wave (2026-09-29) left
+    behind: `_image_placeholder` used to call `resolve_artifact_jobs`
+    and then `identity.retention.content_status` once per image-bearing
+    turn, and TWICE for a TOOL turn (`agents.chat.rendering.turn_card`'s
+    own call and `tool_card`'s second one over the same artifacts).
+
+    NO SECOND QUERY TO CONFIRM THE JOB ITSELF STILL EXISTS, unlike
+    `resolve_artifact_jobs`'s own `services.existing_job_ids` call:
+    `GeneratedOutput.job` is `on_delete=CASCADE` from `GenerationJob`
+    (`tools/vision/models.py`), so a `GeneratedOutput`/`JobInput` row
+    found here at all already proves its job survives -- the extra
+    check on the sibling function's own OTHER channel (generation ids
+    read straight off `Turn.data`, no FK behind them) is not something
+    this function is ever asked about: the render path only ever holds
+    artifact reference strings, never bare generation ids.
+
+    A reference that fails to parse, or whose row is already gone, is
+    simply ABSENT from the answer -- the same "no job for this
+    reference" fact an empty result already meant to every caller of
+    `resolve_artifact_jobs`.
+
+    AT MOST ONE QUERY PER KIND ACTUALLY PRESENT in `refs` (never one per
+    reference), and none at all for an empty `refs`.
+    """
+    output_pks: dict[int, str] = {}
+    input_pks: dict[int, str] = {}
+    for reference in refs or ():
+        try:
+            kind, pk = parse_artifact(reference)
+        except ValueError:
+            logger.info(
+                "tools.vision.retention: one artifact reference failed to parse; ignored.")
+            continue
+        if kind == "output":
+            output_pks[pk] = reference
+        elif kind == "input":
+            input_pks[pk] = reference
+
+    job_of: dict[str, str] = {}
+    if output_pks:
+        for pk, job_id in GeneratedOutput.objects.filter(
+                pk__in=output_pks).values_list("pk", "job_id"):
+            job_of[output_pks[pk]] = str(job_id)
+    if input_pks:
+        for pk, job_id in JobInput.objects.filter(
+                pk__in=input_pks, job__isnull=False).values_list("pk", "job_id"):
+            job_of[input_pks[pk]] = str(job_id)
+    return job_of
+
+
 def purge_job(key: str) -> int:
     """Destroy ONE generation on its own ticket's date: the row, its
     `JobInput`/`GeneratedOutput` children by CASCADE, its managed

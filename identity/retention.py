@@ -82,19 +82,23 @@ def content_status(kind: str, keys) -> dict[str, bool]:
 
     THE ONE PLACE A RENDERER OUTSIDE `identity/` READS `content_
     unrecoverable` (placeholder wave, 2026-09-29): `agents/chat/
-    rendering.py::artifact_links` calls this, through the SAME named
-    seam `ticketed_keys` above already opens, to choose between
+    rendering.py::_resolve_image_status` calls this, through the SAME
+    named seam `ticketed_keys` above already opens, to choose between
     `identity.contracts.retention.CONTENT_DELETED_LINE` and `CONTENT_
     UNRECOVERABLE_LINE` for a picture whose bytes a turn cannot show.
     `agents/` may import this column (identity sits below it); it may
     not import `tools.vision`, which is why the keys this function is
     asked about -- generation job ids -- arrive already resolved,
-    through `agents.contracts.artifacts.artifact_children`'s own
+    through `agents.contracts.artifacts.artifact_job_ids_resolver`'s own
     dotted-path registry, never queried here.
 
     ONE QUERY FOR THE WHOLE BATCH, `ticketed_keys`'s own shape: a card
-    with several images costs one query, not one per image. `{}` for an
-    empty `keys`, with no query at all -- most turns carry none.
+    with several images costs one query, not one per image -- and, since
+    the placeholder wave's N+1 fix (2026-09-29), one query for a WHOLE
+    RENDER'S images, not one per turn: `agents.chat.rendering.thread_
+    cards` gathers every job id a page's own turns resolve to before
+    calling this once. `{}` for an empty `keys`, with no query at all --
+    most turns carry none.
     """
     if not keys:
         return {}

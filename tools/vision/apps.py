@@ -93,9 +93,16 @@ class VisionConfig(AppConfig):
         # import `tools/` at all. INSIDE the feature gate, so a box with
         # "vision" off carries no registration naming a model whose app
         # registered nothing else.
-        from agents.contracts.artifacts import register_artifact_children
+        from agents.contracts.artifacts import (
+            register_artifact_children, register_artifact_job_ids,
+        )
 
         register_artifact_children("tools.vision.retention.resolve_artifact_jobs")
+        # RENDER TIME'S OWN SLOT (placeholder wave N+1 fix, 2026-09-29):
+        # see `register_artifact_job_ids`'s own docstring for why this
+        # is a second registration rather than a second use of the one
+        # above.
+        register_artifact_job_ids("tools.vision.retention.resolve_artifact_job_ids")
 
         # THIS COLUMN'S ANSWER TO "A DELETED IMAGE'S DATE HAS ARRIVED".
         # A dotted-path string, like every other registration in this

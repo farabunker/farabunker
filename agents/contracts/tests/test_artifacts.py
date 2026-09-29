@@ -30,9 +30,10 @@ import pytest
 from django.urls import reverse
 
 from agents.contracts.artifacts import (
-    ARTIFACT_KINDS, ArtifactFile, ArtifactLabels, artifact_children, artifact_title,
-    artifact_url_name, file_resolver_for, labels_resolver_for, mint_artifact, parse_artifact,
-    register_artifact_children, register_artifact_file_resolver, register_artifact_labels,
+    ARTIFACT_KINDS, ArtifactFile, ArtifactLabels, artifact_children, artifact_job_ids_resolver,
+    artifact_title, artifact_url_name, file_resolver_for, labels_resolver_for, mint_artifact,
+    parse_artifact, register_artifact_children, register_artifact_file_resolver,
+    register_artifact_job_ids, register_artifact_labels,
 )
 from agents.contracts import artifacts as artifacts_module
 from agents.contracts.tests._helpers import isolated_file_resolver_registry, isolated_labels_registry  # noqa: F401
@@ -266,14 +267,17 @@ class TestArtifactFileShape:
 
 @pytest.fixture(autouse=True)
 def _isolated_slot():
-    """This module writes the single artifact-children global, so it
-    saves and restores it -- the same discipline every registry test in
-    this codebase follows (`identity/tests/test_cascades.py::
-    _isolated_registry`). Without it, `"pkg.other.fn"` below would be
-    resolved by the next conversation delete in the same process."""
-    saved = artifacts_module._ARTIFACT_CHILDREN
+    """This module writes the single artifact-children global (and its
+    render-time sibling below), so it saves and restores both -- the
+    same discipline every registry test in this codebase follows
+    (`identity/tests/test_cascades.py::_isolated_registry`). Without it,
+    `"pkg.other.fn"` below would be resolved by the next conversation
+    delete, or the next render, in the same process."""
+    saved_children = artifacts_module._ARTIFACT_CHILDREN
+    saved_job_ids = artifacts_module._ARTIFACT_JOB_IDS
     yield
-    artifacts_module._ARTIFACT_CHILDREN = saved
+    artifacts_module._ARTIFACT_CHILDREN = saved_children
+    artifacts_module._ARTIFACT_JOB_IDS = saved_job_ids
 
 
 class TestTheArtifactChildrenSlot:
@@ -286,3 +290,27 @@ class TestTheArtifactChildrenSlot:
     def test_it_refuses_a_path_that_is_not_dotted(self):
         with pytest.raises(ValueError, match="dotted path"):
             register_artifact_children("notdotted")
+
+
+class TestTheArtifactJobIdsSlot:
+    """`register_artifact_job_ids`/`artifact_job_ids_resolver` -- RENDER
+    TIME'S OWN slot, separate from `_ARTIFACT_CHILDREN` above (placeholder
+    wave N+1 fix, 2026-09-29): see `register_artifact_job_ids`'s own
+    docstring for why a second slot rather than a second use of the
+    first."""
+
+    def test_it_is_one_slot_not_a_per_kind_dict(self):
+        register_artifact_job_ids("pkg.mod.fn")
+        assert artifact_job_ids_resolver() == "pkg.mod.fn"
+        register_artifact_job_ids("pkg.other.fn")
+        assert artifact_job_ids_resolver() == "pkg.other.fn"
+
+    def test_it_refuses_a_path_that_is_not_dotted(self):
+        with pytest.raises(ValueError, match="dotted path"):
+            register_artifact_job_ids("notdotted")
+
+    def test_it_is_independent_of_the_artifact_children_slot(self):
+        register_artifact_children("pkg.children.fn")
+        register_artifact_job_ids("pkg.job_ids.fn")
+        assert artifact_children() == "pkg.children.fn"
+        assert artifact_job_ids_resolver() == "pkg.job_ids.fn"

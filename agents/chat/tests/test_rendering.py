@@ -9,6 +9,8 @@ drifts the first time one of them is edited.
 from __future__ import annotations
 
 import pytest
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.urls import NoReverseMatch, reverse
 from django.utils import timezone
 
@@ -307,6 +309,83 @@ class TestImageAvailability:
         images, _files = artifact_links(["output:12"])
         assert images[0]["url"] == ""
         assert images[0]["placeholder"] is None
+
+    def test_no_resolver_registered_at_all_degrades_to_no_placeholder(self, monkeypatch):
+        """THE IMAGE COLUMN NOT INSTALLED, not merely a route left
+        unmounted: `agents.contracts.artifacts.artifact_job_ids_resolver`
+        answers `None`. `_resolve_image_status` must read that as
+        "nothing to ask, ever" (`registered=False`) and NOT as "asked,
+        and got nothing back" -- the latter is what `CONTENT_DELETED_
+        LINE` means, and claiming a box knows an image is deleted when
+        it never even asked would be the exact kind of over-claim the
+        placeholder wave's own honesty rule forbids. A raise here would
+        take down a whole conversation page for a viewer who did
+        nothing; the render must degrade to the plain `<img>` this box
+        already showed before the placeholder wave existed."""
+        monkeypatch.setattr("agents.chat.rendering.artifact_job_ids_resolver",
+                            lambda: None)
+        images, _files = artifact_links(["output:12"])
+        assert images[0]["placeholder"] is None
+
+
+class TestTheImageStatusBatchDoesNotScale:
+    """`_placeholder_for` (above `TestImageAvailability`) used to be
+    reached through `_resolve_image_status`'s own two queries --
+    `agents.contracts.artifacts.artifact_job_ids_resolver`'s resolver,
+    then `identity.retention.content_status` -- run once PER
+    image-bearing turn, and TWICE for a TOOL turn (`turn_card`'s own
+    `artifact_links` call for the card's "images" key, and `tool_card`'s
+    own second call over the same turn's artifacts under "tool"), so a
+    thread page with N image-bearing TOOL turns cost `thread_cards` up
+    to `4N` queries at render time -- for every viewer, on a page opened
+    constantly. The SAME equality idiom `tools/rag/tests/
+    test_access_documents.py::test_the_query_cost_does_not_scale_with_
+    attachment_count` already pins for an unrelated N+1: one turn and
+    several must cost the IDENTICAL number of queries, proving the
+    lookup moved from "once per turn" to "once per render"."""
+
+    def _image_bearing_tool_turn(self, conversation):
+        from identity.tests._helpers import make_output
+
+        output = make_output()
+        return _tool_turn(conversation, artifacts=[f"output:{output.pk}"])
+
+    def test_rendering_several_image_turns_costs_the_same_as_rendering_one(self):
+        agent = make_agent()
+        one = make_conversation(agent=agent)
+        self._image_bearing_tool_turn(one)
+        with CaptureQueriesContext(connection) as one_ctx:
+            thread_cards(one)
+
+        several = make_conversation(agent=agent)
+        for _ in range(5):
+            self._image_bearing_tool_turn(several)
+        with CaptureQueriesContext(connection) as many_ctx:
+            thread_cards(several)
+
+        assert len(many_ctx.captured_queries) == len(one_ctx.captured_queries)
+
+    def test_a_batched_and_a_self_resolving_render_of_the_same_turn_agree(self):
+        """THERE IS ONE RESOLVER, NOT TWO (review requirement on this
+        fix): `turn_card`'s `image_status=` parameter is a bigger or
+        smaller BATCH into the exact same `_resolve_image_status`, never
+        a second algorithm computing the placeholder a different way. A
+        turn rendered through `thread_cards`' own whole-render batch and
+        the SAME turn rendered by `turn_card` on its own (which falls
+        into `artifact_links`'s own single-turn batch-of-one) must
+        produce byte-identical cards -- a divergence here is exactly
+        what a SECOND implementation would eventually grow."""
+        from agents.chat.rendering import _image_refs_of, _resolve_image_status, turn_card
+
+        conversation = make_conversation()
+        turn = self._image_bearing_tool_turn(conversation)
+
+        self_resolved = turn_card(turn)
+        batched = turn_card(turn, image_status=_resolve_image_status(_image_refs_of([turn])))
+
+        assert self_resolved == batched
+        assert self_resolved["images"][0]["placeholder"] is None
+        assert self_resolved["tool"]["images"][0]["placeholder"] is None
 
 
 class TestTheGenerationLink:
