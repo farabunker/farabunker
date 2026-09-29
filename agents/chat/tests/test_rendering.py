@@ -24,6 +24,15 @@ from agents.runtime.audit import RUNNING
 pytestmark = pytest.mark.django_db
 
 
+def _raising_job_ids_resolver(refs):
+    """A dotted-path target for `TestImageAvailability::
+    test_a_resolver_that_raises_degrades_rather_than_500ing_the_page`
+    (C4) -- module-level so `import_string` can actually resolve it, the
+    same reason `_generation_turn`/`_tool_turn` below sit at module
+    scope rather than nested in a test."""
+    raise RuntimeError("simulated: renamed/half-migrated image-job resolver")
+
+
 def _invocation(**overrides):
     fields = dict(
         principal_kind="resident_agent", principal_key="general",
@@ -324,6 +333,21 @@ class TestImageAvailability:
         already showed before the placeholder wave existed."""
         monkeypatch.setattr("agents.chat.rendering.artifact_job_ids_resolver",
                             lambda: None)
+        images, _files = artifact_links(["output:12"])
+        assert images[0]["placeholder"] is None
+
+    def test_a_resolver_that_raises_degrades_rather_than_500ing_the_page(self, monkeypatch):
+        """C4: a renamed function, a half-migrated column, or a resolver
+        that raises during the window between a migration and a restart
+        must not take the whole conversation page down for every viewer
+        -- `import_string(dotted)(image_refs)` used to run with no
+        try/except at all. Degrades to the SAME `registered=False` path
+        `test_no_resolver_registered_at_all_degrades_to_no_placeholder`
+        above already proves is safe, never a raise."""
+        monkeypatch.setattr(
+            "agents.chat.rendering.artifact_job_ids_resolver",
+            lambda: "agents.chat.tests.test_rendering._raising_job_ids_resolver",
+        )
         images, _files = artifact_links(["output:12"])
         assert images[0]["placeholder"] is None
 

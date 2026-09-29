@@ -636,13 +636,38 @@ def _resolve_image_status(image_refs: list[str]) -> _ImageStatus:
     identical `import_string` mechanism. `registered=False` when
     nothing is (the image column is not installed on this box) -- an
     honest "nothing to ask", never treated as "asked and got nothing".
+
+    C4: `import_string(dotted)(image_refs)` IS CAUGHT, BROADLY, ON
+    PURPOSE. A renamed function, a half-migrated column, or a resolver
+    that raises during the window between a migration and a restart
+    would otherwise turn one bad registration into a 500 for every
+    viewer of every conversation on the box -- a render-time read must
+    degrade, never take the page down for a click nobody made. It
+    degrades to the SAME `registered=False` path used when nothing is
+    registered at all: from here, "the seam is broken" and "the seam
+    does not exist" are the same fact for a renderer that can only ever
+    show a plain `<img>` or say nothing about availability, and logging
+    the exception is what keeps the two distinguishable for whoever
+    reads the log. This is the render-time twin ONLY -- the delete-time
+    resolver (`agents.retention.conversation_children`'s own call
+    through `agents.contracts.artifacts.artifact_children`) is a
+    different blast radius (one deliberate click, not a page for a
+    viewer who did nothing) and is out of this fix's scope.
     """
     dotted = artifact_job_ids_resolver()
     if dotted is None:
         return _ImageStatus(registered=False)
     if not image_refs:
         return _ImageStatus(registered=True)
-    job_of = import_string(dotted)(image_refs)
+    try:
+        job_of = import_string(dotted)(image_refs)
+    except Exception:
+        logger.exception(
+            "chat: the registered image-job resolver %r raised while resolving "
+            "%d reference(s); rendering with no placeholder for this render "
+            "rather than failing the page.", dotted, len(image_refs),
+        )
+        return _ImageStatus(registered=False)
     job_ids = set(job_of.values())
     unrecoverable = content_status(KIND_VISION_JOB, job_ids) if job_ids else {}
     return _ImageStatus(registered=True, job_of=job_of, unrecoverable=unrecoverable)
