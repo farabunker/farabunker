@@ -68,9 +68,14 @@ def _output(**overrides) -> GeneratedOutput:
 # passes on a genuine read. `_OTHER_OWNER_KIND`/`_OTHER_OWNER_KEY` is a
 # SECOND, DIFFERENT pair for the tests below that resolve two jobs in one
 # call, so an owner mixed up between the two entries fails too, not only a
-# blank-everywhere hardcode.
+# blank-everywhere hardcode. The kind slot, not only the key, differs
+# between the two pairs -- `resident_agent` is a real member of
+# `identity.contracts.principals.PRINCIPAL_KINDS`, not a stand-in string --
+# so a resolver that stopped reading `owner_kind` and returned a literal
+# `"user"` for every job fails these assertions too, not only ones built
+# from a blank kind.
 _OWNER_KIND, _OWNER_KEY = "user", "9"
-_OTHER_OWNER_KIND, _OTHER_OWNER_KEY = "user", "11"
+_OTHER_OWNER_KIND, _OTHER_OWNER_KEY = "resident_agent", "11"
 
 
 class TestMappingReferencesToJobs:

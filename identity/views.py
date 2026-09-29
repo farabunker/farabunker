@@ -733,8 +733,12 @@ def deleted_purge(request, pk: int):
         # restored either way, and the unmarked sentence would say the
         # opposite of both facts at once.
         #
-        # `marked=True` HERE HAS NO TEST AT THIS LAYER. It needs a ticket
-        # `record_failed_purge` already marked AND a principal `may_purge`
+        # `marked=True` HERE HAS NO TEST AT THIS LAYER -- a judgement
+        # made 2026-09-28, when this branch's own review of refusal-line
+        # coverage reached this view, not a longstanding fact a later
+        # reader should take on faith without knowing when or why it was
+        # decided. It needs a ticket `record_failed_purge` already
+        # marked AND a principal `may_purge`
         # still refuses on standing alone at once, on a ticket this view
         # still renders a row for. Each half is pinned on its own --
         # `identity.tests.test_retention_service` marks a ticket this way,
