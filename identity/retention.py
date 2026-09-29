@@ -73,6 +73,36 @@ def ticketed_keys(kind: str) -> list[str]:
         DeletionTicket.objects.filter(kind=kind).values_list("key", flat=True))
 
 
+def content_status(kind: str, keys) -> dict[str, bool]:
+    """`{key: content_unrecoverable}`, for whichever of `keys` currently
+    carry a standing ticket under `kind` -- a key with no ticket is
+    ABSENT from the answer, never `False`, because "not deleted" and
+    "deleted, content intact" are different facts and this function is
+    not asked the first one.
+
+    THE ONE PLACE A RENDERER OUTSIDE `identity/` READS `content_
+    unrecoverable` (placeholder wave, 2026-09-29): `agents/chat/
+    rendering.py::artifact_links` calls this, through the SAME named
+    seam `ticketed_keys` above already opens, to choose between
+    `identity.contracts.retention.CONTENT_DELETED_LINE` and `CONTENT_
+    UNRECOVERABLE_LINE` for a picture whose bytes a turn cannot show.
+    `agents/` may import this column (identity sits below it); it may
+    not import `tools.vision`, which is why the keys this function is
+    asked about -- generation job ids -- arrive already resolved,
+    through `agents.contracts.artifacts.artifact_children`'s own
+    dotted-path registry, never queried here.
+
+    ONE QUERY FOR THE WHOLE BATCH, `ticketed_keys`'s own shape: a card
+    with several images costs one query, not one per image. `{}` for an
+    empty `keys`, with no query at all -- most turns carry none.
+    """
+    if not keys:
+        return {}
+    return dict(
+        DeletionTicket.objects.filter(kind=kind, key__in=list(keys))
+        .values_list("key", "content_unrecoverable"))
+
+
 def visible_tickets(principal, *, settings_row=None):
     """The tickets `principal` may see: their own, or everyone's for a
     principal that `sees_all_content` -- which is every principal on an

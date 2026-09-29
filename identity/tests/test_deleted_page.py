@@ -406,6 +406,56 @@ class TestRestoreAndPurge:
         assert DeletionTicket.objects.filter(pk=ticket.pk).exists()
 
 
+class TestTheRestorePartialLine:
+    """Owner ruling (placeholder wave, 2026-09-29): the acceptance pass
+    (`.superpowers/sdd/2026-09-21-deletion-semantics/uat-report.md`,
+    step 8c) found "Restored." said nothing when part of what was
+    restored did not come back. `deleted_restore` now adds ONE more
+    sentence -- `copy.RESTORE_PARTIAL_LINE` -- exactly when the parent
+    it just restored leaves a MARKED child detached behind it, and says
+    nothing extra otherwise."""
+
+    def test_restoring_a_parent_with_a_marked_child_names_the_leftover(self, client):
+        register_retention_handler(RetentionHandler(
+            kind=copy.KIND_CONVERSATION, key="t.page.conversation.partial",
+            label="Conversation", handler=f"{__name__}.noop",
+            children=f"{__name__}._one_image_child"))
+        with posture("personal"):
+            user = make_user()
+            sign_in(client, user)
+            item = make_conversation(owner_kind="user", owner_key=str(user.pk))
+            parent = service.delete_content(
+                user_principal(user), kind=copy.KIND_CONVERSATION,
+                key=str(item.pk), owner=item)
+            child = DeletionTicket.objects.get(
+                kind=copy.KIND_VISION_JOB, parent=parent)
+            DeletionTicket.objects.filter(pk=child.pk).update(
+                content_unrecoverable=True)
+
+            response = client.post(
+                reverse("identity-deleted-restore", args=[parent.pk]), follow=True)
+        assert response.redirect_chain[0][1] == 302
+        body = response.content.decode()
+        assert "Restored." in body
+        assert copy.RESTORE_PARTIAL_LINE in body
+        assert not DeletionTicket.objects.filter(pk=parent.pk).exists()
+        # DETACHED, not deleted: the marked child keeps its own ticket
+        # and its own date, exactly as `restore_content`'s own docstring
+        # says a marked child must.
+        assert DeletionTicket.objects.filter(pk=child.pk, parent=None).exists()
+
+    def test_an_ordinary_restore_with_no_marked_child_says_nothing_extra(self, client):
+        with posture("personal"):
+            user = make_user()
+            sign_in(client, user)
+            ticket = _ticket_for(user)
+            response = client.post(
+                reverse("identity-deleted-restore", args=[ticket.pk]), follow=True)
+        body = response.content.decode()
+        assert "Restored." in body
+        assert copy.RESTORE_PARTIAL_LINE not in body
+
+
 class TestTheViewsOwnFailedPurgeMarkIsReal:
     """`identity.views.deleted_purge`'s two `retention.record_failed_
     purge(ticket)` calls (the refusal-type catch and the bare `except

@@ -659,12 +659,22 @@ def deleted_restore(request, pk: int):
     settings-area click into a traceback. The ticket survives either
     way -- restore never removes content, so there is nothing to retry
     beyond the click itself.
+
+    A SECOND FLASH LINE, ONLY WHEN ONE IS NEEDED (placeholder wave,
+    2026-09-29; UAT report step 8c: "Restored." said nothing when part
+    of what was restored did not come back). Read BEFORE `restore_
+    content` runs, never after: a marked child is DETACHED by that
+    call, not deleted (`restore_content`'s own docstring), so it is
+    still `ticket.children` right up to the moment the call starts --
+    reading it after would need a second query for the same fact this
+    one already has in hand.
     """
     row = settings_row_for(request)
     principal, ticket = _own_ticket_or_404(request, pk, settings_row=row)
     if not retention.may_restore(ticket):
         messages.error(request, retention_copy.RESTORE_REFUSED_LINE)
         return settings_redirect(request, "identity-deleted")
+    left_behind = ticket.children.filter(content_unrecoverable=True).exists()
     try:
         retention.restore_content(principal, ticket, settings_row=row)
     except Exception:  # noqa: BLE001 -- never-500; the traceback goes to the log
@@ -673,6 +683,8 @@ def deleted_restore(request, pk: int):
         messages.error(request, _RESTORE_FAILED_MESSAGE)
     else:
         messages.info(request, "Restored.")
+        if left_behind:
+            messages.info(request, retention_copy.RESTORE_PARTIAL_LINE)
     return settings_redirect(request, "identity-deleted")
 
 

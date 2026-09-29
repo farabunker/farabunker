@@ -91,6 +91,37 @@ RESTORE_REFUSED_LINE = (
     "The content of this item could not be fully removed, so it cannot "
     "be restored. Delete permanently to finish removing what is left."
 )
+# WHAT A CONVERSATION SHOWS IN PLACE OF A PICTURE ITS OWN BYTES ARE
+# GONE FOR (placeholder wave, 2026-09-29) -- `agents/chat/templates/
+# chat/_artifact_images.html`'s one reader, in place of the browser's
+# own bare broken-image icon. TWO SENTENCES, keyed off the SAME
+# `content_unrecoverable` column `RESTORE_REFUSED_LINE` and `may_
+# restore` already read, because the two cases are not the same fact:
+# an item this box finished deleting is gone on purpose, and an item
+# `identity.retention.record_failed_purge` marked is one whose removal
+# stalled halfway -- content gone, ticket still standing, restorable to
+# nobody. Saying the second one "was deleted" would be the SAME
+# mistake `RESTORE_REFUSED_LINE`'s own docstring already refuses to
+# make about the Deleted page's Restore button, applied to a picture
+# instead of a control. NO APOSTROPHE, same reason as above.
+CONTENT_DELETED_LINE = "This item was deleted."
+CONTENT_UNRECOVERABLE_LINE = (
+    "The deletion of this item could not be completed, so it cannot "
+    "be recovered."
+)
+# WHAT `identity.views.deleted_restore` ADDS TO "Restored." when the
+# ticket it just deleted left a MARKED CHILD detached behind it
+# (`identity.retention.restore_content`'s own docstring: a child
+# `record_failed_purge` marked is skipped, never put back). One
+# sentence, the same "deletion could not be completed" words as
+# `CONTENT_UNRECOVERABLE_LINE` above, so a person who restores a
+# conversation and then opens it and finds this sentence's picture are
+# the same fact stated twice, not two different-sounding claims about
+# one thing.
+RESTORE_PARTIAL_LINE = (
+    "Part of this could not be restored because its deletion could "
+    "not be completed."
+)
 LABEL_RETENTION_DAYS = "Keep deleted items for"
 LABEL_QUEUE_RETENTION_DAYS = "Keep finished queue jobs for"
 LABEL_AUDIT_DETAIL = "Show item names in the deletion log"

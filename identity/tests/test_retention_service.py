@@ -578,6 +578,43 @@ class TestTicketedKeys:
         assert service.ticketed_keys(KIND_CONVERSATION) == []
 
 
+class TestContentStatus:
+    """`identity.retention.content_status` -- the one seam `agents.chat.
+    rendering.artifact_links` reads to tell a picture whose deletion
+    finished apart from one whose deletion stalled halfway."""
+
+    def test_a_key_with_no_ticket_is_absent_not_false(self):
+        assert service.content_status(KIND_ASK, ["5"]) == {}
+
+    def test_an_ordinary_ticket_answers_false(self):
+        user = make_user()
+        service.delete_content(user_principal(user), kind=KIND_ASK, key="5",
+                               owner=_owner(user))
+        assert service.content_status(KIND_ASK, ["5"]) == {"5": False}
+
+    def test_a_marked_ticket_answers_true(self):
+        user = make_user()
+        ticket = service.delete_content(user_principal(user), kind=KIND_ASK,
+                                        key="5", owner=_owner(user))
+        DeletionTicket.objects.filter(pk=ticket.pk).update(
+            content_unrecoverable=True)
+        assert service.content_status(KIND_ASK, ["5"]) == {"5": True}
+
+    def test_it_costs_one_query_for_the_whole_batch(self, django_assert_num_queries):
+        user = make_user()
+        service.delete_content(user_principal(user), kind=KIND_ASK, key="5",
+                               owner=_owner(user))
+        service.delete_content(user_principal(user), kind=KIND_ASK, key="6",
+                               owner=_owner(user))
+        with django_assert_num_queries(1):
+            status = service.content_status(KIND_ASK, ["5", "6", "7"])
+        assert status == {"5": False, "6": False}
+
+    def test_an_empty_batch_runs_no_query_at_all(self, django_assert_num_queries):
+        with django_assert_num_queries(0):
+            assert service.content_status(KIND_ASK, []) == {}
+
+
 class TestTheSweep:
     def test_it_picks_up_a_ticket_whose_date_has_arrived(self):
         user = make_user()
