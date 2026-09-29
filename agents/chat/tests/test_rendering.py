@@ -388,6 +388,87 @@ class TestTheImageStatusBatchDoesNotScale:
         assert self_resolved["tool"]["images"][0]["placeholder"] is None
 
 
+class TestMixedPlaceholdersInOneTurn:
+    """F1: a turn's own images are judged ONE AT A TIME, never as one
+    shared verdict for however many the turn happens to carry.
+
+    A FIXTURE WITH ONE IMAGE PER TURN CANNOT SEE THIS -- every other
+    class in this module builds a turn with a single artifact reference,
+    which is exactly why this bug shipped unnoticed. Two images landing
+    on one turn is not a hypothetical: `agents.runtime.loop.run_loop`
+    accumulates `artifacts` across EVERY tool call a turn makes, and
+    `agents.runtime.flow`'s own step aggregation does the same for a
+    flow's steps, so two `vision.generate` calls (or two image-producing
+    flow steps) in one turn is the ordinary agent loop.
+    """
+
+    def test_one_deleted_one_alive_the_deleted_one_still_gets_a_placeholder(self):
+        """BEFORE THE FIX: the deleted reference was absent from the
+        batch's own job map, but the ALIVE sibling still put a job in
+        that batch's `job_ids`, so the shared verdict skipped the "no
+        job at all" branch, found the alive job carries no ticket, and
+        answered `None` for BOTH images -- the deleted picture rendered
+        with no placeholder at all, a bare broken image, the exact
+        defect the placeholder wave exists to fix."""
+        from identity.contracts.retention import CONTENT_DELETED_LINE
+        from identity.tests._helpers import make_output
+
+        alive = make_output()
+        images, _files = artifact_links(["output:999999", f"output:{alive.pk}"])
+        assert images[0]["placeholder"] == CONTENT_DELETED_LINE
+        assert images[1]["placeholder"] is None
+
+    def test_one_ticketed_one_alive_the_alive_one_is_never_stamped_deleted(self):
+        """BEFORE THE FIX: the shared verdict was computed once from the
+        UNION of both jobs, so the ticketed sibling's `CONTENT_DELETED_
+        LINE` was stamped onto the alive sibling too -- a live, present
+        picture replaced by a false statement about the user's own
+        data."""
+        from identity.contracts.retention import CONTENT_DELETED_LINE, KIND_VISION_JOB
+        from identity.retention import delete_content
+        from identity.testing import make_user, user_principal
+        from identity.tests._helpers import make_output
+
+        ticketed = make_output()
+        alive = make_output()
+        user = make_user()
+        delete_content(user_principal(user), kind=KIND_VISION_JOB,
+                       key=str(ticketed.job_id), owner=ticketed.job)
+
+        images, _files = artifact_links([f"output:{ticketed.pk}", f"output:{alive.pk}"])
+        assert images[0]["placeholder"] == CONTENT_DELETED_LINE
+        assert images[1]["placeholder"] is None
+
+    def test_one_marked_one_merely_ticketed_the_ticketed_one_is_not_over_claimed(self):
+        """BEFORE THE FIX: `any(status.values())` over the union of both
+        jobs' `content_unrecoverable` flags meant the MARKED sibling's
+        `True` made the whole batch answer `CONTENT_UNRECOVERABLE_LINE`
+        -- the merely-ticketed image was told its own deletion "could
+        not be completed" and is unrecoverable, a stronger claim than
+        its own ticket makes."""
+        from identity.contracts.retention import (
+            CONTENT_DELETED_LINE, CONTENT_UNRECOVERABLE_LINE, KIND_VISION_JOB,
+        )
+        from identity.models import DeletionTicket
+        from identity.retention import delete_content
+        from identity.testing import make_user, user_principal
+        from identity.tests._helpers import make_output
+
+        marked = make_output()
+        merely_ticketed = make_output()
+        user = make_user()
+        marked_ticket = delete_content(user_principal(user), kind=KIND_VISION_JOB,
+                                       key=str(marked.job_id), owner=marked.job)
+        DeletionTicket.objects.filter(pk=marked_ticket.pk).update(content_unrecoverable=True)
+        delete_content(user_principal(user), kind=KIND_VISION_JOB,
+                       key=str(merely_ticketed.job_id), owner=merely_ticketed.job)
+
+        images, _files = artifact_links(
+            [f"output:{marked.pk}", f"output:{merely_ticketed.pk}"])
+        assert images[0]["placeholder"] == CONTENT_UNRECOVERABLE_LINE
+        assert images[1]["placeholder"] == CONTENT_DELETED_LINE
+
+
 class TestTheGenerationLink:
     """UI-3c: an image card links to its own submission on the image
     surface, not just to the picture.

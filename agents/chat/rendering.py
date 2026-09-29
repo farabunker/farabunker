@@ -703,28 +703,36 @@ def artifact_links(references,
                 if kind == "document" else ""
             ),
         })
-    # ONE PLACEHOLDER LOOKUP FOR THE WHOLE CALL, not one per image --
-    # asked only about the images whose URL actually reversed (a route
-    # that is not even mounted has nothing to ask about).
+    # ONE `_resolve_image_status` LOOKUP FOR THE WHOLE CALL (still just
+    # two queries, whatever this call's own reference count) -- asked
+    # only about the images whose URL actually reversed (a route that is
+    # not even mounted has nothing to ask about). What changed (F1,
+    # 2026-09-29) is that the VERDICT below is no longer shared across
+    # the batch: each image gets its OWN placeholder, read off this one
+    # shared `image_status` -- see `_placeholder_for`'s own docstring for
+    # why a turn's images can disagree.
     image_refs = [entry["reference"] for entry in entries
                  if entry["kind"] in _IMAGE_KINDS and entry["url"]]
     if image_status is None:
         image_status = _resolve_image_status(image_refs)
-    placeholder = _placeholder_for(image_refs, image_status)
     for entry in entries:
         if entry["kind"] in _IMAGE_KINDS:
-            entry["placeholder"] = placeholder if entry["url"] else None
+            entry["placeholder"] = (
+                _placeholder_for(entry["reference"], image_status) if entry["url"] else None
+            )
             images.append(entry)
         else:
             files.append(entry)
     return images, files
 
 
-def _placeholder_for(image_refs: list[str], image_status: _ImageStatus) -> str | None:
-    """`None` when every one of `image_refs` still names a real,
-    unticketed generation job; a plain-copy sentence otherwise -- read
-    PURELY off `image_status` (no query here at all; `_resolve_image_
-    status` is the one place that runs one).
+def _placeholder_for(reference: str, image_status: _ImageStatus) -> str | None:
+    """`None` when `reference` still names a real, unticketed generation
+    job; a plain-copy sentence otherwise -- read PURELY off
+    `image_status` (no query here at all; `_resolve_image_status` is the
+    one place that runs one), and PER REFERENCE: a turn's own images are
+    judged one at a time, never as one verdict shared across whichever
+    images the turn happens to carry.
 
     THE OWNER'S RULING on UAT report step 8c (placeholder wave,
     2026-09-29): a conversation must show a placeholder, never the
@@ -738,41 +746,47 @@ def _placeholder_for(image_refs: list[str], image_status: _ImageStatus) -> str |
     someone their picture "was deleted" when its deletion in fact got
     stuck halfway is the exact mistake the owner ruled against.
 
-    ONE JOB PER CALL, IN PRACTICE, NOT PER REFERENCE: `image_refs` is
-    the set of image references ONE TURN carries, and every `"output:"`
-    reference a turn's own artifacts ever hold came from the SAME
-    `vision.generate` call that minted them all at once
-    (`tools/vision/tools.py::run_generate`); nothing in this column
-    mints an `"input:"` reference onto a turn's artifacts at all today
-    (`tools.vision.services.stage_upload` is the vision page's own
-    upload flow, never a chat turn's). So the whole batch is judged
-    uniformly, by whichever job(s) it resolves to, rather than tracked
-    reference by reference.
+    PER REFERENCE, NOT ONE VERDICT PER CALL (F1, 2026-09-29): a prior
+    version of this function took the WHOLE batch of a turn's image
+    references and answered once for all of them, on the premise that
+    every `"output:"` reference a turn ever holds comes from the same
+    `vision.generate` call. That premise does not hold in this tree:
+    `agents.runtime.loop.run_loop` accumulates `artifacts` across EVERY
+    tool call in a turn, and `agents.runtime.flow`'s own step
+    aggregation does the same for a flow's steps, so two image-producing
+    calls landing on one turn is the ordinary agent loop, not an edge
+    case. A shared verdict then let a deleted sibling hide behind an
+    alive one (no placeholder at all -- a bare broken image), let an
+    alive sibling get stamped with a deleted sibling's own placeholder
+    (a false claim about present content), and let a merely-ticketed
+    sibling borrow a marked sibling's stronger, unrecoverable claim
+    (`TestMixedPlaceholdersInOneTurn` pins all three). Asking
+    `image_status` about one reference at a time is not only correct
+    where the batch verdict was not -- it is also less code.
 
     `image_status.registered is False` (nothing to ask on this box at
-    all) answers `None` for every reference, the same degrade `_resolve_
-    image_status` documents -- never `CONTENT_DELETED_LINE`, which would
-    claim a fact nothing here asked about.
+    all) answers `None`, the same degrade `_resolve_image_status`
+    documents -- never `CONTENT_DELETED_LINE`, which would claim a fact
+    nothing here asked about.
     """
-    if not image_refs:
-        return None
     if not image_status.registered:
         return None
-    job_ids = {image_status.job_of[ref] for ref in image_refs if ref in image_status.job_of}
-    if not job_ids:
-        # ONLY JOBS THAT STILL EXIST are ever keys of `job_of` (`_resolve_
-        # image_status`'s own docstring) -- none of this batch's own
-        # references named one, so every reference in it names a job the
-        # box no longer has any row for at all: the ordinary,
-        # successful-purge case (UAT report Step 4).
+    job_id = image_status.job_of.get(reference)
+    if job_id is None:
+        # `reference` NAMES NO SURVIVING JOB. Usually that is a
+        # completed purge (UAT report Step 4); it is also, honestly,
+        # what a reference that never named a real row AT ALL looks like
+        # from here (`test_an_image_whose_job_no_longer_exists_at_all_
+        # is_the_generic_line` proves this branch with exactly such a
+        # reference) -- this function has no way to tell the two apart,
+        # and the plain, generic sentence is the one that does not
+        # over-claim either way.
         return CONTENT_DELETED_LINE
-    status = {job_id: image_status.unrecoverable[job_id] for job_id in job_ids
-             if job_id in image_status.unrecoverable}
-    if not status:
+    if job_id not in image_status.unrecoverable:
+        # The job survives and carries no ticket at all -- available.
         return None
-    if any(status.values()):
-        return CONTENT_UNRECOVERABLE_LINE
-    return CONTENT_DELETED_LINE
+    return (CONTENT_UNRECOVERABLE_LINE if image_status.unrecoverable[job_id]
+            else CONTENT_DELETED_LINE)
 
 
 def _url_for(url_name: str, pk: int) -> str:
