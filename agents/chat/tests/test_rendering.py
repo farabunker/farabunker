@@ -380,6 +380,16 @@ class TestTheImageStatusBatchDoesNotScale:
         output = make_output()
         return _tool_turn(conversation, artifacts=[f"output:{output.pk}"])
 
+    def _multi_image_tool_turn(self, conversation, image_count):
+        """ONE turn carrying `image_count` images -- `_tool_turn` already
+        takes an `artifacts` list, so this needs no new turn-building
+        machinery, only several references on one row instead of one
+        reference each on several rows."""
+        from identity.tests._helpers import make_output
+
+        refs = [f"output:{make_output().pk}" for _ in range(image_count)]
+        return _tool_turn(conversation, artifacts=refs)
+
     def test_rendering_several_image_turns_costs_the_same_as_rendering_one(self):
         agent = make_agent()
         one = make_conversation(agent=agent)
@@ -394,6 +404,44 @@ class TestTheImageStatusBatchDoesNotScale:
             thread_cards(several)
 
         assert len(many_ctx.captured_queries) == len(one_ctx.captured_queries)
+
+    def test_rendering_one_turn_with_five_images_costs_the_same_as_one_image(self):
+        """THE OTHER AXIS. The arm above varies how many TURNS carry one
+        image each; this one holds the turn count at one and varies how
+        many images that SINGLE turn carries instead. `agents.runtime.
+        loop.run_loop` accumulates `artifacts` across every tool call a
+        turn makes, so five images landing on one turn is the ordinary
+        agent loop, not a hypothetical -- and a lookup that fires once
+        per image INSIDE a turn would be invisible to the arm above,
+        which never puts more than one image reference on any turn it
+        builds, so its equality would hold even if that lookup existed.
+
+        THIS IS NOT A NUMBER TRUSTED ON FAITH. `tools.vision.retention.
+        resolve_artifact_job_ids` answers a turn's references with ONE
+        `pk__in` query over the whole set, and `identity.retention.
+        content_status` answers the resulting job ids with one query
+        over the whole set too -- both batched by construction, not by
+        an accident of this fixture's own five-row size. Replacing
+        either batched query with a loop that asks once per reference is
+        exactly the kind of edit an unrelated change could make without
+        noticing (a "handle them one at a time" pass over that function,
+        say), and this assertion was proved to catch it: temporarily
+        rewriting `resolve_artifact_job_ids`'s batched lookup as a
+        per-reference loop made this exact assertion fail, before that
+        rewrite was reverted.
+        """
+        agent = make_agent()
+        one = make_conversation(agent=agent)
+        self._multi_image_tool_turn(one, 1)
+        with CaptureQueriesContext(connection) as one_ctx:
+            thread_cards(one)
+
+        five = make_conversation(agent=agent)
+        self._multi_image_tool_turn(five, 5)
+        with CaptureQueriesContext(connection) as five_ctx:
+            thread_cards(five)
+
+        assert len(five_ctx.captured_queries) == len(one_ctx.captured_queries)
 
     def test_a_batched_and_a_self_resolving_render_of_the_same_turn_agree(self):
         """THERE IS ONE RESOLVER, NOT TWO (review requirement on this
