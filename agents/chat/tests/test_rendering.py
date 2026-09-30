@@ -8,6 +8,8 @@ drifts the first time one of them is edited.
 """
 from __future__ import annotations
 
+import logging
+
 import pytest
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
@@ -356,6 +358,49 @@ class TestImageAvailability:
         )
         images, _files = artifact_links(["output:12"])
         assert images[0]["placeholder"] is None
+
+    def test_a_resolver_that_keeps_raising_logs_the_first_occurrence_at_error_and_the_rest_at_debug(
+        self, monkeypatch, caplog
+    ):
+        """The operational failure this pins against: an unthrottled
+        `logger.exception` in the except block above fires on EVERY
+        render of EVERY conversation on the box AND every poll tick of
+        a running turn, so a box stuck with a broken resolver buries
+        the one ERROR line an operator needed under thousands of
+        copies of itself. Two consecutive raising renders (the poll
+        loop's own shape) must produce exactly one ERROR record --
+        the first occurrence still pages someone -- and exactly one
+        DEBUG record for the second, carrying the same dotted path and
+        the same reference count the ERROR record does, so an operator
+        who turns DEBUG on can still see the repeat and act on it.
+
+        `_RESOLVER_ERRORS_SEEN` is reset here rather than trusted empty:
+        it is a module-level set, so a process that already hit this
+        same dotted path and exception type in an earlier test would
+        otherwise start this one at DEBUG, which is exactly the
+        vacuous-pin shape this branch has already spent two days
+        refusing."""
+        monkeypatch.setattr(
+            "agents.chat.rendering._RESOLVER_ERRORS_SEEN", set(), raising=False
+        )
+        monkeypatch.setattr(
+            "agents.chat.rendering.artifact_job_ids_resolver",
+            lambda: "agents.chat.tests.test_rendering._raising_job_ids_resolver",
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="agents.chat.rendering"):
+            artifact_links(["output:12"])
+            artifact_links(["output:12"])
+
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        debugs = [r for r in caplog.records if r.levelname == "DEBUG"]
+        assert len(errors) == 1, [r.getMessage() for r in caplog.records]
+        assert len(debugs) == 1, [r.getMessage() for r in caplog.records]
+
+        dotted = "agents.chat.tests.test_rendering._raising_job_ids_resolver"
+        assert dotted in errors[0].getMessage()
+        assert dotted in debugs[0].getMessage()
+        assert "1 reference" in debugs[0].getMessage()
 
 
 class TestTheImageStatusBatchDoesNotScale:

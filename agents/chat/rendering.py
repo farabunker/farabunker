@@ -613,6 +613,22 @@ def _image_refs_of(turns) -> list[str]:
     return refs
 
 
+# Keyed `(dotted path, exception type name)`: which resolver breakages
+# this process has already put at ERROR. A broken resolver raises on
+# EVERY render of EVERY conversation AND every poll tick of a running
+# turn -- unthrottled, that is thousands of copies of the identical
+# traceback burying the one line an operator needed. First occurrence
+# per key still pages someone (below); the SAME dotted path raising the
+# SAME exception type again this process drops to DEBUG, and a
+# genuinely DIFFERENT breakage (a different dotted path, or the same
+# path now failing a different way) still shouts. A plain `set.add` is
+# enough: this is read from a render path, and the worst a lost race
+# costs is one duplicate ERROR line, which is cheaper than a lock here
+# would be. Never read after a process restart, which is intended --
+# a box still broken after a restart should say so again.
+_RESOLVER_ERRORS_SEEN: set[tuple[str, str]] = set()
+
+
 def _resolve_image_status(image_refs: list[str]) -> _ImageStatus:
     """THE ONE PLACE that queries which of `image_refs` still names a
     job, and whether that job's ticket is marked `content_unrecoverable`
@@ -648,7 +664,16 @@ def _resolve_image_status(image_refs: list[str]) -> _ImageStatus:
     does not exist" are the same fact for a renderer that can only ever
     show a plain `<img>` or say nothing about availability, and logging
     the exception is what keeps the two distinguishable for whoever
-    reads the log. This is the render-time twin ONLY -- the delete-time
+    reads the log. LOGGED ONCE PER PROCESS AT ERROR, THEN AT DEBUG
+    (`_RESOLVER_ERRORS_SEEN`, above): this fires on every render of
+    every conversation on the box AND every poll tick of a running
+    turn, so leaving it at ERROR forever would bury the one line an
+    operator needed under thousands of copies of itself -- the same
+    "this fires on every render" pressure `_generation_url`'s own DEBUG
+    choice (elsewhere in this module) answers for a single bad row,
+    except a broken resolver is a box-wide fact rather than a per-row
+    one, which is why the FIRST occurrence still pages someone. This
+    is the render-time twin ONLY -- the delete-time
     resolver (`agents.retention.conversation_children`'s own call
     through `agents.contracts.artifacts.artifact_children`) is a
     different blast radius (one deliberate click, not a page for a
@@ -661,12 +686,22 @@ def _resolve_image_status(image_refs: list[str]) -> _ImageStatus:
         return _ImageStatus(registered=True)
     try:
         job_of = import_string(dotted)(image_refs)
-    except Exception:
-        logger.exception(
-            "chat: the registered image-job resolver %r raised while resolving "
-            "%d reference(s); rendering with no placeholder for this render "
-            "rather than failing the page.", dotted, len(image_refs),
-        )
+    except Exception as exc:
+        error_key = (dotted, type(exc).__name__)
+        if error_key in _RESOLVER_ERRORS_SEEN:
+            logger.debug(
+                "chat: the registered image-job resolver %r is still raising "
+                "%s while resolving %d reference(s); rendering with no "
+                "placeholder for this render rather than failing the page.",
+                dotted, type(exc).__name__, len(image_refs),
+            )
+        else:
+            _RESOLVER_ERRORS_SEEN.add(error_key)
+            logger.exception(
+                "chat: the registered image-job resolver %r raised while resolving "
+                "%d reference(s); rendering with no placeholder for this render "
+                "rather than failing the page.", dotted, len(image_refs),
+            )
         return _ImageStatus(registered=False)
     job_ids = set(job_of.values())
     unrecoverable = content_status(KIND_VISION_JOB, job_ids) if job_ids else {}
