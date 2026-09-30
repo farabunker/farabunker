@@ -29,7 +29,9 @@ pytestmark = pytest.mark.django_db
 def _raising_job_ids_resolver(refs):
     """A dotted-path target for `TestImageAvailability::
     test_a_resolver_that_raises_degrades_rather_than_500ing_the_page`
-    (C4) -- module-level so `import_string` can actually resolve it, the
+    (C4) and `TestImageAvailability::
+    test_a_resolver_that_keeps_raising_logs_the_first_occurrence_at_error_and_the_rest_at_debug`
+    -- module-level so `import_string` can actually resolve it, the
     same reason `_generation_turn`/`_tool_turn` below sit at module
     scope rather than nested in a test."""
     raise RuntimeError("simulated: renamed/half-migrated image-job resolver")
@@ -379,9 +381,14 @@ class TestImageAvailability:
         same dotted path and exception type in an earlier test would
         otherwise start this one at DEBUG, which is exactly the
         vacuous-pin shape this branch has already spent two days
-        refusing."""
+        refusing.
+
+        The `monkeypatch.setattr` below keeps its default `raising=True`:
+        a rename of `_RESOLVER_ERRORS_SEEN` should fail this test with an
+        `AttributeError` naming the missing attribute, not patch a name
+        nothing reads anymore while the real set quietly survives."""
         monkeypatch.setattr(
-            "agents.chat.rendering._RESOLVER_ERRORS_SEEN", set(), raising=False
+            "agents.chat.rendering._RESOLVER_ERRORS_SEEN", set()
         )
         monkeypatch.setattr(
             "agents.chat.rendering.artifact_job_ids_resolver",

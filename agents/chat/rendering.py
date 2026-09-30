@@ -624,7 +624,7 @@ def _image_refs_of(turns) -> list[str]:
 # path now failing a different way) still shouts. A plain `set.add` is
 # enough: this is read from a render path, and the worst a lost race
 # costs is one duplicate ERROR line, which is cheaper than a lock here
-# would be. Never read after a process restart, which is intended --
+# would be. Empty again after a process restart, which is intended --
 # a box still broken after a restart should say so again.
 _RESOLVER_ERRORS_SEEN: set[tuple[str, str]] = set()
 
