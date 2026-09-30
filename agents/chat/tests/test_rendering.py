@@ -29,7 +29,7 @@ pytestmark = pytest.mark.django_db
 def _raising_job_ids_resolver(refs):
     """A dotted-path target for `TestImageAvailability::
     test_a_resolver_that_raises_degrades_rather_than_500ing_the_page`
-    (C4) and `TestImageAvailability::
+    and `TestImageAvailability::
     test_a_resolver_that_keeps_raising_logs_the_first_occurrence_at_error_and_the_rest_at_debug`
     -- module-level so `import_string` can actually resolve it, the
     same reason `_generation_turn`/`_tool_turn` below sit at module

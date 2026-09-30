@@ -249,10 +249,11 @@ A handler's own registered order can put a byte-destroying step ahead of a later
 *same* purge (the band rule only orders handlers within one `run_retention` call, not across a
 failure that comes after); if that later step then fails for any reason, `purge_ticket`'s
 transaction rolls the rows back while the files a `shutil.rmtree` already removed stay removed.
-This was a fifth named residue for one fix wave of this branch, pinned as a strict `xfail` while
-the owner decided between three ways to close it — pin it and close it in the next slice, close it
-now in this branch, or close it in a follow-up PR — and never deferred past that decision: the
-owner ruled to close it now, in this branch, at the acknowledged cost of the more expensive path.
+This failure window was known, and rather than left implicit it was pinned as a strict `xfail`
+while the owner decided between three ways to close it — pin it and close it in the next slice,
+close it now in this branch, or close it in a follow-up PR — and never deferred past that
+decision: the owner ruled to close it now, in this branch, at the acknowledged cost of the more
+expensive path.
 
 **What closes it.** `DeletionTicket.content_unrecoverable`, a boolean folded into the same
 migration that created the table (decision 2's own table is not yet on `origin/dev`, so the field
