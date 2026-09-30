@@ -188,7 +188,7 @@ class TestFindingTheGeneratedImages:
         assert list(refs) == ["output:4"]
 
     def test_a_generation_id_is_collected_from_a_job_that_FAILED(self):
-        """THE STEWARD'S GAP, PINNED AS A TEST. A job that reached the
+        """THE FAILED-JOB GAP IN ARTIFACT COLLECTION, PINNED AS A TEST. A job that reached the
         engine and failed mints no `GeneratedOutput` at all, so the
         artifact channel finds nothing -- but `run_generate` reaches
         `job_json` on every terminal outcome, so the tool turn carries
