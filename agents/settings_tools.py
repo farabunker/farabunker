@@ -106,6 +106,16 @@ from agents.contracts.tools import (
 )
 from foundation.settings_help import CARDS, CONTENT_HASH, card_for, page_choices
 
+# `identity.contracts.retention`'s `LABEL_*` constants are imported
+# LAZILY, inside `run_overview`'s body, not here -- `foundation/ops/
+# tests/test_column_boundaries.py::test_no_tool_module_imports_its_
+# service_layer_at_module_scope` allows only `agents.contracts.*`/
+# `models.contracts.*`/`foundation.settings_help`/stdlib at MODULE scope
+# in a registration module (`agents/settings_tools.py` is one --
+# `agents/apps.py::ready()` imports it to register `settings.card`/
+# `settings.overview`), the same reason `identity.access`/`agents.
+# models` below are lazy too.
+
 # ONE `<route> -- <title>` LINE PER CARD, BUILT AT IMPORT, so the index a
 # model reads cannot go stale relative to the table it is derived from.
 # It rides the TOOL SCHEMA rather than the prompt (spec §5.2, decision
@@ -146,7 +156,9 @@ SETTINGS_OVERVIEW = ToolSpec(
     description=(
         "Report how THIS box is configured right now: its posture, whether administrators "
         "may read other people's content, the session idle timeout, the library posture, "
-        "and whether conversations are told the current date and time. Also names, without "
+        "whether conversations are told the current date and time, and its retention "
+        "policy -- how long a deleted item stays restorable, how long a finished queue job "
+        "is kept, and whether the deletion log shows item names. Also names, without "
         "reciting numbers, that the Library and Job execution pages carry their own "
         "settings this tool does not report. Read-only. Call it when the answer depends on how this box "
         "is set up, not on what a page could do."
@@ -168,7 +180,13 @@ SETTINGS_OVERVIEW = ToolSpec(
 # concrete field lands in exactly one of the two structures below.
 REPORTED_SETTINGS_FIELDS: dict[str, frozenset[str]] = {
     "IdentitySettings": frozenset(
-        {"posture", "library_posture", "admin_sees_content", "session_idle_minutes"}
+        {"posture", "library_posture", "admin_sees_content", "session_idle_minutes",
+         # The deletion-semantics retention policy: all three are
+         # operator-editable and readable
+         # through `identity.access.settings_row()`, the SAME row this
+         # function already reads once -- no second query, no
+         # `identity.models` import (that stays closed to `agents/`).
+         "retention_days", "queue_retention_days", "audit_detail"}
     ),
     "ChatSettings": frozenset({"time_aware"}),
 }
@@ -332,6 +350,9 @@ def run_overview(args: dict, ctx: ToolContext) -> ToolResult:
     """
     from agents.models import ChatSettings
     from identity.access import is_admin, settings_row
+    from identity.contracts.retention import (
+        LABEL_AUDIT_DETAIL, LABEL_QUEUE_RETENTION_DAYS, LABEL_RETENTION_DAYS,
+    )
 
     validate_tool_args(SETTINGS_OVERVIEW, args)   # declares no params: any arg is a bug
 
@@ -391,6 +412,16 @@ def run_overview(args: dict, ctx: ToolContext) -> ToolResult:
         "admin_sees_content": bool(row.admin_sees_content),
         "session_idle_minutes": int(row.session_idle_minutes),
         "time_aware": bool(chat.time_aware),
+        # THE RETENTION POLICY, off the SAME `row` -- no second read.
+        # `queue_retention_days`
+        # is nullable (`None` means no age cliff at all), which is why
+        # its text line below branches rather than always printing a
+        # number.
+        "retention_days": int(row.retention_days),
+        "queue_retention_days": (
+            None if row.queue_retention_days is None else int(row.queue_retention_days)
+        ),
+        "audit_detail": bool(row.audit_detail),
         "unreported_settings": unreported,
     }
     # EVERY VALUE HERE IS AN ENUMERATED OR NUMERIC COLUMN (spec §9). No
@@ -407,12 +438,53 @@ def run_overview(args: dict, ctx: ToolContext) -> ToolResult:
     # carry the values this tool CAN read; "Not reported here" carries
     # the two it cannot, so the reader sees both halves of the picture in
     # one place rather than a flat list that quietly stops at five values.
+    # THE RETENTION LINES REUSE THE PLATFORM'S ONE-DECLARATION COPY
+    # (`identity.contracts.retention`'s `LABEL_*` constants, AGENTS.md
+    # house style: user-facing sentences are declared once in Python) --
+    # this module names no new sentence for "keep deleted items for" or
+    # "keep finished queue jobs for", it reads the same words the
+    # Retention settings form's own labels already carry.
+    # THE SCOPE CLAUSE IS PART OF THE LINE, NOT A SEPARATE SENTENCE, for
+    # the same reason `queue_retention_line` below carries its own
+    # disclosure: the assistant answers in chat, with no help card
+    # beside it to correct an over-claim. A bare number here would tell
+    # a person who asks "how long do you keep things I delete" that
+    # EVERYTHING they delete follows this period -- a deleted library
+    # document is already gone. Same words the Deleted help card
+    # already carries (`foundation/settings_help.py`), not a new
+    # sentence.
+    retention_line = (
+        f"  {LABEL_RETENTION_DAYS} 0 days (deleted permanently at once; "
+        "conversations and the images that were part of them)"
+        if data["retention_days"] == 0
+        else f"  {LABEL_RETENTION_DAYS} {data['retention_days']} days "
+             "(conversations and the images that were part of them)"
+    )
+    # THE DISCLOSURE IS PART OF THE LINE, NOT A SEPARATE SENTENCE:
+    # `models/` is untouched by this branch and nothing reads
+    # `queue_retention_days` yet, so a bare number here would tell the
+    # reader this box's Queue page already behaves that way, on the ONE
+    # surface with no page beside it to correct the claim.
+    queue_retention_line = (
+        f"  {LABEL_QUEUE_RETENTION_DAYS} no age limit"
+        " (recorded; the queue does not apply it yet)"
+        if data["queue_retention_days"] is None
+        else f"  {LABEL_QUEUE_RETENTION_DAYS} {data['queue_retention_days']} days"
+             " (recorded; the queue does not apply it yet)"
+    )
+    audit_detail_line = (
+        f"  {LABEL_AUDIT_DETAIL}: "
+        f"{'yes -- item names are shown' if data['audit_detail'] else 'no -- item names are hidden'}"
+    )
     text = "\n".join([
         "Identity & security:",
         f"  Posture: {data['posture']}",
         f"  Library posture: {data['library_posture']}",
         f"  Administrators may read other people's content: {data['admin_sees_content']}",
         f"  Session idle window (minutes): {data['session_idle_minutes']}",
+        retention_line,
+        queue_retention_line,
+        audit_detail_line,
         "Chat:",
         f"  Conversations are told the current date and time: {data['time_aware']}",
         "Not reported here (this tool cannot read those tables):",

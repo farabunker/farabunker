@@ -714,14 +714,21 @@ live prompt's own attachments block (`agents/runtime/prompt.py`) — one
 resolver, so the two surfaces can never disagree about what is
 attached; each returned dict also carries `"turn_id"` and `"may_detach"`
 (round 13) alongside the round-11/12 keys. Deleting a conversation
-(`agents.visibility.delete_conversation`) removes its
-`DocumentAttachment` rows through the same cleanup slot the provider
+(`agents.visibility.delete_conversation`) removes nothing by itself —
+it writes a `DeletionTicket` and the item stays exactly as it was until
+the date the Deleted page printed (deletion semantics). The teardown
+happens at PURGE time instead, from `agents.retention.
+purge_conversation`, through the same cleanup slot the provider
 registry uses for reads, inside its own savepoint (round 11 fix-2
 Important N-1); for a chat-scoped document specifically, that cascade
 deletes the DOCUMENT itself — chunks, managed-store files, and the row —
 since nothing else can ever reference it; for a universal or contained
 document merely attached to that conversation, only the attachment row
-dies and the document lives on.
+dies and the document lives on. A failure in that cleanup slot now
+fails the whole purge rather than being swallowed,
+so the `DocumentAttachment` rows — and, for a chat-scoped document, the
+document itself — never silently outlive a purge that reported success;
+the ticket survives instead, and the next sweep retries.
 
 **The uploader administers their own chat-scoped document (round 12
 whole-branch review A-2/B-2).** `tools.rag.access.
@@ -907,6 +914,75 @@ commit as the handler**: `panels_for` resolves every registered path with
 registration landing before its module (or in a later commit) would make
 every stream page raise — the same-commit rule this column's
 entitlement-cascade and job-kind registrations already follow.
+
+## Deletion: the staging-note purge and the chat-scope exclusions
+
+`tools/rag/retention.py::purge_conversation_notes` is this column's answer to a purged
+conversation. Registered from `RagConfig.ready()` as `RetentionHandler(kind="conversation",
+key="rag.conversation_notes", label="Staging notes",
+handler="tools.rag.retention.purge_conversation_notes", order=ORDER_FILES)` — the FILES band,
+because it removes bytes: `identity/cascades.py::run_retention` resolves it by dotted path and
+runs it inside `identity.retention.purge_ticket`'s own transaction, in a savepoint of its own.
+It removes exactly two things, and only these two: the deterministic
+`<NOTES_DIR>/<conversation-uuid>.md` file `tools/rag/jobs.py` wrote when the stream was
+consolidated, and the ingested `Document` copy found by `notes_conversation_id` (a UUID carried
+by value, never a foreign key — `tools/rag` may not import `agents.models`). A missing file is
+not an error; a second run finds nothing and removes nothing.
+
+A file that fails to remove for any OTHER reason (a permissions problem, a read-only or full
+volume) is a genuine failure, not forgiven the way a missing file is: the handler raises rather
+than logging and carrying on, and the `Document` row — the only remaining handle on that file —
+is left standing. `identity/cascades.py::run_retention` never swallows a handler's exception, so
+this failure takes the whole purge down: the deletion ticket survives, and the next sweep retries
+this handler from the top instead of a false success being reported while the file itself sits
+untouched on disk.
+
+What it does **not** reach is everything else a deleted conversation might have touched in this
+column, because that is already handled elsewhere: `agents.retention.purge_conversation`'s own
+row deletes reach `tools.rag.access.delete_attachments`, which deletes a chat-scoped document
+outright (it has exactly one attachment, for this conversation, so nothing else could still be
+pointing at it) and leaves a universal or stream-contained document's own claim removed but the
+document itself untouched — an attachment is a claim a conversation makes on a document, never
+the document's own existence.
+
+**The exclusions**, in `tools/rag/access.py`, are the read-side half of the same story: a
+document a ticket hides must disappear from `readable_documents`, `listable_documents` and
+`attached_documents` the moment it is ticketed, days before its purge handler ever runs.
+`_deleted_document_ids()` answers this in one place for all three: the ids ticketed outright
+(`identity.retention.ticketed_keys("document")`), every chat-scoped document whose conversation
+is ticketed (`ticketed_keys("conversation")`, joined through the same
+one-attachment-per-conversation invariant `delete_attachments` depends on), and every workstream
+consolidation note distilled from a ticketed conversation (`notes_conversation_id`, joined
+against the same `ticketed_keys("conversation")` list -- `tools/rag/jobs.py`'s consolidation job
+writes that column, never a `DocumentAttachment` row, so this third leg is what keeps a
+consolidated note's hide and its purge, `tools.rag.retention.purge_conversation_notes`, in
+agreement). A universal or stream-contained document merely attached to a ticketed conversation
+is untouched here too, for the identical reason its purge is untouched: the attachment is the
+conversation's claim, not the document's existence.
+
+The cost is two `ticketed_keys()` reads, always — flat in the number of open tickets, never in
+the number of documents — plus two further conditional reads, both keyed off the same
+conversation-ticket ids (read once, not twice): the chat-scoped lookup and the notes lookup each
+touch the database only once there is at least one id to filter on. An empty filter list is
+answered by the query planner without a round trip, so a box with nothing deleted pays two
+queries, and a box with an open conversation ticket pays four. That is not an approximation kept
+for convenience — it is the real, measured cost, and the cheaper path is deliberately the common
+one: a box spends most of its life with nothing deleted, so that is the state the design should
+be cheap in, not the rarer one. `readable_documents`, `listable_documents` and
+`attached_documents` each accept a keyword-only `deleted_ids=None` so a caller already holding
+the list — `attached_documents` computes it once and threads it into its own `chat_scoped` query
+and both of its `readable_documents` calls — never pays for it twice.
+
+**Retrieval applies the same exclusion, not a second copy of it.** `tools/rag/retrieval.py::
+retrieve_nodes` calls `_deleted_document_ids()` once per retrieval call and threads the result
+into `_visibility_filters`, which turns it into one `file_id NOT IN (...)` clause alongside the
+category and visibility clauses it already builds — so a deleted item's chunks stop reaching a
+fresh answer at the same instant its row stops reaching the library pages, rather than surviving
+until its own purge handler runs. Nothing is added to the filter when nothing is ticketed: an
+empty exclusion list adds no clause at all, matching the ordinary case exactly as it did before
+this exclusion existed. The cost lands on `retrieve_nodes` itself — the same two-or-four-query
+shape described above, paid once per call, never once per filter leg and never once per retrieved
+chunk.
 
 ## Tools
 

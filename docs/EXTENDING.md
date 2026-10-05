@@ -493,6 +493,176 @@ key, prove it is gone, run `ready()` again, prove it came back
 seam is `identity/contracts/cascades.py`, and your column almost certainly
 wants both.
 
+## Registering a retention handler
+
+A retention handler is a column's answer to "this deleted item's content is going" — the
+purge-time counterpart to an entitlement cascade's "this entitlement is going away". Both live
+in `identity/contracts/cascades.py`, one registry each, for the reason stated where a reader
+meets it: deleting an entitlement and purging a deleted item are two questions with one shape,
+and a second registry module would only be a second file to hold in your head.
+
+`identity/` may not import your column (import-law rule 4), so — exactly like an entitlement
+cascade or an entitlement axis — the only way your column's cleanup runs is a **registration**,
+one call in your `AppConfig.ready()`, in the SAME COMMIT as the module it names
+(`identity/cascades.py::run_retention` resolves it with `import_string` and never swallows, so a
+registration that landed before its module would take a purge down the first time it ran):
+
+```python
+from identity.contracts.cascades import (
+    ORDER_FILES, RetentionHandler, register_retention_handler,
+)
+from identity.contracts.retention import KIND_CONVERSATION
+
+register_retention_handler(RetentionHandler(
+    kind=KIND_CONVERSATION,
+    key="agents.conversation",
+    label="Conversation and turns",
+    handler="agents.retention.purge_conversation",
+    order=ORDER_FILES,
+))
+```
+
+Quoted from `agents/apps.py` — the real, shipped registration for a deleted conversation's rows
+and turns. The fields:
+
+- **`kind`** — which ticket kind this answers for, one of
+  `identity.contracts.retention.RETENTION_KINDS` (`conversation`, `document`, `ask`,
+  `vision_job`). A kind nothing has registered for answers an empty handler list, which is not
+  an error — it is what a box with the feature uninstalled looks like.
+- **`key`** — a stable identifier, namespaced by your column, exactly like an entitlement
+  cascade's own `key`.
+- **`label`** — the key your handler's return count is filed under in the purge's content-free
+  audit detail, `removed={label: count}` — the ONLY place the count is read back.
+- **`handler`** — a dotted-path string, `"package.module.function"`, with the signature
+  `(key: str) -> int`, resolved at purge time by `identity/cascades.py`, never imported by
+  `identity/contracts/cascades.py` itself (which stays pure, pinned by
+  `identity/tests/test_purity.py`).
+- **`order`** — `ORDER_ROWS` (the default) or `ORDER_FILES`.
+
+**The two order bands, and when to use each.** The runner runs every `ORDER_ROWS` handler before
+any `ORDER_FILES` handler, stable within a band by registration order — and the ordering exists
+for one reason: a filesystem delete has no rollback, so a row handler that raised AFTER files
+were removed would leave a resurrected row pointing at bytes that are gone. Register in
+`ORDER_ROWS` for anything that only deletes or updates database rows. Register in `ORDER_FILES`
+for anything that removes bytes, directly or through a function that does — even if that same
+handler also touches rows. **A handler that must both read an item's rows and remove its bytes
+registers in `ORDER_FILES` and orders its own reads before its own writes, internally** — the
+conversation handler above is exactly this case: it reads the conversation's turns for their
+artifact references before deleting anything, then deletes rows, then purges the bytes those
+references named, last. That keeps the registry's ordering rule to one field with two values
+instead of a general dependency graph nothing else needs.
+
+**One mode, `(key: str) -> int`, not two like `EntitlementCascade`'s `commit` flag — and the
+reason is worth carrying over.** An entitlement cascade needs a count-only mode because deleting
+an entitlement is irreversible the instant it is confirmed: the count IS the confirmation, shown
+before the click. A deletion has a better confirmation than any number could give it — the
+Deleted page itself, where the item sits named and restorable for as many days as the retention
+setting says. So there is no dry-run pass, no `commit` argument, and the returned integer has
+exactly one consumer: the audit detail named above.
+
+**Every handler must be idempotent, and that is not a nicety — it is the whole recovery story
+for a purge that failed part-way.** The runner never swallows: a handler that raises takes the
+whole purge down with it, inside a savepoint, so the ticket survives for the next sweep to retry.
+An `ORDER_FILES` handler that raised after some bytes were already gone must, on that retry,
+finish the job rather than raise again on the half it already did — the rows still standing, the
+bytes it already removed staying removed, and the count it returns on the successful retry
+reflecting only what that run actually did.
+
+**The one test a new handler owes:** call it once against a fully-populated item, call it again
+against what is left, and assert the second call completes and returns what an already-purged
+item honestly has left to remove (usually `0`) rather than raising.
+`tools/rag/tests/test_retention.py::test_it_is_idempotent` is the shape:
+
+```python
+def test_it_is_idempotent(self, tmp_path, settings):
+    settings.NOTES_DIR = tmp_path
+    conversation_id = uuid.uuid4()
+    (tmp_path / f"{conversation_id}.md").write_text("x", encoding="utf-8")
+    make_document(notes_conversation_id=conversation_id)
+    purge_conversation_notes(str(conversation_id))
+    assert purge_conversation_notes(str(conversation_id)) == 0
+```
+
+**And the coverage gate.** Any model you add that carries the `owner_kind`/`owner_key` pair —
+`identity.access.owner_fields`'s stamp for content somebody owns — is found by
+`foundation/ops/tests/test_deletion_coverage.py`'s walk of `apps.get_models()`, whether or not
+you meant to wire it into deletion. The test fails until you do one of two things: add it to
+that module's `_COVERED` dict, mapped to the ticket kind whose handler now reaches it, or add it
+to `_EXEMPT` with one reasoned line saying why a deletion never reaches it — a setting a person
+authored rather than content, say, or a container whose contents each carry their own cliff. An
+exemption is a sentence somebody writes and a reviewer reads; that is the point of a list rather
+than a default.
+
+### When your item's delete should also ticket something else: `children`
+
+`RetentionHandler.children` is OPTIONAL — a second dotted-path string beside `handler`, with the
+signature `(key: str) -> list[tuple[str, str, str, str]]`, returning one plain 4-tuple `(kind,
+key, owner_kind, owner_key)` per item this item's delete should also ticket. `agents/apps.py`'s
+conversation handler is the shipped example: a deleted chat's generated images are content of
+their own, on their own table, with their own visibility rule, and a delete that hid the chat
+while leaving them in the gallery would be a box whose "delete" and whose "destroy" disagreed.
+
+**The last two elements are an owner, not a label.** `owner_kind` must be one of
+`identity.contracts.principals.PRINCIPAL_KINDS` ("open", "user", "service", "resident_agent",
+"user_agent"), or the pair may be blank together (`("", "")`) for content stamped before an
+owner column existed at all — never one blank and the other not.  Answer the child's OWN owner,
+not the parent item's: a conversation and its generated image are usually owned by the same
+principal, but not the moment a share or an administrator's duplicate lets a second principal's
+content sit inside somebody else's conversation, and a resolver that answered the parent's owner
+for every child would misfile such a child under the wrong person's Deleted page. `identity.
+retention.delete_content` reads this pair to decide who may restore or permanently delete the
+child ticket it writes — get it backwards and the child becomes invisible on every Deleted page,
+skipped by every explicit "Delete permanently" click, and reachable only by the unconditional
+sweep. **That is why `identity.cascades.run_children` wraps every answer in a frozen
+`identity.contracts.cascades.ChildTicket(kind, key, owner_kind, owner_key)` NamedTuple, and
+`delete_content` validates `owner_kind` against `PRINCIPAL_KINDS` (plus the blank pair) before
+writing a single child ticket: a transposed pair now raises loudly, at the delete, instead of
+silently minting a ticket nobody could ever find.** Your resolver still returns a plain 4-tuple
+in this order — `ChildTicket` is a drop-in for that exact shape — but write the tuple in the
+right order the first time; a resolver that swaps the two owner elements fails the very next
+delete it runs against, not some later investigation.
+
+```python
+register_retention_handler(RetentionHandler(
+    kind=KIND_CONVERSATION,
+    key="agents.conversation",
+    label="Conversation and turns",
+    handler="agents.retention.purge_conversation",
+    order=ORDER_FILES,
+    children="agents.retention.conversation_children",
+))
+```
+
+**It is asked exactly ONCE, at `delete_content` time** — inside the same transaction that writes
+the parent's own `DeletionTicket` — never again later, and never at purge time. That is why it
+must be **side-effect-free**: it only reads, and it must not depend on anything the purge itself
+would otherwise delete first, because by the time a purge runs, the answer has already been
+turned into rows.
+
+**What its answer becomes.** Each `ChildTicket` the resolver's answer becomes is written as an
+ORDINARY `DeletionTicket`, stamped with ITS OWN `owner_kind`/`owner_key` (not the parent's) — its
+own row, its own date on the Deleted page (the SAME `purge_on` as the parent, stamped once, never
+recomputed), its own registered handler, its own restore — linked back to the ticket this delete
+just created through `DeletionTicket.parent`. A child ticket is not a different kind of row; it is
+an item that happens to have arrived with another item's delete.
+
+**The order guarantee at purge.** WHEN THE PARENT'S OWN TICKET IS THE ONE PURGED,
+`identity.retention.purge_ticket` runs the parent's OWN registered handlers first, then purges each
+child in turn — so a child's bytes are never destroyed before the parent's own row handlers have
+finished. It is not the stronger claim it can look like: the parent's own handlers can themselves
+be `ORDER_FILES` and remove bytes of their own, so a child's rows can go after the parent's own
+bytes are already gone. What the order DOES promise is scoped to the parent/child boundary, not to
+every byte in the whole cascade — and not to a child the unconditional sweep reaches on its own,
+before its parent: `identity.retention.sweep`'s own docstring records that case as an ordinary due
+ticket, purged on its own, with the parent's later purge simply finding one child fewer.
+
+**A child restored, or deleted, on its own stays that way.** `restore_content` and `purge_ticket`
+both follow the `parent` link FORWARD ONLY: restoring the parent removes the children that arrived
+with it, but a child somebody already restored on its own — or one that already had its own ticket
+before this delete ran — has no link to follow and is left exactly as it is. The resolver is never
+asked again to decide whether a ticket somebody else's delete or restore created should move; the
+link recorded once at `delete_content` time is the only thing either operation reads.
+
 ## Adding a settings page
 
 Five steps get a control onto a page and into the sidebar; a further set,

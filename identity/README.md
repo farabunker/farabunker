@@ -252,6 +252,28 @@ resolve and run them, inside `identity.services.delete_entitlement`'s one
 transaction, so nothing is half-deleted and the confirmation's counts
 can never drift from what actually happens.
 
+**The retention vocabulary and handler registry**, beside the cascade
+registry in the same module: `identity/contracts/retention.py` names the
+closed set of deletable kinds (`RETENTION_KINDS` — conversation,
+document, ask record, generated image; a workstream is deliberately not
+one, spec section 10.2), the shipped policy (`RETENTION_DAYS_DEFAULT`
+30, `QUEUE_RETENTION_DAYS_DEFAULT` 1), every user-facing sentence the
+Deleted page will print, and `RetentionRefused` — the one exception a
+retention handler raises to say "not now" (today, a worker still holding
+a queue job), placed in this pure module rather than beside
+`identity.services.ServiceRefused` precisely so a column that may not
+import `identity.services` (`models/queue`) can still raise it.
+`identity/contracts/cascades.py::RetentionHandler`/
+`register_retention_handler`/`retention_handlers` is that registry's
+counterpart to `EntitlementCascade`: a pure dataclass (`kind`, `key`,
+`label`, a dotted-path `handler` string, an `order` of `ORDER_ROWS`
+(default) or `ORDER_FILES`) that each column registers from its own
+`AppConfig.ready()`, with rows-before-files as the whole reason
+`order` exists — a filesystem delete has no rollback, so a row handler
+that raises after files are gone would leave a resurrected row pointing
+at bytes that no longer exist. Section 9 below covers the model, the
+runner and the service that call this registry.
+
 **Four pages**: `/identity/groups/` and `/identity/groups/<pk>/edit/`
 (create/rename/delete a group, manage membership); `/identity/
 entitlements/` and `/identity/entitlements/<pk>/` (create/rename/delete
@@ -428,6 +450,271 @@ traded for the CPU-exhaustion and credential-guessing protection the lockout buy
 window is short and every attempt is audited either way. There is no unlock command (see
 `docs/OPERATIONS.md`'s accounts section): waiting out the window is the only way to clear a
 lockout, deliberately, because an unlock command is a second authentication path.
+
+## 9. Deletion semantics: the fifth seam
+
+`identity.retention` (`identity/retention.py`) is the fifth module every
+column may import — `foundation/ops/tests/test_import_law.py::
+IDENTITY_PERMITTED` names it beside the four in section 2, and for the
+same shape of reason: it answers a PRINCIPAL-shaped question, "which
+keys of my kind are deleted", never "which conversations" — identity
+still cannot build that queryset (rule 4). Each column turns the answer
+into an exclusion on its own base queryset.
+
+**`DeletionTicket` exists exactly while the item is restorable — with one
+named exception.** One table, not a `deleted_at` column on four models in
+three columns: a cliff, an actor, a label and a hold are facts about the
+DELETION, not about the conversation, and the Deleted page is one query
+over one table rather than a union over four querysets in three columns
+identity may not import. There is no purged-but-pending state and no
+ticket that outlives its content — `purge_ticket` destroys the ticket in
+the same transaction that destroys the content, so the two can never
+disagree. That single invariant is what lets restore be "delete the
+ticket" and nothing else. THE EXCEPTION is `content_unrecoverable`: a
+purge that gets as far as a files-band handler and then fails leaves the
+row rolled back and the ticket standing, but the bytes a filesystem
+delete already removed do not come back with it. `identity.retention.
+may_restore` refuses Restore for a ticket in that state — existing and
+being restorable have stopped being the same question for that one row.
+THE MARK COVERS THE WHOLE FAMILY A FAILED ATTEMPT COULD HAVE REACHED,
+not only the ticket `record_failed_purge` was called with, and NEVER A
+CHILD IT WAS FORBIDDEN TO TOUCH: the flag it reads is one Python
+attribute set the instant the family's files band is entered, by ANY
+attempted member's own handler, so a child whose own bytes really were
+destroyed rolls back to a row that looks untouched on exactly the same
+failed transaction its parent does, and would otherwise keep a working
+Restore button pointed at a file that is gone. `purge_ticket` stashes
+the pks it actually attempted alongside that flag, so a child the
+clicker does not own (below) or a held one — neither ever handed to a
+handler — is never mistaken for one whose bytes were at risk, even
+though both are still linked by `parent_id` at rollback time.
+
+"Delete permanently" keeps working for a marked ticket on every posture
+where standing already admits it — the point of the mark is that
+finishing the job must stay possible for whoever may act on the row —
+and, since an owner ruling (2026-09-28), on the organisation posture too:
+that posture's blanket early-destroy refusal gains one named exception,
+a marked ticket, because the enforced period protects content the item
+still has, and a marked item no longer fully has it. AN UNMARKED TICKET
+ON THAT POSTURE IS UNCHANGED, still refused before its date — the
+exception is to the mark, never to the posture in general, and the sweep
+still takes every ticket, marked or not, on the date regardless.
+
+**Three retention fields on `IdentitySettings`, one "Retention" section,
+zero required setup**: `retention_days` (`LABEL_RETENTION_DAYS`, "Keep
+deleted items for", default 30, may be 0 for no grace period),
+`queue_retention_days` (`LABEL_QUEUE_RETENTION_DAYS`, "Keep finished
+queue jobs for", default 1, never 0 — blank means "no age cliff" there;
+`models/queue` will read it across this same seam once the queue half
+lands, one of the residues ADR 0020 (decision 7) names — nothing reads
+it today), and `audit_detail`
+(`LABEL_AUDIT_DETAIL`, "Show item names in the deletion log", default
+off). `identity/contracts/retention.py` declares every one of those
+sentences once, in Python, with the shipped defaults beside them — the
+owner's principle (spec §3.0): a maintainer installs this and sets up
+nothing.
+
+**Why the orchestration lives here.** `identity/retention.py::
+delete_content`/`restore_content`/`purge_ticket`/`sweep` run inside
+`identity/`, not in a shared "deletion" package, because the import law
+makes that the only place a single item's purge can ever reach every
+column's own bookkeeping in one transaction: `agents/` may not import
+`models.queue` (rule 2), so a delete initiated inside `agents/` could
+never also clear a conversation's queue rows. Identity sits below every
+column, so `purge_ticket` resolves each registered handler by dotted
+path (`identity/cascades.py::run_retention`, over the registry in
+`identity/contracts/cascades.py`) and runs all of them without importing
+any of the columns that registered them.
+
+`purge_on` is stamped ONCE, at `delete_content` time, from the setting
+in force then, and is never recomputed — a changed setting governs
+future deletes only. `retention_days = 0` makes deletion synchronous:
+`delete_content` calls `sweep()` at the end of the same call, the ticket
+it just wrote is due today, and the content is gone before the response
+returns — the same prune-on-write shape `tools.rag.services.record_ask`
+and `models.queue.backend.enqueue` already use, with no scheduler and no
+cron requirement. `sweep()` always acts as `SERVICE_PRINCIPAL`, whoever
+triggered it, and purges each due ticket in its OWN transaction, so one
+handler that raises (logged, never content) leaves that ticket standing
+for the next pass instead of blocking the rest of the batch.
+
+**A registered handler may also name its item's children.**
+`RetentionHandler.children`, OPTIONAL, is a dotted path to `(key: str) ->
+list[tuple[str, str, str, str]]` — `(child_kind, child_key, owner_kind,
+owner_key)` — the case it exists for is a conversation's generated
+images: content of their own, on their own table, with their own
+visibility rule, that would otherwise stay in the gallery while the chat
+that made them was hidden. It is asked ONCE, at `delete_content` time
+only, and what it answers is written as ORDINARY tickets — their own
+row, their own date on the Deleted page, their own handler, their own
+restore — each linked back to the ticket this delete created via
+`DeletionTicket.parent`. Restore and permanent delete follow that link
+rather than asking the resolver again, so a column whose rows have since
+changed can never make either of them reach a ticket a different delete
+created.
+
+**EACH CHILD TICKET IS STAMPED WITH THE OWNER OF THE CONTENT IT
+DESCRIBES, NOT THE PARENT ITEM'S.** This changed (2026-09-28): the
+resolver contract used to answer only `(child_kind, child_key)`, so
+`delete_content` had no owner to stamp a child with but the parent
+item's own — correct only when the two happen to coincide, and false
+whenever a second principal's content sits inside somebody else's
+conversation (a workstream share that let them post into it and
+generate an image; an administrator, `admin_sees_content` on, who
+duplicated the conversation and deleted the copy). Every downstream
+surface keys off a ticket's OWN owner columns — `visible_tickets` for
+listing, `may_purge` and `_own_ticket_or_404` for standing — so the
+wrong stamp meant the actual owner's picture could vanish from their own
+gallery with no row anywhere telling them, unrestorable by them, and
+destroyable early by whoever happened to click delete on the chat. The
+resolver now carries the owner because `identity/` cannot look one up
+itself (rule 4 forbids importing `agents/`/`tools/` to ask); the two
+columns still `identity.retention.owned_rows_q`/`may_read_owned_row`
+already read are simply supplied by the resolver instead of copied from
+the parent's own row.
+
+**A PERMANENT DELETE OF THE PARENT SKIPS A CHILD THE CLICKER DOES NOT
+OWN**, detaching it (`parent=None`, exactly as a held child already is)
+rather than destroying it: it keeps its own ticket, its own date and its
+own Restore, standing on its own from that point on. The scheduled sweep
+is unaffected and still takes everything on the date regardless of who
+owns what — nothing outlives the promise its date printed, and what a
+non-owner's early click cannot do is cut a stranger's window short.
+THE CHECK IS KEYED ON THE ACTOR BEING A REAL PRINCIPAL, never on
+`may_read_owned_row(actor, child)` alone: `sweep` always purges as
+`SERVICE_PRINCIPAL`, for whom that predicate is false on every
+user-owned row, so a naive ownership check applied there would make the
+sweep skip every child on the box and leak the whole feature. `purge_
+ticket` tells the two apart by comparing the acting principal to the
+service principal directly, and only withholds a child from the
+purge loop when the answer is "somebody really clicked this."
+
+**A GENUINELY BLANK OWNER (`("", "")`) IS THE ONE EXCEPTION, and it
+counts as the CONVERSATION'S OWN owner, never as a stranger's** (owner
+ruling, 2026-09-28). Every `GenerationJob` written before `tools/vision/
+migrations/0006_generationjob_owner.py` added its two owner columns
+carries a blank pair to this day — that migration backfilled nothing —
+and no principal can ever own one: `Principal.__post_init__` forbids a
+blank key outright. Left to `may_read_owned_row(actor, child)` alone, a
+blank pair would be un-ownable by anybody, so a permanent delete would
+silently skip a pre-tracking image on every posture, forever. `identity.
+retention._may_destroy_child` reads the PARENT TICKET's own owner
+columns for exactly this one case and nothing wider — it is deliberately
+not `may_purge`'s own `sees_all_content or may_read_owned_row` mirror,
+so a content-reading administrator still cannot destroy a child that is
+really owned by somebody else. No migration and no backfill: the owner
+declined one for this branch, and only the permanent-delete predicate
+treats a blank pair specially — the columns themselves stay blank on
+disk.
+
+Three things follow from the parent link, unchanged by any of the
+above: restoring the parent removes every ORDINARY child it wrote
+(ownership is not asked there); a child a failed purge already marked
+(`content_unrecoverable`) is the one exception — its bytes are already
+partly gone, so it is skipped and detached rather than restored,
+keeping its own ticket and the one column that records the loss,
+exactly like a held child (`identity.retention.may_restore`'s own
+docstring says why); permanently deleting the parent destroys the children the
+clicker owns after the parent's own rows finish, and detaches the rest;
+and the sweep counts every ticket a due purge addressed, a parent's
+children included, not one per due ticket it started from. Two things a
+person can observe: a child restored on its own survives its parent's
+later permanent delete (the link is followed forward only, never
+backward), and an item already deleted on its own keeps its own date
+and its own standing — it is never re-dated or adopted by a later
+delete that happens to reach it too.
+
+**A DUPLICATE OR A BRANCH MUST NOT TICKET A JOB ANOTHER LIVE
+CONVERSATION STILL SHOWS.** `agents.visibility.duplicate_conversation`/
+`branch_conversation` copy `artifacts` and `data` VERBATIM
+(`_copy_turns_into`), so a copy's tool turn names the exact same
+`output:<id>` reference and the exact same generation id the original's
+own turn does. Before a fix (2026-09-28), deleting the COPY walked only
+the copy's own turns, found that same reference, and ticketed the job
+it names — hiding, and on the copy's own date destroying, a picture a
+DIFFERENT, live, undeleted conversation still displayed; this needed no
+sharing and no second principal, since duplicating and deleting one's
+OWN conversation reproduced it. `agents.retention.conversation_children`
+now excludes any reference or generation id some OTHER, undeleted
+conversation's own turns still carry before asking the image column to
+resolve jobs at all — a conversation already ticketed (on its own way
+out) does not count as "another live conversation", so the exclusion is
+eventually consistent rather than permanent: once every conversation
+naming a job is itself deleted, whichever delete runs last is the one
+that finally reaches it.
+
+**"Filesystem-last" describes ordering WITHIN a call, never ACROSS the
+cascade — one sentence worth stating precisely, since the plain reading
+overclaims.** Permanently deleting the parent does not destroy the
+children's content "after the parent's own rows" in the sense that
+every row this click touches is gone before the first byte is: this
+item's OWN registered handlers can themselves destroy bytes (a
+conversation's do, today), so a child's rows can be deleted after this
+item's own bytes are already gone. What holds is narrower and still
+real: children go after the parent's own handlers have finished — the
+`ORDER_ROWS`-before-`ORDER_FILES` rule holds WITHIN each handler run,
+this item's own and independently each child's own, not across the
+whole family (`identity/retention.py::purge_ticket` states this in
+full).
+
+Every audit write for this feature goes through `identity/audit.py::
+record` (`CONTENT_DELETED`, `CONTENT_RESTORED`, `CONTENT_PURGED`), and
+every one is content-free by construction: the item's own title reaches
+`target_label` only when `audit_detail` is on, and a purge's `removed`
+detail is `{handler label: count}` — integers, never rows. `queue_
+retention_days`'s own seam paragraph ships with its own task's code, not
+here.
+
+**The Deleted page** (`/identity/deleted/`) is the one surface this
+feature ships in `identity/` itself, in three routes: `identity-deleted`
+(class **A**, the list), `identity-deleted-restore` and
+`identity-deleted-purge` (class **O**, row-addressed, 404 never 403).
+Gate `EVERYONE`, not `ADMIN` — every other settings entry is operator
+policy, and this one is a person's own deleted items, which on a box
+with accounts a member is exactly who needs it. The GET prunes before it
+lists: `sweep()` runs first, so the page can never show a row whose
+promised date has already passed — one of the three callers alongside a
+delete and `manage.py purge_deleted`, with no scheduler and no new job
+kind. The log lists every `content.*` event only to a `sees_all_content`
+principal; every other signed-in member sees only the events they
+themselves performed — their own deletes, restores and permanent
+deletes, never anybody else's kind, item key or name. An item of
+theirs that reached its own date and was removed by the sweep — always
+the service principal, whoever triggered it, never the person who
+deleted the item — was nobody's own act either, so it does not
+reappear in that member's log this way: the date line on the Deleted
+page was the notice, and the full log is the administrator's. An
+event's own `target_label` needs `sees_all_content` on top of that: it
+reaches the page only for a principal who could already read
+everyone's content, and only when `audit_detail` was already on at the
+moment that particular event was written; anybody else, or an event
+written while the setting was off, renders with the label blank. A
+child ticket — one written alongside a parent item's delete — looks
+like any other row on this page: its own kind, its own date, its own
+restore and its own permanent-delete action, with no visible marker
+tying it back to the item it arrived with. **The permanent-delete
+action itself is per-row, not per-posture, and it depends on one
+predicate**: the template's `{% if row.may_purge %}` around it, and
+the POST view's own `retention.may_purge(...)` check before it acts.
+On the organisation posture that predicate answers False for every
+principal, on every kind — the item's owner included, a child ticket
+included — so the control is simply absent, and a POST reaching the
+URL directly gets a flashed sentence and a redirect rather than a 404:
+the row is still there on the page, still restorable, just not
+destroyable before its date.
+
+**The Restore action is gated the same way, on a different predicate.**
+`{% if row.may_restore %}` and `deleted_restore`'s own
+`retention.may_restore(ticket)` check answer False for exactly one
+reason, unrelated to posture or standing: a purge already destroyed some
+of this ticket's content and then failed
+(`identity.retention.record_failed_purge` marked it). The page prints
+`copy.RESTORE_REFUSED_LINE` in the control's place — unlike the
+permanent-delete control's silent omission, a person who expects to see
+Restore on an item they just deleted needs the one sentence saying why it
+is not there — and the POST answers the same flash-and-redirect shape a
+forged request gets for `may_purge`, never a 404, since the row is still
+visible on the page the click came from.
 
 ## Tests
 

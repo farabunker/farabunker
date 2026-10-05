@@ -111,12 +111,15 @@ all agree with the page-level flag anyway.
       confirm, nested one level deeper. No Cancel button: the one on
       the thread page carries an inline `onclick`, and this fragment
       adds no script of any kind -- closing the menu is the cancel.
+      Delete TICKETS now (Task 8) -- it does not erase; see `chat/
+      _thread_actions.html`'s own comment for the full mechanism, which
+      this fragment's confirm sentence matches exactly (the same
+      affordance in two places says the same thing).
       {% endcomment %}
       <details>
         <summary>Delete</summary>
         <div class="delete-confirm">
-          <span class="muted">Delete this conversation and every turn in it?
-            Its tool-call audit trail is kept.</span>
+          <span class="muted">Delete this conversation? It moves to Settings → Deleted.</span>
           <form method="post"
                 action="{% url 'chat-conversation-delete' row.conversation.id %}">
             {% csrf_token %}

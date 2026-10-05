@@ -225,6 +225,59 @@ class TestRemoveDocumentFiles:
         assert keep_dir.exists()
         assert not remove_dir.exists()
 
+    def test_a_stale_existence_check_does_not_crash_the_removal(
+        self, settings, tmp_path, monkeypatch
+    ):
+        """Simulates the check-then-act race itself, not merely "already
+        gone before this call started": something else -- a concurrent
+        retry sweep landing on the same document, an operator -- removes
+        the directory in the gap between an existence check and the
+        removal that follows it. A fixture that deletes the directory
+        BEFORE calling `remove_document_files` would pass against the
+        OLD, unguarded code too (its check would honestly see nothing
+        there and skip the removal), which proves nothing about the
+        race. So this instead makes `Path.exists` answer True for a
+        directory that was never created -- what a stale check looks
+        like from inside the function, since a directory vanishing a
+        moment after a real check saw it is indistinguishable from a
+        check that was already wrong -- and lets the removal run
+        against nothing. Reproduces the ORDERING the race depends on
+        (check succeeds, removal finds nothing) rather than deleting the
+        directory up front.
+        """
+        settings.DOCUMENTS_DIR = tmp_path / "documents"
+        monkeypatch.setattr(Path, "exists", lambda self: True)
+
+        # No exception -- the removal itself tolerates the directory
+        # having already vanished, without ever trusting a check.
+        store.remove_document_files(13)
+
+    def test_a_permission_error_during_removal_still_propagates(
+        self, settings, tmp_path, monkeypatch
+    ):
+        """The purge path this function serves has a retry contract its
+        caller depends on (`identity/contracts/cascades.py`): a reported
+        success must mean the bytes are truly gone, so a real removal
+        failure -- here, a permission error -- has to reach the caller
+        rather than being swallowed the way the best-effort cleanup
+        call sites elsewhere in this package (`ingest.py`, `media.py`)
+        deliberately swallow theirs. This pin exists so a future
+        "simplification" to `shutil.rmtree(dest_dir, ignore_errors=True)`
+        -- which would also make the test above pass -- fails loudly
+        instead of passing silently.
+        """
+        settings.DOCUMENTS_DIR = tmp_path / "documents"
+        doc_dir = settings.DOCUMENTS_DIR / "14"
+        doc_dir.mkdir(parents=True)
+
+        def _raise_permission_error(path, *args, **kwargs):
+            raise PermissionError("could not remove")
+
+        monkeypatch.setattr(store.shutil, "rmtree", _raise_permission_error)
+
+        with pytest.raises(PermissionError):
+            store.remove_document_files(14)
+
 
 @pytest.mark.parametrize("module", ["ingest", "media", "models", "views"])
 def test_no_production_module_spells_the_store_layout_by_hand(module):

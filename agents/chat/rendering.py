@@ -7,14 +7,24 @@ reuses it byte-identically to render one finished card into its poll
 body. A template that decided any of this itself would be a second
 copy that drifts the first time one of them is edited.
 
-IT IMPORTS NOTHING FROM `tools.*`. Import-law rule 3 forbids it outright
-(`foundation/ops/tests/test_import_law.py::test_no_agents_module_
-imports_a_tools_package` walks every import node in every file under
-`agents/`), and nothing here needs to: an artifact is a REFERENCE
-STRING, `agents.contracts.artifacts.artifact_url_name` maps its kind to
-a URL NAME, and Django reverses the name. No layer below the view ever
-learns a filesystem path -- the same rule `tools/vision/services.py`'s
-`job_json` already enforces for the vision page.
+IT IMPORTS NOTHING FROM `tools.*` AT MODULE SCOPE. Import-law rule 3
+forbids it outright (`foundation/ops/tests/test_import_law.py::
+test_no_agents_module_imports_a_tools_package` walks every import node
+in every file under `agents/`), and nothing here needs to at that
+level: an artifact is a REFERENCE STRING, `agents.contracts.artifacts.
+artifact_url_name` maps its kind to a URL NAME, and Django reverses the
+name. No layer below the view ever learns a filesystem path -- the same
+rule `tools/vision/services.py`'s `job_json` already enforces for the
+vision page. `_resolve_image_status` (placeholder wave, 2026-09-29; N+1
+fix, same date) is the one place this module reaches `tools.vision` at
+all, and it does so the way `agents/retention.py::conversation_children`
+already does for a DIFFERENT question asked at delete time:
+`agents.contracts.artifacts.artifact_job_ids_resolver`'s registered
+DOTTED PATH, resolved by `import_string` at call time, never a static
+import the AST walker above would catch. It DOES import `identity.
+contracts.retention` and `identity.retention` at module scope, which
+the walker does not forbid: identity sits below `agents/` (spec's
+column order), and both are named seams in `IDENTITY_PERMITTED`.
 
 FOUR TRUTHS ABOUT AN AUDIT ROW, three of them from P2's ledger:
 
@@ -45,16 +55,24 @@ import json
 import logging
 import re
 import uuid
+from dataclasses import dataclass, field
 
 from django.urls import NoReverseMatch, reverse
 from django.utils.html import escape
+from django.utils.module_loading import import_string
 from django.utils.safestring import SafeString, mark_safe
 
-from agents.contracts.artifacts import artifact_title, artifact_url_name, parse_artifact
+from agents.contracts.artifacts import (
+    artifact_job_ids_resolver, artifact_title, artifact_url_name, parse_artifact,
+)
 from agents.contracts.tools import VISION_GENERATE_KEY
 from agents.limits import TURN_TIMEOUT_ERROR
 from agents.models import Turn
 from agents.runtime.audit import invocation_message, invocation_state
+from identity.contracts.retention import (
+    CONTENT_DELETED_LINE, CONTENT_UNRECOVERABLE_LINE, KIND_VISION_JOB,
+)
+from identity.retention import content_status
 # THE PER-TURN EDITABILITY RULE, ONE DEFINITION (feature C review, I1).
 # `is_editable_turn_row` needs no principal and runs no query -- it is
 # three facts off a row this module already holds -- so the card asks the
@@ -169,10 +187,23 @@ def thread_cards(conversation, *, queue_job_id: int | None = None,
     a CONVERSATION-level answer the caller computed ONCE -- see
     `turn_card`'s own note on why -- so they are threaded rather than
     derived here: this module holds no principal and cannot ask.
+
+    ONE IMAGE-STATUS LOOKUP FOR THE WHOLE RENDER (placeholder wave N+1
+    fix, 2026-09-29): `turns` is materialised here, once, so its image
+    references can be gathered and resolved through `_resolve_image_
+    status` BEFORE any card is built, and the ONE result handed to
+    every `turn_card` call below. This is not a second code path next
+    to a per-turn one -- `_resolve_image_status` is the SAME function a
+    caller that has only one turn falls into by way of `artifact_
+    links`'s own default (see that function's docstring); this is just
+    that function's batch input, sized to a whole render instead of one
+    turn's own artifacts.
     """
     turns = conversation.turns.select_related("invocation").all()
     if queue_job_id is not None:
         turns = turns.filter(queue_job_id=queue_job_id)
+    turns = list(turns)
+    image_status = _resolve_image_status(_image_refs_of(turns))
     by_turn = attachments_by_turn or {}
     edit_keys = {"may_edit": may_edit, "may_attach_files": may_attach_files,
                  "attach_workstream": attach_workstream}
@@ -182,10 +213,10 @@ def thread_cards(conversation, *, queue_job_id: int | None = None,
     for turn in turns:
         if turn.depth:
             buffered.append(turn_card(turn, attachments=by_turn.get(turn.pk),
-                                      **edit_keys))
+                                      image_status=image_status, **edit_keys))
             continue
         card = turn_card(turn, nested=buffered, attachments=by_turn.get(turn.pk),
-                         **edit_keys)
+                         image_status=image_status, **edit_keys)
         buffered = []
         if turn.role == Turn.Role.USER:
             pending_user_card = card
@@ -200,7 +231,7 @@ def thread_cards(conversation, *, queue_job_id: int | None = None,
 def turn_card(turn, nested: list[dict] | None = None, attachments: list[dict] | None = None,
               attachment_detach_next: str | None = None,
               may_edit: bool = False, may_attach_files: bool = False,
-              attach_workstream=None) -> dict:
+              attach_workstream=None, image_status: "_ImageStatus | None" = None) -> dict:
     """One turn as a fixed-key dict.
 
     FIXED KEYS, always present. A card that omitted a key on some paths
@@ -238,8 +269,19 @@ def turn_card(turn, nested: list[dict] | None = None, attachments: list[dict] | 
     (CHAT CLUSTER, FEATURE C -- editing a past prompt): the three
     conversation-level answers the per-turn edit disclosure needs. Their
     own note sits beside the keys they set, below.
+
+    `image_status`, OPTIONAL (placeholder wave N+1 fix, 2026-09-29):
+    `thread_cards`' own pre-resolved answer for a WHOLE render's image
+    references, threaded straight to `artifact_links` below. `None` --
+    every OTHER caller of this function (`turn_group_cards`'s own
+    single-card paths; `agents.chat.views.all_conversations.
+    _preview_cards`, which calls `turn_card` once PER TURN of its own
+    small, fixed-size preview rather than gathering them first) -- lets
+    `artifact_links` resolve THIS one call's own images itself; see its
+    docstring for why that is the same lookup, sized down, rather than a
+    second one.
     """
-    images, files = artifact_links(turn.artifacts or ())
+    images, files = artifact_links(turn.artifacts or (), image_status)
     return {
         "turn": turn,
         "index": turn.index,
@@ -274,7 +316,15 @@ def turn_card(turn, nested: list[dict] | None = None, attachments: list[dict] | 
         # is ever non-`done` (`agents/models.py::Turn`'s own docstring),
         # so this is exactly the placeholder the poller is waiting on.
         "pending": turn.state in (Turn.State.QUEUED, Turn.State.RUNNING),
-        "tool": tool_card(turn) if turn.role == Turn.Role.TOOL else None,
+        # `images`/`files` PASSED STRAIGHT THROUGH, never a second
+        # `artifact_links` call over the same `turn.artifacts` (the
+        # OTHER half of the placeholder wave's N+1: before this fix a
+        # TOOL turn asked `artifact_links` here AND again inside `tool_
+        # card`, for the identical reference list). `tool_card` still
+        # resolves its own when called on its own (every `TestToolCard*`
+        # case in this module's own tests) -- see its docstring.
+        "tool": tool_card(turn, images=images, files=files)
+                if turn.role == Turn.Role.TOOL else None,
         "nested": nested or [],
         "images": images,
         "files": files,
@@ -423,12 +473,23 @@ def turn_group_cards(turn, attachments_by_turn: dict | None = None, *,
     return cards
 
 
-def tool_card(turn) -> dict:
+def tool_card(turn, images: list[dict] | None = None, files: list[dict] | None = None) -> dict:
     """One TOOL turn as a card: what ran, with what, how it ended, and
-    what it produced."""
+    what it produced.
+
+    `images`/`files`, OPTIONAL (placeholder wave N+1 fix, 2026-09-29):
+    `turn_card`'s own already-resolved answer for this SAME turn's
+    `artifacts`, passed straight through so this never asks
+    `artifact_links` the identical question a second time. `None` --
+    every test in this module that calls `tool_card` directly, and any
+    other future caller that has no `turn_card` of its own to reuse --
+    resolves them here instead, exactly as before this parameter
+    existed.
+    """
     call = turn.tool_call or {}
     key = call.get("tool") or ""
-    images, files = artifact_links(turn.artifacts or ())
+    if images is None:
+        images, files = artifact_links(turn.artifacts or ())
     message = invocation_message(turn.invocation, turn.text)
     shown_args, hidden_args = _split_args(call.get("args") or {})
     return {
@@ -509,23 +570,181 @@ def citations_of(turn) -> list[dict]:
     return out
 
 
-def artifact_links(references) -> tuple[list[dict], list[dict]]:
+@dataclass(frozen=True)
+class _ImageStatus:
+    """Every image reference a render's turns carry, resolved ONCE
+    (placeholder wave N+1 fix, 2026-09-29): `job_of` maps a reference to
+    the id of the job it still names (a reference absent here names no
+    surviving job at all); `unrecoverable` is `identity.retention.
+    content_status`'s own answer, read once for every job id `job_of`
+    found. `_placeholder_for`, below, reads both maps directly and asks
+    the database nothing further -- the entire reason this type exists.
+
+    `registered`: whether a resolver was found AT ALL when this was
+    built. `False` means "nothing to ask, ever" (the image column is not
+    installed on this box) and must NOT be read the same as "asked, and
+    nothing came back" -- the two empty-dict fields alone cannot tell
+    those apart, and conflating them would turn "no placeholder
+    machinery on this box" into "every image on this render is deleted".
+    """
+
+    registered: bool
+    job_of: dict = field(default_factory=dict)
+    unrecoverable: dict = field(default_factory=dict)
+
+
+def _image_refs_of(turns) -> list[str]:
+    """Every image-kind artifact reference across `turns` whose URL
+    actually reverses -- the SAME filter `artifact_links` applies before
+    asking anything about a reference, extracted so `thread_cards` can
+    gather a whole render's worth before any card exists. `_url_for`
+    reads the URL CONF, not the database, so calling it once per
+    reference here costs nothing this function's caller was not already
+    going to pay inside `artifact_links` itself."""
+    refs: list[str] = []
+    for turn in turns:
+        for reference in turn.artifacts or ():
+            try:
+                kind, pk = parse_artifact(reference)
+            except ValueError:
+                continue
+            if kind in _IMAGE_KINDS and _url_for(artifact_url_name(kind), pk):
+                refs.append(reference)
+    return refs
+
+
+# Keyed `(dotted path, exception type name)`: which resolver breakages
+# this process has already put at ERROR. A broken resolver raises on
+# EVERY render of EVERY conversation AND every poll tick of a running
+# turn -- unthrottled, that is thousands of copies of the identical
+# traceback burying the one line an operator needed. First occurrence
+# per key still pages someone (below); the SAME dotted path raising the
+# SAME exception type again this process drops to DEBUG, and a
+# genuinely DIFFERENT breakage (a different dotted path, or the same
+# path now failing a different way) still shouts. A plain `set.add` is
+# enough: this is read from a render path, and the worst a lost race
+# costs is one duplicate ERROR line, which is cheaper than a lock here
+# would be. Empty again after a process restart, which is intended --
+# a box still broken after a restart should say so again.
+_RESOLVER_ERRORS_SEEN: set[tuple[str, str]] = set()
+
+
+def _resolve_image_status(image_refs: list[str]) -> _ImageStatus:
+    """THE ONE PLACE that queries which of `image_refs` still names a
+    job, and whether that job's ticket is marked `content_unrecoverable`
+    -- exactly two queries (one for the resolver, one for `identity.
+    retention.content_status`), however many references `image_refs`
+    holds, and none at all for an empty list or an unregistered resolver.
+
+    ONE FUNCTION, TWO CALL SHAPES, NOT TWO IMPLEMENTATIONS: `artifact_
+    links` calls this with one turn's own handful of references when no
+    caller handed it an already-resolved `_ImageStatus`; `thread_cards`
+    calls it once with every reference a WHOLE RENDER is about to draw.
+    Both are this same function asked about a different-sized batch --
+    the fix for the N+1 the placeholder wave (2026-09-29) left behind
+    is sizing the batch to the render, not writing a second resolver.
+
+    THE RESOLVER COMES FROM `agents.contracts.artifacts.artifact_job_
+    ids_resolver` -- the same registered dotted-path seam shape
+    `agents.retention.conversation_children` already uses to reach
+    `tools.vision` at DELETE time (a SEPARATE slot, `register_artifact_
+    job_ids`'s own docstring says why), resolved here through the
+    identical `import_string` mechanism. `registered=False` when
+    nothing is (the image column is not installed on this box) -- an
+    honest "nothing to ask", never treated as "asked and got nothing".
+
+    C4: `import_string(dotted)(image_refs)` IS CAUGHT, BROADLY, ON
+    PURPOSE. A renamed function, a half-migrated column, or a resolver
+    that raises during the window between a migration and a restart
+    would otherwise turn one bad registration into a 500 for every
+    viewer of every conversation on the box -- a render-time read must
+    degrade, never take the page down for a click nobody made. It
+    degrades to the SAME `registered=False` path used when nothing is
+    registered at all: from here, "the seam is broken" and "the seam
+    does not exist" are the same fact for a renderer that can only ever
+    show a plain `<img>` or say nothing about availability, and logging
+    the exception is what keeps the two distinguishable for whoever
+    reads the log. LOGGED ONCE PER PROCESS AT ERROR, THEN AT DEBUG
+    (`_RESOLVER_ERRORS_SEEN`, above): this fires on every render of
+    every conversation on the box AND every poll tick of a running
+    turn, so leaving it at ERROR forever would bury the one line an
+    operator needed under thousands of copies of itself -- the same
+    "this fires on every render" pressure `_generation_url`'s own DEBUG
+    choice (elsewhere in this module) answers for a single bad row,
+    except a broken resolver is a box-wide fact rather than a per-row
+    one, which is why the FIRST occurrence still pages someone. This
+    is the render-time twin ONLY -- the delete-time
+    resolver (`agents.retention.conversation_children`'s own call
+    through `agents.contracts.artifacts.artifact_children`) is a
+    different blast radius (one deliberate click, not a page for a
+    viewer who did nothing) and is out of this fix's scope.
+    """
+    dotted = artifact_job_ids_resolver()
+    if dotted is None:
+        return _ImageStatus(registered=False)
+    if not image_refs:
+        return _ImageStatus(registered=True)
+    try:
+        job_of = import_string(dotted)(image_refs)
+    except Exception as exc:
+        error_key = (dotted, type(exc).__name__)
+        if error_key in _RESOLVER_ERRORS_SEEN:
+            logger.debug(
+                "chat: the registered image-job resolver %r is still raising "
+                "%s while resolving %d reference(s); rendering with no "
+                "placeholder for this render rather than failing the page.",
+                dotted, type(exc).__name__, len(image_refs),
+            )
+        else:
+            _RESOLVER_ERRORS_SEEN.add(error_key)
+            logger.exception(
+                "chat: the registered image-job resolver %r raised while resolving "
+                "%d reference(s); rendering with no placeholder for this render "
+                "rather than failing the page.", dotted, len(image_refs),
+            )
+        return _ImageStatus(registered=False)
+    job_ids = set(job_of.values())
+    unrecoverable = content_status(KIND_VISION_JOB, job_ids) if job_ids else {}
+    return _ImageStatus(registered=True, job_of=job_of, unrecoverable=unrecoverable)
+
+
+def artifact_links(references,
+                   image_status: "_ImageStatus | None" = None) -> tuple[list[dict], list[dict]]:
     """`(images, files)` for a turn's artifact reference strings.
 
     An unparseable reference is DROPPED. `parse_artifact` raises for
     anything that is not `<kind>:<digits>`; this value reached the row
     from a tool runner, and a link that cannot resolve is worse than no
     link at all.
+
+    EVERY IMAGE ENTRY CARRIES A `"placeholder"` KEY (placeholder wave,
+    2026-09-29, UAT report step 8c): `None` for a picture whose bytes
+    are there, or one of `identity.contracts.retention.CONTENT_DELETED_
+    LINE`/`CONTENT_UNRECOVERABLE_LINE` for one that is not --
+    `_placeholder_for`, below, is where that is decided. A `files`
+    entry (a `document:` reference) never gets this key at all: RAG's
+    own resolvers already have a different, pre-existing availability
+    story this wave does not touch.
+
+    `image_status`, OPTIONAL (placeholder wave N+1 fix, 2026-09-29): a
+    `_ImageStatus` the caller already resolved for a WIDER batch than
+    just `references` (`thread_cards`, over a whole render). `None` --
+    every caller before this fix, and every OTHER caller today except
+    `turn_card`/`thread_cards` -- resolves one here, over exactly this
+    call's own references: `_resolve_image_status` asked about a
+    smaller batch is the SAME lookup, not a second one, so a caller
+    with only one turn's worth of images pays for only that.
     """
     images: list[dict] = []
     files: list[dict] = []
+    entries: list[dict] = []
     for reference in references:
         try:
             kind, pk = parse_artifact(reference)
         except ValueError:
             logger.info("chat: dropping unparseable artifact reference %r", reference)
             continue
-        entry = {
+        entries.append({
             "reference": reference, "kind": kind,
             "url": _url_for(artifact_url_name(kind), pk),
             # R5 (chat-polish P3.1, fix round 1): the document's own
@@ -543,9 +762,91 @@ def artifact_links(references) -> tuple[list[dict], list[dict]]:
                 (artifact_title(reference) or f"Document {pk}")
                 if kind == "document" else ""
             ),
-        }
-        (images if kind in _IMAGE_KINDS else files).append(entry)
+        })
+    # ONE `_resolve_image_status` LOOKUP FOR THE WHOLE CALL (still just
+    # two queries, whatever this call's own reference count) -- asked
+    # only about the images whose URL actually reversed (a route that is
+    # not even mounted has nothing to ask about). What changed (F1,
+    # 2026-09-29) is that the VERDICT below is no longer shared across
+    # the batch: each image gets its OWN placeholder, read off this one
+    # shared `image_status` -- see `_placeholder_for`'s own docstring for
+    # why a turn's images can disagree.
+    image_refs = [entry["reference"] for entry in entries
+                 if entry["kind"] in _IMAGE_KINDS and entry["url"]]
+    if image_status is None:
+        image_status = _resolve_image_status(image_refs)
+    for entry in entries:
+        if entry["kind"] in _IMAGE_KINDS:
+            entry["placeholder"] = (
+                _placeholder_for(entry["reference"], image_status) if entry["url"] else None
+            )
+            images.append(entry)
+        else:
+            files.append(entry)
     return images, files
+
+
+def _placeholder_for(reference: str, image_status: _ImageStatus) -> str | None:
+    """`None` when `reference` still names a real, unticketed generation
+    job; a plain-copy sentence otherwise -- read PURELY off
+    `image_status` (no query here at all; `_resolve_image_status` is the
+    one place that runs one), and PER REFERENCE: a turn's own images are
+    judged one at a time, never as one verdict shared across whichever
+    images the turn happens to carry.
+
+    THE OWNER'S RULING on UAT report step 8c (placeholder wave,
+    2026-09-29): a conversation must show a placeholder, never the
+    browser's own bare broken-image icon, where a picture's bytes are
+    gone -- and the placeholder's own words must say `CONTENT_
+    UNRECOVERABLE_LINE` rather than `CONTENT_DELETED_LINE` for the one
+    case that is not simply "deleted": a purge that reached a files-band
+    handler and then failed, which `identity.retention.record_failed_
+    purge` marks `content_unrecoverable` on the job's own ticket
+    (`may_restore`'s own docstring is the fuller account). Telling
+    someone their picture "was deleted" when its deletion in fact got
+    stuck halfway is the exact mistake the owner ruled against.
+
+    PER REFERENCE, NOT ONE VERDICT PER CALL (F1, 2026-09-29): a prior
+    version of this function took the WHOLE batch of a turn's image
+    references and answered once for all of them, on the premise that
+    every `"output:"` reference a turn ever holds comes from the same
+    `vision.generate` call. That premise does not hold in this tree:
+    `agents.runtime.loop.run_loop` accumulates `artifacts` across EVERY
+    tool call in a turn, and `agents.runtime.flow`'s own step
+    aggregation does the same for a flow's steps, so two image-producing
+    calls landing on one turn is the ordinary agent loop, not an edge
+    case. A shared verdict then let a deleted sibling hide behind an
+    alive one (no placeholder at all -- a bare broken image), let an
+    alive sibling get stamped with a deleted sibling's own placeholder
+    (a false claim about present content), and let a merely-ticketed
+    sibling borrow a marked sibling's stronger, unrecoverable claim
+    (`TestMixedPlaceholdersInOneTurn` pins all three). Asking
+    `image_status` about one reference at a time is not only correct
+    where the batch verdict was not -- it is also less code.
+
+    `image_status.registered is False` (nothing to ask on this box at
+    all) answers `None`, the same degrade `_resolve_image_status`
+    documents -- never `CONTENT_DELETED_LINE`, which would claim a fact
+    nothing here asked about.
+    """
+    if not image_status.registered:
+        return None
+    job_id = image_status.job_of.get(reference)
+    if job_id is None:
+        # `reference` NAMES NO SURVIVING JOB. Usually that is a
+        # completed purge (UAT report Step 4); it is also, honestly,
+        # what a reference that never named a real row AT ALL looks like
+        # from here (`test_an_image_whose_job_no_longer_exists_at_all_
+        # is_the_generic_line` proves this branch with exactly such a
+        # reference) -- this function has no way to tell the two apart,
+        # and the plain, generic sentence is the one that does not
+        # over-claim either way.
+        return CONTENT_DELETED_LINE
+    if job_id not in image_status.unrecoverable:
+        # The job survives and carries no ticket at all -- available.
+        return None
+    return (CONTENT_UNRECOVERABLE_LINE if image_status.unrecoverable[job_id]
+            else CONTENT_DELETED_LINE)
 
 
 def _url_for(url_name: str, pk: int) -> str:

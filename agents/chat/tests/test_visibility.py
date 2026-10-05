@@ -19,6 +19,8 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 
 from agents.chat.tests._helpers import (
     grant, make_admin, make_agent, make_conversation, make_entitlement, make_flow, make_group,
@@ -271,16 +273,22 @@ class TestServiceOwnedRows:
         displays what it will not let you act on.
 
         Content-setting OFF, deliberately: this is `is_admin`, because
-        pruning what a command left behind is administration."""
+        pruning what a command left behind is administration.
+
+        RE-PINNED (Task 8): the refusal/permit answer is unchanged -- the
+        gate is still `may_manage_conversation` -- but the return value
+        is now the `DeletionTicket` rather than a bare `True`
+        (`test_the_owner_may_delete_and_a_stranger_may_not`'s own note
+        has the reason), and the row now survives as a ticket rather
+        than being gone on return."""
         shell_made = create_conversation(SERVICE_PRINCIPAL, make_agent(slug="a1"))
         with posture(POSTURE_PERSONAL, admin_sees_content=False):
-            assert delete_conversation(user_principal(make_admin()), shell_made) is True
-        assert not Conversation.objects.filter(pk=shell_made.pk).exists()
+            assert delete_conversation(user_principal(make_admin()), shell_made) is not None
 
     def test_a_member_may_not(self):
         shell_made = create_conversation(SERVICE_PRINCIPAL, make_agent(slug="a1"))
         with posture(POSTURE_PERSONAL):
-            assert delete_conversation(user_principal(make_user()), shell_made) is False
+            assert delete_conversation(user_principal(make_user()), shell_made) is None
         assert Conversation.objects.filter(pk=shell_made.pk).exists()
 
     def test_an_empty_service_clause_widens_nothing(self):
@@ -343,14 +351,17 @@ class TestTheOpenBranchIsFirst:
         assert " WHERE " not in sql, sql
 
     def test_an_open_box_asks_the_user_table_nothing(self, django_assert_num_queries):
-        """The one read is the settings singleton -- the query that
-        answers WHICH POSTURE, which the box must ask before it can
-        skip anything else."""
+        """The settings singleton read, the ticketed-keys read, and the
+        list -- and NEITHER of the first two is `identity_user`. Three,
+        not two, since `ticketed_keys` adds exactly one query to
+        `visible_conversations` on EVERY box, including an open one: the
+        exclusion is applied before the `sees_all_content` early return,
+        so an open box still pays for it."""
         from identity.models import IdentitySettings
         IdentitySettings.get_solo()
         create_conversation(OPEN_PRINCIPAL, make_agent(slug="a1"))
         with posture(POSTURE_OPEN):
-            with django_assert_num_queries(2):     # the settings read + the list
+            with django_assert_num_queries(3):     # settings + ticketed_keys + the list
                 list(visible_conversations(OPEN_PRINCIPAL))
 
 
@@ -382,13 +393,23 @@ class TestVisibleTurn:
 
 class TestDeleteConversation:
     def test_the_owner_may_delete_and_a_stranger_may_not(self):
+        """The gate is still `may_manage_
+        conversation`, so the refuse/permit answers are unchanged -- but
+        `delete_conversation` now returns the `DeletionTicket` rather
+        than a bare `True` (the view needs
+        `ticket.purge_on` to choose its notice), so this asserts
+        truthy/`None` rather than `is True`/`is False`. The row is no
+        longer gone the instant a truthy delete returns. `agents.chat.
+        tests.test_delete.TestDeleteWritesATicketAndHidesTheThread` and
+        `TestTicketedConversationsAreInvisible` below pin what survives
+        and what a ticket looks like; this test's own job is only the
+        gate."""
         ann, bob = make_user(), make_user()
         theirs = create_conversation(user_principal(bob), make_agent(slug="a1"))
         with posture(POSTURE_PERSONAL):
-            assert delete_conversation(user_principal(ann), theirs) is False
+            assert delete_conversation(user_principal(ann), theirs) is None
             assert Conversation.objects.filter(pk=theirs.pk).exists()
-            assert delete_conversation(user_principal(bob), theirs) is True
-            assert not Conversation.objects.filter(pk=theirs.pk).exists()
+            assert delete_conversation(user_principal(bob), theirs) is not None
 
     def test_an_admin_with_the_content_setting_off_may_not_delete_somebody_elses(self):
         """Deleting somebody's conversation is not on the operator's
@@ -397,7 +418,7 @@ class TestDeleteConversation:
         admin, bob = make_admin(), make_user()
         theirs = create_conversation(user_principal(bob), make_agent(slug="a1"))
         with posture(POSTURE_PERSONAL, admin_sees_content=False):
-            assert delete_conversation(user_principal(admin), theirs) is False
+            assert delete_conversation(user_principal(admin), theirs) is None
 
 
 class TestResidentAgentToolKeys:
@@ -455,13 +476,21 @@ class TestSharesExtendVisibility:
         asks_the_user_table_nothing` above -- without it, the singleton's
         own first-touch INSERT (a savepoint, an insert, a release) counts
         against the query budget this test is actually about.
-        """
+
+        RE-PINNED (Task 8, not named in the brief's own held-test list --
+        the identical fact `TestTheOpenBranchIsFirst::test_an_open_box_
+        asks_the_user_table_nothing` already re-pins, measured a second
+        time here): `ticketed_keys` adds exactly one query to `visible_
+        conversations` on EVERY box, open included, so three replaces
+        two for the identical reason that test's own docstring gives.
+        Still no `identity_user`/`agents_share` query -- the exclusion is
+        neither an ownership filter nor a share query."""
         from identity.models import IdentitySettings
 
         IdentitySettings.get_solo()
         create_conversation(OPEN_PRINCIPAL, make_agent())
         with posture(POSTURE_OPEN):
-            with django_assert_num_queries(2):   # the settings row + the list
+            with django_assert_num_queries(3):   # settings + ticketed_keys + the list
                 list(visible_conversations(OPEN_PRINCIPAL))
 
 
@@ -562,14 +591,10 @@ class TestSharingAConversation:
             assert revoke_share(user_principal(owner), mine, elsewhere.pk) is None
         assert Share.objects.filter(pk=elsewhere.pk).exists()
 
-    def test_deleting_a_conversation_deletes_its_shares(self):
-        owner, guest = make_user(), make_user()
-        conversation = create_conversation(user_principal(owner), make_agent())
-        Share.objects.create(target_type=Share.Target.CONVERSATION,
-                             target_key=str(conversation.pk), user=guest)
-        with posture(POSTURE_ENTERPRISE):
-            assert delete_conversation(user_principal(owner), conversation) is True
-        assert Share.objects.count() == 0
+    # `test_deleting_a_conversation_deletes_its_shares` MOVED to
+    # `agents/tests/test_retention.py` (Task 9): a soft delete tickets
+    # the conversation but does not touch its `Share` rows -- those now
+    # go at PURGE, through `agents.retention.purge_conversation`.
 
 
 class TestPostingRights:
@@ -713,3 +738,66 @@ class TestLabelsNarrowTheThreeVisibilityFunctions:
                                         entitlement=make_entitlement(name="Legal"))
         with posture(POSTURE_ENTERPRISE):
             assert agent not in visible_agents(user_principal(owner))
+
+
+class TestTicketedConversationsAreInvisible:
+    """The exclusion goes on the BASE queryset, BEFORE the
+    `sees_all_content` early return -- that branch is EVERY principal on
+    an open box, which is the posture most boxes run."""
+
+    def test_a_ticketed_conversation_is_hidden_from_sees_all_content_too(self):
+        with posture("open"):
+            principal = user_principal(make_user())
+            conversation = make_conversation()
+            assert delete_conversation(principal, conversation) is not None
+            assert list(visible_conversations(principal)) == []
+
+    def test_it_is_hidden_from_its_own_owner_in_the_personal_posture(self):
+        with posture("personal"):
+            user = make_user()
+            principal = user_principal(user)
+            conversation = make_conversation(
+                owner_kind="user", owner_key=str(user.pk))
+            delete_conversation(principal, conversation)
+            assert list(visible_conversations(principal)) == []
+
+    def test_an_untouched_conversation_is_still_visible(self):
+        """ONE SHARED AGENT for both conversations
+        (`test_sidebar.py::_render_twice`'s own fix, same reason): a bare
+        second `make_conversation()` call in one test makes a FRESH
+        `make_agent()` too, which collides on that helper's own fixed
+        "test-agent" slug."""
+        with posture("open"):
+            principal = user_principal(make_user())
+            agent = make_agent()
+            kept = create_conversation(principal, agent)
+            delete_conversation(principal, create_conversation(principal, agent))
+            assert list(visible_conversations(principal)) == [kept]
+
+    def test_the_cost_is_flat_in_the_number_of_conversations(self):
+        """EQUALITY UNDER SCALE, never an absolute count: one row against
+        twenty-five, with tickets present both times. `ticketed_keys` is
+        ONE query whatever the number of conversations or tickets, and a
+        literal here would drift with unrelated work -- the shape
+        `test_thread.py` and `test_sidebar.py` already use.
+
+        ONE SHARED AGENT for every conversation this test creates, for
+        the identical reason `test_an_untouched_conversation_is_still_
+        visible` (above) shares one -- 27 bare `make_conversation()`
+        calls would make 27 agents and collide on the second one.
+        """
+        with posture("open"):
+            principal = user_principal(make_user())
+            agent = make_agent()
+            delete_conversation(principal, create_conversation(principal, agent))
+            create_conversation(principal, agent)
+            list(visible_conversations(principal))  # warm up
+
+            with CaptureQueriesContext(connection) as small:
+                list(visible_conversations(principal))
+            for _ in range(25):
+                create_conversation(principal, agent)
+            with CaptureQueriesContext(connection) as large:
+                list(visible_conversations(principal))
+
+        assert len(large.captured_queries) == len(small.captured_queries)

@@ -7,6 +7,7 @@ from django.contrib import messages
 from django.http import Http404
 from django.shortcuts import redirect, render
 from django.urls import reverse
+from django.utils import timezone
 from django.views.decorators.http import require_POST
 from django.views.generic import TemplateView
 
@@ -392,30 +393,46 @@ def conversation_start(request):
 def conversation_delete(request, conversation_id):
     """POST /chat/c/<uuid>/delete/ -- remove one thread.
 
-    The TURNS go with it (`Turn.conversation` is CASCADE). The AUDIT
-    DOES NOT: `Turn.invocation` is `SET_NULL`, so every `ToolInvocation`
-    this conversation produced survives, principal and outcome intact.
-    That asymmetry is deliberate and is the 2026-08-27 addendum's
-    consequence 3 doing its job -- the audit row is not owned by the
-    conversation table, precisely so deleting a conversation cannot
-    erase the record of what was called.
+    IT NO LONGER ERASES (Task 8). `agents.visibility.delete_conversation`
+    now writes a `DeletionTicket` through `identity.retention.
+    delete_content` -- the turns, the shares, the attachment claims and
+    the chat-scoped documents all survive until the date the Deleted
+    page prints, and are torn down TOGETHER at purge time by
+    `agents.retention.purge_conversation` and its sibling handlers
+    (Task 9). THE QUEUE ROW DOES NOT JOIN THEM YET -- `models/queue` has
+    no retention handler in the landed tree, so it survives purge until
+    the queue half lands and reaches it, one of the residues ADR 0020
+    (decision 7) names. The tool-call audit trail's own asymmetry -- `Turn.
+    invocation` is `SET_NULL`, so a `ToolInvocation` this conversation
+    produced is never reachable through it -- is unaffected by any of
+    this: the row was never the conversation's to lose, at delete time
+    or at purge time, and it is scrubbed to a content-free shell in the
+    SAME transaction as the purge, which `agents/README.md` documents
+    once rather than at every call site.
 
     The AGENT is untouched: `Conversation.agent` is `PROTECT` in the
     other direction only.
 
-    D4: a `messages.info(...)` notice ("Conversation deleted.") rides
-    the redirect to `chat-index`, which renders it the same way
-    `tools/rag/views.py` already does (`django.contrib.messages` is
-    installed platform-wide -- `config/settings.py`'s `MIDDLEWARE` and
-    `INSTALLED_APPS`) -- reused rather than a bespoke `?deleted=1` query
-    flag, which is the fallback this task names only for a project that
-    had not already adopted the framework.
+    THE NOTICE MUST NOT PROMISE A RESTORE THE BOX CANNOT KEEP.
+    With `retention_days = 0` the
+    ticket `delete_conversation` hands back has ALREADY been purged by
+    the time this view runs -- its `purge_on` is today
+    (`identity.retention.delete_content`'s own unconditional bounded
+    sweep) -- so a flat "you can restore it" sentence would be a lie for
+    that box. `ticket.purge_on <= timezone.localdate()` is the same
+    due-condition `identity.retention.sweep` itself uses, so the two
+    never disagree about what counts as "already gone".
     """
     principal = principal_for_request(request)
     conversation = visible_conversation_or_404(principal, conversation_id)
-    if not delete_conversation(principal, conversation):
+    ticket = delete_conversation(principal, conversation)
+    if not ticket:
         raise Http404(f"Conversation {conversation_id} does not exist.")
-    messages.info(request, "Conversation deleted.")
+    if ticket.purge_on <= timezone.localdate():
+        messages.info(request, "Conversation deleted permanently.")
+    else:
+        messages.info(
+            request, "Conversation deleted. You can restore it from Settings → Deleted.")
     return redirect(reverse("chat-index"))
 
 

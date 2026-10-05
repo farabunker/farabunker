@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import inspect
+import re
 
 import pytest
 from django.urls import reverse
@@ -53,12 +54,24 @@ def _settings_row():
     return RagSettings.get_solo()
 
 
-def _filters(visibility, category=None):
+def _filters(visibility, category=None, deleted_ids=()):
     """The `MetadataFilters` `retrieve_nodes` would build, without
     building an index: the filter construction is factored into
     `retrieval._visibility_filters` precisely so it can be asserted
     directly rather than through a live vector store."""
-    return retrieval._visibility_filters(category, visibility)
+    return retrieval._visibility_filters(category, visibility, deleted_ids)
+
+
+def _flat(filters):
+    """Every leaf `MetadataFilter` in a possibly-nested `MetadataFilters`
+    tree, flattened -- `tools/rag/tests/test_workstream_corpus.py`'s own
+    helper of the same name and shape, needed again here so a test can
+    assert on a leaf's key without caring how deep this function's own
+    nesting goes."""
+    out = []
+    for f in filters.filters:
+        out.extend(_flat(f) if hasattr(f, "filters") else [f])
+    return out
 
 
 class TestTheDangerousLine:
@@ -197,6 +210,82 @@ class TestTheFilterShape:
         assert built.condition == FilterCondition.AND
         assert isinstance(built.filters[0], MetadataFilter)      # the category
         assert isinstance(built.filters[1], MetadataFilters)     # the visibility group
+
+
+class TestTheDeletedIdsClause:
+    """Deletion semantics: the same `_deleted_document_ids()` list
+    `tools.rag.access.readable_documents` excludes from the row surfaces
+    is threaded into this filter too, as a `file_id NOT IN (...)` leg --
+    the chunk-level twin of that exclusion, never derived from a live
+    query."""
+
+    def test_no_deleted_ids_adds_no_clause_at_all(self):
+        """`()` -- every caller before this round -- must add NOTHING:
+        an empty `NOT IN (...)` is not valid SQL, and "nothing is
+        deleted" is the overwhelmingly common case, so it must cost no
+        extra clause, not merely an inert one."""
+        v = DocumentVisibility(unrestricted=True, entitlement_ids=frozenset(),
+                               unlabelled_allowed=True)
+        with_none = _filters(v)
+        without_deletion = retrieval._visibility_filters(None, v)
+        assert with_none == without_deletion
+        assert all(f.key != "file_id" for f in _flat(with_none))
+
+    def test_deleted_ids_add_a_top_level_NOT_IN_clause_of_decimal_strings(self):
+        v = DocumentVisibility(unrestricted=True, entitlement_ids=frozenset(),
+                               unlabelled_allowed=True)
+        built = _filters(v, deleted_ids=[3, 7])
+        clause = built.filters[-1]
+        assert clause.key == "file_id"
+        assert clause.operator == FilterOperator.NIN
+        assert clause.value == ["3", "7"]
+
+    def test_the_exclusion_applies_regardless_of_category_or_restriction(self):
+        """Never nested inside the corpus/entitlement composition -- a
+        deleted document's chunks are excluded on every leg, including
+        a restricted principal's entitlement-gated one and a
+        category-narrowed search."""
+        restricted = DocumentVisibility(False, frozenset({3}), False)
+        built = _filters(restricted, category="Finance", deleted_ids=[9])
+        clause = built.filters[-1]
+        assert (clause.key, clause.operator, clause.value) == (
+            "file_id", FilterOperator.NIN, ["9"])
+
+    def test_the_ingest_stamp_and_the_exclusion_key_are_the_same_literal(self):
+        """NEITHER SIDE NAMES A SHARED CONSTANT TODAY: `tools.rag.ingest.
+        _ingest_prose` writes `node.metadata["file_id"] = str(doc.id)`
+        on every chunk it produces, and `_visibility_filters` above
+        builds its NOT-IN leg against `key="file_id"`,
+        `value=[str(i) for i in deleted_ids]` -- two independent
+        literals that happen to agree. If ingest ever stamped a
+        different key, or dropped the `str(...)` cast, the exclusion
+        above would silently match nothing: chunks would keep answering
+        for a document its own ticket already hides. This test reads
+        both literals out of the real source rather than retyping a
+        third copy, so a drift between them fails HERE instead of only
+        showing up as a deleted document's chunks still being
+        retrievable."""
+        from tools.rag import ingest
+
+        ingest_source = inspect.getsource(ingest._ingest_prose)
+        stamp_match = re.search(
+            r'node\.metadata\["(?P<key>\w+)"\]\s*=\s*str\(doc\.id\)', ingest_source)
+        assert stamp_match, (
+            "tools.rag.ingest._ingest_prose no longer stamps "
+            "`node.metadata[<key>] = str(doc.id)` the way this test expects -- "
+            "update this test to read wherever the document-id metadata key "
+            "now lives.")
+
+        filter_source = inspect.getsource(retrieval._visibility_filters)
+        filter_match = re.search(
+            r'key="(?P<key>\w+)",\s*value=\[str\(i\) for i in deleted_ids\]',
+            filter_source)
+        assert filter_match, (
+            "tools.rag.retrieval._visibility_filters no longer builds its "
+            "deletion NOT-IN clause the way this test expects -- update this "
+            "test to read wherever that key now lives.")
+
+        assert stamp_match.group("key") == filter_match.group("key")
 
 
 class TestTheConversationLeg:

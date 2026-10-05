@@ -16,6 +16,7 @@
 | `chat/` | **P3 — shipped** | Django app, label `chat`. The permanent chat product at `/chat/`: conversation list, thread, tool cards with thumbnails and citations, the 202-and-poll contract with a no-JS path, and flow rows reached through `flow.run`. See [`chat/README.md`](chat/README.md). |
 | `reconcile.py` + `manage.py reconcile_turns` | **Queue memory governance (2026-09-21) — shipped** | A chat turn whose JOB ROW vanished recovers instead of saying "working" for ever. `reconcile_stranded_turn(turn)` / `reconcile_stranded_turns(grace)` close an ASSISTANT turn that is still queued/running, older than `STRANDED_TURN_GRACE_SECONDS` (60), and whose `queue_job_id` is null or names a job row that no longer exists — one conditional, idempotent `UPDATE` in the same shape `runtime/jobs.py::on_turn_terminal` uses, plus that turn's open invocation rows. `count_stranded_turns()` is the read-only half `manage.py reconcile_turns --dry-run` reports from, so a dry run gives the exact count a real run would close. Called from the chat poll view (`agents/chat/views/turns.py`, for the turn somebody is watching) and from the command (for the turn nobody is polling); **there is no background sweeper**, deliberately. **It lives at the column root, NOT under `runtime/`**: its condition IS a `models.contracts.queue.get_job` call, and `foundation/ops/tests/test_column_boundaries.py::test_no_runtime_module_blocks_on_a_queue_job` forbids that call anywhere under `agents/runtime/` — because every module there executes INSIDE the `agent.turn` job, holding the one execution slot, where such a call can deadlock. A view and a management command never do. See [`chat/README.md`](chat/README.md)'s "A stranded turn, and a poll loop that cannot tick silently for ever". |
 | `entitlements.py` + `labels.py` + `shares.py` | **Identity & Auth IA-2 — shipped** | `entitlements.py::tool_access_for` builds the pure `ToolAccess` (`agents/contracts/tools.py`) a turn's `granted_tools` call needs; `labels.py` reads/writes `ToolEntitlement`/`AgentEntitlement`/`FlowEntitlement` and supplies this column's two entitlement-delete cascade handlers (registered from `agents/apps.py`); `shares.py` reads/writes `Share` and answers `may_post_to`. See "The acting rule" and "The four visibility bodies get real filters" below. |
+| `visibility.py`'s `delete_conversation` + `retention.py`'s `purge_conversation` | **Deletion semantics — Tasks 8 and 9, both shipped** | Deleting a conversation writes a `DeletionTicket` (`identity.retention.delete_content`) instead of erasing the row; `visible_conversations` excludes ticketed keys on the BASE queryset, before the `sees_all_content` early return. The row, its turns, its shares, its attachment claims, its chat-scoped documents and its generated images all survive until the date the Deleted page prints, then go together at purge. See "Deletion: a ticket, then a purge" below. |
 
 - **`agents/usage.py`** — what the next turn's prompt will carry, as an
   estimate, and the declared sentences that say it. At the column root for the
@@ -885,3 +886,142 @@ invisible-parent cases and the query-budget pin.
 Design: `docs/superpowers/specs/2026-09-03-workstreams-design.md`. The
 rest of this app's design: `docs/superpowers/specs/
 2026-08-25-agents-and-tools-design.md`.
+
+### Deletion: a ticket, then a purge
+
+`agents.visibility.delete_conversation` no longer erases. It calls
+`identity.retention.delete_content` (a NAMED SEAM every column may
+import — `identity/retention.py`'s own docstring has the full reason),
+which writes one `DeletionTicket`, records a content-free
+`content.deleted` event, and returns the ticket. The conversation, its
+turns, its shares, its attachment claims and its chat-scoped documents
+all survive the request — nothing about them changes at delete time.
+The gate is unchanged: `may_manage_conversation`, exactly as before.
+
+`visible_conversations` excludes every ticketed key on the BASE
+queryset, BEFORE the `sees_all_content` early return — that ordering
+matters because `sees_all_content` is True for every principal on an
+open box, the posture most boxes run, so an exclusion on the restricted
+leg alone would leave a deleted conversation visible in exactly the
+posture where it matters most.
+
+`agents/chat/views/conversations.py::conversation_delete` reads the
+returned ticket's `purge_on` to choose its notice: "Conversation
+deleted. You can restore it from Settings → Deleted." ordinarily, or
+"Conversation deleted permanently." when `purge_on` is today or
+earlier — the box's own zero-day retention setting, under which
+`delete_content`'s own unconditional bounded sweep purges the ticket
+before the response returns. A notice that promised a restore door the
+box had already closed would be a lie the settings page's own "Keep
+deleted items for" control made possible.
+
+`agents/retention.py::purge_conversation` is where the HARD
+side lands, registered under `agents.apps.AgentsConfig.ready()` as a
+`RetentionHandler(kind=KIND_CONVERSATION, key="agents.conversation",
+handler="agents.retention.purge_conversation", order=ORDER_FILES,
+children="agents.retention.conversation_children")` —
+the FILES band, deliberately: this handler is in that band because it
+removes bytes through the attachment seam (a conversation's chat-scoped
+documents die with it, files and pgvector chunks both), and it must also
+READ a conversation's turns before it deletes them, so it collects
+everything it needs first, then writes. `identity.cascades.run_retention`
+calls it, inside the one `transaction.atomic()` `identity.retention.
+purge_ticket` already opens (a nested savepoint per handler), so a
+conversation's ticket and its content can never disagree about whether
+the item still exists.
+
+The collect step (`agents/retention.py::_collect`) reads three things off
+every one of the conversation's turns before any row is touched:
+`output:<id>` / `input:<id>` artifact references (`document:<id>` is left
+alone — that is a `Document` row the attachment seam already reaches,
+never handed to the image column); `data["id"]` on any turn whose JSON
+`data` is a dict with a UUID-shaped `"id"` — the channel that catches a
+generation job that reached the engine and FAILED, minting no output at
+all, so the artifact channel alone would miss it entirely; and every
+non-null `invocation_id`, collected here because `Turn.invocation` is
+`SET_NULL` — once the turns are gone there is no path left from the
+conversation to its tool records at all. An artifact reference that
+fails to parse is dropped and logged by TURN ID AND CONVERSATION ID
+only — never the raw stored string, because a deletion path must not
+write the content it is destroying into a log. THE SAME COLLECT STEP
+FEEDS `conversation_children` (below), which the delete calls, not the
+purge — one function, read from two callers at two different moments,
+rather than two copies of the same walk.
+
+The row deletes follow: the conversation's `Share` rows, then
+`agents.attachments.delete_attachments_for` (which reaches `tools.rag.
+access.delete_attachments` through the registered cleanup seam — a
+chat-scoped document is deleted outright there, a universal or
+stream-contained one loses only its claim; a failure here now
+PROPAGATES rather than degrading to zero
+— that provider's only production caller today is this purge, so a
+swallowed failure would report success while its rows survive with no
+ticket left to find them by), then `conversation.delete()`, with `Turn`
+going by CASCADE. Then `scrub_tool_records` blanks `args`/`text`/
+`error` on every `ToolInvocation` id collected up front — content gone,
+the shell (principal, tool key, outcome, timings) kept, because that
+shell IS the machine audit trail. **Scrubbed inline with the same
+purge, always, with no setting and no second date.**
+
+**A conversation's generated images are NOT destroyed by this
+function at all** — that is the whole point of `children`. At DELETE
+time (`identity.retention.delete_content`, before any row above is
+touched), `agents.retention.conversation_children` runs the same
+collect step, EXCLUDES whatever `_still_referenced_elsewhere` finds
+some other, undeleted conversation still carrying (a reference this
+conversation shares with a live thread — a branch, a duplicate — names
+a job that thread is still showing, and must not be ticketed on this
+conversation's date instead of its own; the exclusion is eventually
+consistent, not a permanent one — once every conversation naming a job
+is itself ticketed, the last one's own delete finally reaches it), hands
+what remains to the ONE registered artifact-children slot
+(`agents.contracts.artifacts.register_artifact_children` /
+`artifact_children`, resolved by dotted path, never imported —
+`agents/` may not import `tools/` at all), and turns every `(job_key,
+owner_kind, owner_key)` triple the resolver answers into a
+`("vision_job", <job key>, <owner_kind>, <owner_key>)` quadruple. THE
+OWNER IS THE IMAGE'S OWN, NOT THE CONVERSATION'S — a workstream share
+that let a second principal post and generate inside somebody else's
+conversation, or an administrator's duplicate, means the two can
+differ, and `identity.retention.delete_content` stamps the child
+ticket from that owner directly (owner ruling, 2026-09-28), since
+`identity/` cannot look an owner up itself (rule 4). A permanent
+delete of the parent then destroys only a child the clicker owns
+(a genuinely ownerless child counts as the conversation's own, since
+no principal can ever match a blank pair); one owned by somebody
+else keeps its own ticket, date and Restore, detached rather than
+destroyed — the sweep, which always purges as the service principal,
+still takes everything on the date regardless of whose it is.
+`identity.retention.delete_content` writes each quadruple as an
+ordinary `DeletionTicket`, linked back to the conversation's own
+ticket via `parent`, with the SAME `purge_on` date. With nothing
+registered on the slot (vision uninstalled) `conversation_children`
+answers `[]`, and a chat delete tickets only the chat — the honest
+answer on that box. Each image is then destroyed by the image column's
+own registered handler, on its own ticket, either on its own date or
+— when somebody clicks "Delete permanently" on the conversation — by
+that same click, AFTER this function's own row handlers have finished
+(`identity.retention.purge_ticket` runs an item's own handlers before
+any child's), so bytes still go after rows even though the row that
+decides which bytes was written well before either purge ran.
+
+Every step is IDEMPOTENT: a re-run on a conversation that is already
+gone, or on one only partly torn down by an earlier failed purge,
+removes zero rows for what is already gone and completes rather than
+raising — the contract every `RetentionHandler` owes
+(`identity.contracts.cascades.RetentionHandler`'s own docstring). A
+`key` that does not even parse as a UUID answers `0` rather than
+raising, the same "one bad row, not a broken purge" posture the collect
+step's own unparseable-artifact-reference handling takes.
+
+Two things this purge deliberately leaves behind. `agents.models.
+WorkstreamTaint.first_conversation` keeps a purged conversation's id BY
+VALUE after the purge — content-free (an entitlement id and a
+timestamp), inert, and not cleaned up here. And `scrub_tool_records`
+only reaches invocations a SURVIVING `Turn` points at, because the
+collect step finds them by walking the conversation's own turns — a
+tool call whose job died between its `ToolInvocation` row being written
+(`agents/runtime/invoke.py`) and its tool `Turn` being written
+(`agents/runtime/loop.py`) has no turn and no conversation link at all,
+so its `args`/`text` are not reachable by any conversation's purge — a
+known, accepted residue with no reaper today.

@@ -20,7 +20,10 @@ from identity.contracts.postures import (
     LIBRARY_LOCKED, POSTURE_ENTERPRISE, POSTURE_OPEN, POSTURE_PERSONAL,
 )
 from identity.access import owner_fields
+from identity.contracts.actions import SOURCE_WEB
 from identity.contracts.principals import OPEN_PRINCIPAL, SERVICE_PRINCIPAL
+from identity.contracts.retention import KIND_CONVERSATION
+from identity.retention import delete_content, restore_content
 from tools.rag.access import (
     artifact_file_for, attached_documents, document_visibility, image_caption,
     image_caption_for, inline_text_for, listable_documents, may_label_document,
@@ -28,8 +31,8 @@ from tools.rag.access import (
 )
 from tools.rag.models import Document, DocumentAttachment, DocumentEntitlement
 from tools.rag.tests._helpers import (
-    _workstream, grant, make_admin, make_document, make_entitlement, make_user, posture,
-    reset_settings, seed_sweep_posture, user_principal,
+    _workstream, grant, make_admin, make_conversation, make_document, make_entitlement,
+    make_user, posture, reset_settings, seed_sweep_posture, user_principal,
 )
 
 pytestmark = pytest.mark.django_db
@@ -49,20 +52,53 @@ def _labelled(entitlement, **overrides):
     return document
 
 
+def _ticket_a_conversation() -> None:
+    """Soft-delete one `Conversation`, through the real deletion path
+    (`identity.retention.delete_content`) rather than a hand-inserted
+    `DeletionTicket` row -- the same "no hand database edits" rule every
+    other fixture in this repository follows. Leaves one OPEN
+    conversation ticket on the box (the shipped 30-day default retention
+    means the bounded prune-on-write sweep this call ends with does not
+    purge it), which is the one condition `_deleted_document_ids`'s own
+    third query answers with a real read rather than an empty `__in`."""
+    conversation = make_conversation()
+    delete_content(
+        OPEN_PRINCIPAL, kind=KIND_CONVERSATION, key=str(conversation.id),
+        owner=conversation, source=SOURCE_WEB,
+    )
+
+
 class TestReadableDocuments:
     def test_open_posture_returns_everything_with_no_permission_query(
             self, django_assert_num_queries):
-        """The claim is in the NAME, so it is in the assertion too: one
-        primary-key read of the settings singleton (inside
-        `sees_all_content`), one for the document list, and nothing
-        against a grant or label table.
+        """The claim is in the NAME, so it is in the assertion too: two
+        `DeletionTicket` reads (deletion semantics, Task 10 -- one for
+        documents, one for conversations, both empty here, so the
+        conversation-ticket-keyed chat-scoped lookup they would otherwise
+        gate costs nothing: an empty `__in` is known-empty to the ORM
+        without a round trip), one primary-key read of the settings
+        singleton (inside `sees_all_content`), one for the document list,
+        and nothing against a grant or label table.
 
         PINNED to `POSTURE_OPEN` explicitly: under a posture sweep
         (`FARABUNKER_TEST_POSTURE=enterprise`), an unpinned box would be
         enterprise, `OPEN_PRINCIPAL` would take the restricted branch,
         and this test would fail for a reason its own name denies."""
         labelled = _labelled(make_entitlement(name="Finance"))
-        with posture(POSTURE_OPEN), django_assert_num_queries(2):
+        with posture(POSTURE_OPEN), django_assert_num_queries(4):
+            assert list(readable_documents(OPEN_PRINCIPAL)) == [labelled]
+
+    def test_with_one_open_conversation_ticket_the_chat_scoped_lookup_costs_one_more(
+            self, django_assert_num_queries):
+        """The sibling of the pin just above: one open conversation
+        ticket gives `_deleted_document_ids`'s chat-scoped AND notes
+        lookups an id to filter on each, so neither is answerable from
+        an empty `__in` any more -- exactly two queries more than the
+        no-ticket count, never a jump that scales with the number of
+        documents."""
+        labelled = _labelled(make_entitlement(name="Finance"))
+        _ticket_a_conversation()
+        with posture(POSTURE_OPEN), django_assert_num_queries(6):
             assert list(readable_documents(OPEN_PRINCIPAL)) == [labelled]
 
     def test_a_holder_reads_a_labelled_document_and_a_non_holder_does_not(self):
@@ -158,6 +194,64 @@ class TestListableDocuments:
             readable = list(readable_documents(principal))
         assert listable == readable != []
         assert set(listable) == {unlabelled, mine}
+
+
+class TestAConsolidatedNoteFollowsItsConversation:
+    """A workstream consolidation note (`tools.rag.jobs`'s `origin=
+    NOTES`, `notes_conversation_id`) is neither directly ticketed nor
+    chat-scoped -- it has no `DocumentAttachment` row and `scope` stays
+    `UNIVERSAL` -- so `_deleted_document_ids()`'s first two legs never
+    named it, while `tools.rag.retention.purge_conversation_notes`
+    destroys it at purge regardless of whether it was ever hidden. The
+    third leg makes hide and purge agree: a consolidated conversation's
+    note disappears from both row surfaces the moment its conversation
+    is ticketed, and comes back on restore."""
+
+    def _note_for(self, conversation, **overrides):
+        return make_document(origin=Document.Origin.NOTES,
+                             notes_conversation_id=conversation.id, **overrides)
+
+    def test_it_is_hidden_from_listable_and_readable_documents_once_ticketed(self):
+        with posture(POSTURE_OPEN):
+            conversation = make_conversation()
+            note = self._note_for(conversation)
+            principal = user_principal(make_user())
+            assert note in listable_documents(principal)
+            assert note in readable_documents(principal)
+
+            delete_content(OPEN_PRINCIPAL, kind=KIND_CONVERSATION,
+                           key=str(conversation.id), owner=conversation, source=SOURCE_WEB)
+
+            assert note not in listable_documents(principal)
+            assert note not in readable_documents(principal)
+
+    def test_it_comes_back_on_restore(self):
+        with posture(POSTURE_OPEN):
+            conversation = make_conversation()
+            note = self._note_for(conversation)
+            principal = user_principal(make_user())
+            ticket = delete_content(OPEN_PRINCIPAL, kind=KIND_CONVERSATION,
+                                    key=str(conversation.id), owner=conversation,
+                                    source=SOURCE_WEB)
+            assert note not in readable_documents(principal)
+
+            restore_content(OPEN_PRINCIPAL, ticket, source=SOURCE_WEB)
+
+            assert note in readable_documents(principal)
+            assert note in listable_documents(principal)
+
+    def test_an_untouched_conversations_note_stays(self):
+        with posture(POSTURE_OPEN):
+            conversation = make_conversation()
+            note = self._note_for(conversation)
+            other = make_conversation()
+            principal = user_principal(make_user())
+
+            delete_content(OPEN_PRINCIPAL, kind=KIND_CONVERSATION,
+                           key=str(other.id), owner=other, source=SOURCE_WEB)
+
+            assert note in readable_documents(principal)
+            assert note in listable_documents(principal)
 
 
 class TestSeesNothing:
@@ -723,20 +817,42 @@ class TestTheCaptionNeverCrossesALineTheBytesDoNot:
         something to narrow" discipline this function already follows
         for `in_corpus`.
 
-        PINNED (review fix round 1, minor 6) at the REAL count for this
-        posture/scenario -- 3: `Document.objects.filter(scope=
-        "conversation", ...)` (always paid, and empty here), settings/
-        permission reads `readable_documents` itself does under
+        PINNED AT THE REAL COUNT FOR THIS POSTURE/SCENARIO -- 5, with no
+        open conversation ticket on the box: two `DeletionTicket` reads
+        (deletion semantics, Task 10 -- `_deleted_document_ids`'s own
+        two-or-four-query cost, its docstring has the full accounting;
+        both empty here, so its own chat-scoped and notes lookups cost
+        nothing),
+        `Document.objects.filter(scope="conversation", ...)` (this
+        function's own always-paid, empty-here `chat_scoped` query),
+        settings/permission reads `readable_documents` itself does under
         `POSTURE_OPEN`, and the ONE combined `readable_documents(...)
         .exclude(...).filter(...).annotate(...)` query this ordinary
         attachment's own row comes from. What this pins is the ABSENCE
-        of a FOURTH query -- the `chat_scoped_readable_ids` read this
+        of a further query -- the `chat_scoped_readable_ids` read this
         function pays only when `chat_scoped` is non-empty, which it
         never is here."""
         settings.DOCUMENTS_DIR = tmp_path
         conversation_id = uuid.uuid4()
         _attach(make_document(title="shared.png", media_type="image/png"), conversation_id)
-        with posture(POSTURE_OPEN), django_assert_num_queries(3):
+        with posture(POSTURE_OPEN), django_assert_num_queries(5):
+            rows = attached_documents(OPEN_PRINCIPAL, conversation_id=conversation_id)
+        assert rows[0]["readable"] is True
+
+    def test_with_one_open_conversation_ticket_the_chat_scoped_lookup_costs_one_more(
+            self, tmp_path, settings, django_assert_num_queries):
+        """The sibling of the pin just above: one open conversation
+        ticket gives `_deleted_document_ids`'s chat-scoped AND notes
+        queries an id to filter on each, costing exactly two queries
+        more than the no-ticket count -- unaffected
+        by how many documents or attachments this conversation itself
+        carries, since the ticketed conversation is a DIFFERENT one from
+        the one being rendered here."""
+        settings.DOCUMENTS_DIR = tmp_path
+        conversation_id = uuid.uuid4()
+        _attach(make_document(title="shared.png", media_type="image/png"), conversation_id)
+        _ticket_a_conversation()
+        with posture(POSTURE_OPEN), django_assert_num_queries(7):
             rows = attached_documents(OPEN_PRINCIPAL, conversation_id=conversation_id)
         assert rows[0]["readable"] is True
 

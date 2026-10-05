@@ -20,6 +20,7 @@ from agents.tests._helpers import _workstream, make_document
 from agents.visibility import create_conversation
 from identity.access import owner_fields
 from identity.contracts.postures import POSTURE_ENTERPRISE
+from identity.tests._helpers import make_output
 from tools.rag.models import Document, DocumentAttachment, DocumentEntitlement
 
 pytestmark = pytest.mark.django_db
@@ -703,15 +704,25 @@ class TestToolCardsOnThePage:
         """Spec section 8.4: an `output:<id>` artifact is an `<img>`
         whose src is `vision-output-file`, which streams strictly by pk
         and clamps its Content-Type -- so the chat never learns or
-        exposes a filesystem path."""
+        exposes a filesystem path.
+
+        RE-PINNED (placeholder wave, 2026-09-29): `output:12` used to
+        name nothing at all, which this test never cared about because
+        `artifact_links` never asked. It asks now -- a reference that
+        resolves to no row renders a placeholder, not an `<img>` (the
+        owner's own ruling on UAT report step 8c) -- so this test needs
+        a REAL `GeneratedOutput` row to still be testing what its own
+        name says: an output that exists renders as an image.
+        """
+        output = make_output()
         conversation = make_conversation()
-        self._tool_turn(conversation, artifacts=["output:12"],
+        self._tool_turn(conversation, artifacts=[f"output:{output.pk}"],
                         tool_call={"tool": "vision.generate", "args": {},
                                    "agent": "general", "id": "", "discarded": []})
         body = client.get(
             reverse("chat-conversation", args=[conversation.id])
         ).content.decode()
-        assert f'<img src="{reverse("vision-output-file", args=[12])}"' in body
+        assert f'<img src="{reverse("vision-output-file", args=[output.pk])}"' in body
 
     def test_a_document_artifact_renders_as_a_files_link_on_the_answer_card(
         self, client
@@ -888,18 +899,26 @@ class TestImagesStayInsideTheirCard:
         unwrapped `<img>` really does render inside `<article class="turn
         ...">`, so `.turn img` governs it. Without this, the rule above
         could stay pinned while sitting on a selector that matches
-        nothing on the page."""
+        nothing on the page.
+
+        RE-PINNED (placeholder wave, 2026-09-29): needs a REAL
+        `GeneratedOutput` row for the same reason `test_a_vision_
+        output_renders_as_an_img_pointing_at_the_output_view` above
+        does -- a reference to nothing now renders a placeholder, not
+        an `<img>`.
+        """
+        output = make_output()
         conversation = make_conversation()
         make_turn(conversation=conversation, role=Turn.Role.ASSISTANT,
                   text="here is the picture", state=Turn.State.DONE,
-                  artifacts=["output:12"])
+                  artifacts=[f"output:{output.pk}"])
 
         body = client.get(
             reverse("chat-conversation", args=[conversation.id])).content.decode()
 
         card_start = body.index('<article class="turn turn-assistant"')
         card = body[card_start:body.index("</article>", card_start)]
-        assert f'<img src="{reverse("vision-output-file", args=[12])}"' in card
+        assert f'<img src="{reverse("vision-output-file", args=[output.pk])}"' in card
 
 
 class TestTheGenerationLinkOnThePage:

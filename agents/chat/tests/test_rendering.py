@@ -8,7 +8,11 @@ drifts the first time one of them is edited.
 """
 from __future__ import annotations
 
+import logging
+
 import pytest
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.urls import NoReverseMatch, reverse
 from django.utils import timezone
 
@@ -20,6 +24,17 @@ from agents.models import ToolInvocation, Turn
 from agents.runtime.audit import RUNNING
 
 pytestmark = pytest.mark.django_db
+
+
+def _raising_job_ids_resolver(refs):
+    """A dotted-path target for `TestImageAvailability::
+    test_a_resolver_that_raises_degrades_rather_than_500ing_the_page`
+    and `TestImageAvailability::
+    test_a_resolver_that_keeps_raising_logs_the_first_occurrence_at_error_and_the_rest_at_debug`
+    -- module-level so `import_string` can actually resolve it, the
+    same reason `_generation_turn`/`_tool_turn` below sit at module
+    scope rather than nested in a test."""
+    raise RuntimeError("simulated: renamed/half-migrated image-job resolver")
 
 
 def _invocation(**overrides):
@@ -219,6 +234,386 @@ class TestArtifacts:
         images, _files = artifact_links(["output:12"])
         assert images[0]["url"] == ""
         assert images[0]["reference"] == "output:12"
+
+
+class TestImageAvailability:
+    """Owner ruling on UAT report step 8c (placeholder wave,
+    2026-09-29): a restored conversation whose picture is gone renders
+    a placeholder, never the browser's own bare broken-image icon --
+    and the placeholder's own words say `CONTENT_UNRECOVERABLE_LINE`
+    rather than `CONTENT_DELETED_LINE` exactly when `identity.retention.
+    content_status` reports the underlying job's ticket as
+    `content_unrecoverable`. `images[0]["placeholder"]` is `None` for an
+    ordinary, resolvable image -- the one key every existing
+    `TestArtifacts` case above never had to know about, because `None`
+    renders exactly as those tests already expect.
+    """
+
+    def test_an_image_whose_job_carries_no_ticket_is_available(self):
+        from identity.tests._helpers import make_output
+
+        output = make_output()
+        images, _files = artifact_links([f"output:{output.pk}"])
+        assert images[0]["placeholder"] is None
+
+    def test_an_image_whose_job_no_longer_exists_at_all_is_the_generic_line(self):
+        """THE ORDINARY, SUCCESSFUL-PURGE CASE (Step 4 in the UAT
+        report): the row and its ticket were destroyed together, so
+        there is nothing left to read a `content_unrecoverable` mark
+        off of -- the honest sentence is the plain one."""
+        from identity.contracts.retention import CONTENT_DELETED_LINE
+
+        images, _files = artifact_links(["output:999999"])
+        assert images[0]["placeholder"] == CONTENT_DELETED_LINE
+
+    def test_an_image_whose_job_is_ticketed_and_marked_is_the_specific_line(self):
+        from identity.contracts.retention import CONTENT_UNRECOVERABLE_LINE, KIND_VISION_JOB
+        from identity.models import DeletionTicket
+        from identity.retention import delete_content
+        from identity.testing import make_user, user_principal
+        from identity.tests._helpers import make_output
+
+        output = make_output()
+        user = make_user()
+        ticket = delete_content(user_principal(user), kind=KIND_VISION_JOB,
+                                key=str(output.job_id), owner=output.job)
+        DeletionTicket.objects.filter(pk=ticket.pk).update(content_unrecoverable=True)
+
+        images, _files = artifact_links([f"output:{output.pk}"])
+        assert images[0]["placeholder"] == CONTENT_UNRECOVERABLE_LINE
+
+    def test_an_image_whose_job_is_ticketed_but_not_marked_is_the_generic_line(self):
+        """A JOB DELETED ON ITS OWN, not yet purged: its picture is
+        already hidden from every OTHER surface (`tools.vision.
+        visibility` excludes any ticketed job regardless of the mark),
+        so this turn must not show it either -- but nothing here claims
+        the stronger, more specific fact the marked case does."""
+        from identity.contracts.retention import CONTENT_DELETED_LINE, KIND_VISION_JOB
+        from identity.retention import delete_content
+        from identity.testing import make_user, user_principal
+        from identity.tests._helpers import make_output
+
+        output = make_output()
+        user = make_user()
+        delete_content(user_principal(user), kind=KIND_VISION_JOB,
+                       key=str(output.job_id), owner=output.job)
+
+        images, _files = artifact_links([f"output:{output.pk}"])
+        assert images[0]["placeholder"] == CONTENT_DELETED_LINE
+
+    def test_a_document_artifact_is_never_given_a_placeholder_key(self):
+        """Scoped to images: `document:` files have their own,
+        pre-existing availability story (`tools.rag`'s own resolvers)
+        and this wave does not touch it."""
+        images, files = artifact_links(["document:7"])
+        assert images == []
+        assert "placeholder" not in files[0]
+
+    def test_a_reference_whose_url_is_not_mounted_never_queries_for_a_placeholder(
+        self, monkeypatch, django_assert_num_queries
+    ):
+        """THE VISION-OFF CASE, again: no route means no point asking
+        whether the bytes are there -- `_artifact_images.html`'s own
+        `{% else %}` branch already has the honest sentence for this.
+
+        THE NAME MAKES A QUERY-COUNT CLAIM, so this asserts one (tail
+        item, F1 fix report): before this, nothing here proved the
+        function actually skipped the database rather than merely
+        happening to answer `None` for some other reason."""
+        def _unmounted(*args, **kwargs):
+            raise NoReverseMatch("vision is not mounted")
+
+        monkeypatch.setattr("agents.chat.rendering.reverse", _unmounted)
+        with django_assert_num_queries(0):
+            images, _files = artifact_links(["output:12"])
+        assert images[0]["url"] == ""
+        assert images[0]["placeholder"] is None
+
+    def test_no_resolver_registered_at_all_degrades_to_no_placeholder(self, monkeypatch):
+        """THE IMAGE COLUMN NOT INSTALLED, not merely a route left
+        unmounted: `agents.contracts.artifacts.artifact_job_ids_resolver`
+        answers `None`. `_resolve_image_status` must read that as
+        "nothing to ask, ever" (`registered=False`) and NOT as "asked,
+        and got nothing back" -- the latter is what `CONTENT_DELETED_
+        LINE` means, and claiming a box knows an image is deleted when
+        it never even asked would be the exact kind of over-claim the
+        placeholder wave's own honesty rule forbids. A raise here would
+        take down a whole conversation page for a viewer who did
+        nothing; the render must degrade to the plain `<img>` this box
+        already showed before the placeholder wave existed."""
+        monkeypatch.setattr("agents.chat.rendering.artifact_job_ids_resolver",
+                            lambda: None)
+        images, _files = artifact_links(["output:12"])
+        assert images[0]["placeholder"] is None
+
+    def test_a_resolver_that_raises_degrades_rather_than_500ing_the_page(self, monkeypatch):
+        """C4: a renamed function, a half-migrated column, or a resolver
+        that raises during the window between a migration and a restart
+        must not take the whole conversation page down for every viewer
+        -- `import_string(dotted)(image_refs)` used to run with no
+        try/except at all. Degrades to the SAME `registered=False` path
+        `test_no_resolver_registered_at_all_degrades_to_no_placeholder`
+        above already proves is safe, never a raise."""
+        monkeypatch.setattr(
+            "agents.chat.rendering.artifact_job_ids_resolver",
+            lambda: "agents.chat.tests.test_rendering._raising_job_ids_resolver",
+        )
+        images, _files = artifact_links(["output:12"])
+        assert images[0]["placeholder"] is None
+
+    def test_a_resolver_that_keeps_raising_logs_the_first_occurrence_at_error_and_the_rest_at_debug(
+        self, monkeypatch, caplog
+    ):
+        """The operational failure this pins against: an unthrottled
+        `logger.exception` in the except block above fires on EVERY
+        render of EVERY conversation on the box AND every poll tick of
+        a running turn, so a box stuck with a broken resolver buries
+        the one ERROR line an operator needed under thousands of
+        copies of itself. Two consecutive raising renders (the poll
+        loop's own shape) must produce exactly one ERROR record --
+        the first occurrence still pages someone -- and exactly one
+        DEBUG record for the second, carrying the same dotted path and
+        the same reference count the ERROR record does, so an operator
+        who turns DEBUG on can still see the repeat and act on it.
+
+        `_RESOLVER_ERRORS_SEEN` is reset here rather than trusted empty:
+        it is a module-level set, so a process that already hit this
+        same dotted path and exception type in an earlier test would
+        otherwise start this one at DEBUG, which is exactly the
+        vacuous-pin shape this branch has already spent two days
+        refusing.
+
+        The `monkeypatch.setattr` below keeps its default `raising=True`:
+        a rename of `_RESOLVER_ERRORS_SEEN` should fail this test with an
+        `AttributeError` naming the missing attribute, not patch a name
+        nothing reads anymore while the real set quietly survives."""
+        monkeypatch.setattr(
+            "agents.chat.rendering._RESOLVER_ERRORS_SEEN", set()
+        )
+        monkeypatch.setattr(
+            "agents.chat.rendering.artifact_job_ids_resolver",
+            lambda: "agents.chat.tests.test_rendering._raising_job_ids_resolver",
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="agents.chat.rendering"):
+            artifact_links(["output:12"])
+            artifact_links(["output:12"])
+
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        debugs = [r for r in caplog.records if r.levelname == "DEBUG"]
+        assert len(errors) == 1, [r.getMessage() for r in caplog.records]
+        assert len(debugs) == 1, [r.getMessage() for r in caplog.records]
+
+        dotted = "agents.chat.tests.test_rendering._raising_job_ids_resolver"
+        assert dotted in errors[0].getMessage()
+        assert dotted in debugs[0].getMessage()
+        assert "1 reference" in debugs[0].getMessage()
+
+
+class TestTheImageStatusBatchDoesNotScale:
+    """`_placeholder_for` (above `TestImageAvailability`) used to be
+    reached through `_resolve_image_status`'s own two queries --
+    `agents.contracts.artifacts.artifact_job_ids_resolver`'s resolver,
+    then `identity.retention.content_status` -- run once PER
+    image-bearing turn, and TWICE for a TOOL turn (`turn_card`'s own
+    `artifact_links` call for the card's "images" key, and `tool_card`'s
+    own second call over the same turn's artifacts under "tool"), so a
+    thread page with N image-bearing TOOL turns cost `thread_cards` up
+    to `4N` queries at render time -- for every viewer, on a page opened
+    constantly. The SAME equality idiom `tools/rag/tests/
+    test_access_documents.py::test_the_query_cost_does_not_scale_with_
+    attachment_count` already pins for an unrelated N+1: one turn and
+    several must cost the IDENTICAL number of queries, proving the
+    lookup moved from "once per turn" to "once per render"."""
+
+    def _image_bearing_tool_turn(self, conversation):
+        from identity.tests._helpers import make_output
+
+        output = make_output()
+        return _tool_turn(conversation, artifacts=[f"output:{output.pk}"])
+
+    def _multi_image_tool_turn(self, conversation, image_count):
+        """ONE turn carrying `image_count` images -- `_tool_turn` already
+        takes an `artifacts` list, so this needs no new turn-building
+        machinery, only several references on one row instead of one
+        reference each on several rows."""
+        from identity.tests._helpers import make_output
+
+        refs = [f"output:{make_output().pk}" for _ in range(image_count)]
+        return _tool_turn(conversation, artifacts=refs)
+
+    def test_rendering_several_image_turns_costs_the_same_as_rendering_one(self):
+        agent = make_agent()
+        one = make_conversation(agent=agent)
+        self._image_bearing_tool_turn(one)
+        with CaptureQueriesContext(connection) as one_ctx:
+            thread_cards(one)
+
+        several = make_conversation(agent=agent)
+        for _ in range(5):
+            self._image_bearing_tool_turn(several)
+        with CaptureQueriesContext(connection) as many_ctx:
+            thread_cards(several)
+
+        assert len(many_ctx.captured_queries) == len(one_ctx.captured_queries)
+
+    def test_rendering_one_turn_with_five_images_costs_the_same_as_one_image(self):
+        """THE OTHER AXIS. The arm above varies how many TURNS carry one
+        image each; this one holds the turn count at one and varies how
+        many images that SINGLE turn carries instead. `agents.runtime.
+        loop.run_loop` accumulates `artifacts` across every tool call a
+        turn makes, so five images landing on one turn is the ordinary
+        agent loop, not a hypothetical -- and a lookup that fires once
+        per image INSIDE a turn would be invisible to the arm above,
+        which never puts more than one image reference on any turn it
+        builds, so its equality would hold even if that lookup existed.
+
+        THIS IS NOT A NUMBER TRUSTED ON FAITH. `tools.vision.retention.
+        resolve_artifact_job_ids` answers a turn's references with ONE
+        `pk__in` query over the whole set, and `identity.retention.
+        content_status` answers the resulting job ids with one query
+        over the whole set too -- both batched by construction, not by
+        an accident of this fixture's own five-row size. Replacing
+        either batched query with a loop that asks once per reference is
+        exactly the kind of edit an unrelated change could make without
+        noticing (a "handle them one at a time" pass over that function,
+        say), and this assertion was proved to catch it: temporarily
+        rewriting `resolve_artifact_job_ids`'s batched lookup as a
+        per-reference loop made this exact assertion fail, before that
+        rewrite was reverted.
+        """
+        agent = make_agent()
+        one = make_conversation(agent=agent)
+        self._multi_image_tool_turn(one, 1)
+        with CaptureQueriesContext(connection) as one_ctx:
+            thread_cards(one)
+
+        five = make_conversation(agent=agent)
+        self._multi_image_tool_turn(five, 5)
+        with CaptureQueriesContext(connection) as five_ctx:
+            thread_cards(five)
+
+        assert len(five_ctx.captured_queries) == len(one_ctx.captured_queries)
+
+    def test_a_batched_and_a_self_resolving_render_of_the_same_turn_agree(self):
+        """THERE IS ONE RESOLVER, NOT TWO (review requirement on this
+        fix): `turn_card`'s `image_status=` parameter is a bigger or
+        smaller BATCH into the exact same `_resolve_image_status`, never
+        a second algorithm computing the placeholder a different way. A
+        turn rendered through `thread_cards`' own whole-render batch and
+        the SAME turn rendered by `turn_card` on its own (which falls
+        into `artifact_links`'s own single-turn batch-of-one) must
+        produce byte-identical cards -- a divergence here is exactly
+        what a SECOND implementation would eventually grow.
+
+        KEYED ON A DELETED JOB, NOT A LIVE ONE (tail item, F1 fix
+        report): pinning `placeholder is None` proves nothing on its
+        own -- an implementation that always returns `None` (never
+        actually reading `image_status` at all) would pass that
+        assertion too, batched or not. A ticketed job makes the pinned
+        value `CONTENT_DELETED_LINE`, something a "just return None"
+        stand-in cannot produce, so agreement on THIS value is agreement
+        that actually varies."""
+        from agents.chat.rendering import _image_refs_of, _resolve_image_status, turn_card
+        from identity.contracts.retention import CONTENT_DELETED_LINE, KIND_VISION_JOB
+        from identity.retention import delete_content
+        from identity.testing import make_user, user_principal
+        from identity.tests._helpers import make_output
+
+        output = make_output()
+        conversation = make_conversation()
+        turn = _tool_turn(conversation, artifacts=[f"output:{output.pk}"])
+        user = make_user()
+        delete_content(user_principal(user), kind=KIND_VISION_JOB,
+                       key=str(output.job_id), owner=output.job)
+
+        self_resolved = turn_card(turn)
+        batched = turn_card(turn, image_status=_resolve_image_status(_image_refs_of([turn])))
+
+        assert self_resolved == batched
+        assert self_resolved["images"][0]["placeholder"] == CONTENT_DELETED_LINE
+        assert self_resolved["tool"]["images"][0]["placeholder"] == CONTENT_DELETED_LINE
+
+
+class TestMixedPlaceholdersInOneTurn:
+    """F1: a turn's own images are judged ONE AT A TIME, never as one
+    shared verdict for however many the turn happens to carry.
+
+    A FIXTURE WITH ONE IMAGE PER TURN CANNOT SEE THIS -- every other
+    class in this module builds a turn with a single artifact reference,
+    which is exactly why this bug shipped unnoticed. Two images landing
+    on one turn is not a hypothetical: `agents.runtime.loop.run_loop`
+    accumulates `artifacts` across EVERY tool call a turn makes, and
+    `agents.runtime.flow`'s own step aggregation does the same for a
+    flow's steps, so two `vision.generate` calls (or two image-producing
+    flow steps) in one turn is the ordinary agent loop.
+    """
+
+    def test_one_deleted_one_alive_the_deleted_one_still_gets_a_placeholder(self):
+        """BEFORE THE FIX: the deleted reference was absent from the
+        batch's own job map, but the ALIVE sibling still put a job in
+        that batch's `job_ids`, so the shared verdict skipped the "no
+        job at all" branch, found the alive job carries no ticket, and
+        answered `None` for BOTH images -- the deleted picture rendered
+        with no placeholder at all, a bare broken image, the exact
+        defect the placeholder wave exists to fix."""
+        from identity.contracts.retention import CONTENT_DELETED_LINE
+        from identity.tests._helpers import make_output
+
+        alive = make_output()
+        images, _files = artifact_links(["output:999999", f"output:{alive.pk}"])
+        assert images[0]["placeholder"] == CONTENT_DELETED_LINE
+        assert images[1]["placeholder"] is None
+
+    def test_one_ticketed_one_alive_the_alive_one_is_never_stamped_deleted(self):
+        """BEFORE THE FIX: the shared verdict was computed once from the
+        UNION of both jobs, so the ticketed sibling's `CONTENT_DELETED_
+        LINE` was stamped onto the alive sibling too -- a live, present
+        picture replaced by a false statement about the user's own
+        data."""
+        from identity.contracts.retention import CONTENT_DELETED_LINE, KIND_VISION_JOB
+        from identity.retention import delete_content
+        from identity.testing import make_user, user_principal
+        from identity.tests._helpers import make_output
+
+        ticketed = make_output()
+        alive = make_output()
+        user = make_user()
+        delete_content(user_principal(user), kind=KIND_VISION_JOB,
+                       key=str(ticketed.job_id), owner=ticketed.job)
+
+        images, _files = artifact_links([f"output:{ticketed.pk}", f"output:{alive.pk}"])
+        assert images[0]["placeholder"] == CONTENT_DELETED_LINE
+        assert images[1]["placeholder"] is None
+
+    def test_one_marked_one_merely_ticketed_the_ticketed_one_is_not_over_claimed(self):
+        """BEFORE THE FIX: `any(status.values())` over the union of both
+        jobs' `content_unrecoverable` flags meant the MARKED sibling's
+        `True` made the whole batch answer `CONTENT_UNRECOVERABLE_LINE`
+        -- the merely-ticketed image was told its own deletion "could
+        not be completed" and is unrecoverable, a stronger claim than
+        its own ticket makes."""
+        from identity.contracts.retention import (
+            CONTENT_DELETED_LINE, CONTENT_UNRECOVERABLE_LINE, KIND_VISION_JOB,
+        )
+        from identity.models import DeletionTicket
+        from identity.retention import delete_content
+        from identity.testing import make_user, user_principal
+        from identity.tests._helpers import make_output
+
+        marked = make_output()
+        merely_ticketed = make_output()
+        user = make_user()
+        marked_ticket = delete_content(user_principal(user), kind=KIND_VISION_JOB,
+                                       key=str(marked.job_id), owner=marked.job)
+        DeletionTicket.objects.filter(pk=marked_ticket.pk).update(content_unrecoverable=True)
+        delete_content(user_principal(user), kind=KIND_VISION_JOB,
+                       key=str(merely_ticketed.job_id), owner=merely_ticketed.job)
+
+        images, _files = artifact_links(
+            [f"output:{marked.pk}", f"output:{merely_ticketed.pk}"])
+        assert images[0]["placeholder"] == CONTENT_UNRECOVERABLE_LINE
+        assert images[1]["placeholder"] == CONTENT_DELETED_LINE
 
 
 class TestTheGenerationLink:

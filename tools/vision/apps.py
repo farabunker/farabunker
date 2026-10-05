@@ -85,3 +85,33 @@ class VisionConfig(AppConfig):
 
         register_owned_rows(
             OwnedRows("vision.generationjob", "Generated images", "vision.GenerationJob"))
+
+        # THIS COLUMN'S ANSWER TO "WHICH GENERATIONS DOES THIS
+        # CONVERSATION'S DELETE REACH". A dotted-path string on the
+        # single artifact-children slot, for the same import-law reason
+        # every other registration in this method has: `agents/` may not
+        # import `tools/` at all. INSIDE the feature gate, so a box with
+        # "vision" off carries no registration naming a model whose app
+        # registered nothing else.
+        from agents.contracts.artifacts import (
+            register_artifact_children, register_artifact_job_ids,
+        )
+
+        register_artifact_children("tools.vision.retention.resolve_artifact_jobs")
+        # RENDER TIME'S OWN SLOT (placeholder wave N+1 fix, 2026-09-29):
+        # see `register_artifact_job_ids`'s own docstring for why this
+        # is a second registration rather than a second use of the one
+        # above.
+        register_artifact_job_ids("tools.vision.retention.resolve_artifact_job_ids")
+
+        # THIS COLUMN'S ANSWER TO "A DELETED IMAGE'S DATE HAS ARRIVED".
+        # A dotted-path string, like every other registration in this
+        # method, because `identity/` may not import `tools/` at all.
+        from identity.contracts.cascades import (
+            ORDER_FILES, RetentionHandler, register_retention_handler,
+        )
+        from identity.contracts.retention import KIND_VISION_JOB
+
+        register_retention_handler(RetentionHandler(
+            kind=KIND_VISION_JOB, key="vision.job", label="Generated image",
+            handler="tools.vision.retention.purge_job", order=ORDER_FILES))

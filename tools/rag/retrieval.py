@@ -120,7 +120,7 @@ from llama_index.core.vector_stores.types import (
 from foundation.format import format_timecode, single_line
 from models.contracts import gateway
 from models.contracts.bindings import ResolvedModel
-from tools.rag.access import DocumentVisibility
+from tools.rag.access import DocumentVisibility, _deleted_document_ids
 from tools.rag.categories import normalize_category_name
 from tools.rag import index as index_module
 from tools.rag.index import get_index
@@ -458,7 +458,7 @@ def _search_result_for(node_with_score, *, hybrid: bool) -> dict:
     }
 
 
-def _visibility_filters(category, visibility: DocumentVisibility):
+def _visibility_filters(category, visibility: DocumentVisibility, deleted_ids=()):
     """The `MetadataFilters` for this question -- the category clause and
     the visibility group, AND-combined.
 
@@ -485,6 +485,25 @@ def _visibility_filters(category, visibility: DocumentVisibility):
     store expects rather than raising -- and
     `test_the_filter_is_never_none_any_more` pins that today's code
     cannot reach it.
+
+    `deleted_ids` (deletion semantics): the SAME `tools.rag.access.
+    _deleted_document_ids()` list `readable_documents`/`listable_
+    documents`/`attached_documents` exclude from the ROW surfaces,
+    applied here to the CHUNK surface too -- a soft-deleted item must
+    disappear from every surface at once, retrieval included, not just
+    the pages that read `Document` rows. `retrieve_nodes` computes the
+    list ONCE per call and passes it straight through; this function
+    never calls `_deleted_document_ids()` itself, so a caller that
+    builds several filter objects in one request (there is none today)
+    would not pay for the list more than once either. `()` -- every
+    caller in this module's own test suite that is not exercising the
+    exclusion -- adds NO clause at all: an empty `NOT IN (...)` is not
+    valid SQL, and "nothing is deleted" must cost nothing extra, not an
+    inert filter leg. Applied at the TOP LEVEL, alongside `gated` below,
+    never nested inside the corpus/entitlement composition -- a deleted
+    document's chunks are excluded regardless of which leg would
+    otherwise have admitted them, including the conversation leg's own
+    exemption from the entitlement gate.
     """
     clauses = []
     if category:
@@ -667,6 +686,20 @@ def _visibility_filters(category, visibility: DocumentVisibility):
         ], condition=FilterCondition.OR)
     clauses.append(gated)
 
+    if deleted_ids:
+        # DELETION SEMANTICS: excluded regardless of category or
+        # visibility -- a soft-deleted item's chunks are gone from
+        # retrieval the same instant its row is gone from the library,
+        # no matter which corpus/entitlement leg above would otherwise
+        # have admitted them. Skipped entirely when `deleted_ids` is
+        # empty (the common box, nothing ticketed): `NOT IN ()` is not
+        # valid SQL, and "nothing is deleted" must add no clause at all,
+        # not an inert one -- see this function's own docstring
+        # paragraph on `deleted_ids`.
+        clauses.append(MetadataFilter(
+            key="file_id", value=[str(i) for i in deleted_ids],
+            operator=FilterOperator.NIN))
+
     if not clauses:
         return None
     return MetadataFilters(filters=clauses, condition=FilterCondition.AND)
@@ -750,6 +783,17 @@ def retrieve_nodes(
     ollama.build_embedder`) cannot compete with a turn's own,
     operator-editable response timeout the same way the chat LLM's
     already cannot (B2/I-3, one-timeout task).
+
+    DELETION SEMANTICS: `tools.rag.access._deleted_document_ids()` is
+    read ONCE, here, and threaded straight into `_visibility_filters` --
+    never recomputed per filter leg, and never left for the EARLY-RETURN
+    branch just below to pay for, since that branch already returns no
+    nodes at all. This is the retrieval side of the same exclusion
+    `readable_documents`/`listable_documents`/`attached_documents` apply
+    to the row surfaces: a soft-deleted conversation's chat-scoped
+    document, or a directly ticketed document, can otherwise still be
+    retrieved into a fresh answer from inside a surface that has not
+    itself been re-checked against the ticket.
     """
     if visibility.sees_nothing:
         # A signed-in principal with no entitlements on a LOCKED library.
@@ -761,14 +805,16 @@ def retrieve_nodes(
         # The index is still built and returned: `answer_question`
         # synthesizes from it even with zero nodes. The query EMBEDDING is
         # skipped, because it happens inside `retriever.retrieve`, which
-        # is what we skip.
+        # is what we skip. NOTHING is retrieved either way, so the
+        # deletion exclusion below is never computed for this branch --
+        # there is nothing for it to narrow.
         embed_model = gateway.get_embed_model_for(
             embed_resolved, request_timeout=request_timeout)
         with index_module.disposing_vector_store() as vector_store:
             index = get_index(vector_store, embed_model=embed_model)
             return [], vector_store.hybrid_search, index
 
-    filters = _visibility_filters(category, visibility)
+    filters = _visibility_filters(category, visibility, _deleted_document_ids())
 
     embed_model = gateway.get_embed_model_for(embed_resolved, request_timeout=request_timeout)
     # W5 (ADR 0014 §18): the store is built explicitly, once, so its own

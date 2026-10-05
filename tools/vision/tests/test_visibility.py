@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import pytest
 from django.urls import reverse
+from django.utils import timezone
 
 from identity.access import owner_fields
 from identity.contracts.postures import POSTURE_OPEN, POSTURE_PERSONAL
 from identity.contracts.principals import OPEN_PRINCIPAL
+from identity.models import DeletionTicket
 from models.contracts.operations import get_operation
 from tools.vision.models import GeneratedOutput, GenerationJob, JobInput
 from tools.vision.tests._helpers import (
@@ -174,6 +176,27 @@ class TestTheCarriedReferencePreviewIsGatedByVisibility:
             )
         assert len(shown) == 1
         assert shown[0]["reference"] == f"output:{theirs.id}"
+
+
+class TestTicketedJobsAreInvisible:
+    def test_a_ticketed_job_is_hidden_from_sees_all_content_too(self):
+        with posture("open"):
+            principal = user_principal(make_user())
+            job = _generation()
+            DeletionTicket.objects.create(
+                kind="vision_job", key=str(job.pk),
+                purge_on=timezone.localdate())
+            assert list(visible_jobs(principal)) == []
+
+    def test_an_untouched_job_is_still_visible(self):
+        with posture("open"):
+            principal = user_principal(make_user())
+            kept = _generation()
+            hidden = _generation()
+            DeletionTicket.objects.create(
+                kind="vision_job", key=str(hidden.pk),
+                purge_on=timezone.localdate())
+            assert list(visible_jobs(principal)) == [kept]
 
 
 class TestStagedInputPreviewIsAdminOnly:

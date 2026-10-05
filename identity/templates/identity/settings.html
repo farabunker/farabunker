@@ -221,6 +221,22 @@ only.
       <p class="helptext">A rolling idle timeout: every signed-in request pushes it out again. Zero means a session ends when the browser closes.</p>
       {% if form.session_idle_minutes.errors %}<ul class="errorlist">{% for error in form.session_idle_minutes.errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
     </div>
+    <div class="field" id="retention">
+      <label for="{{ form.retention_days.id_for_label }}">{{ form.retention_days.label }}</label>
+      {{ form.retention_days }}
+      <p class="helptext">Days. A deleted conversation, document, question or image stays on the Deleted page for this long, and can be restored from it at any point. Zero removes it straight away. Changing this governs future deletions only — anything already deleted keeps the date it was given.</p>
+      {% if form.retention_days.errors %}<ul class="errorlist">{% for error in form.retention_days.errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
+    </div>
+    <div class="field" id="queue-retention">
+      <label for="{{ form.queue_retention_days.id_for_label }}">{{ form.queue_retention_days.label }}</label>
+      {{ form.queue_retention_days }}
+      <p class="helptext">Days. Recorded now; the Queue page does not remove finished jobs by age yet -- that starts in a following change. Leave it blank for no age limit.</p>
+      {% if form.queue_retention_days.errors %}<ul class="errorlist">{% for error in form.queue_retention_days.errors %}<li>{{ error }}</li>{% endfor %}</ul>{% endif %}
+    </div>
+    <div class="field checkbox-field" id="audit-detail">
+      {{ form.audit_detail }}
+      <label for="{{ form.audit_detail.id_for_label }}">{{ form.audit_detail.label }}</label>
+    </div>
     <div class="form-row">
       <button type="submit">Save</button>
     </div>

@@ -32,6 +32,7 @@ phase and the two modules above carry the rest.)
 """
 from __future__ import annotations
 
+import datetime
 import itertools
 import json
 import re
@@ -43,6 +44,7 @@ import pytest
 from django.conf import settings
 from django.test import Client
 from django.urls import NoReverseMatch, Resolver404, resolve, reverse
+from django.utils import timezone
 
 from agents.defaults import DEFAULT_AGENTS
 from foundation.settings_area import with_assistant_flag
@@ -53,6 +55,8 @@ from identity.access import owner_fields
 from identity.contracts.postures import (
     POSTURE_ENTERPRISE, POSTURE_OPEN, POSTURE_PERSONAL,
 )
+from identity.contracts.retention import KIND_CONVERSATION
+from identity.models import DeletionTicket
 from identity.routes import ROUTE_RULES
 from identity.tests._helpers import (
     grant, make_admin, make_agent, make_category, make_connection, make_conversation,
@@ -394,6 +398,17 @@ _DRIVERS: dict[str, Callable[["World"], tuple[str, str, dict]]] = {
     "identity-entitlement-edit": lambda w: (
         "get", reverse("identity-entitlement-edit", args=[w.entitlement.pk]), {}),
 
+    # --- /identity/deleted/ (deletion semantics, 2026-09-21) ----------
+    # A: the page lists the CALLER's own tickets and addresses no row in
+    # its own URL, the identical shape `chat-all`'s own driver takes.
+    "identity-deleted": lambda w: ("get", reverse("identity-deleted"), {}),
+    # O, pointed at `w.ticket` -- owned by `other`, the same convention
+    # every other row-addressed driver's row follows.
+    "identity-deleted-restore": lambda w: (
+        "post", reverse("identity-deleted-restore", args=[w.ticket.pk]), {}),
+    "identity-deleted-purge": lambda w: (
+        "post", reverse("identity-deleted-purge", args=[w.ticket.pk]), {}),
+
     # --- /chat/agents/ (chat cluster, feature B) ----------------------
     "chat-agents": lambda w: ("get", reverse("chat-agents"), {}),
     # A GET probe even though this route also accepts a POST, the SAME
@@ -492,6 +507,7 @@ class World:
     entitlement: object
     model_set: object
     workstream: object
+    ticket: object
     generation: object = None
     output: object = None
     job_input: object = None
@@ -609,11 +625,34 @@ def _build_world() -> World:
     # that triggers the exceptional branch" shape that route's own
     # world-building already established.
     model_set = make_model_set(name=f"set-{next(_counter)}")
+    # A DeletionTicket owned by `other`, for `identity-deleted-restore`/
+    # `-purge`'s own row-addressed cells -- the same "owned by `other`,
+    # never the caller" convention every other row-addressed driver's row
+    # follows. Kind `conversation`, key a DEDICATED conversation's own pk
+    # -- NEVER `world.conversation`'s: `agents.visibility.
+    # visible_conversations` excludes every ticketed key
+    # (`identity.retention.ticketed_keys`), so ticketing the world's
+    # shared conversation would make it disappear for every OTHER
+    # driver that addresses it (`chat-conversation`, `chat-turn`,
+    # `chat-workstream-consolidate`, and the rest of the sidebar-menu
+    # actions) -- discovered by this module's own admin-content-on
+    # cells going 404 where every one of them expects admission.
+    # `purge_on` is thirty days out so no incidental sweep (the
+    # `identity-deleted` GET cell's own) removes it before the row-
+    # addressed cells get to address it.
+    ticket_conversation = make_conversation(agent=agent, **owner_fields(principal))
+    ticket = DeletionTicket.objects.create(
+        kind=KIND_CONVERSATION, key=str(ticket_conversation.pk),
+        owner_kind="user", owner_key=str(other.pk),
+        deleted_by_kind="user", deleted_by_key=str(other.pk),
+        label="a deleted conversation",
+        purge_on=timezone.localdate() + datetime.timedelta(days=30),
+    )
     world = World(
         other=other, agent=agent, default_slug=DEFAULT_AGENTS[0].slug,
         conversation=conversation, turn=turn, document=document, category=category,
         queue_job=queue_job, connection=connection, group=group, entitlement=entitlement,
-        model_set=model_set, workstream=workstream,
+        model_set=model_set, workstream=workstream, ticket=ticket,
     )
     if "vision" in settings.FARABUNKER_FEATURES:
         world.generation = make_generation(**owner_fields(principal))

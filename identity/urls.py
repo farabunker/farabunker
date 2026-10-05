@@ -9,8 +9,8 @@ from django.urls import path
 
 from identity.views import (
     LoginView, LogoutView, PasswordChangeDoneView, PasswordChangeView,
-    entitlement_edit, entitlements, group_edit, groups, settings_page,
-    user_create, user_edit, users,
+    deleted_page, deleted_purge, deleted_restore, entitlement_edit, entitlements,
+    group_edit, groups, settings_page, user_create, user_edit, users,
 )
 
 urlpatterns = [
@@ -27,4 +27,7 @@ urlpatterns = [
     path("groups/<int:pk>/edit/", group_edit, name="identity-group-edit"),
     path("entitlements/", entitlements, name="identity-entitlements"),
     path("entitlements/<int:pk>/", entitlement_edit, name="identity-entitlement-edit"),
+    path("deleted/", deleted_page, name="identity-deleted"),
+    path("deleted/<int:pk>/restore/", deleted_restore, name="identity-deleted-restore"),
+    path("deleted/<int:pk>/purge/", deleted_purge, name="identity-deleted-purge"),
 ]

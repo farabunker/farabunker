@@ -1,7 +1,11 @@
 {% comment %}
-Every image in `images` (a `rendering.artifact_links` list), as a link
-when its `url` resolved and an honest "not available on this install"
-span when it did not (vision turned off on this box). Included by BOTH
+Every image in `images` (a `rendering.artifact_links` list): a link
+when its `url` resolved and its bytes are there, a plain placeholder
+sentence (`image.placeholder`) in place of a picture whose bytes are
+gone -- never the browser's own bare broken-image icon (owner ruling,
+placeholder wave, 2026-09-29; UAT report step 8c) -- and an honest "not
+available on this install" span when the route itself did not even
+mount (vision turned off on this box). Included by BOTH
 `_turn_card.html` (`images=card.images`) and `_tool_card.html`
 (`images=tool.images`), which is what `_turn_block.html`'s own comment
 already argues for the card loop one level up: two copies of this same
@@ -9,7 +13,9 @@ already argues for the card loop one level up: two copies of this same
 empty-url fallback (CQ-12).
 {% endcomment %}
 {% for image in images %}
-  {% if image.url %}
+  {% if image.placeholder %}
+  <span class="muted">{{ image.placeholder }}</span>
+  {% elif image.url %}
   <a href="{{ image.url }}"><img src="{{ image.url }}" alt="{{ image.reference }}"></a>
   {% else %}
   <span class="muted">{{ image.reference }} (not available on this install)</span>

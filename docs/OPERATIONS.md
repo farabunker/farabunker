@@ -73,6 +73,53 @@ This is the operator's home for backing up and restoring a farabunker box (W3,
     watcher never looks at closes a question rather than opening one — see
     below.
 
+## Deleted content and your backups
+
+A backup is **a copy of content that no delete path on this box reaches.** The retention date
+governs the live box. It does not, and cannot, reach into a backup set that was written before
+the delete.
+
+**There is no retroactive purge of existing backup sets**, and this platform will not offer one:
+rewriting a database dump in place would make every backup's integrity unverifiable, and
+selectively deleting from a file copy would leave a set that no longer restores to a coherent
+box.
+
+Deleted content therefore leaves your backups **as rotation ages them out**, on whatever
+schedule you keep. An operator with a retention obligation sets the backup rotation to match the
+deletion date; the two numbers are independent and this platform will not pretend otherwise.
+
+A deleted conversation's generated images are listed individually on the Deleted page, with the
+same date as the conversation itself, and can be restored individually — deleting the chat does
+not leave its pictures sitting in the gallery, unnamed, until a later date nobody was shown.
+
+An operator choosing the organisation posture gets one more guarantee about that date: a
+deleted conversation and the images that went with it always wait it out there, restorable but
+not destroyable early by anybody — with one named exception: an item whose content a failed
+purge already partly destroyed can no longer be restored either way, so finishing its removal
+is offered early there too, since the waiting period has nothing further of that item's content
+left to protect. An ordinary, intact item is unaffected by that exception and still waits for its
+date. An image deleted straight from the gallery, or a document deleted from the library, is not
+on this page yet and is unaffected, on every posture.
+
+**Preview stacks are not a backup layer** and are not covered either. A preview stack is a full
+parallel copy with its own database; deleting something on the live box does not touch it. Tear
+one down when you are done with it.
+
+What a deletion leaves in a *new* backup taken after the purge: the content-free audit rows,
+which are in the dump like every other identity row — and, for now, the queue row of any purged
+conversation, which still carries the person's literal message or prompt in its payload, because
+`models/queue` has no retention handler yet (see ADR 0020's residue list, decision 7, for the full
+accounting). An operator reading an `InferenceJob` payload from a backup for a conversation
+somebody deleted and purged today will find the message still there.
+
+An operator who would rather the retention date be enforced on a schedule than rely on the
+platform's own prune-on-write can run `manage.py purge_deleted` from cron: each run **starts**
+from at most `--limit` due items (default 25, the same bound the on-write sweep uses), never every
+item whose date has arrived in one pass — but may **destroy** more than `--limit` items, because
+destroying a chat destroys the pictures it carried, each of which was listed with its own date on
+the Deleted page. A box with more due items than the limit drains its backlog across several runs,
+not in the one that first catches up to it.
+
 ## `data/notes/`: why the watcher must never be pointed at it
 
 `config/settings.py::NOTES_DIR` (`DATA_DIR / "notes"`) is **deliberately NOT

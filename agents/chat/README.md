@@ -1034,45 +1034,74 @@ built here.
 
 `POST /chat/c/<uuid>/delete/` (`agents/chat/views/conversations.py`)
 looks the conversation up through `visible_conversations` (ruling 4c,
-so a bad id is a real 404) and calls `.delete()`.
+so a bad id is a real 404) and calls `agents.visibility.
+delete_conversation` — which, since deletion semantics, no
+longer erases anything. It calls `identity.retention.delete_content`,
+which writes one `DeletionTicket`, records a content-free
+`content.deleted` event, and returns the ticket. **The click hides the
+thread; it does not remove it.** `visible_conversations` excludes every
+ticketed key on the base queryset, so the conversation vanishes from
+every reader immediately, but the row, its turns, its shares, its
+attachment claims and its chat-scoped documents all survive the request
+untouched.
 
-**The turns go with it.** `Turn.conversation` is `on_delete=CASCADE`
-(`agents/models.py`), so every turn in the conversation is deleted in
-the same statement.
+**The teardown happens later, together, at a date the click promised.**
+`agents/retention.py::purge_conversation` — registered against
+`identity/cascades.py`'s retention registry from `agents/apps.py`,
+FILES band — runs when that date arrives (`identity.retention.sweep`,
+triggered on every delete, on every Deleted-page view, and by the
+periodic command) and destroys the conversation's turns, shares,
+attachment claims, chat-scoped documents and generated images together,
+in one transaction. `Turn.conversation` being `on_delete=CASCADE`
+(`agents/models.py`) is what removes the turns in that same statement,
+same as it always was — it now just runs at that later moment rather
+than at the click.
 
-**The audit does not.** `Turn.invocation` is `on_delete=SET_NULL` —
-but the direction that actually matters here is that `ToolInvocation`
-holds no foreign key back to `Turn` or `Conversation` at all; it is
-`Turn` that points at it. Deleting a conversation's turns therefore
-never reaches the `ToolInvocation` table by any cascade path — every
-row this conversation's tool calls produced survives, `outcome`,
-`principal_key`, `text`, and `error` all intact, exactly as the
-2026-08-27 addendum's consequence 3 designed it: the audit row is not
-owned by the conversation table, precisely so deleting a conversation
-can never erase the record of what was called. `test_delete.py::
-TestTheAuditSurvives` pins both an OK and an ERROR invocation surviving
-with their fields unchanged.
+**The audit is never reached, at either moment.** `Turn.invocation` is
+`on_delete=SET_NULL` — but the direction that actually matters here is
+that `ToolInvocation` holds no foreign key back to `Turn` or
+`Conversation` at all; it is `Turn` that points at it. Deleting (or
+tearing down) a conversation's turns therefore never reaches the
+`ToolInvocation` table by any cascade path. What changes instead, at
+teardown, is content: `agents.retention.scrub_tool_records` blanks
+`args`, `text` and `error` on every invocation id the teardown collected
+from this conversation's turns before they were deleted, and keeps the
+rest of the row — `outcome`, `principal_key`, `tool_key`, timings —
+exactly as the 2026-08-27 addendum's consequence 3 designed it: the
+audit row is not owned by the conversation table, precisely so a
+conversation's teardown can never erase the record of what was called,
+only the words it carried. `test_delete.py::TestTheAuditSurvives` pins
+the click leaving `ToolInvocation` untouched; `agents/tests/
+test_retention.py::TestTheToolRecordScrub` pins the scrub itself.
 
 **The agent is untouched.** `Conversation.agent` is `PROTECT` in the
 *other* direction — an agent can never be deleted while a conversation
-still references it — and deleting the conversation does not touch the
-agent row either; `test_delete.py::TestTheAgentIsUntouched` pins it.
+still references it — and neither the click nor the later teardown
+touches the agent row; `test_delete.py::TestTheAgentIsUntouched` pins
+it.
 
-**The index confirms it (chat-polish P3.1, D4)** — `conversation_delete`
-calls `django.contrib.messages.info(request, "Conversation deleted.")`
-before its redirect, and `chat/index.html` renders `{% if messages %}`
-the same way `tools/rag/templates/rag/documents.html` and
-`rag/history.html` already do (the framework is installed platform-wide
-— `config/settings.py`'s `MIDDLEWARE`/`INSTALLED_APPS`), rather than a
-bespoke `?deleted=1` query flag. Before this, the row simply vanished
-from the list with nothing telling the operator the click had worked.
+**The index confirms it (chat-polish P3.1, D4; two notices now that
+delete writes a ticket)** — `conversation_delete` reads the returned ticket's `purge_on` and
+calls `django.contrib.messages.info(request, ...)` with one of two
+sentences before its redirect: "Conversation deleted. You can restore
+it from Settings → Deleted." ordinarily, or "Conversation deleted
+permanently." when `purge_on` is today or earlier — the box's own
+zero-day retention setting, under which `delete_content`'s own
+unconditional bounded sweep tears the ticket's content down before the
+response even returns, so a restore promise the box could not keep is
+never printed. `chat/index.html` renders `{% if messages %}` the same
+way `tools/rag/templates/rag/documents.html` and `rag/history.html`
+already do (the framework is installed platform-wide —
+`config/settings.py`'s `MIDDLEWARE`/`INSTALLED_APPS`), rather than a
+bespoke `?deleted=1` query flag.
 
 **The control on the page** is a `<details>` disclosure in
 `conversation.html`, modelled on `tools/vision/templates/vision/
 _delete_control.html`: click "Delete this conversation" to reveal the
 real POST form and a "Yes, delete" button, or "Cancel" (a one-line
 `onclick` that is inert without JavaScript) to close it again. No
-`confirm()`/`alert()`/`prompt()` anywhere.
+`confirm()`/`alert()`/`prompt()` anywhere — deletion semantics changed the
+copy behind the click, not the mechanism that raises the form.
 
 ## The conversation sidebar (UI-3b)
 
@@ -2140,16 +2169,20 @@ carried it; a `Document.scope == "conversation"` row (round 12) still
 carries EXACTLY one attachment row, enforced in the write path (`tools.
 rag.services._attach`, moved from the now-retired `tools.rag.views.
 _attach`). Deleting a conversation (`agents.visibility.
-delete_conversation`) removes its attachment rows through the SAME
+delete_conversation`, under deletion semantics) only tickets it — the attachment
+rows survive that click untouched. They are removed later, at PURGE,
+by `agents.retention.purge_conversation`, through the SAME
 `agents.contracts.attachments` cleanup slot the provider registry uses
-for reads, wrapped in its own savepoint (round 11 fix-2 Important N-1)
-— for a chat-scoped attachment, that cascade deletes the DOCUMENT
-itself (chunks, managed-store files, and the row); for a universal/
-contained one, only the attachment row dies. Post-send removal
-(`chat-attachment-detach`) follows the SAME split for a single row:
-uploader-only, chat-scoped → full delete via `tools.rag.services.
-delete_document`; universal/contained → unlink only, document
-untouched.
+for reads, wrapped in its own savepoint (the same savepoint the read
+path already opened,
+now inherited by the purge path) — for a chat-scoped attachment, that
+cascade deletes the DOCUMENT itself (chunks, managed-store files, and
+the row); for a universal/contained one, only the attachment row dies.
+Post-send removal (`chat-attachment-detach`) is unaffected by any of
+this — an uploader can still remove a single attachment immediately —
+and follows the SAME split for that one row: uploader-only, chat-scoped
+→ full delete via `tools.rag.services.delete_document`;
+universal/contained → unlink only, document untouched.
 
 An image row (`doc.is_image`, off the same provider) also renders a small
 thumbnail inside its own chip, served by the very `rag-document-file` route the

@@ -244,6 +244,7 @@ class TestTheOverview:
         assert set(result.data) == {
             "content_hash", "posture", "library_posture", "admin_sees_content",
             "session_idle_minutes", "time_aware", "unreported_settings",
+            "retention_days", "queue_retention_days", "audit_detail",
         }
 
     def test_it_names_library_and_queue_as_not_reported_grouped_by_page(self):
@@ -267,6 +268,97 @@ class TestTheOverview:
         # live on the Queue page.
         assert "Job execution --" in result.text
         assert set(result.data["unreported_settings"]) == {"Library", "Job execution"}
+
+    def test_it_reports_the_retention_policy_in_plain_words(self):
+        """The three retention
+        columns added to `IdentitySettings` (`retention_days`,
+        `queue_retention_days`, `audit_detail`) are operator-editable
+        and readable off the SAME `settings_row()` this tool already
+        fetches once -- so they are REPORTED, not named in `UNREPORTED_
+        SETTINGS_FIELDS`. The zero/blank edges get their own plain
+        words, the same way `retention_days = 0` and `queue_retention_
+        days = None` each mean something specific on the Retention
+        settings page itself."""
+        from identity.models import IdentitySettings
+
+        with posture(POSTURE_ENTERPRISE):
+            row = IdentitySettings.get_solo()
+            row.retention_days = 45
+            row.queue_retention_days = 3
+            row.audit_detail = True
+            row.save()
+            result = run_overview({}, make_tool_ctx(principal=user_principal(make_admin())))
+        assert result.data["retention_days"] == 45
+        assert result.data["queue_retention_days"] == 3
+        assert result.data["audit_detail"] is True
+        assert "45 days" in result.text
+        assert "3 days" in result.text
+        assert "shown" in result.text
+
+    def test_the_queue_retention_line_discloses_it_is_not_applied_yet(self):
+        """`models/` is untouched by this branch and nothing reads
+        `queue_retention_days` yet, so a line that just printed a number
+        would tell the reader this box's Queue page already behaves
+        that way. Both branches -- a number and "no age limit" -- carry
+        the same disclosure, since neither is enforced today."""
+        from identity.models import IdentitySettings
+
+        with posture(POSTURE_ENTERPRISE):
+            row = IdentitySettings.get_solo()
+            row.queue_retention_days = 3
+            row.save()
+            result = run_overview({}, make_tool_ctx(principal=user_principal(make_admin())))
+        assert "3 days (recorded; the queue does not apply it yet)" in result.text
+
+        with posture(POSTURE_ENTERPRISE):
+            row.queue_retention_days = None
+            row.save()
+            result = run_overview({}, make_tool_ctx(principal=user_principal(make_admin())))
+        assert "no age limit (recorded; the queue does not apply it yet)" in result.text
+
+    def test_the_retention_line_discloses_its_scope(self):
+        """The assistant answers in chat, with no help card beside it to
+        correct an over-claim -- unlike the Deleted page and the two
+        settings help cards, which all carry this same clause. Both
+        branches -- a number and "deleted permanently at once" -- carry
+        it, since a person asking "how long do you keep things I
+        delete" would otherwise read either one as covering everything,
+        including a library document, which is already gone."""
+        from identity.models import IdentitySettings
+
+        with posture(POSTURE_ENTERPRISE):
+            row = IdentitySettings.get_solo()
+            row.retention_days = 45
+            row.save()
+            result = run_overview({}, make_tool_ctx(principal=user_principal(make_admin())))
+        assert "45 days (conversations and the images that were part of them)" in result.text
+
+        with posture(POSTURE_ENTERPRISE):
+            row.retention_days = 0
+            row.save()
+            result = run_overview({}, make_tool_ctx(principal=user_principal(make_admin())))
+        assert ("deleted permanently at once; conversations and the images "
+                "that were part of them") in result.text
+
+    def test_the_zero_and_blank_retention_edges_get_plain_words(self):
+        """`0` and `None` are both LEGAL values with specific meanings
+        (`identity/models.py`'s own field comments) -- "no grace period"
+        and "no age cliff at all" -- and a bare `0`/`None` in the text
+        would read as a missing value rather than a deliberate one."""
+        from identity.models import IdentitySettings
+
+        with posture(POSTURE_ENTERPRISE):
+            row = IdentitySettings.get_solo()
+            row.retention_days = 0
+            row.queue_retention_days = None
+            row.audit_detail = False
+            row.save()
+            result = run_overview({}, make_tool_ctx(principal=user_principal(make_admin())))
+        assert result.data["retention_days"] == 0
+        assert result.data["queue_retention_days"] is None
+        assert "deleted permanently at once" in result.text
+        assert "no age limit" in result.text
+        assert "hidden" in result.text
 
 
 class TestTheOverviewFieldCoverage:
@@ -315,11 +407,13 @@ class TestTheOverviewFieldCoverage:
             )
             assert overlap == set(), (model_name, overlap)
 
-    def test_the_eighteen_the_audit_counted_are_exactly_these_eighteen(self):
+    def test_the_twenty_two_the_audit_counted_are_exactly_these_twenty_two(self):
         """Pinned against the backend audit's own Dimension 1 count plus
-        round-3 hardening's one addition and the one-timeout task's own
-        (7 + 5 + 4 + 1 + 1 = 18 OPERATOR-EDITABLE fields, as of
-        2026-09-17), so a future field silently changes this number
+        round-3 hardening's one addition, the one-timeout task's own, the
+        deletion-semantics task's three retention columns, and the queue
+        memory-governance track's one
+        (7 + 5 + 4 + 1 + 1 + 3 + 1 = 22 OPERATOR-EDITABLE fields, as of
+        2026-09-21), so a future field silently changes this number
         rather than the accounting above. The two `updated_at`
         bookkeeping timestamps are excluded from this count on purpose --
         they are not operator-editable settings at all -- but still
@@ -336,18 +430,37 @@ class TestTheOverviewFieldCoverage:
         added `JobSettings.response_timeout_seconds`, for the identical
         reason -- import law, not a policy choice about this one field.
 
-        EIGHTEEN BECAME NINETEEN when the queue memory-governance track
-        (`models/queue/migrations/0005`, 2026-09-21) added three
-        `JobSettings` fields, but only ONE of them is operator-editable:
-        `kind_wait_seconds` (the per-kind wait-ceiling map, edited on the
-        Job execution page's fourth form) joins the import-law unreported
-        set with its siblings, for the unchanged reason. `detected_memory_
-        bytes`/`detected_memory_at` are the OTHER shape -- worker-written
-        measurements, never operator-set (`_DETECTED_MEMORY_REASON` in the
-        module under test) -- so, exactly like the two `updated_at`
-        timestamps above, they are named in `UNREPORTED_SETTINGS_FIELDS`
-        but excluded from this operator-editable count by name below,
-        not folded into `import_law_unreported`."""
+        FROM EIGHTEEN, THE TREE FORKED, and both forks reached
+        twenty-one and nineteen independently before this merge put them
+        back together.
+
+        EIGHTEEN BECAME TWENTY-ONE, on this branch, when deletion
+        semantics' `IdentitySettings.retention_days`/`queue_retention_
+        days`/`audit_detail` joined the REPORTED set instead -- unlike
+        the Library/Job-execution fields, these three are readable off
+        the same `settings_row()` this tool already fetches, so import
+        law names no reason to exclude them.
+
+        EIGHTEEN ALSO BECAME NINETEEN, separately, when the queue
+        memory-governance track (`models/queue/migrations/0005`,
+        2026-09-21) added three `JobSettings` fields, but only ONE of
+        them is operator-editable: `kind_wait_seconds` (the per-kind
+        wait-ceiling map, edited on the Job execution page's fourth
+        form) joins the import-law unreported set with its siblings, for
+        the unchanged reason. `detected_memory_bytes`/`detected_memory_
+        at` are the OTHER shape -- worker-written measurements, never
+        operator-set (`_DETECTED_MEMORY_REASON` in the module under
+        test) -- so, exactly like the two `updated_at` timestamps above,
+        they are named in `UNREPORTED_SETTINGS_FIELDS` but excluded from
+        this operator-editable count by name below, not folded into
+        `import_law_unreported`.
+
+        TWENTY-ONE AND NINETEEN MERGE TO TWENTY-TWO: the queue track's
+        only operator-editable addition is `kind_wait_seconds` (one
+        field -- the other two are the worker-written pair this count
+        was never going to include), so it carries this branch's own
+        twenty-one one further rather than the two branches colliding.
+        """
         from agents.settings_tools import REPORTED_SETTINGS_FIELDS, UNREPORTED_SETTINGS_FIELDS
 
         # Worker-written measurements, not operator-editable settings --
@@ -359,9 +472,9 @@ class TestTheOverviewFieldCoverage:
             len(fields) for model, fields in UNREPORTED_SETTINGS_FIELDS.items()
             if model in ("RagSettings", "JobSettings")
         ) - len(job_settings_not_operator_editable)
-        assert reported_count == 5
+        assert reported_count == 8
         assert import_law_unreported == 14
-        assert reported_count + import_law_unreported == 19
+        assert reported_count + import_law_unreported == 22
 
     def test_bookkeeping_fields_are_named_separately_from_import_law_fields(self):
         from agents.settings_tools import UNREPORTED_SETTINGS_FIELDS

@@ -355,6 +355,9 @@ _FIELD_ANCHORS: dict[str, dict[str, str]] = {
         "library_posture": "library-posture",
         "admin_sees_content": "admin-sees-content",
         "session_idle_minutes": "session-idle",
+        "retention_days": "retention",
+        "queue_retention_days": "queue-retention",
+        "audit_detail": "audit-detail",
     },
     "ChatSettings": {
         "time_aware": "time-aware",
@@ -494,13 +497,15 @@ class TestTheModelFieldCoverage:
             excluded = {f for (m, f) in _NAMED_EXCLUSIONS if m == model_name}
             assert set(field_anchors) & excluded == set(), model_name
 
-    def test_the_eighteen_the_audit_counted_are_exactly_these_eighteen(self):
+    def test_the_twentyfour_the_audit_counted_are_exactly_these_twentyfour(self):
         """Pinned against the backend audit's own Dimension 1 count, plus
-        round-3 hardening's one addition and the one-timeout task's own
-        (7 + 4 + 6 + 1 = 18 operator-editable fields, as of 2026-09-17) --
-        the two `updated_at` bookkeeping timestamps are excluded from
-        THIS count on purpose, same as `agents/settings_tools.py`'s own
-        sibling test.
+        round-3 hardening's one addition, the one-timeout task's own, the
+        deletion-semantics task's three, and the queue memory-governance
+        track's three
+        (7 + 1 + 7 + 9 = 24 fields mapped, as of 2026-09-21) -- the two
+        `updated_at` bookkeeping timestamps are excluded from THIS count
+        on purpose, same as `agents/settings_tools.py`'s own sibling
+        test.
 
         F1 (Coherence Wave C): all of them are MAPPED. The `JobSettings`
         fields used to make up the count as named exclusions ("no card
@@ -522,11 +527,21 @@ class TestTheModelFieldCoverage:
         response timeout -- mapped the identical way, on its own section
         of the same page, for the same reason.
 
-        EIGHTEEN BECAME TWENTY when Task 15 of the queue memory-
-        governance track (2026-09-21) added `JobSettings.detected_
-        memory_bytes`/`detected_memory_at`, the worker-measured memory
-        prefill shown beside the budget. THIS IS A DIFFERENT KIND OF
-        ADDITION than the four before it: neither field is operator-
+        FROM EIGHTEEN, THE TREE FORKED, and both forks reached
+        twenty-one independently before this merge put them back
+        together.
+
+        EIGHTEEN BECAME TWENTY-ONE, on this branch, when the
+        deletion-semantics task (2026-09-21) added `IdentitySettings.
+        retention_days`, `.queue_retention_days` and `.audit_detail` --
+        the Retention section on Identity & security -- mapped the
+        identical way.
+
+        EIGHTEEN ALSO BECAME TWENTY, separately, when Task 15 of the
+        queue memory-governance track (2026-09-21) added `JobSettings.
+        detected_memory_bytes`/`detected_memory_at`, the worker-measured
+        memory prefill shown beside the budget. THIS IS A DIFFERENT KIND
+        OF ADDITION than the three before it: neither field is operator-
         editable (there is no form control for either, only an
         informational note), so they are not two more of "the audit's
         eighteen" -- the audit counted operator-editable fields, and this
@@ -538,18 +553,27 @@ class TestTheModelFieldCoverage:
         rather than carving out an exception for it; `queue_excluded`
         stays `0` because neither is a `_NAMED_EXCLUSIONS` entry either.
 
-        TWENTY BECAME TWENTY-ONE when Task 16 of the same track
-        (2026-09-21) added `JobSettings.kind_wait_seconds`'s fourth form
-        (`"waits"`, `id="kind-waits"`) -- back to an OPERATOR-EDITABLE
-        control, same category as the audit's own eighteen, not the
-        display-only pair just above. ONE model field, ONE `HelpField`
-        anchor, even though its own page renders it as one row per
-        registered job kind: `test_no_two_fields_on_one_model_share_an_
-        anchor` above is about MODEL fields sharing an anchor, and this
-        is exactly one field carrying one."""
+        TWENTY BECAME TWENTY-ONE, still on the queue track alone, when
+        Task 16 of the same track (2026-09-21) added `JobSettings.
+        kind_wait_seconds`'s fourth form (`"waits"`, `id="kind-waits"`)
+        -- back to an OPERATOR-EDITABLE control, same category as the
+        audit's own eighteen, not the display-only pair just above. ONE
+        model field, ONE `HelpField` anchor, even though its own page
+        renders it as one row per registered job kind: `test_no_two_
+        fields_on_one_model_share_an_anchor` above is about MODEL fields
+        sharing an anchor, and this is exactly one field carrying one.
+
+        THE TWO TWENTY-ONES MERGE TO TWENTY-FOUR: the Retention fields
+        live on `IdentitySettings` and the queue-track's fields live on
+        `JobSettings`, so nothing either side added collides with the
+        other -- this merge carries both sets of three on top of the
+        same shared eighteen.
+        """
         mapped_count = sum(len(v) for v in _FIELD_ANCHORS.values())
         queue_excluded = sum(1 for (m, _f) in _NAMED_EXCLUSIONS if m == "JobSettings")
-        # 4 IdentitySettings + 1 ChatSettings + 7 RagSettings + 7 JobSettings
-        # (operator-editable) + 2 JobSettings (worker-measured, display-only)
-        assert mapped_count == 21
+        # 7 IdentitySettings + 1 ChatSettings + 7 RagSettings + 9 JobSettings
+        # (6 operator-editable base + max_queued_per_principal +
+        # response_timeout_seconds + kind_wait_seconds, plus 2 display-only
+        # detected_memory_bytes/detected_memory_at)
+        assert mapped_count == 24
         assert queue_excluded == 0

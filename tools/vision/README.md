@@ -497,6 +497,11 @@ raises this one specifically rather than folding it into the role's own
   no request thread sits blocked on a generation.
 - **`delete_job(job)`** — deletes the DB rows (cascading to `JobInput`/`GeneratedOutput`)
   and the job's whole directory (`store.remove_job_files`).
+- **`delete_jobs(job_ids) -> int`** — `delete_job` for every id in `job_ids`, by pk,
+  returning how many were actually deleted. This is the one place outside
+  `visibility.py` that queries `GenerationJob.objects` directly (IA-1's closed set of
+  two), which is what lets the retention purge below reach a job it must destroy
+  regardless of who owns it or whether anyone may currently see it.
 - **`stage_upload(param_key, uploaded) -> "input:<id>"`** — records a browser
   upload as a stored input that has no job yet, and returns the ordinary
   reference for it. This is what lets the page enqueue: a queue payload is JSON
@@ -949,6 +954,75 @@ flag-guarded on `"vision"` in `FARABUNKER_FEATURES` — with the feature off
 there is no `/vision/` route at all (`config/urls.py`), so the sidebar must
 not try to `reverse()` it either (`foundation/settings_area.py::Entry.
 feature`, `foundation/templates/_settings.html`).
+
+## Deletion
+
+A ticketed generation (spec: deletion semantics) is excluded from
+`visible_jobs` the moment its ticket exists — see "Visibility" above —
+and its rows and files are destroyed when the ticket's date arrives, or
+on an explicit "Delete permanently". The two file-serving routes are
+refused the same way: even reached by its direct URL, a ticketed job's
+stored image or stored input answers the same 404 as one this principal
+could never read in the first place, so a deleted picture cannot be
+fetched by a link that was copied or bookmarked before it was deleted.
+
+This column registers TWO things for deletion, both in
+`tools/vision/apps.py::VisionConfig.ready()`, alongside its role,
+operations, job kind and tools (see above). The first is a RESOLVER, not
+a destroyer: `agents.contracts.artifacts.register_artifact_children`
+names `tools/vision/retention.py::resolve_artifact_jobs`, and a deleted
+conversation hands it the same two things it collects at delete time —
+the `output:<id>`/`input:<id>` artifact references its turns carried, and
+the generation ids sitting in `Turn.data["id"]`. `resolve_artifact_jobs`
+maps both channels to `(job_id, owner_kind, owner_key)` triples for the
+`GenerationJob`s that still exist — an `output`/`input` reference is one
+FK hop from its job, and several outputs share one job, so the mapping
+dedupes by job — and DESTROYS NOTHING: `agents.retention.
+conversation_children` turns every triple it answers into a ticket of
+its own, `vision_job`, linked back to the conversation's own ticket as a
+child. THE OWNER RIDES ALONG so `identity.retention.delete_content` can
+stamp that child ticket from the IMAGE's own owner, never the
+conversation's (owner ruling, 2026-09-28) — `identity/` may not import
+this column and so cannot look the owner up itself (rule 4), and a
+workstream share or an administrator's duplicate can leave a generated
+image owned by somebody other than the conversation it sits inside. That
+owner is what a permanent delete of the parent conversation checks
+before destroying this child at all: the clicker's own images go with
+it, one belonging to somebody else keeps its own ticket, date and
+Restore instead (a genuinely ownerless job — every row written before
+this column's owner columns existed — counts as the conversation's own,
+since no principal can ever match a blank pair); the sweep is exempt
+from that check entirely and always takes everything on the date,
+whoever it belongs to. The resolver checks existence, once, for the
+whole batch, because a stored generation id can outlive the job it
+names — the turn keeps the id after the picture was deleted from the
+gallery — and every key it answers is about to become something that
+must be true: a ticket for a job nobody has would be a "Generated
+image" row on the Deleted page with a date and a Restore button, naming
+a picture nobody can restore and nothing will ever destroy.
+
+The second registration is `tools/vision/retention.py::purge_job`, the
+`vision_job` kind's handler (`identity.contracts.cascades.RetentionHandler`,
+registered in the same `ready()`), which destroys exactly one generation on
+its own ticket's date — reached directly through the gallery, or through
+the child ticket a conversation's delete wrote for it — through
+`services.delete_jobs`, never querying `GenerationJob.objects` itself (see
+`delete_jobs` above). Every job either of these two registrations reaches
+goes through `services.delete_job` (inside `delete_jobs`), whose own
+best-effort engine-side sweep (`store.remove_engine_files`, which never
+raises) is **the only reach this platform has into `/engine/output` and
+`/engine/input`** outside the Engine files page — those two directories
+are tracked by no row at all, and that page (above) remains the operator's
+own manual door onto them, for whatever a sweep never reached.
+
+**Accepted residue.** A generation whose tool turn was never written at
+all — the job row was created and the chat turn died before it (a
+crash, a kill, a cancelled turn) — carries no artifact reference and no
+`Turn.data["id"]` anywhere a conversation purge can read. It is not lost:
+it stays visible to its own owner in the gallery, where deleting it
+directly writes the same `vision_job` ticket and reaches the same purge
+path. It is simply not reachable *through a conversation's own delete*,
+which is the residue spec section 10.7 records rather than papers over.
 
 ## The poll-driven page and its no-JS fallback
 

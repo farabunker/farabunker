@@ -1,3 +1,4 @@
+from identity.contracts import actions
 from identity.contracts.actions import AUDIT_ACTIONS, SOURCE_CHOICES
 
 
@@ -36,11 +37,17 @@ class TestTheCatalogue:
         `RagSettings`, so it adds no new one), `connection.`
         (`models.registry.models.ModelConnection` create/edit/delete),
         and `role.` (`models.registry.models.RoleBinding` assign/
-        unassign) -- pushing the count from thirteen to sixteen."""
+        unassign) -- pushing the count from thirteen to sixteen.
+        Deletion semantics (2026-09-21) adds `content.` -- deleting,
+        restoring and purging a conversation, a document, an Ask record
+        or a generated image is one fact about content itself, not about
+        any one of those tables, so it has no earlier prefix to reuse --
+        pushing the count from sixteen to seventeen."""
         prefixes = {"identity.", "entitlement.", "grant.", "group.", "library.",
                     "tool.", "share.", "modelset.", "agent.", "flow.", "vision.",
-                    "workstream.", "conversation.", "queue.", "connection.", "role."}
-        assert len(prefixes) == 16
+                    "workstream.", "conversation.", "queue.", "connection.", "role.",
+                    "content."}
+        assert len(prefixes) == 17
         for action in AUDIT_ACTIONS:
             assert any(action.startswith(p) for p in prefixes), action
 
@@ -82,13 +89,18 @@ class TestTheCatalogue:
         `ModelConnection` (incl. `footprint_override_bytes`) and
         `RoleBinding` writes were the four unaudited settings surfaces
         the backend audit named with no recorded rationale, and the
-        recorded ruling closing that gap is "audit all four".
-        `agent.created`/`agent.edited` are a TENTH amendment, the chat
+        recorded ruling closing that gap is "audit all four". Deletion
+        semantics (2026-09-21) is a TENTH amendment: three `content.`
+        actions for a deleted/restored/purged item, plus
+        `identity.retention_policy_changed` for the three
+        `IdentitySettings` retention fields as one settings domain --
+        see `TestTheContentActions` below.
+        `agent.created`/`agent.edited` are an ELEVENTH amendment, the chat
         cluster's agent form (feature B, task 6) -- the first rows this
         box writes for an agent that nobody shipped. Both reuse the
         existing `agent.` prefix the labelling pair already opened, so
-        the prefix count above stays at sixteen while the vocabulary
-        grows by two."""
+        the prefix count above is unaffected by this amendment while the
+        vocabulary grows by two."""
         assert "entitlement.created" in AUDIT_ACTIONS
         assert "share.revoked" in AUDIT_ACTIONS
         assert "modelset.created" in AUDIT_ACTIONS
@@ -124,9 +136,13 @@ class TestTheCatalogue:
         assert "connection.deleted" in AUDIT_ACTIONS
         assert "role.assigned" in AUDIT_ACTIONS
         assert "role.unassigned" in AUDIT_ACTIONS
+        assert "content.deleted" in AUDIT_ACTIONS
+        assert "content.restored" in AUDIT_ACTIONS
+        assert "content.purged" in AUDIT_ACTIONS
+        assert "identity.retention_policy_changed" in AUDIT_ACTIONS
         assert "agent.created" in AUDIT_ACTIONS
         assert "agent.edited" in AUDIT_ACTIONS
-        assert len(AUDIT_ACTIONS) == 70
+        assert len(AUDIT_ACTIONS) == 74
 
     def test_no_name_is_longer_than_the_column(self):
         """`AuditEvent.action` is CharField(max_length=64)."""
@@ -134,3 +150,25 @@ class TestTheCatalogue:
 
     def test_the_three_sources(self):
         assert [value for value, _ in SOURCE_CHOICES] == ["web", "cli", "admin"]
+
+
+class TestTheContentActions:
+    """Spec section 3.12: three content actions and one settings action,
+    and no fourth content action -- a `content.held` name would be an
+    action nothing in this delivery can write, and `AuditEvent.save()`
+    raises on an unlisted action precisely so the tuple stays honest."""
+
+    def test_the_three_content_actions_are_declared(self):
+        assert actions.CONTENT_DELETED == "content.deleted"
+        assert actions.CONTENT_RESTORED == "content.restored"
+        assert actions.CONTENT_PURGED == "content.purged"
+        for name in (actions.CONTENT_DELETED, actions.CONTENT_RESTORED,
+                     actions.CONTENT_PURGED):
+            assert name in AUDIT_ACTIONS
+
+    def test_the_settings_action_is_one_per_domain_not_one_per_field(self):
+        assert actions.RETENTION_POLICY_CHANGED == "identity.retention_policy_changed"
+        assert actions.RETENTION_POLICY_CHANGED in AUDIT_ACTIONS
+
+    def test_no_hold_action_is_declared_before_the_control_that_writes_it(self):
+        assert not [a for a in AUDIT_ACTIONS if a.endswith(".held")]

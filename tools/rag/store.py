@@ -200,9 +200,29 @@ def assert_inside_platform_dirs(resolved: Path) -> None:
 
 
 def remove_document_files(doc_id: int) -> None:
-    """Delete a document's entire managed-store directory tree, if present.
-    Safe to call when the directory doesn't exist (e.g. the document was
-    never ingested via the managed store, or was already cleaned up)."""
+    """Delete a document's entire managed-store directory tree.
+
+    Safe to call when the directory doesn't exist -- e.g. the document
+    was never ingested via the managed store, was already cleaned up, or
+    vanished between two overlapping attempts to purge it (the retry
+    contract `identity/contracts/cascades.py::RetentionHandler` states:
+    a handler re-run on a partially-purged item must complete, not
+    raise). NO EXISTENCE CHECK FIRST -- a check here is exactly the
+    window that makes that race possible: `dest_dir.exists()` can be
+    true and then false by the time `shutil.rmtree` actually runs, so a
+    caller cannot rely on it, only on `shutil.rmtree` itself reporting
+    what it finds. Absence is not an error and is the only thing this
+    tolerates: any OTHER failure -- a permission error, a busy mount --
+    still propagates, deliberately NOT `ignore_errors=True` the way the
+    best-effort cleanup call sites elsewhere in this package use
+    (`ingest.py`, `media.py`, after an already-failed attempt, where a
+    leaked directory is the only cost). This is the purge path, whose
+    caller retries and must be able to trust that a reported success
+    means the bytes are truly gone -- swallowing a permission error here
+    would report success while they remain.
+    """
     dest_dir = document_dir(doc_id)
-    if dest_dir.exists():
+    try:
         shutil.rmtree(dest_dir)
+    except FileNotFoundError:
+        logger.info("tools.rag.store: nothing to remove at %s", dest_dir)

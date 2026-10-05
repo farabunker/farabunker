@@ -21,6 +21,10 @@ from identity.contracts.actions import SOURCE_WEB
 from identity.contracts.postures import (
     LIBRARY_LOCKED, LIBRARY_OPEN, POSTURE_OPEN, POSTURE_PERSONAL, POSTURES,
 )
+from identity.contracts.retention import (
+    LABEL_QUEUE_RETENTION_DAYS, LABEL_RETENTION_DAYS, QUEUE_RETENTION_DAYS_MAX,
+    QUEUE_RETENTION_DAYS_MIN, RETENTION_DAYS_MAX, RETENTION_DAYS_MIN,
+)
 from identity.models import Entitlement, EntitlementGrant, IdentitySettings, User
 from identity.ownership import owned_models
 
@@ -29,6 +33,38 @@ from identity.ownership import owned_models
 # named here once rather than spelling `(LIBRARY_OPEN, LIBRARY_LOCKED)` at
 # each call site that must validate one.
 _LIBRARY_POSTURES = (LIBRARY_OPEN, LIBRARY_LOCKED)
+
+# `None` IS A LEGAL VALUE for `queue_retention_days` -- it is how "no age
+# cliff" is expressed -- so it cannot double as "the caller did not
+# supply this field". One sentinel, named once.
+_UNSET = object()
+
+
+def _retention_int(value, *, label: str, low: int, high: int) -> int:
+    """One bounded integer for the retention policy, or `ServiceRefused`.
+
+    ONE RANGE CHECK, NOT TWO. `foundation.settings_bounds.
+    exceeds_field_ceiling` exists for a field whose only bound is the
+    COLUMN's -- a value large enough to overflow `PositiveIntegerField`
+    reaching `.save()` as a `DataError` on a never-500 surface. These
+    two fields have a real policy bound of 3650 days, which is nine
+    orders of magnitude below that ceiling, so the range check below
+    already refuses everything the ceiling check would have, with the
+    same sentence. A second check that can never fire is a second thing
+    to keep in agreement with the first.
+
+    The bound is stated in exactly two places: here, where the refusal
+    happens, and on the form field's `min_value`/`max_value`, which is
+    the browser's own hint. Both read it from
+    `identity/contracts/retention.py`; neither types a number.
+    """
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ServiceRefused(f"{label}: {value!r} is not a number of days.") from exc
+    if not low <= number <= high:
+        raise ServiceRefused(f"{label}: {number} is outside the range {low}-{high}.")
+    return number
 
 
 class ServiceRefused(ValueError):
@@ -269,13 +305,19 @@ def _refuse_a_switch_away_from_open() -> None:
 def set_posture(actor, *, posture: str | None = None, library_posture: str | None = None,
                 admin_sees_content: bool | None = None,
                 session_idle_minutes: int | None = None,
+                retention_days: int | None = None,
+                queue_retention_days=_UNSET,
+                audit_detail: bool | None = None,
                 source: str = SOURCE_WEB) -> IdentitySettings:
     """Write the posture row, with one audit event per AUDITED field
-    changed -- `posture`, `library_posture` and `admin_sees_content`.
-    `session_idle_minutes` carries no catalogue action of its own (it is
-    an operational tuning knob, not a change to who can see what) and is
-    applied silently -- said here so this docstring does not quietly
-    promise more than the audit trail records.
+    changed -- `posture`, `library_posture`, `admin_sees_content`, and
+    the three retention fields (`retention_days`, `queue_retention_days`,
+    `audit_detail`), each of which writes under the one
+    `RETENTION_POLICY_CHANGED` action. `session_idle_minutes` carries no
+    catalogue action of its own (it is an operational tuning knob, not a
+    change to who can see what) and is applied silently -- said here so
+    this docstring does not quietly promise more than the audit trail
+    records.
 
     A SWITCH, NOT A MIGRATION: this writes columns on one row and
     nothing else. It does not create, delete or rewrite any user; it
@@ -349,6 +391,53 @@ def set_posture(actor, *, posture: str | None = None, library_posture: str | Non
                 f"{session_idle_minutes!r} is not a valid number of minutes."
             ) from exc
         row.session_idle_minutes = max(0, minutes)
+
+    # THE RETENTION POLICY (spec section 4, owner ruling section 11.1):
+    # three fields, ONE audit action, the literal column in `detail` --
+    # `LIBRARY_SETTINGS_UPDATED`'s "one action per settings DOMAIN" rule,
+    # rather than the three-way split the three security postures get.
+    # Those three are semantically distinct postures; these three are one
+    # retention policy expressed as three knobs.
+    #
+    # REFUSED BEFORE `.save()`, like every other bound on this row, and
+    # the bounds live HERE rather than as database constraints
+    # (`foundation/settings_bounds.py`'s own recorded rule).
+    if retention_days is not None:
+        days = _retention_int(retention_days, label=LABEL_RETENTION_DAYS,
+                              low=RETENTION_DAYS_MIN, high=RETENTION_DAYS_MAX)
+        if days != row.retention_days:
+            row.retention_days = days
+            events.append((actions.RETENTION_POLICY_CHANGED,
+                           {"field": "retention_days", "to": days}))
+
+    if queue_retention_days is not _UNSET:
+        if queue_retention_days in (None, ""):
+            # BLANK IS HOW "NO AGE CLIFF" IS SAID -- the FIFO
+            # `retention_limit` alone then bounds the queue table.
+            value = None
+        elif str(queue_retention_days).strip() == "0":
+            # REFUSED BEFORE THE RANGE CHECK, so the operator gets the
+            # sentence that tells them what to do instead. `0` is inside
+            # no legal range for this field -- `1` is the floor -- but
+            # "outside the range 1-3650" would not explain that blank is
+            # the way to say "keep them until the row limit bites".
+            raise ServiceRefused(
+                f"{LABEL_QUEUE_RETENTION_DAYS}: 0 is not a number of days. "
+                "Leave it blank to keep finished jobs until the queue's own "
+                "row limit removes them.")
+        else:
+            value = _retention_int(
+                queue_retention_days, label=LABEL_QUEUE_RETENTION_DAYS,
+                low=QUEUE_RETENTION_DAYS_MIN, high=QUEUE_RETENTION_DAYS_MAX)
+        if value != row.queue_retention_days:
+            row.queue_retention_days = value
+            events.append((actions.RETENTION_POLICY_CHANGED,
+                           {"field": "queue_retention_days", "to": value}))
+
+    if audit_detail is not None and audit_detail != row.audit_detail:
+        row.audit_detail = audit_detail
+        events.append((actions.RETENTION_POLICY_CHANGED,
+                       {"field": "audit_detail", "to": audit_detail}))
 
     with transaction.atomic():
         row.save()

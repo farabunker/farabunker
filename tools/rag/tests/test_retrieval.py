@@ -561,6 +561,92 @@ class TestRetrieveNodes:
         # ROUND 12 REVIEW I-3: see the sibling test's own comment above.
         assert kwargs["filters"].filters[0].filters[0].filters[0].key == "entitlements"
 
+    @patch("tools.rag.retrieval.gateway")
+    @patch("tools.rag.retrieval.get_index")
+    def test_a_ticketed_documents_id_reaches_the_retriever_as_a_not_in_clause(
+        self, mock_get_index, mock_gateway
+    ):
+        """Proves the REAL threading through `retrieve_nodes` end to
+        end -- not just `_visibility_filters`'s own output in isolation
+        (`test_retrieval_visibility.py::TestTheDeletedIdsClause` already
+        covers that half): a document ticketed through the real service
+        shows up on the retriever's OWN `filters` kwarg as a `file_id
+        NOT IN (...)` leg."""
+        from identity.contracts.actions import SOURCE_WEB
+        from identity.contracts.principals import OPEN_PRINCIPAL
+        from identity.contracts.retention import KIND_DOCUMENT
+        from identity.retention import delete_content
+        from tools.rag.tests._helpers import make_document
+
+        document = make_document()
+        delete_content(OPEN_PRINCIPAL, kind=KIND_DOCUMENT, key=str(document.pk),
+                       owner=document, source=SOURCE_WEB)
+
+        mock_index, _, _ = _stub_index(mock_get_index)
+        settings_row = RagSettings.get_solo()
+
+        retrieval.retrieve_nodes(
+            "q?", None, settings_row, embed_resolved=EMBED_RESOLVED, visibility=OPEN_VISIBILITY
+        )
+
+        _, kwargs = mock_index.as_retriever.call_args
+        clause = kwargs["filters"].filters[-1]
+        assert clause.key == "file_id"
+        assert clause.operator == FilterOperator.NIN
+        assert clause.value == [str(document.pk)]
+
+    @patch("tools.rag.retrieval.gateway")
+    @patch("tools.rag.retrieval.get_index")
+    def test_the_deletion_exclusion_costs_the_ruled_two_queries_with_nothing_ticketed(
+        self, mock_get_index, mock_gateway, django_assert_num_queries
+    ):
+        """The ruled cost (`tools.rag.access._deleted_document_ids`'s
+        own docstring): two bounded ticket reads, computed ONCE per
+        call -- never once per filter leg, never once per node -- and
+        paid even when nothing is ticketed, since "nothing ticketed" is
+        answered by a real (empty) read, not assumed. Every OTHER test
+        in this class runs unpinned and would not catch a regression
+        that started reading the ticket table once per node, or once
+        per retrieval leg, instead of once per call."""
+        _stub_index(mock_get_index)
+        settings_row = RagSettings.get_solo()
+
+        with django_assert_num_queries(2):
+            retrieval.retrieve_nodes(
+                "q?", None, settings_row, embed_resolved=EMBED_RESOLVED,
+                visibility=OPEN_VISIBILITY)
+
+    @patch("tools.rag.retrieval.gateway")
+    @patch("tools.rag.retrieval.get_index")
+    def test_one_open_conversation_ticket_costs_two_queries_more(
+        self, mock_get_index, mock_gateway, django_assert_num_queries
+    ):
+        """The sibling of the pin just above: one open conversation
+        ticket gives BOTH the chat-scoped lookup AND the notes lookup
+        inside `_deleted_document_ids` an id to filter on each, so
+        neither is answerable from an empty `__in` any more -- exactly
+        two queries more than the no-ticket count, the
+        same delta that function's own docstring states and
+        `tools/rag/tests/test_access_documents.py` already pins for the
+        row surfaces."""
+        from identity.contracts.actions import SOURCE_WEB
+        from identity.contracts.principals import OPEN_PRINCIPAL
+        from identity.contracts.retention import KIND_CONVERSATION
+        from identity.retention import delete_content
+        from tools.rag.tests._helpers import make_conversation
+
+        conversation = make_conversation()
+        delete_content(OPEN_PRINCIPAL, kind=KIND_CONVERSATION, key=str(conversation.id),
+                       owner=conversation, source=SOURCE_WEB)
+
+        _stub_index(mock_get_index)
+        settings_row = RagSettings.get_solo()
+
+        with django_assert_num_queries(4):
+            retrieval.retrieve_nodes(
+                "q?", None, settings_row, embed_resolved=EMBED_RESOLVED,
+                visibility=OPEN_VISIBILITY)
+
 
 class TestRetrieveNodesDisposesTheVectorStore:
     """C-06. `retrieve_nodes` builds a fresh `PGVectorStore` -- and its own

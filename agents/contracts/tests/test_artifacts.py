@@ -30,10 +30,12 @@ import pytest
 from django.urls import reverse
 
 from agents.contracts.artifacts import (
-    ARTIFACT_KINDS, ArtifactFile, ArtifactLabels, artifact_title, artifact_url_name,
-    file_resolver_for, labels_resolver_for, mint_artifact, parse_artifact,
-    register_artifact_file_resolver, register_artifact_labels,
+    ARTIFACT_KINDS, ArtifactFile, ArtifactLabels, artifact_children, artifact_job_ids_resolver,
+    artifact_title, artifact_url_name, file_resolver_for, labels_resolver_for, mint_artifact,
+    parse_artifact, register_artifact_children, register_artifact_file_resolver,
+    register_artifact_job_ids, register_artifact_labels,
 )
+from agents.contracts import artifacts as artifacts_module
 from agents.contracts.tests._helpers import isolated_file_resolver_registry, isolated_labels_registry  # noqa: F401
 
 
@@ -261,3 +263,91 @@ class TestArtifactFileShape:
         artifact = ArtifactFile(path="/store/7/photo.png", name="photo.png")
         with pytest.raises(dataclasses.FrozenInstanceError):
             artifact.path = "/etc/passwd"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_slot():
+    """This module writes the single artifact-children global (and its
+    render-time sibling below), so it saves and restores both -- the
+    same discipline every registry test in this codebase follows
+    (`identity/tests/test_cascades.py::_isolated_registry`). Without it,
+    `"pkg.other.fn"` below would be resolved by the next conversation
+    delete, or the next render, in the same process."""
+    saved_children = artifacts_module._ARTIFACT_CHILDREN
+    saved_job_ids = artifacts_module._ARTIFACT_JOB_IDS
+    yield
+    artifacts_module._ARTIFACT_CHILDREN = saved_children
+    artifacts_module._ARTIFACT_JOB_IDS = saved_job_ids
+
+
+class TestTheArtifactChildrenSlot:
+    def test_it_is_one_slot_not_a_per_kind_dict(self):
+        register_artifact_children("pkg.mod.fn")
+        assert artifact_children() == "pkg.mod.fn"
+        register_artifact_children("pkg.other.fn")
+        assert artifact_children() == "pkg.other.fn"
+
+    def test_it_refuses_a_path_that_is_not_dotted(self):
+        with pytest.raises(ValueError, match="dotted path"):
+            register_artifact_children("notdotted")
+
+
+class TestTheArtifactJobIdsSlot:
+    """`register_artifact_job_ids`/`artifact_job_ids_resolver` -- RENDER
+    TIME'S OWN slot, separate from `_ARTIFACT_CHILDREN` above (placeholder
+    wave N+1 fix, 2026-09-29): see `register_artifact_job_ids`'s own
+    docstring for why a second slot rather than a second use of the
+    first."""
+
+    def test_it_is_one_slot_not_a_per_kind_dict(self):
+        register_artifact_job_ids("pkg.mod.fn")
+        assert artifact_job_ids_resolver() == "pkg.mod.fn"
+        register_artifact_job_ids("pkg.other.fn")
+        assert artifact_job_ids_resolver() == "pkg.other.fn"
+
+    def test_it_refuses_a_path_that_is_not_dotted(self):
+        with pytest.raises(ValueError, match="dotted path"):
+            register_artifact_job_ids("notdotted")
+
+    def test_it_is_independent_of_the_artifact_children_slot(self):
+        """STORAGE independence only: the two globals do not shadow or
+        overwrite each other when set. This does NOT prove a real box
+        ever registers both together -- `test_the_real_app_registers_
+        both_slots_together`, below, is what proves that; a box that
+        registered only one slot would pass THIS test just as easily,
+        which is exactly the gap the sibling test closes."""
+        register_artifact_children("pkg.children.fn")
+        register_artifact_job_ids("pkg.job_ids.fn")
+        assert artifact_children() == "pkg.children.fn"
+        assert artifact_job_ids_resolver() == "pkg.job_ids.fn"
+
+    def test_the_real_app_registers_both_slots_together(self):
+        """BOTH-OR-NEITHER, pinned against the REAL startup registration
+        (`tools/vision/apps.py::ready()`), not a value this test sets
+        itself -- the same "the running app registers at import time"
+        proof `tools/vision/tests/test_apps.py::
+        test_the_real_startup_registered_them` uses for the role/
+        operation registry. `_isolated_slot` above saves and restores
+        both globals around every test in this module but never clears
+        them, so what this reads IS the real app's own `ready()` call.
+
+        WHY BOTH MATTER, KEEPING BOTH IS RIGHT: `_ARTIFACT_CHILDREN`
+        answers a DELETE's own question (which generations does a
+        conversation's delete reach) and `_ARTIFACT_JOB_IDS` answers a
+        RENDER's (which job does each reference name) -- collapsing them
+        into one call would make every thread-page render pay a second,
+        unscoped query to answer what CASCADE already answers for free.
+        But the two slots are set in two separate calls inside `ready()`,
+        so forgetting one is silent and real: only the children slot
+        registered stops deletes cascading to a conversation's own
+        images; only the job-ids slot registered means every image
+        placeholder silently vanishes and the page reverts to the bare
+        broken image the placeholder wave exists to replace. Neither
+        half raises on its own -- both `artifact_children()` and
+        `artifact_job_ids_resolver()` answer `None`, "not installed",
+        for the one nobody registered -- so nothing short of a test like
+        this one would ever catch a half-registration in CI.
+        """
+        assert artifact_children() == "tools.vision.retention.resolve_artifact_jobs"
+        assert (artifact_job_ids_resolver()
+                == "tools.vision.retention.resolve_artifact_job_ids")

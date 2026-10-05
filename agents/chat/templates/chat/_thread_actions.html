@@ -84,15 +84,17 @@ html`, and the gate is what will say so.
       {% comment %}
       Dialog-free by design, modelled on `tools/vision/templates/vision/
       _delete_control.html`: a native <details> reveals the real form,
-      no `confirm()`/`alert()`/`prompt()` anywhere. The turns go with the
-      conversation (`Turn.conversation` is CASCADE); the tool-call audit
-      trail does not (`Turn.invocation` is SET_NULL) -- see
-      `conversation_delete`'s own docstring for the full asymmetry.
+      no `confirm()`/`alert()`/`prompt()` anywhere. Delete TICKETS now
+      (Task 8) -- it does not erase: the conversation moves to Settings
+      → Deleted, where it is restorable until the date shown there, and is
+      only destroyed at purge time, together with its turns, shares,
+      attachment claims and chat-scoped documents (`agents.retention.
+      purge_conversation`, Task 9). See `conversation_delete`'s own
+      docstring for the full mechanism.
       {% endcomment %}
       <summary>Delete this conversation</summary>
       <div class="delete-confirm">
-        <span class="muted">Delete this conversation and every turn in it? Its
-          tool-call audit trail is kept.</span>
+        <span class="muted">Delete this conversation? It moves to Settings → Deleted.</span>
         <form method="post" action="{% url 'chat-conversation-delete' conversation.id %}">
           {% csrf_token %}
           <button type="submit" class="danger">Yes, delete</button>

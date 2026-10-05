@@ -29,8 +29,9 @@ slot would be generality this need never asked for.
 
 - `_PROVIDER` (round 11) -- "what is attached to this conversation".
 - `_CLEANUP` (round 11 re-review, minor 4) -- "forget every attachment
-  a DELETED conversation claimed" (`agents.visibility.
-  delete_conversation`'s own cascade).
+  a PURGED conversation claimed" (`agents.retention.
+  purge_conversation`'s own cascade, Task 9 -- a delete only writes a
+  ticket; this runs at purge time).
 - `_UPLOADER` (round 13) -- "stage these newly-submitted files".
 - `_DETACHER` (round 13) -- "remove one attachment, uploader-only".
 - `_TEXT_PROVIDER` (round 13, owner addendum) -- "this document's own
@@ -243,15 +244,16 @@ def register_attachment_cleanup(dotted_path: str) -> None:
     """`dotted_path` -- "package.module.function", resolved at CALL
     time by `agents.attachments.delete_attachments_for`. Signature:
     `(conversation_id) -> int`, the count of `DocumentAttachment` rows
-    removed -- called from `agents.visibility.delete_conversation`
-    (round 11 re-review minor 4), in the SAME transaction the
-    conversation's own `Share` rows and the conversation itself are
-    deleted in, so a `DocumentAttachment` naming a deleted conversation
-    never outlives it. Deliberately NARROWER than `identity.contracts.
-    cascades.EntitlementCascade`'s `commit=False`/`commit=True` dry-run
-    shape: a conversation delete is already the ACTOR's own confirmed
-    action (the view's own POST, behind `may_manage_conversation`), not
-    a bulk admin operation a preview count protects.
+    removed -- called from `agents.retention.purge_conversation`
+    (round 11 re-review minor 4; re-pointed at purge time by Task 9),
+    alongside the conversation's own `Share` rows and the conversation
+    itself, in the same purge, so a `DocumentAttachment` naming a purged
+    conversation never outlives it. Deliberately NARROWER than
+    `identity.contracts.cascades.EntitlementCascade`'s
+    `commit=False`/`commit=True` dry-run shape: a conversation's content
+    is already the ACTOR's own confirmed decision (the delete click
+    behind `may_manage_conversation`, ticketed since Task 8), not a bulk
+    admin operation a preview count protects.
 
     Idempotent, the same reason `register_attachment_provider` above
     is.
@@ -398,8 +400,9 @@ def register_attachment_orphan_cleanup(dotted_path: str) -> None:
     THE SIXTH SLOT, NOT A REUSE OF `_CLEANUP`: that slot's own
     registered function answers a different question at a different
     time -- "forget every `DocumentAttachment` naming this CONVERSATION"
-    (`agents.visibility.delete_conversation`'s own cascade, whole rows
-    that DID commit) -- while this one answers "delete the managed-store
+    (`agents.retention.purge_conversation`'s own cascade, at purge time,
+    whole rows that DID commit) -- while this one answers "delete the
+    managed-store
     BYTES for these DOCUMENT ids, which never finished committing at
     all" (`agents.chat.service.start_turn`'s own failure path, right
     after a later step in the SAME transaction rolled the rows back

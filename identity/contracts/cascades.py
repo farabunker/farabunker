@@ -20,6 +20,9 @@ Pure: `handler` is a DOTTED-PATH STRING, resolved at delete time by
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import NamedTuple
+
+from identity.contracts.retention import RETENTION_KINDS
 
 
 @dataclass(frozen=True)
@@ -67,3 +70,182 @@ def register_entitlement_cascade(spec: EntitlementCascade) -> None:
 def all_entitlement_cascades() -> list[EntitlementCascade]:
     """Every registered cascade, in registration order."""
     return list(_CASCADES.values())
+
+
+# --- the retention namespace -------------------------------------------
+# A SECOND DATACLASS AND A SECOND REGISTRY DICT, IN THIS SAME MODULE --
+# not a second registry module. Deleting an entitlement and purging a
+# deleted item are two questions with one shape: "this thing is going
+# away; what does your column have to do about it". Same purity, same
+# dotted-path discipline, same `AppConfig.ready()` self-registration,
+# and one file a reader has to hold in their head instead of two.
+
+# Two named bands, and only two. The runner runs every ORDER_ROWS
+# handler before any ORDER_FILES handler, stable within a band by
+# registration order.
+#
+# THIS IS THE FILESYSTEM-LAST RULE, and its whole purpose is the one
+# thing a database transaction cannot undo: a filesystem delete has no
+# rollback (`tools/rag/services.py::delete_document`'s own docstring),
+# so a row handler that raised AFTER files were removed would leave a
+# resurrected row pointing at bytes that are gone. Rows first means the
+# common failure -- a database error -- aborts the purge with nothing on
+# disk touched.
+#
+# A handler that must both READ an item's rows and REMOVE its bytes
+# registers in the FILES band and does its own reads before its own
+# writes, internally. That keeps this rule to one field with two values
+# instead of a general dependency graph nothing else needs.
+ORDER_ROWS = 100
+ORDER_FILES = 200
+
+
+class ChildTicket(NamedTuple):
+    """One entry a `RetentionHandler.children` resolver answers: a single
+    item that goes with the parent's own ticket, and who it belongs to.
+
+    `kind`       -- one of `identity.contracts.retention.RETENTION_KINDS`.
+    `key`        -- the child's own stable identifier, as a string.
+    `owner_kind` -- one of `identity.contracts.principals.PRINCIPAL_KINDS`,
+                    or blank alongside a blank `owner_key` for content
+                    stamped before an owner column existed at all (every
+                    `GenerationJob` row `tools/vision/migrations/
+                    0006_generationjob_owner.py` added the columns to
+                    without backfilling). `identity.retention.
+                    delete_content` REJECTS anything else, loudly, before
+                    a child ticket is ever written -- see its own
+                    validation for why.
+    `owner_key`  -- the owner's own key, as a string; blank only
+                    alongside a blank `owner_kind`.
+
+    A NAMED TUPLE, NOT A DATACLASS, ON PURPOSE, AND A DROP-IN FOR THE
+    SHAPE IT REPLACES: a resolver already returns a plain 4-tuple in
+    this exact order, so `ChildTicket(*that_tuple)` is the same call
+    that shape already supports, and every existing resolver keeps
+    working unchanged. What a frozen NamedTuple adds is at the READING
+    end, not the writing end: `child.owner_kind` cannot be confused with
+    `child.owner_key` the way `child[2]` and `child[3]` -- or four
+    positional loop variables in someone else's order -- can be, with
+    nothing to catch a swap. `DeletionTicket.owner_kind` is a bare
+    `CharField` with no choices, so a transposed pair used to write
+    silently: an un-ownable ticket, invisible on every Deleted page,
+    reachable only by the sweep. This type does not validate the pair
+    itself (a NamedTuple has no `__post_init__` to hook, and validating
+    here would run once per resolver call rather than once per child
+    actually being ticketed) -- `identity.retention.delete_content`
+    validates it at the one point that matters, immediately before the
+    write.
+    """
+
+    kind: str
+    key: str
+    owner_kind: str
+    owner_key: str
+
+
+@dataclass(frozen=True)
+class RetentionHandler:
+    """One column's answer to "this deleted item's content is going".
+
+    `kind`    -- which ticket kind this answers for, from
+                 `identity.contracts.retention.RETENTION_KINDS`.
+    `key`     -- stable identifier, e.g. "agents.conversation".
+    `label`   -- the key in the audit event's content-free `removed` map,
+                 e.g. "Conversation and turns".
+    `handler` -- "package.module.function", with the signature
+                 `(key: str) -> int`.
+    `order`   -- ORDER_ROWS (default) or ORDER_FILES.
+
+    ONE HANDLER, ONE MODE -- deliberately unlike `EntitlementCascade`
+    above, and the difference is worth stating where a reader meets it.
+    That registry needs `commit=False` because deleting an entitlement
+    is irreversible the instant it is confirmed: the count IS the
+    confirmation. A deletion has a better confirmation than any number
+    -- the Deleted page itself, where the item sits named and restorable
+    for as many days as the policy says. So there is no count-only mode,
+    no `commit` flag, and no per-item count anywhere a person looks; the
+    returned integer has exactly one consumer, the content-free
+    `removed={label: count}` detail on the `content.purged` event.
+
+    EVERY HANDLER MUST BE IDEMPOTENT. Re-running one on a
+    partially-purged item must COMPLETE rather than raise. That is not
+    an assumption, it is this contract's obligation, and it is the whole
+    recovery story for a purge that failed part-way: a FILES-band
+    handler that raised after some bytes were gone leaves the rows
+    standing, the ticket standing and the item still hidden, and the
+    next sweep retries.
+
+    `children` -- OPTIONAL, a dotted path to `(key: str) -> list[tuple[str,
+    str, str, str]]` -- a plain 4-tuple `(child_kind, child_key,
+    owner_kind, owner_key)` per child, which `identity.cascades.
+    run_children` wraps as a `ChildTicket` (above) before handing it on
+    -- answering "what else is deleted when this item is, and whose is
+    it". A conversation's generated images are the case it exists for:
+    they are content of their own, on their own table, with their own
+    visibility rule, and a delete that hid the chat while leaving them in
+    the gallery would be a box whose "delete" and whose "destroy"
+    disagreed. **It is asked ONCE, at delete time**, and what it answers
+    becomes ordinary tickets -- their own row, their own date on the
+    Deleted page, their own handler, their own restore -- each one linked
+    back to the ticket whose delete created it. Restore and permanent
+    delete follow that link rather than asking again, so this resolver is
+    never the reason a ticket somebody else's delete wrote is put back or
+    destroyed early.
+
+    THE OWNER COLUMNS NAME THE CONTENT'S OWN OWNER, NOT THE PARENT
+    ITEM'S -- `identity.retention.delete_content` stamps the child ticket
+    from them directly, because `identity/` cannot look an owner up
+    itself (rule 4 forbids importing the column that would know). A
+    conversation's owner and its generated image's owner are usually the
+    same principal and were once assumed to always be; they are not the
+    moment a share or an administrator's duplicate lets a second
+    principal's content sit inside somebody else's conversation, and a
+    resolver that answered the parent's owner instead would misfile every
+    such child under the wrong person's Deleted page.
+    """
+
+    kind: str
+    key: str
+    label: str
+    handler: str
+    order: int = ORDER_ROWS
+    children: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in RETENTION_KINDS:
+            raise ValueError(
+                f"{self.kind!r} is not a retention kind; must be one of "
+                f"{list(RETENTION_KINDS)}")
+        if not self.key:
+            raise ValueError("RetentionHandler needs a non-blank key")
+        if not self.label:
+            raise ValueError(f"RetentionHandler({self.key!r}) needs a non-blank label")
+        if "." not in self.handler:
+            raise ValueError(
+                f"RetentionHandler({self.key!r}).handler must be a dotted path, "
+                f"got {self.handler!r}")
+        if self.children is not None and "." not in self.children:
+            raise ValueError(
+                f"RetentionHandler({self.key!r}).children must be a dotted path, "
+                f"got {self.children!r}")
+
+
+_RETENTION: dict[str, RetentionHandler] = {}
+
+
+def register_retention_handler(spec: RetentionHandler) -> None:
+    """Register `spec` under its `.key`, replacing any existing entry.
+    Idempotent, like every sibling registry in this codebase."""
+    _RETENTION[spec.key] = spec
+
+
+def retention_handlers(kind: str) -> list[RetentionHandler]:
+    """Every handler registered for `kind`, ROWS band before FILES band,
+    stable within a band by registration order.
+
+    A kind nothing has registered for answers `[]` -- which is not an
+    error: it is what a box with a feature uninstalled looks like, and
+    what every kind looks like before its column's slice lands.
+    """
+    matching = [spec for spec in _RETENTION.values() if spec.kind == kind]
+    return sorted(matching, key=lambda spec: spec.order)

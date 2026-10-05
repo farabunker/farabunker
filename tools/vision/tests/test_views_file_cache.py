@@ -27,8 +27,14 @@ import pytest
 from django.test import Client
 from django.urls import reverse
 
+from identity.contracts.actions import SOURCE_WEB
+from identity.contracts.postures import POSTURE_OPEN, POSTURE_PERSONAL
+from identity.contracts.retention import KIND_VISION_JOB
+from identity.retention import delete_content, restore_content
 from tools.vision.models import JobInput
-from tools.vision.tests._helpers import PNG, clear_bindings, stored_output
+from tools.vision.tests._helpers import (
+    PNG, clear_bindings, make_user, posture, sign_in, stored_output, user_principal,
+)
 
 _PRIVATE_NO_STORE = "private, no-store, max-age=0"
 
@@ -137,3 +143,86 @@ class TestServedFileAnswersPrivateNoStore:
         assert response.status_code == 404
         assert not response.has_header("Cache-Control")
         assert "Cookie" not in response.get("Vary", "")
+
+
+def _owned_output_route(tmp_path, owner):
+    """An owned `GeneratedOutput`, a real file on disk: (job, its
+    `vision-output-file` URL)."""
+    output = stored_output(tmp_path)
+    output.job.owner_kind = "user"
+    output.job.owner_key = str(owner.pk)
+    output.job.save(update_fields=["owner_kind", "owner_key"])
+    return output.job, reverse("vision-output-file", args=[output.id])
+
+
+def _owned_input_route(tmp_path, owner):
+    """An owned `JobInput`, a real file on disk: (job, its
+    `vision-input-file` URL)."""
+    output = stored_output(tmp_path)
+    output.job.owner_kind = "user"
+    output.job.owner_key = str(owner.pk)
+    output.job.save(update_fields=["owner_kind", "owner_key"])
+    source = tmp_path / "init_image-beach.png"
+    source.write_bytes(PNG)
+    job_input = JobInput.objects.create(
+        job=output.job, param_key="init_image", path=str(source), media_type="image/png",
+    )
+    return output.job, reverse("vision-input-file", args=[job_input.id])
+
+
+_OWNED_ROUTES = {"output": _owned_output_route, "input": _owned_input_route}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("route", ["output", "input"])
+class TestATicketedJobsFileIsNotFetchableByItsDirectURL:
+    """`output_file` and `input_file` resolve their owner check through
+    `may_read_job`, on the row they already loaded by primary key --
+    never through `visible_jobs`, which is what excludes a ticketed job
+    from the gallery and the create page's Recent list. Without a
+    matching check inside `may_read_job` itself, a deleted image would
+    stay fetchable forever by anybody who already had its direct URL."""
+
+    def test_the_owner_is_refused_after_delete_and_served_again_after_restore(
+        self, tmp_path, client, route,
+    ):
+        owner = make_user()
+        job, url = _OWNED_ROUTES[route](tmp_path, owner)
+        with posture(POSTURE_PERSONAL):
+            sign_in(client, owner)
+            assert client.get(url).status_code == 200
+
+            ticket = delete_content(
+                user_principal(owner), kind=KIND_VISION_JOB, key=str(job.pk),
+                owner=job, source=SOURCE_WEB,
+            )
+            assert client.get(url).status_code == 404
+
+            restore_content(user_principal(owner), ticket, source=SOURCE_WEB)
+            assert client.get(url).status_code == 200
+
+    def test_another_principal_on_an_open_box_is_refused_too(
+        self, tmp_path, client, route,
+    ):
+        """`sees_all_content` answers True for every principal on an
+        open box -- the posture most boxes run -- so this is the case
+        that proves the ticket check runs BEFORE that branch, not only
+        on the restricted leg: a check bolted onto the owner-only leg
+        alone would leave the file servable exactly here."""
+        owner, another = make_user(), make_user()
+        job, url = _OWNED_ROUTES[route](tmp_path, owner)
+        with posture(POSTURE_PERSONAL):
+            delete_content(
+                user_principal(owner), kind=KIND_VISION_JOB, key=str(job.pk),
+                owner=job, source=SOURCE_WEB,
+            )
+        with posture(POSTURE_OPEN):
+            sign_in(client, another)
+            assert client.get(url).status_code == 404
+
+    def test_an_unticketed_jobs_file_still_serves(self, tmp_path, client, route):
+        owner = make_user()
+        _job, url = _OWNED_ROUTES[route](tmp_path, owner)
+        with posture(POSTURE_PERSONAL):
+            sign_in(client, owner)
+            assert client.get(url).status_code == 200

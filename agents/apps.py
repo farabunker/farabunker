@@ -151,6 +151,44 @@ class AgentsConfig(AppConfig):
             handler="agents.workstreams.workstream_entitlement_cascade",
         ))
 
+        # THIS COLUMN'S ANSWER TO "A DELETED CONVERSATION'S DATE HAS
+        # ARRIVED", as a DOTTED-PATH STRING so `identity/` can run it
+        # without importing `agents/` (import-law rule 4) -- the same
+        # mechanism, and the same reason, as the entitlement cascades
+        # just above. FILES band: this handler removes bytes, through
+        # the attachment seam (`agents.attachments.delete_attachments_
+        # for` -> `tools.rag.access.delete_attachments` ->
+        # `services.delete_document` -> `store.remove_document_files`,
+        # `shutil.rmtree`) -- a conversation's chat-scoped documents die
+        # with it. It does its own reads (`_collect`, for the artifact
+        # references) before its own writes, internally, which is the
+        # shape `docs/EXTENDING.md`'s band rule prescribes for a handler
+        # that must do both. `tools.rag.retention.purge_conversation_
+        # notes` is also registered for this kind, in the FILES band
+        # (`tools/rag/apps.py`), and runs BEFORE this one (`tools.rag`
+        # precedes `agents` in `INSTALLED_APPS`): its one raising path
+        # is deliberately not swallowed, so if it fails, this handler
+        # never runs and nothing on disk has been touched yet.
+        # `agents/retention.py`'s own module docstring has the full
+        # reason.
+        from identity.contracts.cascades import (
+            ORDER_FILES, RetentionHandler, register_retention_handler,
+        )
+        from identity.contracts.retention import KIND_CONVERSATION
+
+        register_retention_handler(RetentionHandler(
+            kind=KIND_CONVERSATION,
+            key="agents.conversation",
+            label="Conversation and turns",
+            handler="agents.retention.purge_conversation",
+            order=ORDER_FILES,
+            # A deleted chat's images are content of their own and get
+            # tickets of their own, not a silent destruction on the
+            # chat's own date. The answer is computed from the chat's
+            # turns at the moment of the delete, not recomputed later.
+            children="agents.retention.conversation_children",
+        ))
+
         # THE OTHER DIRECTION ON THE SAME THREE TABLES. The cascades
         # above answer "this entitlement is going away"; these answer
         # "which of your rows carry it, and change that" -- the question

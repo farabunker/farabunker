@@ -256,6 +256,13 @@ SETTINGS_GROUPS: tuple[tuple[str, tuple[Entry, ...]], ...] = (
         Entry("Engine files", "vision-engine-files", ADMIN, feature="vision"),
         Entry("Install guides", "setup-index", EVERYONE),
     )),
+    ("Your content", (
+        # EVERYONE, not ADMIN: every other settings entry is operator
+        # policy; this one is a person's own deleted items, and on a box
+        # with accounts a member is exactly who needs it. The one
+        # consequence is recorded at `identity.views.deleted_page`.
+        Entry("Deleted", "identity-deleted", EVERYONE),
+    )),
     ("Access", (
         Entry("Accounts", "identity-users", ACCOUNTS_ADMIN),
         Entry("Groups", "identity-groups", ACCOUNTS_ADMIN),

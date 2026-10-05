@@ -249,8 +249,12 @@ class TestTheSetupScreenCostsTheSameAtOneAndTenHeldEntitlements:
     #: and this page renders that same sidebar. DROPPED FROM 25 TO 23 BY
     #: TASK 9 (Task 8 review, R2): the same sidebar render's own -2 (see
     #: that pin's comment -- `visible_conversations`'s `owned_rows_q`
-    #: call now threads `settings_row`).
-    EXPECTED_QUERIES = 23
+    #: call now threads `settings_row`). RAISED FROM 23 TO 24 BY THE
+    #: DELETION-SEMANTICS TASK 8 (+1): the same sidebar render's own +1
+    #: (`agents/chat/tests/test_sidebar.py::TestItCostsTheSameAtOneRow
+    #: AndAtThirty.EXPECTED_QUERIES`'s own later note -- `visible_
+    #: conversations`'s new `ticketed_keys` exclusion).
+    EXPECTED_QUERIES = 24
 
     def _render(self, client, user, count, django_assert_num_queries):
         for i in range(count):
@@ -1174,8 +1178,30 @@ class TestTheStreamPageCostsTheSameAtOneAndTenConversations:
     # principal, settings_row=settings_row)`), which takes the identical
     # non-cheap branch for both an owner and a share recipient and so
     # drops by the same 2 either viewer sees on the sidebar.
-    OWNER_QUERIES = 55
-    RECIPIENT_QUERIES = 57
+    #
+    # RAISED BY TWO, EACH, BY THE DELETION-SEMANTICS TASK 8: `visible_
+    # conversations`'s new `ticketed_keys` exclusion is ONE query per
+    # CALL into that function, and this page calls it TWICE for either
+    # viewer -- once inside the sidebar render (`agents/chat/tests/
+    # test_sidebar.py::TestItCostsTheSameAtOneRowAndAtThirty.
+    # EXPECTED_QUERIES`'s own later note), once for this page's OWN
+    # Conversations-list call named just above -- so both totals move by
+    # 2, not 1.
+    #
+    # RAISED BY TWO, EACH, BY THE DELETION-SEMANTICS TASK 10:
+    # `tools.rag.workstreams.panel` -- this page's own `rag.documents`
+    # stream panel, reached through `panels_for` -- calls `readable_
+    # documents(...)` exactly ONCE per render (every other line in that
+    # panel filters the SAME queryset further, never a second call), so
+    # its new `_deleted_document_ids()` cost lands on this page exactly
+    # once, not once per conversation: two `ticketed_keys` reads on the
+    # common path, where no conversation on the box carries an open
+    # deletion ticket (`tools/rag/access.py::_deleted_document_ids`'s
+    # own docstring has the full accounting, including the third,
+    # conditional read a ticketed conversation would add). Both totals
+    # move by 2, not 3.
+    OWNER_QUERIES = 59
+    RECIPIENT_QUERIES = 61
 
     def _conversations(self, principal, agent, stream, count):
         from agents.models import Conversation
@@ -1278,7 +1304,12 @@ class TestTheSettingsPageCostsAKnownAmountAtOneShare:
     #: the Conversations working page above) has no conversation list of
     #: its own to pick up a second -2 from -- the Shared-with list reads
     #: `Share`, not `Conversation`.
-    OWNER_QUERIES_AT_ONE_SHARE = 39
+    #: RAISED FROM 39 TO 40 BY THE DELETION-SEMANTICS TASK 8 (+1, not
+    #: +2): the sidebar's own single `ticketed_keys` query (`agents/chat/
+    #: tests/test_sidebar.py::TestItCostsTheSameAtOneRowAndAtThirty.
+    #: EXPECTED_QUERIES`'s own later note) -- this page still has no
+    #: conversation list of its own to pay a second one.
+    OWNER_QUERIES_AT_ONE_SHARE = 40
 
     def test_one_share(self, client, django_assert_num_queries):
         owner = make_user()

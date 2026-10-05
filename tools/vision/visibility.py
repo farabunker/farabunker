@@ -19,11 +19,17 @@ them rather than restating the rule.
 from __future__ import annotations
 
 from identity.access import may_read_owned_row, owned_rows_q, sees_all_content
+from identity.contracts.retention import KIND_VISION_JOB
+from identity.retention import ticketed_keys
 from tools.vision.models import GenerationJob
 
 
 def visible_jobs(principal):
-    qs = GenerationJob.objects.all()
+    # THE EXCLUSION IS ON THE BASE QUERYSET, BEFORE the
+    # `sees_all_content` early return: that branch is every principal on
+    # an open box, so an exclusion on the restricted leg alone would
+    # leave deleted generations fully visible in the common posture.
+    qs = GenerationJob.objects.exclude(pk__in=ticketed_keys(KIND_VISION_JOB))
     if sees_all_content(principal):
         return qs
     return qs.filter(owned_rows_q(principal))
@@ -33,7 +39,24 @@ def may_read_job(principal, job) -> bool:
     """Whether one already-loaded job may be read. `job_status`,
     `job_delete`, `output_file` and `input_file` resolve through this and
     answer 404 when it is False -- 404 rather than 403, because a 403 on
-    a row-addressed URL confirms the row exists."""
+    a row-addressed URL confirms the row exists.
+
+    A TICKETED JOB IS REFUSED HERE TOO, before the `sees_all_content`
+    branch below. `output_file` and `input_file` load their
+    `GeneratedOutput`/`JobInput` row by primary key and reach this
+    function directly -- they never go through `visible_jobs`, so the
+    base-queryset exclusion that hides a deleted generation from the
+    gallery and the Recent list never runs for them. Without a matching
+    check here, a deleted image would stay fetchable forever by anybody
+    who already had its direct URL. Placed before `sees_all_content` for
+    the same reason `visible_jobs`'s own exclusion comes first: that
+    branch answers True for every principal on an open box, so a check
+    on the restricted leg alone would leave a deleted image servable
+    exactly where it matters most. Costs one extra ticket read per file
+    fetch.
+    """
+    if str(job.pk) in ticketed_keys(KIND_VISION_JOB):
+        return False
     if sees_all_content(principal):
         return True
     return may_read_owned_row(principal, job)
@@ -54,5 +77,12 @@ def known_job_uuids() -> set[str]:
     this one and `services.py`), so a THIRD module querying the table
     directly is exactly what this function exists to keep from
     happening.
+
+    NOT narrowed by `ticketed_keys` the way `visible_jobs` is: this is
+    the Engine files page's box-inventory accounting seam, not a
+    content listing, and a deleted-but-not-yet-purged job's engine-side
+    files are still accounted for here, not orphaned -- the row still
+    exists, only hidden from `visible_jobs`, until the day its ticket
+    is purged and this set stops naming it.
     """
     return {str(pk) for pk in GenerationJob.objects.values_list("id", flat=True)}

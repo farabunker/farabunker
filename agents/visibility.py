@@ -63,6 +63,8 @@ from identity.access import (
     may_read_owned_row, owned_rows_q, owner_fields, sees_all_content,
 )
 from identity.contracts import actions
+from identity.contracts.retention import KIND_CONVERSATION
+from identity.retention import delete_content, ticketed_keys
 from models.contracts.roles import CHAT_CONVERSE_ROLE, chat_capable_roles
 
 
@@ -97,7 +99,21 @@ def visible_conversations(principal, *, settings_row=None):
     with no row is unaffected: `owned_rows_q` re-fetches the singleton
     itself, same as always.
     """
-    qs = Conversation.objects.select_related("agent")
+    # THE EXCLUSION GOES ON THE BASE QUERYSET, BEFORE the
+    # `sees_all_content` early return below -- and that ordering is the
+    # single most important mechanical detail here. `sees_all_content` is
+    # True for EVERY principal on an open box, the posture the majority of
+    # boxes run; an exclusion bolted onto the restricted leg alone would
+    # leave deleted conversations fully visible in exactly the posture
+    # where it matters most.
+    #
+    # `ticketed_keys` is ONE query returning a materialised list of key
+    # STRINGS -- `agents.shares.shared_keys`' own reasoning, and the
+    # reason it is a list rather than a `Subquery`: the ticket's `key` is
+    # text and `Conversation.pk` is a UUID, so a subquery would need a
+    # cast and would be a silent type mismatch waiting to happen.
+    qs = Conversation.objects.select_related("agent").exclude(
+        pk__in=ticketed_keys(KIND_CONVERSATION))
     if sees_all_content(principal, settings_row=settings_row):
         return qs.all()
     # COMPUTED ONCE, reused for BOTH the top-level clause and the
@@ -461,40 +477,52 @@ def may_manage_conversation(principal, conversation, *, settings_row=None) -> bo
     return stream is not None and may_read_owned_row(principal, stream)
 
 
-def delete_conversation(principal, conversation) -> bool:
-    """Delete `conversation` if `principal` may. True if it went.
+def delete_conversation(principal, conversation):
+    """Delete `conversation` if `principal` may. The `DeletionTicket` if
+    it went, `None` if `principal` may not.
 
-    THE DELETE LIVES HERE for the same reason the create does: a view
-    that could reach the manager could reach it without the ownership
-    check, and a guard with an exception is a guard somebody widens.
-    The conversation's `Share` rows are deleted in the same transaction.
+    IT TICKETS; IT DOES NOT ERASE. `identity.retention.delete_content`
+    writes one `DeletionTicket`, records a content-free
+    `content.deleted` event, and runs a bounded sweep. The conversation,
+    its turns, its shares, its attachment claims, its chat-scoped
+    documents and its generated images all survive until the date the
+    Deleted page prints -- and are then destroyed together by
+    `agents.retention.purge_conversation` and its sibling handlers,
+    through the registry `identity/cascades.py` runs. ITS QUEUE ROWS ARE
+    NOT AMONG THEM YET: `models/queue` has no retention handler in the
+    landed tree, so a purged conversation's queue row survives purge
+    entirely until the queue half lands and reaches it -- one of the
+    residues ADR 0020 (decision 7) names.
 
-    `tools.rag`'s OWN `DocumentAttachment` rows go too (round 11
-    re-review minor 4): `agents.attachments.delete_attachments_for`,
-    the delete-time twin of `agents.attachments.attached_documents`
-    (the SAME `agents.contracts.attachments` registry, resolved the
-    identical way) -- `conversation_id` is a UUID BY VALUE there, never
-    a real FK (`tools/rag` may not import `agents.models`), so nothing
-    else would ever clean those rows up once this conversation is gone.
-    NEVER RAISES, and its own count is not this function's business --
-    a broken `tools.rag` cleanup provider must not block a delete the
-    actor already confirmed.
+    THE TICKET, NOT A BARE BOOL:
+    `agents/chat/views/conversations.py::conversation_delete` must not
+    promise a restore the box cannot keep -- with `retention_days = 0`
+    the ticket `delete_content` hands back has ALREADY been purged by
+    the time this call returns (its `purge_on` is today), so the view
+    reads `ticket.purge_on` to choose between "deleted, restorable" and
+    "deleted permanently" rather than printing one sentence unconditionally.
+    Every existing caller that only asked "did it go" keeps working
+    unchanged: a `DeletionTicket` is truthy, `None` is not, and `if not
+    delete_conversation(...)` reads exactly as it did.
+
+    WHY THE TEARDOWN MOVED OUT OF HERE. It had to: a conversation's
+    queue rows carry the person's literal message in
+    `InferenceJob.payload["text"]`, and `agents/` may not import
+    `models.queue` (import-law rule 2, pinned by
+    `foundation/ops/tests/test_import_law.py`'s `FORBIDDEN_MODULES`).
+    No delete written in this column could ever reach them. The
+    orchestration therefore lives in `identity/`, below every column,
+    and this function's whole job is now the gate and the ticket.
+
+    THE GATE IS UNCHANGED -- `may_manage_conversation`, with its
+    service-owned-row ruling intact. Still no `post_delete` receiver:
+    this repository uses no Django signals anywhere, and a delete that
+    must be explicit, counted and audited is the last place to start.
     """
     if not may_manage_conversation(principal, conversation):
-        return False
-    with transaction.atomic():
-        # IA-2: the thread's shares go with it, in the SAME transaction.
-        # No `post_delete` receiver: this repository uses no Django
-        # signals anywhere, and a stale `Share` row is inert -- every
-        # reader resolves the target first. This is the one shipped
-        # delete surface, so it is the one place that has to say so.
-        Share.objects.filter(target_type=Share.Target.CONVERSATION,
-                             target_key=str(conversation.pk)).delete()
-        from agents.attachments import delete_attachments_for
-
-        delete_attachments_for(conversation.id)
-        conversation.delete()
-    return True
+        return None
+    return delete_content(principal, kind=KIND_CONVERSATION, key=conversation.pk,
+                          owner=conversation, label=conversation.title or "")
 
 
 def rename_conversation(principal, conversation, title: str) -> bool:

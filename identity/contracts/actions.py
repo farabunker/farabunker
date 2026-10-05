@@ -206,6 +206,40 @@ CONVERSATION_UNTAINTED = "conversation.untainted"
 # wall edits and pin changes.
 WORKSTREAM_CONSOLIDATED = "workstream.consolidated"
 
+# Deletion (2026-09-21): an item soft-deleted, restored, or purged. A
+# `content.` namespace -- naming WHAT CHANGED, not which table, the
+# convention this module's comments already argue for: one vocabulary
+# covers a conversation, a document, an Ask record and a generated
+# image, because "a person's content was deleted" is one fact whatever
+# row held it. `target_type` is the ticket KIND and `target_key` the
+# item's own key, so `for_target("conversation", pk)` still answers the
+# question an operator asks.
+#
+# CONTENT-FREE BY CONSTRUCTION. `detail` carries the kind and, on a
+# purge, `removed={label: count}` -- integers. The item's own TITLE
+# reaches `target_label` only when `IdentitySettings.audit_detail` is
+# on, and no event is ever suppressed in either position: an audit trail
+# with a switch that turns rows off is not an audit trail.
+#
+# NO FOURTH CONTENT ACTION. A `content.held` name belongs in the same
+# commit as the control that writes it (the deferred enterprise slice,
+# spec section 10.10) -- this tuple is closed and `AuditEvent.save()`
+# raises on anything unlisted, so an unused name would be an action
+# nothing can write.
+CONTENT_DELETED = "content.deleted"
+CONTENT_RESTORED = "content.restored"
+CONTENT_PURGED = "content.purged"
+
+# `RETENTION_POLICY_CHANGED` (2026-09-21): any of `IdentitySettings`'
+# three retention fields changed. ONE action for all three, with the
+# literal column in `detail` -- `LIBRARY_SETTINGS_UPDATED`'s own "one
+# action per settings DOMAIN" rule, rather than the three-way split
+# `POSTURE_CHANGED`/`LIBRARY_POSTURE_CHANGED`/
+# `ADMIN_CONTENT_ACCESS_CHANGED` uses, because those three are
+# semantically distinct security postures and these three are one
+# retention policy expressed as three knobs.
+RETENTION_POLICY_CHANGED = "identity.retention_policy_changed"
+
 AUDIT_ACTIONS = (
     LOGIN, LOGIN_FAILED, LOGOUT,
     USER_CREATED, USER_DEACTIVATED, USER_REACTIVATED, PASSWORD_CHANGED,
@@ -232,6 +266,8 @@ AUDIT_ACTIONS = (
     DOCUMENT_PINNED, DOCUMENT_UNPINNED,
     WORKSTREAM_TAINTED, CONVERSATION_TAINTED, WORKSTREAM_UNTAINTED, CONVERSATION_UNTAINTED,
     WORKSTREAM_CONSOLIDATED,
+    CONTENT_DELETED, CONTENT_RESTORED, CONTENT_PURGED,
+    RETENTION_POLICY_CHANGED,
 )
 
 # Where an audited action was performed. `web` is a page, `cli` a
